@@ -68,12 +68,16 @@ export interface CodegenResult {
 export type {
   HostConfig,
   HostCompileProfile,
+  HostTsxResponse,
   HostVirtualNodeKind,
   HostSliceChanges,
   HostDiagnostic,
   HostDiagnosticsSnapshot,
   HostExternalSourceRequest,
   HostScriptImportInfo,
+  HostPreprocessorRequest,
+  HostBlockOverrideEntry,
+  HostBlockOverrideRequest,
   HostUpdateResult,
   HostResolvedId,
   HostVirtualMeta,
@@ -83,18 +87,33 @@ export type {
   HostStyleOverrideRequest,
   HostVirtualQuery,
   HostRemoveResult,
+  HostTextEdit,
+  HostCodeAction,
+  HostLintRuleMetadata,
+  HostLintDiagnostic,
+  HostDocumentSymbol,
+  HostElementMatch,
+  HostSelectorMatchResult,
 } from "@verter/native/host-types";
 
 import type {
   HostConfig,
+  HostCompileProfile,
+  HostTsxResponse,
   HostResolvedId,
   HostUpsertRequest,
   HostStyleOverrideRequest,
+  HostBlockOverrideRequest,
   HostUpdateResult,
   HostVirtualQuery,
   HostVirtualFileResponse,
   HostVirtualNodeKind,
   HostRemoveResult,
+  HostCodeAction,
+  HostLintRuleMetadata,
+  HostLintDiagnostic,
+  HostDocumentSymbol,
+  HostSelectorMatchResult,
 } from "@verter/native/host-types";
 
 // =============================================================================
@@ -109,20 +128,34 @@ type WasmInitFn = () => Promise<unknown>;
 type WasmHostResolveFn = (rawId: string) => HostResolvedId | null;
 type WasmHostUpsertFn = (request: HostUpsertRequest) => HostUpdateResult;
 type WasmHostApplyOverridesFn = (request: HostStyleOverrideRequest) => HostUpdateResult;
+type WasmHostApplyBlockOverridesFn = (request: HostBlockOverrideRequest) => HostUpdateResult;
 type WasmHostGetVirtualFileFn = (query: HostVirtualQuery) => HostVirtualFileResponse;
 type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[];
 type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
+type WasmHostGetTsxFn = (canonicalId: string, profile?: HostCompileProfile) => HostTsxResponse | null;
 type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
 type WasmHostSetImportDependenciesFn = (canonicalOrAlias: string, resolvedDeps: string[]) => void;
+type WasmHostLintFn = (canonicalOrAlias: string, config?: unknown) => HostLintDiagnostic[];
+type WasmHostGetCodeActionsFn = (canonicalOrAlias: string, offset: number) => HostCodeAction[];
+type WasmHostGetLintRuleMetadataFn = () => HostLintRuleMetadata[];
+type WasmHostGetDocumentSymbolsFn = (canonicalOrAlias: string) => HostDocumentSymbol[];
+type WasmHostMatchCssSelectorsFn = (canonicalOrAlias: string) => HostSelectorMatchResult[];
 interface WasmHostBinding {
   resolve: WasmHostResolveFn;
   upsert: WasmHostUpsertFn;
   applyStyleOverrides: WasmHostApplyOverridesFn;
+  applyBlockOverrides: WasmHostApplyBlockOverridesFn;
+  getTsx: WasmHostGetTsxFn;
   getVirtualFile: WasmHostGetVirtualFileFn;
   listVirtualFiles: WasmHostListVirtualFilesFn;
   remove: WasmHostRemoveFn;
   getAnalysis: WasmHostGetAnalysisFn;
   setImportDependencies: WasmHostSetImportDependenciesFn;
+  lint: WasmHostLintFn;
+  getCodeActions: WasmHostGetCodeActionsFn;
+  getLintRuleMetadata: WasmHostGetLintRuleMetadataFn;
+  getDocumentSymbols: WasmHostGetDocumentSymbolsFn;
+  matchCssSelectors: WasmHostMatchCssSelectorsFn;
 }
 type WasmHostCtor = new (config?: HostConfig) => WasmHostBinding;
 
@@ -241,8 +274,17 @@ export class Host {
     return this.inner.upsert(request);
   }
 
+  /** @deprecated Use `applyBlockOverrides` instead — unified API for all block types. */
   applyStyleOverrides(request: HostStyleOverrideRequest): HostUpdateResult {
     return this.inner.applyStyleOverrides(request);
+  }
+
+  applyBlockOverrides(request: HostBlockOverrideRequest): HostUpdateResult {
+    return this.inner.applyBlockOverrides(request);
+  }
+
+  getTsx(canonicalId: string, profile?: HostCompileProfile): HostTsxResponse | null {
+    return this.inner.getTsx(canonicalId, profile);
   }
 
   getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse {
@@ -272,6 +314,31 @@ export class Host {
    */
   setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void {
     this.inner.setImportDependencies(canonicalOrAlias, resolvedDeps);
+  }
+
+  /** Runs lint rules against a file and returns diagnostics with UTF-16 spans. */
+  lint(canonicalOrAlias: string, config?: unknown): HostLintDiagnostic[] {
+    return this.inner.lint(canonicalOrAlias, config);
+  }
+
+  /** Returns code actions (quick fixes) at a given UTF-16 offset. */
+  getCodeActions(canonicalOrAlias: string, offset: number): HostCodeAction[] {
+    return this.inner.getCodeActions(canonicalOrAlias, offset);
+  }
+
+  /** Returns metadata for all registered lint rules. */
+  getLintRuleMetadata(): HostLintRuleMetadata[] {
+    return this.inner.getLintRuleMetadata();
+  }
+
+  /** Returns document symbols for a file (SFC blocks → children). */
+  getDocumentSymbols(canonicalOrAlias: string): HostDocumentSymbol[] {
+    return this.inner.getDocumentSymbols(canonicalOrAlias);
+  }
+
+  /** Matches CSS selectors against template elements (three-valued matrix). */
+  matchCssSelectors(canonicalOrAlias: string): HostSelectorMatchResult[] {
+    return this.inner.matchCssSelectors(canonicalOrAlias);
   }
 }
 

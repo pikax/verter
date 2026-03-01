@@ -6,16 +6,21 @@ license.workspace = true
 publish = false
 
 [dependencies]
-verter_host = { path = "../verter_host" }
+verter_host = { path = "../verter_host", features = ["host_metrics"] }
 verter_analysis = { path = "../verter_analysis" }
+verter_diagnostics = { path = "../verter_diagnostics" }
+verter_actions = { path = "../verter_actions" }
+verter_span = { path = "../verter_span" }
 oxc_sourcemap = "6.0.2"
 tower-lsp-server = "0.21"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { version = "1", features = ["rt", "macros", "io-std", "io-util", "sync", "process", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "6"
 glob = "0.3"
+parking_lot = "0.12"
 
 [[bin]]
 name = "verter-lsp"

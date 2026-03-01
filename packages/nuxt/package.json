@@ -1,0 +1,39 @@
+{
+  "name": "@verter/nuxt",
+  "version": "0.0.1-alpha.3",
+  "description": "Nuxt module for Verter Vue compiler",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "type": "module",
+  "main": "dist/module.js",
+  "module": "dist/module.js",
+  "types": "dist/module.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/module.d.ts",
+      "import": "./dist/module.js",
+      "require": "./dist/module.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown src/module.ts --format esm,cjs --dts --unbundle",
+    "dev": "tsdown src/module.ts --format esm,cjs --dts --unbundle --watch"
+  },
+  "dependencies": {
+    "@verter/unplugin": "workspace:*",
+    "@nuxt/kit": "^4.0.0"
+  },
+  "devDependencies": {
+    "tsdown": "^0.12.4",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "nuxt": "^3.0.0 || ^4.0.0"
+  }
+}

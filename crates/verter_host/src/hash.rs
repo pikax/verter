@@ -1,9 +1,26 @@
 //! xxh3-based content hashing, semantic hashing, and profile/style-override hashing.
+//!
+//! ## Hash Algorithm Rationale
+//!
+//! Three hash algorithms serve different purposes in the Verter codebase:
+//!
+//! | Algorithm | Used By | Purpose | Persisted? |
+//! |-----------|---------|---------|------------|
+//! | **XXH3-128** | `verter_host` | Content and semantic hashing for compile cache invalidation | No (in-process only) |
+//! | **SHA-256** | `verter_core`, `verter_analysis` | Scope IDs (`data-v-{hash}`), CSS Modules class names, export signatures, type resolution fingerprinting | Scope IDs and CSS Modules output **yes** (embedded in compiled CSS/HTML); export/type sigs **no** |
+//! | **DefaultHasher** | `verter_host` | `CompileProfile` and `StyleOverride` cache keys | No (in-process, non-deterministic across Rust versions) |
+//!
+//! SHA-256 is used for scope IDs and CSS Modules to match `@vue/compiler-sfc` output.
+//! XXH3 is used for internal cache invalidation where speed matters more than compatibility.
+//! DefaultHasher is used only for transient in-process cache keys — never persisted.
+//! FxHash (`rustc-hash`) is used for in-memory `HashMap`/`HashSet` throughout (not shown here).
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::types::{CompileProfile, DescriptorMin, Hash16, SliceHashes, StyleOverrideEntry};
+use crate::types::{
+    CompileProfile, ContentOverride, DescriptorMin, Hash16, SliceHashes, StyleOverrideEntry,
+};
 
 pub(crate) fn hash_16(input: &[u8]) -> Hash16 {
     xxhash_rust::xxh3::xxh3_128(input).to_le_bytes()
@@ -65,6 +82,30 @@ pub(crate) fn style_override_hash(overrides: &HashMap<usize, StyleOverrideEntry>
         idx.hash(&mut hasher);
         entry.code.as_ref().hash(&mut hasher);
         if let Some(sm) = &entry.source_map {
+            sm.as_ref().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Hash the content of template/script overrides for cache invalidation.
+pub(crate) fn content_override_hash(
+    template: Option<&ContentOverride>,
+    script: Option<&ContentOverride>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    if let Some(t) = template {
+        "template".hash(&mut hasher);
+        t.code.as_ref().hash(&mut hasher);
+        if let Some(sm) = &t.source_map {
+            sm.as_ref().hash(&mut hasher);
+        }
+    }
+    if let Some(s) = script {
+        "script".hash(&mut hasher);
+        s.code.as_ref().hash(&mut hasher);
+        if let Some(sm) = &s.source_map {
             sm.as_ref().hash(&mut hasher);
         }
     }

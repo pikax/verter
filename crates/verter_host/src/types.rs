@@ -167,14 +167,20 @@ pub struct CompileProfile {
     pub comments: Option<bool>,
     /// Runtime module name for template imports (default `"vue"`).
     pub runtime_module_name: Option<String>,
+    /// Types module name for TSX helper imports (default `"$verter/types"`).
+    pub types_module_name: Option<String>,
     /// Force Vapor mode codegen regardless of `<template vapor>` attribute.
     pub force_vapor: bool,
     /// Strip TypeScript type annotations from compiled output.
     pub force_js: bool,
     /// Generate source maps for compiled output.
     pub source_map: bool,
-    /// Generate TSX output for IDE type checking (script + template JSX).
-    pub enable_types: bool,
+    /// Controls which compilation steps run.
+    /// See [`verter_core::compile::CompileTarget`] for available flags and presets.
+    pub target: verter_core::compile::CompileTarget,
+    /// Embed `declare module "@verter/types"` in generated TSX.
+    /// When `false` (default), relies on the real `@verter/types` package.
+    pub embed_ambient_types: bool,
 }
 
 impl Default for CompileProfile {
@@ -189,10 +195,12 @@ impl Default for CompileProfile {
             custom_elements: None,
             comments: None,
             runtime_module_name: Some("vue".to_string()),
+            types_module_name: None,
             force_vapor: false,
             force_js: false,
             source_map: false,
-            enable_types: false,
+            target: verter_core::compile::CompileTarget::BUNDLER,
+            embed_ambient_types: false,
         }
     }
 }
@@ -264,6 +272,19 @@ pub struct SliceChanges {
     pub descriptor_changed: bool,
 }
 
+impl SliceChanges {
+    /// Returns `true` when the only change is in style blocks — no script, template,
+    /// structure, or descriptor changes. Useful for skipping TSGO sync since the
+    /// generated TSX is unaffected by style-only edits.
+    pub fn is_style_only(&self) -> bool {
+        !self.script_changed
+            && !self.template_changed
+            && !self.structure_changed
+            && !self.descriptor_changed
+            && !self.style_indices_changed.is_empty()
+    }
+}
+
 /// Summary of a single import statement found in a script block.
 ///
 /// Returned in [`HostUpdateResult::import_specifiers`] so the caller can
@@ -310,6 +331,12 @@ pub struct HostUpdateResult {
     pub external_source_requests: Vec<ExternalSourceRequest>,
     /// Import specifiers found in script blocks, for caller-side resolution.
     pub import_specifiers: Vec<ScriptImportInfo>,
+    /// Blocks that need external preprocessing before compilation.
+    ///
+    /// Non-empty when the SFC uses non-native languages (e.g., `<template lang="pug">`).
+    /// The caller should invoke the appropriate preprocessor and feed results back
+    /// via [`VerterHost::apply_block_overrides`](crate::VerterHost::apply_block_overrides).
+    pub preprocessor_requests: Vec<PreprocessorRequest>,
     /// Time spent in the parse phase (ms).
     pub parse_duration_ms: f64,
 }
@@ -330,6 +357,7 @@ impl HostUpdateResult {
             diagnostics: DiagnosticsSnapshot::default(),
             external_source_requests: Vec::new(),
             import_specifiers: Vec::new(),
+            preprocessor_requests: Vec::new(),
             parse_duration_ms: 0.0,
         }
     }
@@ -357,6 +385,12 @@ pub struct FileAnalysisSnapshot {
     /// Template analysis (components, bindings, slots, refs, events).
     /// Present after compilation when template analysis scope flags are active.
     pub template: Option<verter_analysis::template::TemplateAnalysisSnapshot>,
+    /// Vue API call sites (lifecycle hooks, watchers, provide/inject, etc.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vue_api_calls: Vec<verter_analysis::types::VueApiCallSite>,
+    /// DOM query call sites (querySelector, getElementById, etc.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dom_query_calls: Vec<verter_analysis::types::DomQueryCallSite>,
 }
 
 /// Result of [`VerterHost::resolve`](crate::VerterHost::resolve).
@@ -447,6 +481,64 @@ pub struct UpsertRequest {
     pub aliases: Vec<String>,
 }
 
+/// Discriminates the SFC block type that needs external preprocessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreprocessorBlockType {
+    Template,
+    Script,
+    Style,
+    Custom,
+}
+
+/// A block that needs external preprocessing before compilation.
+///
+/// Returned in [`HostUpdateResult::preprocessor_requests`] when a block uses
+/// a non-native `lang` attribute (e.g., `<template lang="pug">` or
+/// `<script lang="coffee">`). The caller invokes the appropriate external
+/// compiler and feeds the result back via
+/// [`VerterHost::apply_block_overrides`](crate::VerterHost::apply_block_overrides).
+#[derive(Debug, Clone)]
+pub struct PreprocessorRequest {
+    /// Which block type needs preprocessing.
+    pub block_type: PreprocessorBlockType,
+    /// Block index (0 for template/script, 0..N for styles/custom blocks).
+    pub index: usize,
+    /// The `lang` attribute value (e.g., `"pug"`, `"coffee"`, `"scss"`).
+    pub lang: String,
+    /// Raw content of the block that needs preprocessing.
+    pub content: String,
+}
+
+/// A single preprocessed block override to inject into the compile pipeline.
+///
+/// Used in [`BlockOverrideRequest`] to provide the preprocessed output for
+/// a template, script, style, or custom block.
+#[derive(Debug, Clone)]
+pub struct BlockOverrideEntry {
+    /// Which block type this override applies to.
+    pub block_type: PreprocessorBlockType,
+    /// Block index (0 for template/script, 0..N for styles/custom blocks).
+    pub index: usize,
+    /// Preprocessed code (HTML for template, JS for script, CSS for style).
+    pub code: Arc<str>,
+    /// Source map from the preprocessor, if available.
+    pub source_map: Option<Arc<str>>,
+}
+
+/// Input to [`VerterHost::apply_block_overrides`](crate::VerterHost::apply_block_overrides).
+///
+/// Unified API for applying preprocessed block overrides. Replaces the
+/// deprecated [`StyleOverrideRequest`] for new code.
+#[derive(Debug, Clone)]
+pub struct BlockOverrideRequest {
+    /// Canonical ID of the file whose blocks are being overridden.
+    pub canonical_id: String,
+    /// Compile profile to apply the overrides under.
+    pub compile_profile: CompileProfile,
+    /// Preprocessed block overrides to inject.
+    pub overrides: Vec<BlockOverrideEntry>,
+}
+
 /// A single preprocessor-compiled style block to override in the compile cache.
 #[derive(Debug, Clone)]
 pub struct StyleOverrideEntry {
@@ -492,10 +584,8 @@ pub struct HostDiagnostic {
     pub code: String,
     /// Human-readable diagnostic message.
     pub message: String,
-    /// Byte offset of the start of the problematic span, if available.
-    pub span_start: Option<u32>,
-    /// Byte offset of the end of the problematic span, if available.
-    pub span_end: Option<u32>,
+    /// SFC-absolute byte offset span, if available.
+    pub span: Option<verter_span::Span>,
 }
 
 /// Collection of diagnostics with a precomputed `has_errors` flag.
@@ -579,6 +669,10 @@ pub(crate) struct FileMeta {
     /// need `__scopeId` on the component object.
     pub(crate) has_scoped_style: bool,
     pub(crate) script_lang: Option<String>,
+    /// Template lang attribute value (e.g., `"pug"`). `None` for native HTML.
+    /// Stored for preprocessor request generation; read in tests.
+    #[allow(dead_code)]
+    pub(crate) template_lang: Option<String>,
     pub(crate) style_langs: Vec<Option<String>>,
     pub(crate) custom_types: Vec<String>,
     pub(crate) custom_langs: Vec<Option<String>>,
@@ -606,12 +700,34 @@ pub(crate) struct ParseSnapshot {
     pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
     pub(crate) export_signatures: Vec<verter_analysis::ExportSignature>,
     pub(crate) style_analyses: Vec<verter_analysis::StyleBlockAnalysis>,
+    /// Blocks that need external preprocessing (non-native `lang` attributes).
+    pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct StyleOverrideLayer {
     pub(crate) hash: u64,
     pub(crate) by_index: HashMap<usize, StyleOverrideEntry>,
+}
+
+/// Preprocessed template/script content that replaces the original block
+/// content before compilation. Stored per compile-profile.
+#[derive(Debug, Clone)]
+pub(crate) struct ContentOverride {
+    pub(crate) code: Arc<str>,
+    pub(crate) source_map: Option<Arc<str>>,
+}
+
+/// Per-profile layer of content overrides for template and/or script blocks.
+/// The `template` and `script` fields store the preprocessor output for future
+/// source map chain support; currently only `hash` is read by the compile pipeline.
+#[derive(Debug, Clone)]
+pub(crate) struct ContentOverrideLayer {
+    pub(crate) hash: u64,
+    #[allow(dead_code)]
+    pub(crate) template: Option<ContentOverride>,
+    #[allow(dead_code)]
+    pub(crate) script: Option<ContentOverride>,
 }
 
 #[derive(Debug, Clone)]
@@ -638,10 +754,25 @@ pub struct TsxResponse {
     pub source_map: Option<Arc<str>>,
 }
 
+/// Response from [`VerterHost::get_tsc`].
+///
+/// Contains minimal TypeScript declarations generated by macro-only extraction
+/// (defineProps, defineEmits, defineModel, defineOptions). No template
+/// compilation is performed.
+#[derive(Debug, Clone)]
+pub struct TscResponse {
+    /// The generated TSC code (ComponentPublicInstance-based declaration).
+    /// Includes an inline `//# sourceMappingURL=` at the end.
+    pub code: Arc<str>,
+    /// JSON source map (always present — embedded inline in `code`).
+    pub source_map: Option<Arc<str>>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CompileSlot {
     pub(crate) semantic_hash: Hash16,
     pub(crate) style_override_hash: u64,
+    pub(crate) content_override_hash: u64,
     pub(crate) outputs: HashMap<VirtualNodeKind, CachedVirtualFile>,
     pub(crate) diagnostics: DiagnosticsSnapshot,
     pub(crate) last_good_outputs: Option<HashMap<VirtualNodeKind, CachedVirtualFile>>,
@@ -666,6 +797,8 @@ pub(crate) struct CompileInput {
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) style_override_layer: Option<StyleOverrideLayer>,
+    /// Content overrides for preprocessed template/script blocks.
+    pub(crate) content_override_layer: Option<ContentOverrideLayer>,
     /// Macro type dependencies for cross-file type resolution.
     pub(crate) macro_type_deps: Vec<verter_analysis::MacroTypeDep>,
 }
@@ -695,6 +828,8 @@ pub(crate) struct FileEntry {
     /// Key: (dep_canonical_id, type_name). Value: hash of resolved prop shape.
     pub(crate) resolved_type_hashes: HashMap<(String, String), Hash16>,
     pub(crate) style_overrides: HashMap<u64, StyleOverrideLayer>,
+    /// Per-profile content overrides for preprocessed template/script blocks.
+    pub(crate) content_overrides: HashMap<u64, ContentOverrideLayer>,
     pub(crate) compile_slots: HashMap<u64, CompileSlot>,
     pub(crate) latest_diagnostics: HashMap<u64, DiagnosticsSnapshot>,
     pub(crate) generation: u64,
@@ -773,4 +908,98 @@ pub(crate) struct HostMetrics {
     pub(crate) compile_time_us_total: std::sync::atomic::AtomicU64,
     pub(crate) compile_time_us_total_by_profile: std::sync::Mutex<HashMap<u64, u64>>,
     pub(crate) compile_count_by_profile: std::sync::Mutex<HashMap<u64, u64>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// @ai-generated — SliceChanges::is_style_only unit tests
+    #[test]
+    fn is_style_only_true_when_only_styles_changed() {
+        let sc = SliceChanges {
+            style_indices_changed: vec![0],
+            ..SliceChanges::default()
+        };
+        assert!(sc.is_style_only());
+    }
+
+    #[test]
+    fn is_style_only_true_for_multiple_style_indices() {
+        let sc = SliceChanges {
+            style_indices_changed: vec![0, 2],
+            ..SliceChanges::default()
+        };
+        assert!(sc.is_style_only());
+    }
+
+    #[test]
+    fn is_style_only_false_when_nothing_changed() {
+        let sc = SliceChanges::default();
+        assert!(!sc.is_style_only(), "no changes at all is not style-only");
+    }
+
+    #[test]
+    fn is_style_only_false_when_script_also_changed() {
+        let sc = SliceChanges {
+            script_changed: true,
+            style_indices_changed: vec![0],
+            ..SliceChanges::default()
+        };
+        assert!(!sc.is_style_only());
+    }
+
+    #[test]
+    fn is_style_only_false_when_template_also_changed() {
+        let sc = SliceChanges {
+            template_changed: true,
+            style_indices_changed: vec![1],
+            ..SliceChanges::default()
+        };
+        assert!(!sc.is_style_only());
+    }
+
+    #[test]
+    fn is_style_only_false_when_structure_changed() {
+        let sc = SliceChanges {
+            structure_changed: true,
+            style_indices_changed: vec![0],
+            ..SliceChanges::default()
+        };
+        assert!(
+            !sc.is_style_only(),
+            "structure change means blocks were added/removed"
+        );
+    }
+
+    #[test]
+    fn is_style_only_false_when_descriptor_changed() {
+        let sc = SliceChanges {
+            descriptor_changed: true,
+            style_indices_changed: vec![0],
+            ..SliceChanges::default()
+        };
+        assert!(
+            !sc.is_style_only(),
+            "descriptor change (e.g. scoped added) affects compilation"
+        );
+    }
+
+    #[test]
+    fn is_style_only_false_for_script_only_change() {
+        let sc = SliceChanges {
+            script_changed: true,
+            ..SliceChanges::default()
+        };
+        assert!(!sc.is_style_only());
+    }
+
+    #[test]
+    fn is_style_only_false_for_template_only_change() {
+        let sc = SliceChanges {
+            template_changed: true,
+            ..SliceChanges::default()
+        };
+        assert!(!sc.is_style_only());
+    }
 }

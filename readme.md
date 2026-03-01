@@ -130,7 +130,7 @@ Since the Vetur days, Vue has struggled with type safety and tooling quality. Vu
 
 ## Architecture
 
-Verter is a hybrid Rust + TypeScript monorepo. The Rust crates handle template compilation (exposed via NAPI-RS native bindings and wasm-bindgen WASM), while TypeScript packages handle SFC-to-TSX transformation, the LSP, and IDE integration.
+Verter is a hybrid Rust + TypeScript monorepo. Rust crates handle template compilation (exposed via NAPI-RS native bindings and wasm-bindgen WASM) and the LSP server (`verter-lsp` binary, communicates over stdio), while TypeScript packages handle the SFC-to-TSX transformation and IDE integration.
 
 ### System Overview
 
@@ -140,8 +140,14 @@ graph TB
         VSCode["verter-vscode<br/>(VS Code Extension)"]
     end
 
+    subgraph "Rust"
+        LSP["verter-lsp<br/>(Rust LSP binary, stdio)"]
+        Native["@verter/native<br/>(NAPI-RS Bindings)"]
+        WASM["@verter/wasm<br/>(WASM Bindings)"]
+        RustCore["verter_core<br/>(Rust Template Compiler)"]
+    end
+
     subgraph "Language Services"
-        LSP["@verter/language-server<br/>(LSP Server)"]
         TSPlugin["@verter/typescript-plugin<br/>(TS Plugin)"]
         Shared["@verter/language-shared<br/>(Protocol Types)"]
     end
@@ -149,12 +155,6 @@ graph TB
     subgraph "Transformation"
         Core["@verter/core<br/>(SFC → TSX)"]
         Types["@verter/types<br/>(Type Utilities)"]
-    end
-
-    subgraph "Rust Compiler"
-        Native["@verter/native<br/>(NAPI-RS Bindings)"]
-        WASM["@verter/wasm<br/>(WASM Bindings)"]
-        RustCore["verter_core<br/>(Rust Template Compiler)"]
     end
 
     subgraph "Build Tools"
@@ -167,8 +167,7 @@ graph TB
 
     VSCode --> LSP
     VSCode --> TSPlugin
-    LSP --> Core
-    LSP --> Native
+    LSP --> RustCore
     LSP --> Shared
     TSPlugin --> Core
     Core --> Types
@@ -186,7 +185,7 @@ flowchart LR
     SFC --> RustCompiler["verter_core<br/>(Rust)"]
     TSCore --> TSX["Typed TSX<br/>(for IDE analysis)"]
     RustCompiler --> Render["Render Functions<br/>(for runtime)"]
-    TSX --> LSP["Language Server<br/>+ IDE Features"]
+    TSX --> LSP["verter-lsp<br/>+ IDE Features"]
     Render --> Vite["Vite Build<br/>+ Production"]
 ```
 
@@ -196,6 +195,7 @@ flowchart LR
 verter/
 ├── crates/                        # Rust crates
 │   ├── verter_core/               # Core template compiler (pure Rust)
+│   ├── verter_lsp/                # Rust LSP server binary (stdio)
 │   ├── verter_bench/              # Benchmarks and comparison examples
 │   ├── verter_napi/               # Native Node.js bindings (NAPI-RS)
 │   └── verter_wasm/               # WASM bindings (wasm-bindgen)
@@ -205,7 +205,6 @@ verter/
 │   ├── native/                    # @verter/native — Native binding loader
 │   ├── wasm/                      # @verter/wasm — WASM binding wrapper
 │   ├── unplugin/                  # @verter/unplugin — Universal bundler plugin
-│   ├── language-server/           # @verter/language-server — LSP server
 │   ├── language-shared/           # @verter/language-shared — Shared protocol types
 │   ├── typescript-plugin/         # @verter/typescript-plugin — TS plugin
 │   ├── oxc-bindings/              # @verter/oxc-bindings — OXC parser helper
@@ -222,13 +221,11 @@ verter/
 
 ```
 verter-vscode (VS Code extension)
-├── @verter/language-server (LSP server)
-│   ├── @verter/core (SFC → TSX transformation)
-│   │   └── @verter/types (type utilities)
-│   ├── @verter/native (Rust template compiler, NAPI-RS)
-│   └── @verter/language-shared (client/server protocol)
-├── @verter/typescript-plugin (IDE .vue import resolution)
-│   └── @verter/core
+├── verter-lsp (Rust LSP binary, stdio)
+│   ├── verter_host (file host + compilation)
+│   └── TsgoTypeProvider (optional, for TS type checking)
+├── @verter/language-shared (custom protocol types)
+├── @verter/typescript-plugin (.vue import resolution, NAPI-backed)
 └── @verter/oxc-bindings (OXC parser binary helper)
 
 @verter/unplugin (universal bundler plugin)
@@ -263,7 +260,7 @@ corepack prepare pnpm@latest --activate
 git clone https://github.com/pikax/verter.git
 cd verter
 pnpm install
-pnpm build    # Builds: native bindings → WASM bindings → TypeScript packages
+pnpm build    # Builds: native bindings → LSP binary → WASM bindings → TypeScript packages
 
 # 5. (Optional) Package VS Code extension
 pnpm package
@@ -282,18 +279,20 @@ pnpm package
 ### Commands
 
 ```bash
-# Build everything (sequential: native → wasm → TypeScript)
+# Build everything (sequential: native → lsp → wasm → TypeScript)
 pnpm build
 
 # Build individual layers
 pnpm run build:native         # Rust → .node bindings
+pnpm run build:lsp            # Rust → LSP binary (debug)
+pnpm run build:lsp:release    # Rust → LSP binary (release, optimized)
 pnpm run build:wasm           # Rust → .wasm bindings
 pnpm run build:ts             # TypeScript packages
 
 # Watch mode for extension development
 pnpm watch
 
-# Watch language-server + vscode extension
+# Build LSP binary, then watch language-shared + vscode extension + typescript-plugin
 pnpm dev-extension
 
 # Clean build artifacts
@@ -380,10 +379,11 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 
 ### Project Guides
 
-- **[Architecture Overview](./docs/architecture.md)** — Deep dive into Verter's design
-- **[Rust Setup Guide](./docs/rust-setup.md)** — Rust development environment
-- **[Contributing Guide](./CONTRIBUTING.md)** — How to contribute
-- **[CI/CD Documentation](./.claude/ci-cd.md)** — Workflows and release process
+- **[Documentation](https://verterjs.dev)** — Full documentation site
+- **[Architecture Overview](https://verterjs.dev/guide/architecture)** — Deep dive into Verter's design
+- **[Rust Setup Guide](https://verterjs.dev/contributing/rust-setup)** — Rust development environment
+- **[Contributing Guide](https://verterjs.dev/contributing/)** — How to contribute
+- **[CI/CD Documentation](https://verterjs.dev/contributing/ci-cd)** — Workflows and release process
 
 ### TypeScript Packages
 
@@ -394,7 +394,6 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 | `@verter/native`            | [README](./packages/native/README.md)            | Native Node.js bindings (NAPI-RS) |
 | `@verter/wasm`              | [README](./packages/wasm/README.md)              | WASM bindings for browser         |
 | `@verter/unplugin`          | [README](./packages/unplugin/README.md)          | Universal bundler plugin          |
-| `@verter/language-server`   | [README](./packages/language-server/readme.md)   | LSP server                        |
 | `@verter/language-shared`   | [README](./packages/language-shared/readme.md)   | Shared protocol types             |
 | `@verter/typescript-plugin` | [README](./packages/typescript-plugin/readme.md) | TypeScript plugin                 |
 | `@verter/oxc-bindings`      | [README](./packages/oxc-bindings/readme.md)      | OXC parser helper                 |
@@ -406,6 +405,7 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 | Crate          | README                                    | Description                        |
 | -------------- | ----------------------------------------- | ---------------------------------- |
 | `verter_core`  | [README](./crates/verter_core/README.md)  | Core template compiler             |
+| `verter_lsp`   | [README](./crates/verter_lsp/)            | Rust LSP server binary (stdio)     |
 | `verter_bench` | [README](./crates/verter_bench/Cargo.toml)| Benchmarks and comparison examples |
 | `verter_napi`  | [README](./crates/verter_napi/README.md)  | NAPI-RS Node.js bindings           |
 | `verter_wasm`  | [README](./crates/verter_wasm/README.md)  | WASM bindings                      |

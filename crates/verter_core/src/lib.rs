@@ -70,10 +70,18 @@ pub(crate) mod template;
 // TSX code generation for IDE type checking
 pub(crate) mod tsx;
 
+// TSC code generation (vue-tsc replacement)
+pub mod tsc;
+
+// Re-export the standalone @verter/types declaration for the LSP
+pub use tsx::script::VERTER_TYPES_STANDALONE_DTS;
+
 pub mod types;
 
 #[cfg(test)]
 mod compile_ported_tests;
+#[cfg(test)]
+mod sourcemap_e2e_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]

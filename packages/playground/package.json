@@ -4,14 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "node scripts/fetch-tsgo.mjs && vite",
+    "build": "node scripts/fetch-tsgo.mjs && vite build",
     "preview": "vite preview",
     "test": "vitest --run",
     "test:e2e": "playwright test",
     "generate:vue-language": "tsx scripts/generate-vue-language.ts"
   },
   "dependencies": {
+    "@verter/types": "workspace:*",
     "@verter/wasm": "workspace:*",
     "fflate": "^0.8.2",
     "vue": "^3.5.27"

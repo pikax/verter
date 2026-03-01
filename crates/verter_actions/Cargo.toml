@@ -1,0 +1,13 @@
+[package]
+name = "verter_actions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vue SFC code actions for Verter — quick fixes, refactoring, source actions"
+
+[dependencies]
+verter_span = { path = "../verter_span" }
+verter_diagnostics = { path = "../verter_diagnostics" }
+verter_analysis = { path = "../verter_analysis" }
+
+[dev-dependencies]

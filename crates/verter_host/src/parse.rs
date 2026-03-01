@@ -15,7 +15,8 @@ use crate::hash::{hash_16, semantic_hash};
 use crate::id::resolve_external;
 use crate::types::{
     DescriptorMin, DiagnosticsSnapshot, ExternalBlockKind, ExternalSourceRequest, FileMeta,
-    HostDiagnostic, HostSeverity, ParseSnapshot, SliceHashes, SrcBlockInfo,
+    HostDiagnostic, HostSeverity, ParseSnapshot, PreprocessorBlockType, PreprocessorRequest,
+    SliceHashes, SrcBlockInfo,
 };
 
 /// Zero-copy attribute extraction: returns slices borrowed from `source`.
@@ -116,6 +117,8 @@ pub(crate) fn parse_vue_snapshot(
     let mut script_count = 0;
     let mut has_script = false;
     let mut script_lang: Option<String> = None;
+    // Content span for script block (used for preprocessor request content extraction)
+    let mut script_content_span: Option<(u32, u32)> = None;
     let mut src_blocks = Vec::new();
     let mut external_requests = Vec::new();
 
@@ -139,6 +142,10 @@ pub(crate) fn parse_vue_snapshot(
             if let Some(lang) = find_attr(&attrs, "lang") {
                 if lang != "true" {
                     script_lang = Some(lang);
+                    // Capture content span for the script with non-native lang
+                    if let Some(span) = script.content {
+                        script_content_span = Some((span.start, span.end));
+                    }
                 }
             }
         }
@@ -180,6 +187,9 @@ pub(crate) fn parse_vue_snapshot(
     let mut has_template = false;
     let mut template_hash = None;
     let mut template_attrs_fp = Vec::new();
+    let mut template_lang: Option<String> = None;
+    // Content span for template block (used for preprocessor request content extraction)
+    let mut template_content_span: Option<(u32, u32)> = None;
 
     if let Some(ast) = syntax.template_ast() {
         template_count = 1;
@@ -188,11 +198,18 @@ pub(crate) fn parse_vue_snapshot(
             template_hash = Some(hash_16(
                 &source.as_bytes()[content.start as usize..content.end as usize],
             ));
+            template_content_span = Some((content.start, content.end));
         } else {
             template_hash = Some(hash_16(&[]));
         }
 
         let attrs = extract_attrs(&ast.root.attributes, source);
+        // Capture template lang from lang attribute
+        if let Some(lang) = find_attr(&attrs, "lang") {
+            if lang != "true" && !lang.eq_ignore_ascii_case("html") {
+                template_lang = Some(lang);
+            }
+        }
         try_resolve_src_block(
             canonical_id,
             &attrs,
@@ -212,6 +229,8 @@ pub(crate) fn parse_vue_snapshot(
     let mut style_attrs_fp = Vec::new();
     let mut style_langs = Vec::new();
     let mut has_scoped_style = false;
+    // Content spans for style blocks (used for preprocessor request content extraction)
+    let mut style_content_spans: Vec<Option<(u32, u32)>> = Vec::new();
 
     for (idx, style) in syntax.style_nodes().iter().enumerate() {
         let content = if let Some(span) = style.content {
@@ -249,12 +268,15 @@ pub(crate) fn parse_vue_snapshot(
         ));
 
         style_langs.push(find_attr(&attrs, "lang"));
+        style_content_spans.push(style.content.map(|span| (span.start, span.end)));
     }
 
     let mut custom_hashes = Vec::new();
     let mut custom_attrs_fp = Vec::new();
     let mut custom_types = Vec::new();
     let mut custom_langs = Vec::new();
+    // Content spans for custom blocks (used for preprocessor request content extraction)
+    let mut custom_content_spans: Vec<Option<(u32, u32)>> = Vec::new();
 
     for (idx, custom) in syntax.unknown_nodes().iter().enumerate() {
         let content = if let Some(span) = custom.content {
@@ -285,6 +307,7 @@ pub(crate) fn parse_vue_snapshot(
         );
 
         custom_langs.push(find_attr(&attrs, "lang"));
+        custom_content_spans.push(custom.content.map(|span| (span.start, span.end)));
 
         custom_attrs_fp.push(normalize_attr_map(&attrs, &["type", "lang", "src"]));
     }
@@ -322,8 +345,7 @@ pub(crate) fn parse_vue_snapshot(
                 },
                 code: format!("{:?}", d.code),
                 message: d.message,
-                span_start: d.span.map(|s| s.start),
-                span_end: d.span.map(|s| s.end),
+                span: d.span,
             })
             .collect(),
     );
@@ -354,6 +376,20 @@ pub(crate) fn parse_vue_snapshot(
         parse_diagnostics
     };
 
+    // Build preprocessor requests for non-native languages
+    let preprocessor_requests = build_preprocessor_requests(
+        &template_lang,
+        template_content_span,
+        &script_lang,
+        script_content_span,
+        &style_langs,
+        &style_content_spans,
+        &custom_types,
+        &custom_langs,
+        &custom_content_spans,
+        source,
+    );
+
     ParseSnapshot {
         whole_hash,
         semantic_hash,
@@ -364,6 +400,7 @@ pub(crate) fn parse_vue_snapshot(
             has_template,
             has_scoped_style,
             script_lang,
+            template_lang,
             style_langs,
             custom_types,
             custom_langs,
@@ -374,7 +411,103 @@ pub(crate) fn parse_vue_snapshot(
         script_analysis,
         export_signatures: Vec::new(),
         style_analyses,
+        preprocessor_requests,
     }
+}
+
+/// Build preprocessor requests for blocks that use non-native languages.
+///
+/// A non-native language is any `lang` that the Rust compiler cannot handle natively:
+/// - Template: anything other than HTML (or no `lang`)
+/// - Script: anything not in `[ts, tsx, js, jsx]`
+/// - Style: anything other than CSS (or no `lang`)
+/// - Custom: any custom block with a `lang` attribute
+#[allow(clippy::too_many_arguments)]
+fn build_preprocessor_requests(
+    template_lang: &Option<String>,
+    template_content_span: Option<(u32, u32)>,
+    script_lang: &Option<String>,
+    script_content_span: Option<(u32, u32)>,
+    style_langs: &[Option<String>],
+    style_content_spans: &[Option<(u32, u32)>],
+    custom_types: &[String],
+    custom_langs: &[Option<String>],
+    custom_content_spans: &[Option<(u32, u32)>],
+    source: &str,
+) -> Vec<PreprocessorRequest> {
+    let mut requests = Vec::new();
+
+    // Template: non-native if template_lang is Some (already filtered for "html")
+    if let Some(lang) = template_lang {
+        let content = template_content_span
+            .map(|(s, e)| &source[s as usize..e as usize])
+            .unwrap_or("");
+        requests.push(PreprocessorRequest {
+            block_type: PreprocessorBlockType::Template,
+            index: 0,
+            lang: lang.clone(),
+            content: content.to_string(),
+        });
+    }
+
+    // Script: non-native if not in [ts, tsx, js, jsx]
+    if let Some(lang) = script_lang {
+        let is_native = matches!(
+            lang.as_str(),
+            "ts" | "tsx" | "js" | "jsx" | "TS" | "TSX" | "JS" | "JSX"
+        );
+        if !is_native {
+            let content = script_content_span
+                .map(|(s, e)| &source[s as usize..e as usize])
+                .unwrap_or("");
+            requests.push(PreprocessorRequest {
+                block_type: PreprocessorBlockType::Script,
+                index: 0,
+                lang: lang.clone(),
+                content: content.to_string(),
+            });
+        }
+    }
+
+    // Style: non-native if lang is Some and not "css"
+    for (idx, lang_opt) in style_langs.iter().enumerate() {
+        if let Some(lang) = lang_opt {
+            if !lang.eq_ignore_ascii_case("css") {
+                let content = style_content_spans
+                    .get(idx)
+                    .and_then(|s| *s)
+                    .map(|(s, e)| &source[s as usize..e as usize])
+                    .unwrap_or("");
+                requests.push(PreprocessorRequest {
+                    block_type: PreprocessorBlockType::Style,
+                    index: idx,
+                    lang: lang.clone(),
+                    content: content.to_string(),
+                });
+            }
+        }
+    }
+
+    // Custom: any custom block with a lang attribute
+    for (idx, lang_opt) in custom_langs.iter().enumerate() {
+        if let Some(lang) = lang_opt {
+            let content = custom_content_spans
+                .get(idx)
+                .and_then(|s| *s)
+                .map(|(s, e)| &source[s as usize..e as usize])
+                .unwrap_or("");
+            requests.push(PreprocessorRequest {
+                block_type: PreprocessorBlockType::Custom,
+                index: idx,
+                lang: lang.clone(),
+                content: content.to_string(),
+            });
+            // Also store custom block type name in context for the caller
+            let _ = custom_types.get(idx); // suppress unused warning
+        }
+    }
+
+    requests
 }
 
 /// Build a single style analysis from a parsed style node and the SFC source.
@@ -386,6 +519,7 @@ fn build_single_style_analysis(
     let module_name =
         find_attr(&extract_attrs(&style.attributes, source), "module").filter(|v| v != "true");
     let vue_input = verter_analysis::VueStyleInput::default();
+    let content_offset = style.content.map(|span| span.start).unwrap_or(0);
     let analysis_lang = match style.lang {
         Some(verter_core::parser::types::StyleLang::Css) | None => {
             let css_content = style
@@ -398,6 +532,7 @@ fn build_single_style_analysis(
                 style.scoped,
                 style.module,
                 module_name.as_deref(),
+                content_offset,
             );
         }
         Some(verter_core::parser::types::StyleLang::Scss) => {
@@ -422,6 +557,7 @@ fn build_single_style_analysis(
         style.scoped,
         style.module,
         module_name.as_deref(),
+        content_offset,
     )
 }
 
@@ -444,8 +580,7 @@ fn catch_analysis_panic<T: Default>(
                 severity: HostSeverity::Warning,
                 code: "HOST_ANALYSIS_PANIC".to_string(),
                 message: format!("{label}: {msg}"),
-                span_start: None,
-                span_end: None,
+                span: None,
             };
             (T::default(), Some(diagnostic))
         }
@@ -455,6 +590,10 @@ fn catch_analysis_panic<T: Default>(
 /// Build script analysis from an already-parsed Syntax. Concatenates script block
 /// contents and runs OXC analysis with catch_unwind for panic safety.
 /// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_source()` (on-demand).
+///
+/// After OXC analysis, adjusts all span fields from script-content-relative offsets
+/// to SFC-absolute byte offsets so downstream consumers (LSP features) can use them
+/// directly with `LineIndex::offset_to_position()`.
 fn build_script_analysis_from_syntax(
     syntax: &Syntax,
     source: &str,
@@ -463,6 +602,8 @@ fn build_script_analysis_from_syntax(
     Option<HostDiagnostic>,
 ) {
     let mut combined_content = String::new();
+    // Track (sfc_content_start, content_length) for each block in the concatenation
+    let mut block_ranges: Vec<(u32, u32)> = Vec::new();
     for script in [syntax.script(), syntax.script_setup()]
         .into_iter()
         .flatten()
@@ -472,6 +613,7 @@ fn build_script_analysis_from_syntax(
             if !combined_content.is_empty() {
                 combined_content.push('\n');
             }
+            block_ranges.push((span.start, (span.end - span.start)));
             combined_content.push_str(content);
         }
     }
@@ -479,12 +621,77 @@ fn build_script_analysis_from_syntax(
         return (verter_analysis::ScriptAnalysisSnapshot::default(), None);
     }
     let alloc = Allocator::new();
-    catch_analysis_panic(
+    let (mut analysis, diag) = catch_analysis_panic(
         "script analysis",
         std::panic::AssertUnwindSafe(|| {
             verter_analysis::build_script_analysis(&combined_content, SourceType::ts(), &alloc)
         }),
-    )
+    );
+    adjust_analysis_spans(&mut analysis, &block_ranges);
+    (analysis, diag)
+}
+
+/// Map a byte offset in the concatenated script content to the SFC-absolute offset.
+///
+/// The concatenated content is built as: `block0_content + "\n" + block1_content + ...`
+/// Each block's `(sfc_start, length)` is tracked in `block_ranges`.
+fn combined_offset_to_sfc(offset: u32, block_ranges: &[(u32, u32)]) -> u32 {
+    let mut cursor = 0u32;
+    for &(sfc_start, len) in block_ranges {
+        if offset < cursor + len {
+            return sfc_start + (offset - cursor);
+        }
+        cursor += len + 1; // +1 for the '\n' separator between blocks
+    }
+    // Fallback: offset past all blocks (shouldn't happen with valid spans)
+    offset
+}
+
+/// Adjust all span fields in a `ScriptAnalysisSnapshot` from script-content-relative
+/// to SFC-absolute byte offsets.
+fn adjust_analysis_spans(
+    analysis: &mut verter_analysis::ScriptAnalysisSnapshot,
+    block_ranges: &[(u32, u32)],
+) {
+    if block_ranges.is_empty() {
+        return;
+    }
+    // Single block with start=0 means no adjustment needed (non-SFC .ts file)
+    if block_ranges.len() == 1 && block_ranges[0].0 == 0 {
+        return;
+    }
+
+    let map = |offset: u32| combined_offset_to_sfc(offset, block_ranges);
+
+    for import in &mut analysis.imports {
+        import.span.start = map(import.span.start);
+        import.span.end = map(import.span.end);
+        for binding in &mut import.bindings {
+            binding.span.start = map(binding.span.start);
+            binding.span.end = map(binding.span.end);
+        }
+    }
+    for binding in &mut analysis.bindings {
+        binding.span.start = map(binding.span.start);
+        binding.span.end = map(binding.span.end);
+    }
+    for mac in &mut analysis.macros {
+        mac.span.start = map(mac.span.start);
+        mac.span.end = map(mac.span.end);
+    }
+    for call in &mut analysis.vue_api_calls {
+        call.span.start = map(call.span.start);
+        call.span.end = map(call.span.end);
+    }
+    for call in &mut analysis.dom_query_calls {
+        call.span.start = map(call.span.start);
+        call.span.end = map(call.span.end);
+        call.arg_span.start = map(call.arg_span.start);
+        call.arg_span.end = map(call.arg_span.end);
+    }
+    if let Some(ref mut offset) = analysis.first_await_offset {
+        *offset = map(*offset);
+    }
 }
 
 /// Compute script analysis on demand from SFC source. Used by get_analysis()
@@ -560,6 +767,7 @@ pub(crate) fn parse_non_sfc_snapshot(_canonical_id: &str, source: &str) -> Parse
         script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
         export_signatures,
         style_analyses: Vec::new(),
+        preprocessor_requests: Vec::new(),
     }
 }
 
@@ -1041,5 +1249,254 @@ const isOpen = computed(() => props.visible)
         assert_eq!(snap.descriptor.template_count, 0);
         assert!(snap.external_requests.is_empty());
         assert!(snap.src_blocks.is_empty());
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Script span SFC-absolute adjustment
+    // ═══════════════════════════════════════════════════════════
+
+    /// @ai-generated - combined_offset_to_sfc: single block maps offset correctly
+    #[test]
+    fn combined_offset_to_sfc_single_block() {
+        // Script content starts at SFC offset 45, length 30
+        let blocks = [(45u32, 30u32)];
+        assert_eq!(combined_offset_to_sfc(0, &blocks), 45);
+        assert_eq!(combined_offset_to_sfc(7, &blocks), 52);
+        assert_eq!(combined_offset_to_sfc(29, &blocks), 74);
+    }
+
+    /// @ai-generated - combined_offset_to_sfc: dual blocks map offsets correctly
+    #[test]
+    fn combined_offset_to_sfc_dual_blocks() {
+        // <script> content at SFC offset 10, length 20
+        // <script setup> content at SFC offset 60, length 30
+        // combined_content = source[10..30] + "\n" + source[60..90]
+        let blocks = [(10u32, 20u32), (60u32, 30u32)];
+        // Offset in first block
+        assert_eq!(combined_offset_to_sfc(0, &blocks), 10);
+        assert_eq!(combined_offset_to_sfc(19, &blocks), 29);
+        // Offset in second block (after the \n separator at position 20)
+        assert_eq!(combined_offset_to_sfc(21, &blocks), 60);
+        assert_eq!(combined_offset_to_sfc(30, &blocks), 69);
+        assert_eq!(combined_offset_to_sfc(50, &blocks), 89);
+    }
+
+    /// @ai-generated - Script binding spans become SFC-absolute after parsing
+    #[test]
+    fn script_analysis_spans_are_sfc_absolute() {
+        // Template block takes bytes 0..48, script starts after
+        let source = r#"<template><div>{{ msg }}</div></template>
+<script setup>
+const msg = 'hello'
+</script>"#;
+        let snap = parse_vue_snapshot("App.vue", source, AnalysisScope::LSP);
+
+        // Find the "msg" binding
+        let binding = snap
+            .script_analysis
+            .bindings
+            .iter()
+            .find(|b| b.name == "msg")
+            .expect("should find 'msg' binding");
+
+        // The span should point to "msg" in "const msg = 'hello'" within the SFC source
+        let script_line = "const msg = 'hello'";
+        let msg_in_script = source.find(script_line).unwrap() + "const ".len();
+        assert_eq!(
+            binding.span.start as usize, msg_in_script,
+            "span.start should be SFC-absolute offset of 'msg' in script, got {} expected {}",
+            binding.span.start, msg_in_script
+        );
+        assert_eq!(
+            binding.span.end as usize,
+            msg_in_script + "msg".len(),
+            "span.end should be SFC-absolute end of 'msg' in script"
+        );
+    }
+
+    /// @ai-generated - Import spans become SFC-absolute after parsing
+    #[test]
+    fn import_analysis_spans_are_sfc_absolute() {
+        let source = r#"<template><div/></template>
+<script setup>
+import { ref } from 'vue'
+const x = ref(0)
+</script>"#;
+        let snap = parse_vue_snapshot("App.vue", source, AnalysisScope::LSP);
+
+        let import = snap
+            .script_analysis
+            .imports
+            .iter()
+            .find(|i| i.source == "vue")
+            .expect("should find vue import");
+
+        // import statement should have SFC-absolute span
+        let import_line = "import { ref } from 'vue'";
+        let import_offset = source.find(import_line).unwrap();
+        assert_eq!(
+            import.span.start as usize, import_offset,
+            "import span.start should be SFC-absolute"
+        );
+
+        // "ref" binding inside the import should also be SFC-absolute
+        let ref_binding = import
+            .bindings
+            .iter()
+            .find(|b| b.name == "ref")
+            .expect("should find 'ref' binding");
+        // "ref" appears after "import { "
+        let ref_in_import = source.find("{ ref }").unwrap() + 2; // past "{ "
+        assert_eq!(
+            ref_binding.span.start as usize, ref_in_import,
+            "import binding span.start should be SFC-absolute"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Preprocessor request tests
+    // ═══════════════════════════════════════════════════════════
+
+    /// @ai-generated - template_lang captured for pug
+    #[test]
+    fn parse_captures_template_lang_pug() {
+        let source =
+            "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
+        let snap = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
+        assert_eq!(
+            snap.meta.template_lang,
+            Some("pug".to_string()),
+            "template_lang should be 'pug'"
+        );
+    }
+
+    /// @ai-generated - no template_lang for plain HTML template
+    #[test]
+    fn no_template_lang_for_html() {
+        let source =
+            "<template><div>hello</div></template>\n<script setup>\nconst x = 1\n</script>";
+        let snap = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
+        assert!(
+            snap.meta.template_lang.is_none(),
+            "template_lang should be None for native HTML"
+        );
+    }
+
+    /// @ai-generated - explicit lang="html" is treated as native (no preprocessor request)
+    #[test]
+    fn no_template_lang_for_explicit_html() {
+        let source = "<template lang=\"html\"><div>hello</div></template>";
+        let snap = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
+        assert!(
+            snap.meta.template_lang.is_none(),
+            "template_lang should be None for explicit lang='html'"
+        );
+        assert!(
+            snap.preprocessor_requests.is_empty(),
+            "no preprocessor requests for native HTML"
+        );
+    }
+
+    /// @ai-generated - preprocessor request for pug template
+    #[test]
+    fn preprocessor_request_for_pug_template() {
+        let source = "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
+        let snap = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
+        assert_eq!(snap.preprocessor_requests.len(), 1);
+        let req = &snap.preprocessor_requests[0];
+        assert_eq!(req.block_type, PreprocessorBlockType::Template);
+        assert_eq!(req.index, 0);
+        assert_eq!(req.lang, "pug");
+        assert!(
+            req.content.contains("div hello"),
+            "content should contain 'div hello', got: {}",
+            req.content
+        );
+    }
+
+    /// @ai-generated - preprocessor request for coffee script
+    #[test]
+    fn preprocessor_request_for_coffee_script() {
+        let source =
+            "<template><div>hello</div></template>\n<script lang=\"coffee\">\nx = 1\n</script>";
+        let snap = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
+        assert_eq!(snap.preprocessor_requests.len(), 1);
+        let req = &snap.preprocessor_requests[0];
+        assert_eq!(req.block_type, PreprocessorBlockType::Script);
+        assert_eq!(req.index, 0);
+        assert_eq!(req.lang, "coffee");
+        assert!(
+            req.content.contains("x = 1"),
+            "content should contain 'x = 1', got: {}",
+            req.content
+        );
+    }
+
+    /// @ai-generated - no preprocessor requests for native langs
+    #[test]
+    fn no_preprocessor_requests_for_native_langs() {
+        let source =
+            "<template><div>hello</div></template>\n<script lang=\"ts\" setup>\nconst x = 1\n</script>\n<style>.a { color: red }</style>";
+        let snap = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
+        assert!(
+            snap.preprocessor_requests.is_empty(),
+            "no preprocessor requests for html + ts + css"
+        );
+    }
+
+    /// @ai-generated - preprocessor request for scss style
+    #[test]
+    fn preprocessor_request_for_scss_style() {
+        let source = "<template><div>hello</div></template>\n<style lang=\"scss\">\n.a { .b { color: red } }\n</style>";
+        let snap = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
+        assert_eq!(snap.preprocessor_requests.len(), 1);
+        let req = &snap.preprocessor_requests[0];
+        assert_eq!(req.block_type, PreprocessorBlockType::Style);
+        assert_eq!(req.index, 0);
+        assert_eq!(req.lang, "scss");
+        assert!(
+            req.content.contains(".a { .b"),
+            "content should contain '.a {{ .b', got: {}",
+            req.content
+        );
+    }
+
+    /// @ai-generated - preprocessor request for custom block with lang
+    #[test]
+    fn preprocessor_request_for_custom_block_with_lang() {
+        let source = "<template><div>hello</div></template>\n<i18n lang=\"yaml\">\nen:\n  hello: world\n</i18n>";
+        let snap = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
+        assert_eq!(snap.preprocessor_requests.len(), 1);
+        let req = &snap.preprocessor_requests[0];
+        assert_eq!(req.block_type, PreprocessorBlockType::Custom);
+        assert_eq!(req.index, 0);
+        assert_eq!(req.lang, "yaml");
+        assert!(
+            req.content.contains("hello: world"),
+            "content should contain 'hello: world', got: {}",
+            req.content
+        );
+    }
+
+    /// @ai-generated - multiple preprocessor requests for mixed non-native langs
+    #[test]
+    fn multiple_preprocessor_requests_for_mixed_langs() {
+        let source = "<template lang=\"pug\">\ndiv hello\n</template>\n<script lang=\"coffee\">\nx = 1\n</script>\n<style lang=\"scss\">\n.a { .b { color: red } }\n</style>";
+        let snap = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
+        assert_eq!(
+            snap.preprocessor_requests.len(),
+            3,
+            "should have 3 preprocessor requests: template, script, style"
+        );
+
+        // Verify each type is present
+        let types: Vec<_> = snap
+            .preprocessor_requests
+            .iter()
+            .map(|r| r.block_type)
+            .collect();
+        assert!(types.contains(&PreprocessorBlockType::Template));
+        assert!(types.contains(&PreprocessorBlockType::Script));
+        assert!(types.contains(&PreprocessorBlockType::Style));
     }
 }

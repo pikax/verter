@@ -2,11 +2,20 @@
 import { ref, watch, onMounted, onUnmounted, shallowRef } from "vue";
 import * as monaco from "monaco-editor-core";
 import { IMPORT_MAP_FILENAME, type Store } from "../core/store";
+import { extractVueVersion } from "../core/importMap";
 import type { HostDiagnostic, LintDiagnostic } from "../core/types";
 import { registerLspProviders } from "./lspProviders";
 import { computeAutoCloseTagText } from "./templateIde";
 import { TypeScriptService, type MappedDiagnostic } from "./tsService";
+import { TsgoService } from "./tsgoService";
 import { getTypeDiagnosticsSourceMap } from "./diagnosticSourceMap";
+import {
+  computeBindingDecorations,
+  computeCssClassDecorations,
+  getDecorationStyles,
+} from "./decorations";
+import type { TypeScriptServiceBridge } from "./lspProviders";
+import typeHelpersSource from "@verter/types/string";
 
 const props = defineProps<{
   store: Store;
@@ -16,8 +25,16 @@ const editorContainer = ref<HTMLElement>();
 const editor = shallowRef<monaco.editor.IStandaloneCodeEditor>();
 const pendingCode = ref<string | null>(null);
 let lspDisposables: monaco.IDisposable[] = [];
-const tsService = new TypeScriptService();
+let tsService: TypeScriptServiceBridge & { init(): Promise<void>; dispose(): void; syncTsx: TypeScriptService["syncTsx"] } = new TypeScriptService();
+let tsgoService: TsgoService | null = null;
 let tsDiagnostics: MappedDiagnostic[] = [];
+let decorationIds: string[] = [];
+let decorationStyleEl: HTMLStyleElement | null = null;
+
+// Debounce + cancel-on-new-edit for TypeScript sync
+let tsSyncVersion = 0;
+let tsSyncTimer: ReturnType<typeof setTimeout> | null = null;
+const TS_SYNC_DEBOUNCE_MS = 300;
 
 function getLanguage(filename: string): string {
   if (filename.endsWith(".vue")) return "vue";
@@ -164,6 +181,15 @@ function updateMarkers() {
   monaco.editor.setModelMarkers(model, "typescript", tsMarkers);
 }
 
+/** Debounced TypeScript sync with cancel-on-new-edit. */
+function scheduleTsSync() {
+  if (tsSyncTimer) clearTimeout(tsSyncTimer);
+  tsSyncTimer = setTimeout(() => {
+    tsSyncTimer = null;
+    syncTypeScript();
+  }, TS_SYNC_DEBOUNCE_MS);
+}
+
 async function syncTypeScript() {
   const file = props.store.activeFile;
   if (!file) return;
@@ -175,6 +201,9 @@ async function syncTypeScript() {
     return;
   }
 
+  // Capture version to detect stale results
+  const version = ++tsSyncVersion;
+
   try {
     const diagnosticsSourceMap = getTypeDiagnosticsSourceMap(file.compiled);
     const diagnostics = await tsService.syncTsx(
@@ -183,6 +212,10 @@ async function syncTypeScript() {
       file.code,
       diagnosticsSourceMap,
     );
+
+    // Discard results if a newer sync was requested while we were waiting
+    if (version !== tsSyncVersion) return;
+
     const styleVBindIdentifiers = collectStyleVBindIdentifiers();
     tsDiagnostics = diagnostics.filter((diag) => {
       const unusedName = extractUnusedBindingName(diag);
@@ -190,9 +223,72 @@ async function syncTypeScript() {
       return !styleVBindIdentifiers.has(unusedName);
     });
   } catch {
+    if (version !== tsSyncVersion) return;
     tsDiagnostics = [];
   }
+  // Expose TS diagnostics to store for the Diagnostics panel
+  props.store.tsDiagnostics = tsDiagnostics.map((d) => ({
+    message: d.message,
+    start: d.start,
+    end: d.end,
+    severity: d.severity,
+    code: d.code,
+  }));
   updateMarkers();
+}
+
+function updateDecorations() {
+  const monacoEditor = editor.value;
+  const model = monacoEditor?.getModel();
+  if (!monacoEditor || !model) return;
+
+  const file = props.store.activeFile;
+  const analysis = file?.compiled.analysis;
+  if (!analysis || !file) {
+    decorationIds = monacoEditor.deltaDecorations(decorationIds, []);
+    return;
+  }
+
+  const newDecorations: monaco.editor.IModelDeltaDecoration[] = [];
+
+  // Binding reactivity decorations
+  const bindingDecs = computeBindingDecorations(file.code, analysis);
+  for (const dec of bindingDecs) {
+    const startPos = model.getPositionAt(dec.start);
+    const endPos = model.getPositionAt(dec.end);
+    newDecorations.push({
+      range: new monaco.Range(
+        startPos.lineNumber,
+        startPos.column,
+        endPos.lineNumber,
+        endPos.column,
+      ),
+      options: {
+        inlineClassName: dec.className,
+        hoverMessage: { value: dec.hoverMessage },
+      },
+    });
+  }
+
+  // CSS class usage decorations
+  const cssDecs = computeCssClassDecorations(analysis);
+  for (const dec of cssDecs) {
+    const startPos = model.getPositionAt(dec.start);
+    const endPos = model.getPositionAt(dec.end);
+    newDecorations.push({
+      range: new monaco.Range(
+        startPos.lineNumber,
+        startPos.column,
+        endPos.lineNumber,
+        endPos.column,
+      ),
+      options: {
+        inlineClassName: dec.className,
+      },
+    });
+  }
+
+  decorationIds = monacoEditor.deltaDecorations(decorationIds, newDecorations);
 }
 
 onMounted(() => {
@@ -213,7 +309,8 @@ onMounted(() => {
   });
 
   // Initialize TypeScript service in background (non-blocking)
-  tsService.init().then(() => {
+  const vueVersion = extractVueVersion(props.store.importMap) ?? "3.5";
+  tsService.init({ vueVersion, verterTypesContent: typeHelpersSource }).then(() => {
     // Re-sync on init if we already have compiled output
     syncTypeScript();
   });
@@ -272,6 +369,11 @@ onMounted(() => {
     }
   });
 
+  // Inject decoration styles
+  decorationStyleEl = document.createElement("style");
+  decorationStyleEl.textContent = getDecorationStyles();
+  document.head.appendChild(decorationStyleEl);
+
   // Watch diagnostics and update markers (Verter lint + compiler)
   watch(
     () => [
@@ -282,10 +384,17 @@ onMounted(() => {
     { deep: true },
   );
 
-  // Watch TSX output changes to trigger TS re-sync
+  // Watch analysis changes to update inline decorations
+  watch(
+    () => props.store.activeFile?.compiled.analysis,
+    () => updateDecorations(),
+    { deep: true },
+  );
+
+  // Watch TSX output changes to trigger debounced TS re-sync
   watch(
     () => [props.store.activeFile?.compiled.types, props.store.activeFile?.compiled.typesSourceMap],
-    () => syncTypeScript(),
+    () => scheduleTsSync(),
   );
 
   watch(
@@ -310,6 +419,54 @@ onMounted(() => {
     },
   );
 
+  // Watch type checker toggle to switch between tsc and tsgo
+  watch(
+    () => props.store.typeChecker,
+    async (mode) => {
+      // Dispose current providers
+      lspDisposables.forEach((d) => d.dispose());
+      lspDisposables = [];
+
+      if (mode === "tsgo") {
+        tsService.dispose();
+        if (!tsgoService) {
+          tsgoService = new TsgoService();
+        }
+        tsService = tsgoService as unknown as typeof tsService;
+        await tsgoService.init();
+      } else {
+        if (tsgoService) {
+          tsgoService.dispose();
+          tsgoService = null;
+        }
+        const newTsService = new TypeScriptService();
+        tsService = newTsService;
+        const curVueVersion = extractVueVersion(props.store.importMap) ?? "3.5";
+        await newTsService.init({ vueVersion: curVueVersion, verterTypesContent: typeHelpersSource });
+      }
+
+      // Re-register LSP providers with new service
+      lspDisposables = registerLspProviders(props.store, tsService);
+
+      // Re-sync current file
+      tsDiagnostics = [];
+      updateMarkers();
+      syncTypeScript();
+    },
+  );
+
+  // Watch Vue version changes in import map to reload types
+  watch(
+    () => extractVueVersion(props.store.importMap),
+    async (newVersion) => {
+      if (!newVersion) return;
+      if (tsService instanceof TypeScriptService) {
+        await tsService.updateVueTypes(newVersion);
+        syncTypeScript();
+      }
+    },
+  );
+
   // Initial markers
   updateMarkers();
 });
@@ -318,7 +475,12 @@ onUnmounted(() => {
   lspDisposables.forEach((d) => d.dispose());
   lspDisposables = [];
   tsService.dispose();
+  tsgoService?.dispose();
   editor.value?.dispose();
+  if (decorationStyleEl) {
+    decorationStyleEl.remove();
+    decorationStyleEl = null;
+  }
 });
 </script>
 

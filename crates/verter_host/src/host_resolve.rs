@@ -62,6 +62,57 @@ impl VerterHost {
         })
     }
 
+    /// Ensure a file is compiled and cached for the given profile.
+    ///
+    /// Unlike [`get_virtual_file`](Self::get_virtual_file), this does not require
+    /// specifying a `VirtualNodeKind`. It simply ensures the compilation cache is
+    /// populated so that subsequent `get_tsx()`, `get_analysis()`, or
+    /// `get_virtual_file()` calls hit the cache.
+    ///
+    /// Returns `Ok(())` on success (cache hit or successful compilation).
+    /// Returns `Err(HostError)` if the file is missing or compilation fails.
+    pub fn ensure_compiled(
+        &self,
+        canonical_id: &str,
+        profile: &CompileProfile,
+    ) -> Result<(), HostError> {
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let profile_hash = compile_profile_hash(profile);
+
+        // Check cache under read lock
+        {
+            let files = read_lock(&self.files);
+            let entry = files
+                .get(&canonical)
+                .ok_or_else(|| HostError::MissingSource {
+                    canonical_id: canonical.clone(),
+                })?;
+
+            let soh = entry
+                .style_overrides
+                .get(&profile_hash)
+                .map(|o| o.hash)
+                .unwrap_or(0);
+
+            if let Some(slot) = entry.compile_slots.get(&profile_hash) {
+                if slot.semantic_hash == entry.semantic_hash && slot.style_override_hash == soh {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Cache miss — compile by requesting the Main virtual file.
+        // This populates ALL cached outputs (script, template, styles, TSX, etc.)
+        // for the given profile.
+        let _ = self.get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile.clone(),
+        })?;
+        Ok(())
+    }
+
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
     ///
     /// On cache hit, returns immediately. On cache miss, compiles the file using
@@ -120,9 +171,17 @@ impl VerterHost {
                 .get(&profile_hash)
                 .map(|o| o.hash)
                 .unwrap_or(0);
+            let coh = entry
+                .content_overrides
+                .get(&profile_hash)
+                .map(|o| o.hash)
+                .unwrap_or(0);
 
             if let Some(slot) = entry.compile_slots.get(&profile_hash) {
-                if slot.semantic_hash == entry.semantic_hash && slot.style_override_hash == soh {
+                if slot.semantic_hash == entry.semantic_hash
+                    && slot.style_override_hash == soh
+                    && slot.content_override_hash == coh
+                {
                     #[cfg(feature = "host_metrics")]
                     self.metrics
                         .compile_cache_hits
@@ -162,6 +221,7 @@ impl VerterHost {
                     src_blocks: entry.src_blocks.clone(),
                     external_requests: entry.external_requests.clone(),
                     style_override_layer: entry.style_overrides.get(&profile_hash).cloned(),
+                    content_override_layer: entry.content_overrides.get(&profile_hash).cloned(),
                     macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
                 },
                 fallback_last_good,
@@ -187,6 +247,11 @@ impl VerterHost {
 
         let style_override_hash = compile_input
             .style_override_layer
+            .as_ref()
+            .map(|o| o.hash)
+            .unwrap_or(0);
+        let content_override_hash = compile_input
+            .content_override_layer
             .as_ref()
             .map(|o| o.hash)
             .unwrap_or(0);
@@ -244,6 +309,7 @@ impl VerterHost {
                     CompileSlot {
                         semantic_hash: captured_semantic_hash,
                         style_override_hash,
+                        content_override_hash,
                         outputs: compiled_outputs.clone(),
                         diagnostics: diagnostics.clone(),
                         last_good_outputs,
@@ -305,6 +371,42 @@ impl VerterHost {
         })
     }
 
+    /// Generate TSC output for a Vue SFC — minimal TypeScript declarations.
+    ///
+    /// Unlike [`get_tsx`](Self::get_tsx), this does NOT require a prior
+    /// [`get_virtual_file`](Self::get_virtual_file) call. It performs
+    /// macro-only extraction (OXC parse → defineProps/Emits/Model/Options)
+    /// and generates a `ComponentPublicInstance`-based declaration.
+    ///
+    /// Returns `None` if the file is not in the host or not a Vue SFC.
+    pub fn get_tsc(&self, canonical_id: &str) -> Option<TscResponse> {
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let (source, file_kind) = {
+            let files = read_lock(&self.files);
+            let entry = files.get(&canonical)?;
+            (entry.source.clone(), entry.file_kind)
+        };
+        if file_kind != FileKind::VueSfc {
+            return None;
+        }
+        // Derive component name from canonical_id: last path segment, strip .vue extension.
+        let component_name = canonical
+            .rsplit('/')
+            .next()
+            .unwrap_or(&canonical)
+            .trim_end_matches(".vue")
+            .to_string();
+        let tsc_out = verter_core::tsc::generate_tsc_output(&source, &component_name);
+        Some(TscResponse {
+            code: Arc::from(tsc_out.code),
+            source_map: if tsc_out.source_map.is_empty() {
+                None
+            } else {
+                Some(Arc::from(tsc_out.source_map))
+            },
+        })
+    }
+
     /// Store diagnostics from a failed compile without triggering recompilation.
     pub(crate) fn store_latest_diagnostics(
         &self,
@@ -357,8 +459,7 @@ impl VerterHost {
                                 "missing external source '{}' for '{}'",
                                 req.specifier, snapshot.canonical_id
                             ),
-                            span_start: None,
-                            span_end: None,
+                            span: None,
                         }]));
                 }
             }
@@ -387,7 +488,9 @@ impl VerterHost {
             custom_elements: profile.custom_elements.clone(),
             comments: profile.comments,
             runtime_module_name: profile.runtime_module_name.clone(),
-            include_tsx: profile.enable_types,
+            types_module_name: profile.types_module_name.clone(),
+            target: profile.target,
+            embed_ambient_types: profile.embed_ambient_types,
             ..CodegenOptions::default()
         };
 
@@ -436,6 +539,7 @@ impl VerterHost {
             force_vapor: profile.force_vapor,
             force_js: profile.force_js,
             source_map: profile.source_map,
+            ssr: profile.ssr,
             external_types,
             extract_template_data: scope.needs_template_analysis(),
             prop_constness_overrides: None, // TODO(Phase 6): populated by cross-file optimizer
@@ -463,8 +567,7 @@ impl VerterHost {
                         },
                         code: d.code.clone(),
                         message: d.message.clone(),
-                        span_start: d.span.map(|s| s.start),
-                        span_end: d.span.map(|s| s.end),
+                        span: d.span,
                     })
                     .collect(),
             ));

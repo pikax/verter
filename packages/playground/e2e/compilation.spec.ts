@@ -11,33 +11,42 @@ test.describe("Compilation", () => {
   });
 
   test("default template compiles to JS with __sfc__", async ({ page }) => {
-    const jsTab = page.locator(".output-tabs button", { hasText: "JS" });
-    await jsTab.click();
-    await page.waitForTimeout(1000);
+    // Use the Files tab which renders in a <pre> (no Monaco virtualization)
+    const filesTab = page.locator(".output-tabs button", { hasText: "Files" });
+    await filesTab.click();
+    await page.waitForTimeout(500);
+    // Click the "script" node in the sidebar
+    const scriptBtn = page.locator(".vfile-btn", { hasText: "script" });
+    await scriptBtn.click();
+    await page.waitForTimeout(500);
 
-    // The compiled output should contain __sfc__
-    const pageContent = await page.textContent("body");
-    expect(pageContent).toContain("__sfc__");
+    const code = await page.locator(".vfiles-code pre code").textContent();
+    expect(code).toContain("__sfc__");
   });
 
   test("compiled output contains render function", async ({ page }) => {
-    const jsTab = page.locator(".output-tabs button", { hasText: "JS" });
-    await jsTab.click();
-    await page.waitForTimeout(1000);
+    // Use the Files tab → template node
+    const filesTab = page.locator(".output-tabs button", { hasText: "Files" });
+    await filesTab.click();
+    await page.waitForTimeout(500);
+    const templateBtn = page.locator(".vfile-btn", { hasText: "template" });
+    await templateBtn.click();
+    await page.waitForTimeout(500);
 
-    const pageContent = await page.textContent("body");
-    expect(pageContent).toContain("render");
+    const code = await page.locator(".vfiles-code pre code").textContent();
+    expect(code).toContain("render");
   });
 
   test("CSS output contains scoped styles", async ({ page }) => {
-    const cssTab = page.locator(".output-tabs button", { hasText: "CSS" });
+    const cssTab = page.getByRole("button", { name: "CSS", exact: true });
     await cssTab.click();
     await page.waitForTimeout(1000);
 
-    // Default template has <style scoped>, so CSS should contain data-v attributes
-    const pageContent = await page.textContent("body");
+    // Default template has <style scoped>, so CSS should contain data-v attributes.
+    // Read from the code output view lines (CSS output is typically short).
+    const code = await page.locator(".code-output").textContent();
     // Scoped CSS should have data-v- attribute selector or the raw CSS
-    expect(pageContent).toMatch(/\.(app|button)|data-v-|font-family|text-align/);
+    expect(code).toMatch(/\.(app|button)|data-v-|font-family|text-align/);
   });
 
   test("compilation timing is displayed", async ({ page }) => {

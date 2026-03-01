@@ -1,0 +1,2104 @@
+//! MCP server definition with tool routing.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::*;
+use rmcp::schemars;
+use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use serde::Deserialize;
+
+use verter_analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
+use verter_diagnostics::{Linter, Severity};
+use verter_host::VerterHost;
+
+use crate::config::McpServerConfig;
+use crate::helpers::{ensure_loaded, ensure_template_analysis, mcp_err, resolve_path};
+use crate::scanner;
+use crate::tools::scoring;
+
+// ── Parameter types ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ScanProjectParams {
+    #[schemars(description = "Absolute path to the project root directory")]
+    pub root: String,
+    #[schemars(description = "Also scan .ts/.js files for cross-file analysis")]
+    pub include_deps: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpsertFileParams {
+    #[schemars(description = "File path (absolute or relative to project root)")]
+    pub path: String,
+    #[schemars(description = "Inline source content. If omitted, reads from disk")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FilePathParams {
+    #[schemars(description = "File path to a .vue file")]
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AnalyzeFileParams {
+    #[schemars(description = "File path to analyze")]
+    pub path: String,
+    #[schemars(description = "Filter: [\"script\", \"template\", \"styles\"]. Default: all")]
+    #[allow(dead_code)]
+    pub sections: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LintFileParams {
+    #[schemars(description = "File path to lint")]
+    pub path: String,
+    #[schemars(description = "Lint preset: essential|recommended|all|performance|a11y|strict")]
+    pub preset: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LintProjectParams {
+    #[schemars(description = "Lint preset: essential|recommended|all|performance|a11y|strict")]
+    pub preset: Option<String>,
+    #[schemars(description = "Only return errors, skip warnings and info")]
+    pub errors_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CompileFileParams {
+    #[schemars(description = "File path to compile")]
+    pub path: String,
+    #[schemars(description = "Enable production mode")]
+    pub production: Option<bool>,
+    #[schemars(description = "Generate source maps")]
+    pub source_map: Option<bool>,
+    #[schemars(description = "Use Vapor mode compilation")]
+    pub vapor: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MatchCssSelectorParams {
+    #[schemars(description = "File path of the Vue component")]
+    pub path: String,
+    #[schemars(description = "CSS selector string to test against template elements")]
+    pub selector: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ComponentGraphParams {
+    #[schemars(description = "Start from a specific file, or omit for full project graph")]
+    pub root: Option<String>,
+    #[schemars(description = "Maximum graph traversal depth")]
+    #[allow(dead_code)]
+    pub max_depth: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct OrphanComponentsParams {
+    #[schemars(
+        description = "Bundler entry point files (e.g. [\"src/main.ts\", \"src/App.vue\"])"
+    )]
+    pub entry_points: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ApiNameParams {
+    #[schemars(description = "Vue API function name (e.g. \"ref\", \"onMounted\", \"computed\")")]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct QuickFixParams {
+    #[schemars(description = "File path of the Vue component")]
+    pub path: String,
+    #[schemars(description = "Byte offset in the SFC source where the cursor is")]
+    pub offset: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct OptionalPathParams {
+    #[schemars(description = "Optional file path. If omitted, checks all loaded files")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CheckPropTypesParams {
+    #[schemars(description = "Parent component file path")]
+    pub parent: String,
+    #[schemars(description = "Child component name (PascalCase)")]
+    pub child_component: String,
+}
+
+// ── Server struct ──────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct VerterMcpServer {
+    pub host: Arc<VerterHost>,
+    pub linter: Arc<Linter>,
+    pub action_engine: Arc<verter_actions::ActionEngine>,
+    pub project_root: Option<PathBuf>,
+    #[allow(dead_code)]
+    pub config: McpServerConfig,
+    tool_router: ToolRouter<Self>,
+}
+
+// ── Helper: build ScriptAnalysisSnapshot from host FileAnalysisSnapshot ──
+
+fn build_script_snapshot(
+    analysis: &verter_host::FileAnalysisSnapshot,
+) -> verter_analysis::types::ScriptAnalysisSnapshot {
+    verter_analysis::types::ScriptAnalysisSnapshot {
+        imports: analysis.imports.clone(),
+        bindings: analysis.bindings.clone(),
+        macros: analysis.macros.clone(),
+        macro_type_deps: analysis.macro_type_deps.clone(),
+        flags: AnalysisFlags::from_bits_truncate(analysis.script_flags),
+        exported_functions: Vec::new(),
+        vue_api_calls: analysis.vue_api_calls.clone(),
+        dom_query_calls: analysis.dom_query_calls.clone(),
+        first_await_offset: None,
+        type_enhancements: None,
+    }
+}
+
+// ── Tool implementations ───────────────────────────────────────────
+
+#[tool_router]
+impl VerterMcpServer {
+    pub fn new(host: Arc<VerterHost>, linter: Arc<Linter>, config: McpServerConfig) -> Self {
+        let project_root = config.project_root.clone();
+        Self {
+            host,
+            linter,
+            action_engine: Arc::new(verter_actions::ActionEngine::builtin()),
+            project_root,
+            config,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    fn resolve(&self, path: &str) -> String {
+        resolve_path(path, self.project_root.as_deref())
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // FILE MANAGEMENT (3 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Scan a directory for Vue files and load them into the analysis host. Returns file count and any parse errors."
+    )]
+    async fn scan_project(
+        &self,
+        Parameters(params): Parameters<ScanProjectParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let root = std::path::Path::new(&params.root);
+        let result =
+            scanner::scan_directory(root, &self.host, params.include_deps.unwrap_or(false));
+        let json = serde_json::to_string_pretty(&result).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Load or update a single file. If source is omitted, reads from disk. Returns change info and diagnostics."
+    )]
+    async fn upsert_file(
+        &self,
+        Parameters(params): Parameters<UpsertFileParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        let source = match params.source {
+            Some(s) => s,
+            None => std::fs::read_to_string(&canonical)
+                .map_err(|e| mcp_err(format!("Cannot read {}: {}", canonical, e)))?,
+        };
+        let file_kind = if canonical.ends_with(".vue") {
+            verter_host::FileKind::VueSfc
+        } else {
+            verter_host::FileKind::NonSfc
+        };
+        let result = self
+            .host
+            .upsert(verter_host::UpsertRequest {
+                canonical_id: Some(canonical.clone()),
+                input_id: canonical.clone(),
+                source: Arc::from(source.as_str()),
+                file_kind,
+                aliases: vec![],
+            })
+            .map_err(|e| mcp_err(e.to_string()))?;
+
+        let response = serde_json::json!({
+            "canonical_id": result.canonical_id,
+            "changed": result.changed,
+            "has_parse_errors": result.diagnostics.has_errors,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&response).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(description = "List all files currently tracked by the analysis host.")]
+    async fn list_files(&self) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let list: Vec<serde_json::Value> = files
+            .into_iter()
+            .map(|(id, kind)| {
+                serde_json::json!({
+                    "id": id,
+                    "kind": format!("{:?}", kind),
+                })
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&list).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // DEEP ANALYSIS (5 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Get the full analysis snapshot for a Vue file. Includes imports, bindings, macros, template usage, style analysis."
+    )]
+    async fn analyze_file(
+        &self,
+        Parameters(params): Parameters<AnalyzeFileParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let json = serde_json::to_string_pretty(&analysis).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get the public API surface of a Vue component: props, emits, slots, models, expose."
+    )]
+    async fn get_component_api(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let mut api = serde_json::json!({
+            "props": [],
+            "emits": [],
+            "slots": [],
+            "models": [],
+            "expose": [],
+        });
+
+        for m in &analysis.macros {
+            match m.kind {
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+                    api["props"] = serde_json::to_value(m).unwrap_or_default();
+                }
+                AnalyzedMacroKind::DefineEmits => {
+                    api["emits"] = serde_json::to_value(m).unwrap_or_default();
+                }
+                AnalyzedMacroKind::DefineModel => {
+                    if let Some(models) = api["models"].as_array_mut() {
+                        models.push(serde_json::to_value(m).unwrap_or_default());
+                    }
+                }
+                AnalyzedMacroKind::DefineSlots => {
+                    api["slots"] = serde_json::to_value(m).unwrap_or_default();
+                }
+                AnalyzedMacroKind::DefineExpose => {
+                    api["expose"] = serde_json::to_value(m).unwrap_or_default();
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(tpl) = &analysis.template {
+            if !tpl.defined_slots.is_empty() {
+                api["template_slots"] =
+                    serde_json::to_value(&tpl.defined_slots).unwrap_or_default();
+            }
+            if !tpl.prop_definitions.is_empty() {
+                api["runtime_props"] =
+                    serde_json::to_value(&tpl.prop_definitions).unwrap_or_default();
+            }
+            if !tpl.emit_definitions.is_empty() {
+                api["runtime_emits"] =
+                    serde_json::to_value(&tpl.emit_definitions).unwrap_or_default();
+            }
+        }
+
+        let json = serde_json::to_string_pretty(&api).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get all imports with Vue API classification (lifecycle, reactivity, watchers, etc.)."
+    )]
+    async fn get_imports(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_loaded(&self.host, &canonical)?;
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let json =
+            serde_json::to_string_pretty(&analysis.imports).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get all top-level bindings with reactivity classification (Ref, Computed, Reactive, etc.)."
+    )]
+    async fn get_bindings(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_loaded(&self.host, &canonical)?;
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let json =
+            serde_json::to_string_pretty(&analysis.bindings).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get template usage analysis: components, binding references, slots, refs, event handlers."
+    )]
+    async fn get_template_usage(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let tpl = analysis
+            .template
+            .ok_or_else(|| mcp_err("No template analysis available"))?;
+        let json = serde_json::to_string_pretty(&tpl).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // CSS (3 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Get CSS analysis for all style blocks: selectors, classes, IDs, specificity, v-bind(), scoped/module flags."
+    )]
+    async fn analyze_css(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_loaded(&self.host, &canonical)?;
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let json =
+            serde_json::to_string_pretty(&analysis.styles).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Test if a CSS selector matches template elements. Returns three-valued result per element: Matches, MaybeMatches, NoMatch."
+    )]
+    async fn match_css_selector(
+        &self,
+        Parameters(params): Parameters<MatchCssSelectorParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let tpl = analysis
+            .template
+            .ok_or_else(|| mcp_err("No template analysis available"))?;
+
+        let parsed = match verter_analysis::parse_selector(&params.selector) {
+            Some(s) => s,
+            None => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    "Failed to parse selector",
+                )]))
+            }
+        };
+
+        let mut results = Vec::new();
+        for (idx, el) in tpl.elements.iter().enumerate() {
+            let result = verter_analysis::match_selector(&parsed, idx, &tpl.elements);
+            results.push(serde_json::json!({
+                "element": el.tag,
+                "index": idx,
+                "result": format!("{:?}", result),
+            }));
+        }
+
+        let json = serde_json::to_string_pretty(&results).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Detect unintended CSS class bleed across components. Finds non-scoped styles that could affect other components, shared class name collisions."
+    )]
+    async fn detect_css_bleed(
+        &self,
+        Parameters(params): Parameters<OptionalPathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut bleeds: Vec<serde_json::Value> = Vec::new();
+
+        // Build a map of class_name -> files that define it (non-scoped only)
+        let mut global_class_files: HashMap<String, Vec<String>> = HashMap::new();
+        // Build a map of file -> template classes used
+        let mut file_template_classes: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_template_analysis(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                // Collect non-scoped class definitions
+                for style in &analysis.styles {
+                    if !style.scoped {
+                        if let Some(css) = &style.css {
+                            for cls in &css.classes {
+                                global_class_files
+                                    .entry(cls.name.clone())
+                                    .or_default()
+                                    .push(id.clone());
+                            }
+                        }
+                    }
+                }
+
+                // Collect template class usage
+                if let Some(tpl) = &analysis.template {
+                    let mut classes = HashSet::new();
+                    for el in &tpl.elements {
+                        for attr in &el.attributes {
+                            if attr.name == "class" {
+                                if let Some(val) = &attr.value {
+                                    for cls in val.split_whitespace() {
+                                        classes.insert(cls.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    file_template_classes.insert(id.clone(), classes);
+                }
+            }
+        }
+
+        // Detect bleed: non-scoped class defined in file A, used in template of file B
+        for (class_name, defining_files) in &global_class_files {
+            for (file_id, template_classes) in &file_template_classes {
+                if template_classes.contains(class_name) {
+                    for def_file in defining_files {
+                        if def_file != file_id {
+                            bleeds.push(serde_json::json!({
+                                "kind": "global_class_bleed",
+                                "class": class_name,
+                                "source_file": def_file,
+                                "affected_file": file_id,
+                                "severity": "warning",
+                            }));
+                        }
+                    }
+                }
+            }
+
+            // Shared class name collision
+            if defining_files.len() > 1 {
+                bleeds.push(serde_json::json!({
+                    "kind": "shared_class_collision",
+                    "class": class_name,
+                    "files": defining_files,
+                    "severity": "info",
+                }));
+            }
+        }
+
+        // Filter to specific file if requested
+        if let Some(path) = &params.path {
+            let resolved = self.resolve(path);
+            bleeds.retain(|b| {
+                b["source_file"].as_str() == Some(resolved.as_str())
+                    || b["affected_file"].as_str() == Some(resolved.as_str())
+                    || b["files"]
+                        .as_array()
+                        .is_some_and(|a| a.iter().any(|f| f.as_str() == Some(resolved.as_str())))
+            });
+        }
+
+        let response = serde_json::json!({
+            "bleeds": bleeds,
+            "total_bleed_count": bleeds.len(),
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // DIAGNOSTICS (3 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Run lint rules against a Vue file. Returns diagnostics with rule, category, severity, message, and span."
+    )]
+    async fn lint_file(
+        &self,
+        Parameters(params): Parameters<LintFileParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let source = self.host.get_source(&canonical);
+        let source_str = source.as_deref();
+
+        let linter = if let Some(preset) = &params.preset {
+            let config = crate::tools::diagnostics::make_lint_config(preset);
+            Arc::new(Linter::new(config))
+        } else {
+            self.linter.clone()
+        };
+
+        let script_snapshot = build_script_snapshot(&analysis);
+        let diags = linter.lint_with_source(
+            Some(&script_snapshot),
+            analysis.template.as_ref(),
+            &analysis.styles,
+            source_str,
+        );
+
+        let diag_vec = diags.into_diagnostics();
+        let json = serde_json::to_string_pretty(&diag_vec).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Run lint rules across all loaded files. Returns summary and per-file diagnostics."
+    )]
+    async fn lint_project(
+        &self,
+        Parameters(params): Parameters<LintProjectParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let linter = if let Some(preset) = &params.preset {
+            let config = crate::tools::diagnostics::make_lint_config(preset);
+            Arc::new(Linter::new(config))
+        } else {
+            self.linter.clone()
+        };
+
+        let mut total_errors = 0usize;
+        let mut total_warnings = 0usize;
+        let mut total_info = 0usize;
+        let mut by_file = serde_json::Map::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_template_analysis(&self.host, id);
+            let analysis = match self.host.get_analysis(id) {
+                Some(a) => a,
+                None => continue,
+            };
+            let source = self.host.get_source(id);
+            let source_str = source.as_deref();
+
+            let script_snapshot = build_script_snapshot(&analysis);
+            let diags = linter.lint_with_source(
+                Some(&script_snapshot),
+                analysis.template.as_ref(),
+                &analysis.styles,
+                source_str,
+            );
+
+            let errors_only = params.errors_only.unwrap_or(false);
+            let diag_vec = diags.into_diagnostics();
+
+            for d in &diag_vec {
+                match d.severity {
+                    Severity::Error => total_errors += 1,
+                    Severity::Warning => total_warnings += 1,
+                    _ => total_info += 1,
+                }
+            }
+
+            let filtered: Vec<_> = diag_vec
+                .iter()
+                .filter(|d| !errors_only || d.severity == Severity::Error)
+                .collect();
+
+            if !filtered.is_empty() {
+                by_file.insert(
+                    id.clone(),
+                    serde_json::to_value(&filtered).unwrap_or_default(),
+                );
+            }
+        }
+
+        let response = serde_json::json!({
+            "files_checked": files.iter().filter(|(_, k)| *k == verter_host::FileKind::VueSfc).count(),
+            "summary": {
+                "errors": total_errors,
+                "warnings": total_warnings,
+                "info": total_info,
+            },
+            "by_file": by_file,
+        });
+
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get available quick fixes and code actions at a byte offset in a Vue file."
+    )]
+    async fn get_quick_fixes(
+        &self,
+        Parameters(params): Parameters<QuickFixParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let source = self
+            .host
+            .get_source(&canonical)
+            .ok_or_else(|| mcp_err("No source available"))?;
+
+        let script_snapshot = build_script_snapshot(&analysis);
+        let diags = self.linter.lint_with_source(
+            Some(&script_snapshot),
+            analysis.template.as_ref(),
+            &analysis.styles,
+            Some(&source),
+        );
+
+        let ctx = verter_actions::ActionContext {
+            source: &source,
+            file_id: &canonical,
+            diagnostics: &diags,
+            template: analysis.template.as_ref(),
+            script: Some(&script_snapshot),
+            styles: &analysis.styles,
+        };
+
+        let actions = self.action_engine.actions_at(params.offset, &ctx);
+        let actions_json: Vec<serde_json::Value> = actions
+            .into_iter()
+            .map(|a| {
+                serde_json::json!({
+                    "title": a.title,
+                    "kind": format!("{:?}", a.kind),
+                    "is_preferred": a.is_preferred,
+                    "diagnostic_rule": a.diagnostic_rule,
+                    "edits": a.edits.iter().map(|e| serde_json::json!({
+                        "file_id": e.file_id,
+                        "replacement": e.replacement,
+                        "span_start": e.span.start,
+                        "span_end": e.span.end,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let json =
+            serde_json::to_string_pretty(&actions_json).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // COMPILATION (2 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Compile a Vue SFC to JavaScript/CSS. Returns compiled code per virtual node (main, script, template, styles)."
+    )]
+    async fn compile_file(
+        &self,
+        Parameters(params): Parameters<CompileFileParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_loaded(&self.host, &canonical)?;
+
+        let profile = verter_host::CompileProfile {
+            is_production: params.production.unwrap_or(false),
+            source_map: params.source_map.unwrap_or(false),
+            force_vapor: params.vapor.unwrap_or(false),
+            ..Default::default()
+        };
+
+        let mut outputs = serde_json::Map::new();
+        for node_kind in [
+            verter_host::VirtualNodeKind::Main,
+            verter_host::VirtualNodeKind::Script,
+            verter_host::VirtualNodeKind::Template,
+        ] {
+            if let Ok(resp) = self.host.get_virtual_file(verter_host::VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(canonical.clone()),
+                node_kind: Some(node_kind.clone()),
+                compile_profile: profile.clone(),
+            }) {
+                outputs.insert(
+                    format!("{:?}", node_kind),
+                    serde_json::json!({
+                        "code": resp.code.as_ref(),
+                        "lang": resp.lang,
+                        "stale": resp.stale,
+                    }),
+                );
+            }
+        }
+
+        for i in 0..4 {
+            let node_kind = verter_host::VirtualNodeKind::Style { index: i };
+            if let Ok(resp) = self.host.get_virtual_file(verter_host::VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(canonical.clone()),
+                node_kind: Some(node_kind),
+                compile_profile: profile.clone(),
+            }) {
+                outputs.insert(
+                    format!("Style_{}", i),
+                    serde_json::json!({
+                        "code": resp.code.as_ref(),
+                        "lang": resp.lang,
+                    }),
+                );
+            } else {
+                break;
+            }
+        }
+
+        let json = serde_json::to_string_pretty(&serde_json::Value::Object(outputs))
+            .map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Generate TSX type-checking output for a Vue file (same as LSP type-checking path)."
+    )]
+    async fn generate_tsx(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_loaded(&self.host, &canonical)?;
+
+        let profile = verter_host::CompileProfile {
+            target: verter_host::CompileTarget::IDE,
+            ..Default::default()
+        };
+
+        // Ensure compilation populates the TSX cache
+        let _ = self.host.ensure_compiled(&canonical, &profile);
+
+        let tsx = self
+            .host
+            .get_tsx(&canonical, &profile)
+            .ok_or_else(|| mcp_err(format!("Cannot generate TSX for {}", canonical)))?;
+
+        Ok(CallToolResult::success(vec![Content::text(
+            tsx.code.as_ref().to_string(),
+        )]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // CROSS-FILE (4 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Get the component dependency graph. Shows which components import and use which other components."
+    )]
+    async fn get_component_graph(
+        &self,
+        Parameters(params): Parameters<ComponentGraphParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut graph = serde_json::Map::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            if let Some(root) = &params.root {
+                let root_resolved = self.resolve(root);
+                if !id.starts_with(&root_resolved) && id != &root_resolved {
+                    continue;
+                }
+            }
+
+            let _ = ensure_template_analysis(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                if let Some(tpl) = &analysis.template {
+                    let components: Vec<serde_json::Value> = tpl
+                        .components
+                        .iter()
+                        .map(|c| {
+                            serde_json::json!({
+                                "name": c.name,
+                                "import_source": c.import_source,
+                                "is_dynamic": c.is_dynamic,
+                                "props_count": c.props.len(),
+                            })
+                        })
+                        .collect();
+                    if !components.is_empty() {
+                        graph.insert(
+                            id.clone(),
+                            serde_json::to_value(&components).unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+        }
+
+        let json = serde_json::to_string_pretty(&serde_json::Value::Object(graph))
+            .map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Find orphan components unreachable from any bundler entry point.")]
+    async fn find_orphan_components(
+        &self,
+        Parameters(params): Parameters<OrphanComponentsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let vue_files: HashSet<String> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut reachable = HashSet::new();
+        let mut queue: VecDeque<String> = params
+            .entry_points
+            .iter()
+            .map(|e| self.resolve(e))
+            .collect();
+
+        while let Some(current) = queue.pop_front() {
+            if !reachable.insert(current.clone()) {
+                continue;
+            }
+            if let Some(analysis) = self.host.get_analysis(&current) {
+                for imp in &analysis.imports {
+                    let resolved = self.resolve(&imp.source);
+                    if !reachable.contains(&resolved) {
+                        queue.push_back(resolved);
+                    }
+                }
+                if let Some(tpl) = &analysis.template {
+                    for comp in &tpl.components {
+                        if let Some(src) = &comp.import_source {
+                            let resolved = self.resolve(src);
+                            if !reachable.contains(&resolved) {
+                                queue.push_back(resolved);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let orphans: Vec<serde_json::Value> = vue_files
+            .iter()
+            .filter(|f| !reachable.contains(*f))
+            .map(|f| {
+                serde_json::json!({
+                    "path": f,
+                    "reason": "Not reachable from any entry point",
+                })
+            })
+            .collect();
+
+        let response = serde_json::json!({
+            "orphans": orphans,
+            "entry_reachable": vue_files.len() - orphans.len(),
+            "total": vue_files.len(),
+        });
+
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Validate provide/inject pairs across the project. Finds inject() calls with no matching provide()."
+    )]
+    async fn validate_provide_inject(&self) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut provides: HashMap<String, Vec<String>> = HashMap::new();
+        let mut injects: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_loaded(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                for call in &analysis.vue_api_calls {
+                    match call.api {
+                        VueApiClassification::Provide => {
+                            if let Some(key) = &call.arg_value {
+                                provides.entry(key.clone()).or_default().push(id.clone());
+                            }
+                        }
+                        VueApiClassification::Inject => {
+                            if let Some(key) = &call.arg_value {
+                                injects.entry(key.clone()).or_default().push(id.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let mut missing_providers = Vec::new();
+        let mut unused_provides = Vec::new();
+
+        for (key, inject_files) in &injects {
+            if !provides.contains_key(key) {
+                missing_providers.push(serde_json::json!({
+                    "key": key,
+                    "inject_files": inject_files,
+                }));
+            }
+        }
+
+        for (key, provide_files) in &provides {
+            if !injects.contains_key(key) {
+                unused_provides.push(serde_json::json!({
+                    "key": key,
+                    "provide_files": provide_files,
+                }));
+            }
+        }
+
+        let response = serde_json::json!({
+            "total_provide_keys": provides.len(),
+            "total_inject_keys": injects.len(),
+            "missing_providers": missing_providers,
+            "unused_provides": unused_provides,
+        });
+
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Check component props: find unknown props passed to child components and missing required props."
+    )]
+    async fn check_component_props(
+        &self,
+        Parameters(params): Parameters<OptionalPathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut issues: Vec<serde_json::Value> = Vec::new();
+
+        // Build a map of component name -> known prop definitions
+        let mut component_props: HashMap<String, Vec<String>> = HashMap::new();
+        let mut component_required: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_template_analysis(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                let comp_name = std::path::Path::new(id.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if let Some(tpl) = &analysis.template {
+                    let prop_names: Vec<String> = tpl
+                        .prop_definitions
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    let required: Vec<String> = tpl
+                        .prop_definitions
+                        .iter()
+                        .filter(|p| p.is_required)
+                        .map(|p| p.name.clone())
+                        .collect();
+                    if !prop_names.is_empty() {
+                        component_props.insert(comp_name.clone(), prop_names);
+                    }
+                    if !required.is_empty() {
+                        component_required.insert(comp_name, required);
+                    }
+                }
+            }
+        }
+
+        // Check prop usage against definitions
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            if let Some(path) = &params.path {
+                let resolved = self.resolve(path);
+                if id != &resolved {
+                    continue;
+                }
+            }
+
+            if let Some(analysis) = self.host.get_analysis(id) {
+                if let Some(tpl) = &analysis.template {
+                    for comp in &tpl.components {
+                        if let Some(known_props) = component_props.get(&comp.name) {
+                            for prop in &comp.props {
+                                if !known_props.contains(&prop.name) && !prop.from_spread {
+                                    issues.push(serde_json::json!({
+                                        "kind": "unknown_prop",
+                                        "file": id,
+                                        "component": comp.name,
+                                        "prop": prop.name,
+                                    }));
+                                }
+                            }
+
+                            if !comp.has_spread {
+                                if let Some(required) = component_required.get(&comp.name) {
+                                    let passed: HashSet<_> =
+                                        comp.props.iter().map(|p| &p.name).collect();
+                                    for req in required {
+                                        if !passed.contains(req) {
+                                            issues.push(serde_json::json!({
+                                                "kind": "missing_required_prop",
+                                                "file": id,
+                                                "component": comp.name,
+                                                "prop": req,
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let response = serde_json::json!({
+            "issues": issues,
+            "total": issues.len(),
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // SUMMARY & SCORING (3 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Get everything about a component in a single call: API, scores, metrics, diagnostics, CSS, dependencies, dead code. Primary tool for agents — no file reads needed."
+    )]
+    async fn get_component_summary(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let source = self.host.get_source(&canonical);
+        let script_snapshot = build_script_snapshot(&analysis);
+
+        // Quality score
+        let quality = scoring::compute_quality_score(
+            Some(&script_snapshot),
+            analysis.template.as_ref(),
+            &analysis.styles,
+            source.as_deref(),
+        );
+
+        // Template metrics
+        let metrics = analysis
+            .template
+            .as_ref()
+            .map(scoring::compute_template_metrics);
+
+        // Diagnostics summary
+        let diags = self.linter.lint_with_source(
+            Some(&script_snapshot),
+            analysis.template.as_ref(),
+            &analysis.styles,
+            source.as_deref(),
+        );
+        let diag_vec = diags.into_diagnostics();
+        let diag_errors = diag_vec
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count();
+        let diag_warnings = diag_vec
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .count();
+
+        // API surface
+        let mut api = serde_json::json!({});
+        if let Some(tpl) = &analysis.template {
+            api["props"] = serde_json::to_value(&tpl.prop_definitions).unwrap_or_default();
+            api["emits"] = serde_json::to_value(&tpl.emit_definitions).unwrap_or_default();
+            api["slots"] = serde_json::to_value(&tpl.defined_slots).unwrap_or_default();
+            api["components_used"] =
+                serde_json::json!(tpl.components.iter().map(|c| &c.name).collect::<Vec<_>>());
+        }
+
+        // CSS summary
+        let css_summary = serde_json::json!({
+            "blocks": analysis.styles.len(),
+            "scoped": analysis.styles.iter().any(|s| s.scoped),
+            "total_selectors": analysis.styles.iter()
+                .filter_map(|s| s.css.as_ref())
+                .map(|c| c.selectors.len())
+                .sum::<usize>(),
+            "total_classes": analysis.styles.iter()
+                .filter_map(|s| s.css.as_ref())
+                .map(|c| c.classes.len())
+                .sum::<usize>(),
+        });
+
+        // Dead code: unused bindings
+        let mut unused_bindings = Vec::new();
+        if let Some(tpl) = &analysis.template {
+            let template_refs: HashSet<&str> = tpl
+                .binding_occurrences
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect();
+            for binding in &analysis.bindings {
+                if !template_refs.contains(binding.name.as_str())
+                    && binding.kind != verter_analysis::types::AnalyzedBindingKind::Function
+                {
+                    unused_bindings.push(&binding.name);
+                }
+            }
+        }
+
+        let response = serde_json::json!({
+            "path": canonical,
+            "quality_score": quality.score,
+            "quality": quality,
+            "template_metrics": metrics,
+            "diagnostics_summary": {
+                "errors": diag_errors,
+                "warnings": diag_warnings,
+                "total": diag_vec.len(),
+            },
+            "api": api,
+            "css_summary": css_summary,
+            "dependencies": {
+                "imports": analysis.imports.len(),
+                "child_components": analysis.template.as_ref()
+                    .map(|t| t.components.iter().map(|c| &c.name).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            },
+            "dead_code": {
+                "unused_bindings": unused_bindings,
+            },
+            "bindings_count": analysis.bindings.len(),
+            "macros": analysis.macros.iter().map(|m| format!("{:?}", m.kind)).collect::<Vec<_>>(),
+        });
+
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get aggregate project statistics: scores, Vue API usage, diagnostics health, component rankings."
+    )]
+    async fn get_project_stats(&self) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let vue_files: Vec<_> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .collect();
+
+        let mut quality_scores: Vec<(String, u32)> = Vec::new();
+        let mut total_errors = 0usize;
+        let mut total_warnings = 0usize;
+        let mut total_info = 0usize;
+        let mut vue_api_usage: HashMap<String, usize> = HashMap::new();
+        let mut macro_usage: HashMap<String, usize> = HashMap::new();
+        let mut total_selectors = 0usize;
+        let mut scoped_blocks = 0usize;
+        let mut global_blocks = 0usize;
+        let mut by_category: HashMap<String, usize> = HashMap::new();
+        let mut total_elements = 0usize;
+        let mut total_bindings = 0usize;
+
+        for (id, _) in &vue_files {
+            let _ = ensure_template_analysis(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                let source = self.host.get_source(id);
+                let script_snapshot = build_script_snapshot(&analysis);
+
+                let quality = scoring::compute_quality_score(
+                    Some(&script_snapshot),
+                    analysis.template.as_ref(),
+                    &analysis.styles,
+                    source.as_deref(),
+                );
+                quality_scores.push((id.to_string(), quality.score));
+
+                let diags = self.linter.lint_with_source(
+                    Some(&script_snapshot),
+                    analysis.template.as_ref(),
+                    &analysis.styles,
+                    source.as_deref(),
+                );
+                for d in diags.into_diagnostics() {
+                    match d.severity {
+                        Severity::Error => total_errors += 1,
+                        Severity::Warning => total_warnings += 1,
+                        _ => total_info += 1,
+                    }
+                    *by_category.entry(d.category.clone()).or_default() += 1;
+                }
+
+                for call in &analysis.vue_api_calls {
+                    *vue_api_usage
+                        .entry(call.api.display_name().to_string())
+                        .or_default() += 1;
+                }
+
+                for m in &analysis.macros {
+                    *macro_usage.entry(format!("{:?}", m.kind)).or_default() += 1;
+                }
+
+                for style in &analysis.styles {
+                    if style.scoped {
+                        scoped_blocks += 1;
+                    } else {
+                        global_blocks += 1;
+                    }
+                    if let Some(css) = &style.css {
+                        total_selectors += css.selectors.len();
+                    }
+                }
+
+                if let Some(tpl) = &analysis.template {
+                    total_elements += tpl.elements.len();
+                }
+                total_bindings += analysis.bindings.len();
+            }
+        }
+
+        quality_scores.sort_by(|a, b| a.1.cmp(&b.1));
+        let avg_score = if quality_scores.is_empty() {
+            0
+        } else {
+            quality_scores.iter().map(|s| s.1 as usize).sum::<usize>() / quality_scores.len()
+        };
+
+        let worst: Vec<_> = quality_scores.iter().take(5).collect();
+        let best: Vec<_> = quality_scores.iter().rev().take(5).collect();
+
+        let response = serde_json::json!({
+            "overview": {
+                "total_files": files.len(),
+                "vue_files": vue_files.len(),
+                "script_deps": files.iter().filter(|(_, k)| *k == verter_host::FileKind::NonSfc).count(),
+            },
+            "component_stats": {
+                "avg_quality_score": avg_score,
+                "worst_components": worst.iter().map(|(p, s)| serde_json::json!({"path": p, "score": s})).collect::<Vec<_>>(),
+                "best_components": best.iter().map(|(p, s)| serde_json::json!({"path": p, "score": s})).collect::<Vec<_>>(),
+                "total_elements": total_elements,
+                "total_bindings": total_bindings,
+            },
+            "vue_api_usage": vue_api_usage,
+            "macro_usage": macro_usage,
+            "style_stats": {
+                "scoped_blocks": scoped_blocks,
+                "global_blocks": global_blocks,
+                "total_selectors": total_selectors,
+            },
+            "diagnostics_health": {
+                "total_errors": total_errors,
+                "total_warnings": total_warnings,
+                "total_info": total_info,
+                "by_category": by_category,
+            },
+        });
+
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get a component quality score (0-100) with per-dimension breakdown: a11y, lint, complexity, API surface, CSS, reactivity."
+    )]
+    async fn get_component_quality(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let source = self.host.get_source(&canonical);
+        let script_snapshot = build_script_snapshot(&analysis);
+
+        let quality = scoring::compute_quality_score(
+            Some(&script_snapshot),
+            analysis.template.as_ref(),
+            &analysis.styles,
+            source.as_deref(),
+        );
+
+        let json = serde_json::to_string_pretty(&quality).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // RUNTIME BEHAVIOR HINTS (3 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Get lifecycle hooks in execution order with side effects flagged. Shows which lifecycle stages the component participates in."
+    )]
+    async fn get_lifecycle_order(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_loaded(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let lifecycle_order = [
+            "setup",
+            "onBeforeMount",
+            "onMounted",
+            "onBeforeUpdate",
+            "onUpdated",
+            "onBeforeUnmount",
+            "onUnmounted",
+            "onActivated",
+            "onDeactivated",
+            "onErrorCaptured",
+            "onRenderTracked",
+            "onRenderTriggered",
+            "onServerPrefetch",
+        ];
+
+        let mut hooks = Vec::new();
+        let has_async_setup = AnalysisFlags::from_bits_truncate(analysis.script_flags)
+            .contains(AnalysisFlags::ASYNC_SETUP);
+
+        if has_async_setup {
+            hooks.push(serde_json::json!({
+                "hook": "setup (async)",
+                "has_side_effects": true,
+                "note": "Async setup - component uses suspense boundary",
+            }));
+        }
+
+        for hook_name in &lifecycle_order {
+            let calls: Vec<_> = analysis
+                .vue_api_calls
+                .iter()
+                .filter(|c| c.api.display_name() == *hook_name)
+                .collect();
+            if !calls.is_empty() {
+                hooks.push(serde_json::json!({
+                    "hook": hook_name,
+                    "count": calls.len(),
+                    "has_side_effects": matches!(
+                        calls[0].api,
+                        VueApiClassification::OnMounted
+                        | VueApiClassification::OnUnmounted
+                        | VueApiClassification::OnBeforeUnmount
+                        | VueApiClassification::OnServerPrefetch
+                    ),
+                }));
+            }
+        }
+
+        // Include watchers
+        let watchers: Vec<_> = analysis
+            .vue_api_calls
+            .iter()
+            .filter(|c| c.api.is_watcher())
+            .collect();
+
+        for w in &watchers {
+            hooks.push(serde_json::json!({
+                "hook": w.api.display_name(),
+                "has_side_effects": true,
+                "watched_source": w.arg_value,
+            }));
+        }
+
+        let json = serde_json::to_string_pretty(&hooks).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get re-render triggers: which reactive bindings cause which template regions to update."
+    )]
+    async fn get_rerender_triggers(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let mut triggers: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+
+        if let Some(tpl) = &analysis.template {
+            for occurrence in &tpl.binding_occurrences {
+                let reactivity = analysis
+                    .bindings
+                    .iter()
+                    .find(|b| b.name == occurrence.name)
+                    .map(|b| format!("{:?}", b.reactivity_kind))
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                triggers
+                    .entry(occurrence.name.clone())
+                    .or_default()
+                    .push(serde_json::json!({
+                        "span_start": occurrence.span.start,
+                        "span_end": occurrence.span.end,
+                        "reactivity_kind": reactivity,
+                    }));
+            }
+        }
+
+        let result: Vec<serde_json::Value> = triggers
+            .into_iter()
+            .map(|(name, usages)| {
+                let reactivity = analysis
+                    .bindings
+                    .iter()
+                    .find(|b| b.name == name)
+                    .map(|b| format!("{:?}", b.reactivity_kind))
+                    .unwrap_or_else(|| "Unknown".to_string());
+                serde_json::json!({
+                    "binding": name,
+                    "reactivity_kind": reactivity,
+                    "template_usage_count": usages.len(),
+                    "template_usages": usages,
+                })
+            })
+            .collect();
+
+        let json = serde_json::to_string_pretty(&result).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get all side effects in a component: lifecycle hooks, watchers, provide/inject, DOM queries."
+    )]
+    async fn get_side_effects(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_loaded(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let mut effects: Vec<serde_json::Value> = Vec::new();
+
+        for call in &analysis.vue_api_calls {
+            let category = if call.api.is_lifecycle() {
+                "lifecycle"
+            } else if call.api.is_watcher() {
+                "watcher"
+            } else {
+                match call.api {
+                    VueApiClassification::Provide => "provide",
+                    VueApiClassification::Inject => "inject",
+                    _ => continue,
+                }
+            };
+            effects.push(serde_json::json!({
+                "category": category,
+                "api": call.api.display_name(),
+                "arg": call.arg_value,
+                "span_start": call.span.start,
+                "span_end": call.span.end,
+            }));
+        }
+
+        for query in &analysis.dom_query_calls {
+            effects.push(serde_json::json!({
+                "category": "dom_query",
+                "api": "querySelector/querySelectorAll",
+                "arg": query.selector_text,
+                "span_start": query.span.start,
+                "span_end": query.span.end,
+            }));
+        }
+
+        let response = serde_json::json!({
+            "effects": effects,
+            "total": effects.len(),
+            "has_async_setup": AnalysisFlags::from_bits_truncate(analysis.script_flags)
+                .contains(AnalysisFlags::ASYNC_SETUP),
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // REFACTORING SUGGESTIONS (3 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Detect auto-refactoring opportunities: oversized components, extract component candidates, CSS consolidation."
+    )]
+    async fn suggest_refactorings(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let mut suggestions: Vec<serde_json::Value> = Vec::new();
+
+        if let Some(tpl) = &analysis.template {
+            let metrics = scoring::compute_template_metrics(tpl);
+            if metrics.total_elements > 50 || metrics.max_nesting_depth > 8 {
+                suggestions.push(serde_json::json!({
+                    "kind": "oversized_component",
+                    "message": format!(
+                        "Component has {} elements and nesting depth {}. Consider splitting.",
+                        metrics.total_elements, metrics.max_nesting_depth
+                    ),
+                    "severity": "warning",
+                }));
+            }
+            if metrics.inline_handler_count > 5 {
+                suggestions.push(serde_json::json!({
+                    "kind": "too_many_inline_handlers",
+                    "message": format!(
+                        "{} inline event handlers. Consider extracting to named methods.",
+                        metrics.inline_handler_count
+                    ),
+                    "severity": "info",
+                }));
+            }
+        }
+
+        if analysis.bindings.len() > 30 {
+            suggestions.push(serde_json::json!({
+                "kind": "too_many_bindings",
+                "message": format!(
+                    "Component has {} top-level bindings. Consider composables for grouping related logic.",
+                    analysis.bindings.len()
+                ),
+                "severity": "info",
+            }));
+        }
+
+        // Duplicate selectors
+        let mut seen_selectors: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, style) in analysis.styles.iter().enumerate() {
+            if let Some(css) = &style.css {
+                for sel in &css.selectors {
+                    seen_selectors.entry(sel.text.clone()).or_default().push(i);
+                }
+            }
+        }
+        for (sel, blocks) in &seen_selectors {
+            if blocks.len() > 1 {
+                suggestions.push(serde_json::json!({
+                    "kind": "duplicate_selector",
+                    "message": format!("Selector '{}' appears in {} style blocks", sel, blocks.len()),
+                    "severity": "info",
+                }));
+            }
+        }
+
+        let json =
+            serde_json::to_string_pretty(&suggestions).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Detect prop drilling: props passed through 2+ component levels. Suggests provide/inject migration."
+    )]
+    async fn detect_prop_drilling(
+        &self,
+        Parameters(params): Parameters<OptionalPathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut component_received_props: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut component_passed_props: HashMap<String, Vec<(String, HashSet<String>)>> =
+            HashMap::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_template_analysis(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                let comp_name = std::path::Path::new(id.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if let Some(tpl) = &analysis.template {
+                    let received: HashSet<String> = tpl
+                        .prop_definitions
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    component_received_props.insert(comp_name.clone(), received);
+
+                    for child in &tpl.components {
+                        let passed: HashSet<String> =
+                            child.props.iter().map(|p| p.name.clone()).collect();
+                        component_passed_props
+                            .entry(comp_name.clone())
+                            .or_default()
+                            .push((child.name.clone(), passed));
+                    }
+                }
+            }
+        }
+
+        let mut drilled: Vec<serde_json::Value> = Vec::new();
+        for (comp, children) in &component_passed_props {
+            if let Some(received) = component_received_props.get(comp) {
+                for (child_name, passed) in children {
+                    let forwarded: Vec<_> = passed.intersection(received).collect();
+                    if !forwarded.is_empty() {
+                        drilled.push(serde_json::json!({
+                            "parent": comp,
+                            "child": child_name,
+                            "drilled_props": forwarded,
+                            "suggestion": "Consider using provide/inject instead of passing through intermediate components",
+                        }));
+                    }
+                }
+            }
+        }
+
+        if let Some(path) = &params.path {
+            let comp_name = std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            drilled.retain(|d| {
+                d["parent"].as_str() == Some(comp_name) || d["child"].as_str() == Some(comp_name)
+            });
+        }
+
+        let response = serde_json::json!({
+            "drilled_props": drilled,
+            "total": drilled.len(),
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Detect Options API components that could be migrated to Composition API. Returns candidates with difficulty estimate."
+    )]
+    async fn detect_migration_targets(
+        &self,
+        Parameters(params): Parameters<OptionalPathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut targets: Vec<serde_json::Value> = Vec::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            if let Some(path) = &params.path {
+                let resolved = self.resolve(path);
+                if id != &resolved {
+                    continue;
+                }
+            }
+
+            let _ = ensure_loaded(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                let flags = AnalysisFlags::from_bits_truncate(analysis.script_flags);
+                let has_define_component = analysis
+                    .vue_api_calls
+                    .iter()
+                    .any(|c| c.api == VueApiClassification::DefineComponent);
+
+                let has_setup_macros = analysis.macros.iter().any(|m| {
+                    matches!(
+                        m.kind,
+                        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineEmits
+                    )
+                });
+
+                if has_define_component && !has_setup_macros {
+                    let complexity = if analysis.bindings.len() > 20 {
+                        "hard"
+                    } else if analysis.bindings.len() > 10 {
+                        "medium"
+                    } else {
+                        "easy"
+                    };
+
+                    targets.push(serde_json::json!({
+                        "path": id,
+                        "reason": "Uses defineComponent without script setup macros",
+                        "difficulty": complexity,
+                        "bindings": analysis.bindings.len(),
+                        "has_lifecycle": flags.contains(AnalysisFlags::HAS_LIFECYCLE_HOOKS),
+                        "has_watchers": flags.contains(AnalysisFlags::HAS_WATCHERS),
+                    }));
+                }
+            }
+        }
+
+        let response = serde_json::json!({
+            "targets": targets,
+            "total": targets.len(),
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TYPE SYSTEM (3 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Get inferred/declared types for all props, emits, bindings, and expose in a component."
+    )]
+    async fn get_component_types(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let mut types = serde_json::json!({});
+
+        let binding_types: Vec<serde_json::Value> = analysis
+            .bindings
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "name": b.name,
+                    "kind": format!("{:?}", b.kind),
+                    "type_annotation": b.type_annotation,
+                    "reactivity_kind": format!("{:?}", b.reactivity_kind),
+                    "is_reactive": b.is_reactive,
+                })
+            })
+            .collect();
+        types["bindings"] = serde_json::to_value(&binding_types).unwrap_or_default();
+
+        let macro_types: Vec<serde_json::Value> = analysis
+            .macros
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "kind": format!("{:?}", m.kind),
+                    "is_type_based": m.is_type_based,
+                    "type_references": m.type_references,
+                    "binding_name": m.binding_name,
+                })
+            })
+            .collect();
+        types["macros"] = serde_json::to_value(&macro_types).unwrap_or_default();
+
+        if let Some(tpl) = &analysis.template {
+            let prop_types: Vec<serde_json::Value> = tpl
+                .prop_definitions
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "name": p.name,
+                        "type_annotation": p.type_annotation,
+                        "is_required": p.is_required,
+                        "is_boolean": p.is_boolean,
+                    })
+                })
+                .collect();
+            types["props"] = serde_json::to_value(&prop_types).unwrap_or_default();
+        }
+
+        let type_imports: Vec<serde_json::Value> = analysis
+            .imports
+            .iter()
+            .filter(|i| i.is_type_only)
+            .map(|i| {
+                serde_json::json!({
+                    "source": i.source,
+                    "bindings": i.bindings.iter().map(|b| &b.name).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        types["type_imports"] = serde_json::to_value(&type_imports).unwrap_or_default();
+        types["macro_type_deps"] =
+            serde_json::to_value(&analysis.macro_type_deps).unwrap_or_default();
+
+        let json = serde_json::to_string_pretty(&types).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Check type compatibility between parent prop values and child prop declarations."
+    )]
+    async fn check_prop_types(
+        &self,
+        Parameters(params): Parameters<CheckPropTypesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let parent_canonical = self.resolve(&params.parent);
+        ensure_template_analysis(&self.host, &parent_canonical)?;
+
+        let parent_analysis = self
+            .host
+            .get_analysis(&parent_canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", parent_canonical)))?;
+
+        let child_name = &params.child_component;
+        let mut result = serde_json::json!({
+            "parent": parent_canonical,
+            "child_component": child_name,
+            "issues": [],
+        });
+
+        if let Some(tpl) = &parent_analysis.template {
+            for comp in &tpl.components {
+                if comp.name == *child_name {
+                    if let Some(import_src) = &comp.import_source {
+                        let child_canonical = self.resolve(import_src);
+                        let _ = ensure_template_analysis(&self.host, &child_canonical);
+                        if let Some(child_analysis) = self.host.get_analysis(&child_canonical) {
+                            if let Some(child_tpl) = &child_analysis.template {
+                                let child_props: HashMap<_, _> = child_tpl
+                                    .prop_definitions
+                                    .iter()
+                                    .map(|p| (p.name.clone(), p))
+                                    .collect();
+
+                                let mut issues: Vec<serde_json::Value> = Vec::new();
+                                for prop in &comp.props {
+                                    if let Some(child_prop) = child_props.get(&prop.name) {
+                                        if child_prop.is_boolean && !prop.is_bound {
+                                            issues.push(serde_json::json!({
+                                                "prop": prop.name,
+                                                "issue": "Boolean prop passed as string attribute, use :prop binding",
+                                            }));
+                                        }
+                                    }
+                                }
+
+                                result["issues"] =
+                                    serde_json::to_value(&issues).unwrap_or_default();
+                                result["child_prop_definitions"] =
+                                    serde_json::to_value(&child_tpl.prop_definitions)
+                                        .unwrap_or_default();
+                                result["parent_prop_usage"] =
+                                    serde_json::to_value(&comp.props).unwrap_or_default();
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        let json = serde_json::to_string_pretty(&result).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get type-level diagnostics for a Vue file: unresolved bindings and type dependencies."
+    )]
+    async fn get_type_errors(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let mut type_issues: Vec<serde_json::Value> = Vec::new();
+
+        if let Some(tpl) = &analysis.template {
+            for unresolved in &tpl.unresolved_bindings {
+                type_issues.push(serde_json::json!({
+                    "kind": "unresolved_binding",
+                    "name": unresolved.name,
+                    "span_start": unresolved.span.start,
+                    "span_end": unresolved.span.end,
+                    "message": format!("'{}' is used in template but not defined in script", unresolved.name),
+                }));
+            }
+        }
+
+        for dep in &analysis.macro_type_deps {
+            type_issues.push(serde_json::json!({
+                "kind": "type_dependency",
+                "type_name": dep.type_name,
+                "import_source": dep.import_source,
+                "macro_kind": format!("{:?}", dep.macro_kind),
+                "message": format!("Type '{}' imported from '{}' for {:?}", dep.type_name, dep.import_source, dep.macro_kind),
+            }));
+        }
+
+        let response = serde_json::json!({
+            "type_issues": type_issues,
+            "total": type_issues.len(),
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // DOCUMENTATION (1 tool)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Generate Markdown documentation for a Vue component: props table, events, slots, dependencies, styles."
+    )]
+    async fn generate_component_docs(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let script_snapshot = build_script_snapshot(&analysis);
+        let docs = crate::tools::docs::generate_docs(
+            &canonical,
+            Some(&script_snapshot),
+            analysis.template.as_ref(),
+            &analysis.styles,
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(docs)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // UTILITY (1 tool)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Classify a Vue API function: returns category (lifecycle, reactivity, watcher, DI, etc.) and metadata."
+    )]
+    async fn explain_vue_api(
+        &self,
+        Parameters(params): Parameters<ApiNameParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let classification = verter_analysis::classify_vue_api(&params.name);
+        let response = serde_json::json!({
+            "api_name": params.name,
+            "classification": format!("{:?}", classification),
+            "is_lifecycle": verter_analysis::is_lifecycle_api(classification),
+            "is_reactivity": verter_analysis::is_reactivity_api(classification),
+            "is_watcher": verter_analysis::is_watcher_api(classification),
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+}
+
+// ── ServerHandler trait ────────────────────────────────────────────
+
+#[tool_handler]
+impl ServerHandler for VerterMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+            server_info: Implementation::from_build_env(),
+            instructions: Some(
+                "Verter Vue compiler MCP server. Provides deep analysis, diagnostics, \
+                 compilation, CSS matching, and cross-file analysis for Vue Single File Components. \
+                 Use scan_project first to load a Vue project, then use get_component_summary \
+                 for a complete overview of any component, or get_project_stats for project-wide \
+                 insights. For detailed analysis, use analyze_file, lint_file, get_component_api, etc."
+                    .to_string(),
+            ),
+        }
+    }
+}

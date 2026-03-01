@@ -2931,3 +2931,97 @@ const msg = "hello"
         "template analysis should be None before compilation"
     );
 }
+
+// ─── list_virtual_nodes tests ───────────────────────────────────
+
+/// @ai-generated — list_virtual_nodes returns correct nodes for a full SFC.
+#[test]
+fn list_virtual_nodes_full_sfc() {
+    let host = VerterHost::new(HostConfig::default());
+    let sfc = r#"<script setup>const n = 1</script>
+<template><div>{{n}}</div></template>
+<style scoped>.a{color:red}</style>"#;
+    upsert_vue(&host, "Comp.vue", sfc);
+
+    let nodes = host.list_virtual_nodes("Comp.vue");
+    assert!(
+        !nodes.is_empty(),
+        "Should return virtual nodes for upserted SFC"
+    );
+
+    // Should contain Main, Script, Template, Style { index: 0 }
+    assert!(
+        nodes.contains(&VirtualNodeKind::Main),
+        "Should contain Main, got: {:?}",
+        nodes
+    );
+    assert!(
+        nodes.contains(&VirtualNodeKind::Script),
+        "Should contain Script, got: {:?}",
+        nodes
+    );
+    assert!(
+        nodes.contains(&VirtualNodeKind::Template),
+        "Should contain Template, got: {:?}",
+        nodes
+    );
+    assert!(
+        nodes.contains(&VirtualNodeKind::Style { index: 0 }),
+        "Should contain Style {{ index: 0 }}, got: {:?}",
+        nodes
+    );
+}
+
+/// @ai-generated — list_virtual_nodes returns empty for unknown file.
+#[test]
+fn list_virtual_nodes_unknown_file() {
+    let host = VerterHost::new(HostConfig::default());
+    let nodes = host.list_virtual_nodes("Unknown.vue");
+    assert!(nodes.is_empty(), "Should return empty for unknown file");
+}
+
+/// @ai-generated — list_virtual_nodes handles template-only SFC with scoped style.
+#[test]
+fn list_virtual_nodes_template_only_with_scoped_style() {
+    let host = VerterHost::new(HostConfig::default());
+    let sfc = r#"<template><div>hello</div></template>
+<style scoped>.a{color:red}</style>"#;
+    upsert_vue(&host, "Comp.vue", sfc);
+
+    let nodes = host.list_virtual_nodes("Comp.vue");
+    // Should include Script because of scoped style (even without <script>)
+    assert!(
+        nodes.contains(&VirtualNodeKind::Script),
+        "Should contain synthetic Script for scoped style, got: {:?}",
+        nodes
+    );
+    assert!(
+        nodes.contains(&VirtualNodeKind::Template),
+        "Should contain Template, got: {:?}",
+        nodes
+    );
+}
+
+/// @ai-generated — list_virtual_nodes with multiple styles.
+#[test]
+fn list_virtual_nodes_multiple_styles() {
+    let host = VerterHost::new(HostConfig::default());
+    let sfc = r#"<script setup>const n = 1</script>
+<template><div>{{n}}</div></template>
+<style>.a{color:red}</style>
+<style scoped>.b{color:blue}</style>"#;
+    upsert_vue(&host, "Comp.vue", sfc);
+
+    let nodes = host.list_virtual_nodes("Comp.vue");
+    assert!(
+        nodes.contains(&VirtualNodeKind::Style { index: 0 }),
+        "Should contain Style {{ index: 0 }}"
+    );
+    assert!(
+        nodes.contains(&VirtualNodeKind::Style { index: 1 }),
+        "Should contain Style {{ index: 1 }}"
+    );
+}
+
+// Note: FileAnalysisSnapshot JSON serialization tests are in verter_lsp integration_tests.rs
+// where serde_json is available as a dependency.

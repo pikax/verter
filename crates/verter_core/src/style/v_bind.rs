@@ -82,11 +82,26 @@ fn extract_v_bind(css: &str, start: usize, scope_id: &str) -> Option<(String, us
     let bytes = css.as_bytes();
     let expr_start = start + 7; // after "v-bind("
 
-    // Find matching closing paren
+    // Find matching closing paren, skipping strings
     let mut depth = 1u32;
     let mut j = expr_start;
     while j < bytes.len() && depth > 0 {
         match bytes[j] {
+            b'\'' | b'"' => {
+                // Skip string literal
+                let quote = bytes[j];
+                j += 1;
+                while j < bytes.len() {
+                    if bytes[j] == b'\\' {
+                        j += 2;
+                        continue;
+                    }
+                    if bytes[j] == quote {
+                        break;
+                    }
+                    j += 1;
+                }
+            }
             b'(' => depth += 1,
             b')' => depth -= 1,
             _ => {}

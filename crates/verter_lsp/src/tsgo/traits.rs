@@ -25,7 +25,12 @@ pub trait TypeProvider: Send + Sync {
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()>;
 
-    fn get_completions(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<Completion>>;
+    fn get_completions(
+        &self,
+        path: &str,
+        offset: u32,
+        trigger_character: Option<&str>,
+    ) -> ProviderFuture<'_, CompletionResult>;
 
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>>;
 
@@ -61,4 +66,11 @@ pub trait TypeProvider: Send + Sync {
         path: &str,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>>;
+
+    fn get_inlay_hints(
+        &self,
+        path: &str,
+        start_offset: u32,
+        end_offset: u32,
+    ) -> ProviderFuture<'_, Vec<InlayHint>>;
 }

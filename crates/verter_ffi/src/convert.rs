@@ -25,6 +25,8 @@ pub enum FfiConversionError {
     InvalidFileKind(String),
     /// Invalid virtual node `kind` string.
     InvalidNodeKind(String),
+    /// Invalid `target` string.
+    InvalidTarget(String),
 }
 
 impl std::fmt::Display for FfiConversionError {
@@ -53,6 +55,10 @@ impl std::fmt::Display for FfiConversionError {
             }
             Self::InvalidFileKind(v) => write!(f, "invalid file_kind '{v}'"),
             Self::InvalidNodeKind(v) => write!(f, "invalid virtual node kind '{v}'"),
+            Self::InvalidTarget(v) => write!(
+                f,
+                "invalid target '{v}' (expected 'bundler', 'ide', 'analysis', or 'full')"
+            ),
         }
     }
 }
@@ -151,6 +157,9 @@ pub fn ffi_profile_to_host(
         if let Some(runtime_module_name) = input.runtime_module_name {
             out.runtime_module_name = Some(runtime_module_name);
         }
+        if let Some(types_module_name) = input.types_module_name {
+            out.types_module_name = Some(types_module_name);
+        }
         if let Some(force_vapor) = input.force_vapor {
             out.force_vapor = force_vapor;
         }
@@ -160,11 +169,23 @@ pub fn ffi_profile_to_host(
         if let Some(source_map) = input.source_map {
             out.source_map = source_map;
         }
-        if let Some(enable_types) = input.enable_types {
-            out.enable_types = enable_types;
+        if let Some(target) = input.target {
+            out.target = ffi_target_to_compile_target(&target)?;
         }
     }
     Ok(out)
+}
+
+/// Convert a target string to `CompileTarget` bitflags.
+fn ffi_target_to_compile_target(target: &str) -> Result<host::CompileTarget, FfiConversionError> {
+    use host::CompileTarget;
+    match target.to_ascii_lowercase().as_str() {
+        "bundler" => Ok(CompileTarget::BUNDLER),
+        "ide" => Ok(CompileTarget::IDE),
+        "analysis" => Ok(CompileTarget::ANALYSIS),
+        "full" => Ok(CompileTarget::BUNDLER | CompileTarget::TSX | CompileTarget::TEMPLATE_DATA),
+        other => Err(FfiConversionError::InvalidTarget(other.to_string())),
+    }
 }
 
 /// Parse a file kind string to the host enum.
@@ -224,6 +245,56 @@ pub fn ffi_style_override_to_host(
             })
             .collect(),
     })
+}
+
+/// Parse a block type string to the host `PreprocessorBlockType` enum.
+fn ffi_block_type_to_host(s: &str) -> host::PreprocessorBlockType {
+    match s {
+        "template" => host::PreprocessorBlockType::Template,
+        "script" => host::PreprocessorBlockType::Script,
+        "style" => host::PreprocessorBlockType::Style,
+        _ => host::PreprocessorBlockType::Custom,
+    }
+}
+
+/// Convert a host `PreprocessorBlockType` to its string representation.
+fn host_block_type_to_string(bt: host::PreprocessorBlockType) -> String {
+    match bt {
+        host::PreprocessorBlockType::Template => "template".to_string(),
+        host::PreprocessorBlockType::Script => "script".to_string(),
+        host::PreprocessorBlockType::Style => "style".to_string(),
+        host::PreprocessorBlockType::Custom => "custom".to_string(),
+    }
+}
+
+/// Convert FFI block override request to host block override request.
+pub fn ffi_block_override_to_host(
+    input: FfiBlockOverrideRequest,
+) -> Result<host::BlockOverrideRequest, FfiConversionError> {
+    Ok(host::BlockOverrideRequest {
+        canonical_id: input.canonical_id,
+        compile_profile: ffi_profile_to_host(input.compile_profile)?,
+        overrides: input
+            .overrides
+            .into_iter()
+            .map(|entry| host::BlockOverrideEntry {
+                block_type: ffi_block_type_to_host(&entry.block_type),
+                index: entry.index as usize,
+                code: Arc::from(entry.code),
+                source_map: entry.source_map.map(Arc::from),
+            })
+            .collect(),
+    })
+}
+
+/// Convert host preprocessor request to FFI representation.
+pub fn host_preprocessor_request_to_ffi(req: &host::PreprocessorRequest) -> FfiPreprocessorRequest {
+    FfiPreprocessorRequest {
+        block_type: host_block_type_to_string(req.block_type),
+        index: req.index as u32,
+        lang: req.lang.clone(),
+        content: req.content.clone(),
+    }
 }
 
 /// Convert FFI virtual query to host virtual query.
@@ -293,20 +364,17 @@ fn maybe_utf16_offset(raw: Option<u32>, source: Option<&str>) -> Option<u32> {
 
 /// Convert linter diagnostics from UTF-8 byte spans to UTF-16 spans for JS interop.
 pub fn lint_diagnostics_to_utf16(
-    mut diagnostics: Vec<verter_linter::LintDiagnostic>,
+    mut diagnostics: Vec<verter_diagnostics::LintDiagnostic>,
     source: Option<&str>,
-) -> Vec<verter_linter::LintDiagnostic> {
+) -> Vec<verter_diagnostics::LintDiagnostic> {
     let Some(source) = source else {
         return diagnostics;
     };
 
     for d in &mut diagnostics {
-        d.span_start = byte_offset_to_utf16(source, d.span_start);
-        d.span_end = byte_offset_to_utf16(source, d.span_end);
-        if let Some(fix) = &mut d.fix {
-            fix.span_start = byte_offset_to_utf16(source, fix.span_start);
-            fix.span_end = byte_offset_to_utf16(source, fix.span_end);
-        }
+        let start = byte_offset_to_utf16(source, d.span.start);
+        let end = byte_offset_to_utf16(source, d.span.end);
+        d.span = verter_span::Span::new(start, end);
     }
 
     diagnostics
@@ -328,8 +396,10 @@ pub fn host_diagnostics_to_ffi(
                 },
                 code: d.code.clone(),
                 message: d.message.clone(),
-                span_start: maybe_utf16_offset(d.span_start, source),
-                span_end: maybe_utf16_offset(d.span_end, source),
+                span_start: d
+                    .span
+                    .and_then(|s| maybe_utf16_offset(Some(s.start), source)),
+                span_end: d.span.and_then(|s| maybe_utf16_offset(Some(s.end), source)),
             })
             .collect(),
         has_errors: input.has_errors,
@@ -398,6 +468,11 @@ pub fn host_update_to_ffi(input: host::HostUpdateResult, source: Option<&str>) -
                 is_type_only: imp.is_type_only,
                 bindings: imp.bindings,
             })
+            .collect(),
+        preprocessor_requests: input
+            .preprocessor_requests
+            .iter()
+            .map(host_preprocessor_request_to_ffi)
             .collect(),
         parse_duration_ms: input.parse_duration_ms,
     }
@@ -487,6 +562,53 @@ pub fn host_error_to_string(err: &host::HostError) -> String {
                 .join("; ");
             format!("HostError::CompileError: {}", summary)
         }
+    }
+}
+
+// =============================================================================
+// Code action conversion (Phase 1)
+// =============================================================================
+
+/// Convert a `verter_actions::CodeAction` to an FFI-safe `FfiCodeAction`.
+///
+/// Span byte offsets are converted to UTF-16 for browser consumption.
+pub fn code_action_to_ffi(action: &verter_actions::CodeAction, source: &str) -> FfiCodeAction {
+    FfiCodeAction {
+        title: action.title.clone(),
+        kind: match action.kind {
+            verter_actions::ActionKind::QuickFix => "quickfix".to_string(),
+            verter_actions::ActionKind::Refactor => "refactor".to_string(),
+            verter_actions::ActionKind::Source => "source".to_string(),
+        },
+        edits: action
+            .edits
+            .iter()
+            .map(|edit| FfiTextEdit {
+                span_start: byte_offset_to_utf16(source, edit.span.start),
+                span_end: byte_offset_to_utf16(source, edit.span.end),
+                new_text: edit.replacement.clone(),
+            })
+            .collect(),
+        is_preferred: action.is_preferred,
+        diagnostic_rule: action.diagnostic_rule.clone(),
+    }
+}
+
+// =============================================================================
+// Lint rule metadata conversion (Phase 5)
+// =============================================================================
+
+/// Convert a lint rule to its FFI metadata representation.
+pub fn lint_rule_to_ffi_metadata(rule: &dyn verter_diagnostics::LintRule) -> FfiLintRuleMetadata {
+    FfiLintRuleMetadata {
+        name: rule.name().to_string(),
+        category: rule.category().as_str().to_string(),
+        default_severity: match rule.default_severity() {
+            verter_diagnostics::Severity::Error => "error".to_string(),
+            verter_diagnostics::Severity::Warning => "warning".to_string(),
+            verter_diagnostics::Severity::Info => "info".to_string(),
+            verter_diagnostics::Severity::Hint => "hint".to_string(),
+        },
     }
 }
 
@@ -742,16 +864,17 @@ mod tests {
             custom_elements: Some(vec!["my-el".to_string()]),
             comments: Some(true),
             runtime_module_name: Some("vue/runtime".to_string()),
+            types_module_name: Some("@custom/types".to_string()),
             force_vapor: Some(true),
             force_js: Some(true),
             source_map: Some(true),
-            enable_types: Some(true),
+            target: Some("ide".to_string()),
         };
         let result = ffi_profile_to_host(Some(profile)).unwrap();
         assert_eq!(result.filename, Some("Comp.vue".to_string()));
         assert!(result.is_production);
         assert!(result.ssr);
-        assert!(result.enable_types);
+        assert!(result.target.needs_tsx());
         assert_eq!(result.hmr_strategy, host::HmrStrategy::Vite);
         assert_eq!(result.component_id, Some("abc123".to_string()));
         assert_eq!(
@@ -761,6 +884,7 @@ mod tests {
         assert_eq!(result.custom_elements, Some(vec!["my-el".to_string()]));
         assert_eq!(result.comments, Some(true));
         assert_eq!(result.runtime_module_name, Some("vue/runtime".to_string()));
+        assert_eq!(result.types_module_name, Some("@custom/types".to_string()));
         assert!(result.force_vapor);
         assert!(result.force_js);
         assert!(result.source_map);
@@ -1059,22 +1183,19 @@ mod tests {
                     severity: host::HostSeverity::Error,
                     code: "E001".to_string(),
                     message: "error msg".to_string(),
-                    span_start: Some(0),
-                    span_end: Some(10),
+                    span: Some(verter_span::Span::new(0, 10)),
                 },
                 host::HostDiagnostic {
                     severity: host::HostSeverity::Warning,
                     code: "W001".to_string(),
                     message: "warning msg".to_string(),
-                    span_start: None,
-                    span_end: None,
+                    span: None,
                 },
                 host::HostDiagnostic {
                     severity: host::HostSeverity::Info,
                     code: "I001".to_string(),
                     message: "info msg".to_string(),
-                    span_start: Some(5),
-                    span_end: None,
+                    span: None,
                 },
             ],
             has_errors: true,
@@ -1089,6 +1210,7 @@ mod tests {
         assert_eq!(ffi.diagnostics[1].severity, "warning");
         assert_eq!(ffi.diagnostics[1].span_start, None);
         assert_eq!(ffi.diagnostics[2].severity, "info");
+        assert_eq!(ffi.diagnostics[2].span_start, None);
         assert_eq!(ffi.diagnostics[2].span_end, None);
     }
 
@@ -1109,8 +1231,7 @@ mod tests {
                 severity: host::HostSeverity::Error,
                 code: "E_UTF".to_string(),
                 message: "unicode".to_string(),
-                span_start: Some(1), // byte offset at 😀 start
-                span_end: Some(5),   // byte offset right after 😀
+                span: Some(verter_span::Span::new(1, 5)), // byte offset at 😀 start..right after
             }],
             has_errors: true,
         };
@@ -1128,8 +1249,7 @@ mod tests {
                 severity: host::HostSeverity::Warning,
                 code: "W_NONE".to_string(),
                 message: "none".to_string(),
-                span_start: None,
-                span_end: None,
+                span: None,
             }],
             has_errors: false,
         };
@@ -1140,29 +1260,23 @@ mod tests {
     }
 
     #[test]
-    fn lint_diagnostics_to_utf16_converts_spans_and_fixes() {
+    fn lint_diagnostics_to_utf16_converts_spans() {
         let source = "a😀b";
-        let input = vec![verter_linter::LintDiagnostic {
+        let input = vec![verter_diagnostics::LintDiagnostic {
             rule: "r".to_string(),
             category: "c".to_string(),
-            severity: verter_linter::Severity::Error,
+            severity: verter_diagnostics::Severity::Error,
             message: "m".to_string(),
-            span_start: 1,
-            span_end: 5,
-            fix: Some(verter_linter::LintFix {
-                description: "f".to_string(),
-                replacement: "x".to_string(),
-                span_start: 1,
-                span_end: 5,
-            }),
+            span: verter_span::Span::new(1, 5),
+            tags: vec![],
+            span_kind: verter_diagnostics::DiagnosticSpanKind::ElementOpenTag,
         }];
 
         let out = lint_diagnostics_to_utf16(input, Some(source));
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].span_start, 1);
-        assert_eq!(out[0].span_end, 3);
-        assert_eq!(out[0].fix.as_ref().unwrap().span_start, 1);
-        assert_eq!(out[0].fix.as_ref().unwrap().span_end, 3);
+        assert_eq!(out[0].span.start, 1);
+        assert_eq!(out[0].span.end, 3);
+        assert!(out[0].tags.is_empty(), "tags should be unchanged");
     }
 
     // ── Output direction: host_update_to_ffi ─────────────────────────
@@ -1195,8 +1309,7 @@ mod tests {
                     severity: host::HostSeverity::Warning,
                     code: "W002".to_string(),
                     message: "unused var".to_string(),
-                    span_start: Some(42),
-                    span_end: Some(45),
+                    span: Some(verter_span::Span::new(42, 45)),
                 }],
                 has_errors: false,
             },
@@ -1212,6 +1325,7 @@ mod tests {
                 is_type_only: false,
                 bindings: vec!["ref".to_string(), "computed".to_string()],
             }],
+            preprocessor_requests: Vec::new(),
             parse_duration_ms: 1.5,
         };
 
@@ -1275,8 +1389,7 @@ mod tests {
                     severity: host::HostSeverity::Error,
                     code: "E_UTF".to_string(),
                     message: "unicode".to_string(),
-                    span_start: Some(1),
-                    span_end: Some(5),
+                    span: Some(verter_span::Span::new(1, 5)),
                 }],
                 has_errors: true,
             },
@@ -1332,8 +1445,7 @@ mod tests {
                     severity: host::HostSeverity::Warning,
                     code: "W_UTF".to_string(),
                     message: "unicode".to_string(),
-                    span_start: Some(1),
-                    span_end: Some(5),
+                    span: Some(verter_span::Span::new(1, 5)),
                 }],
                 has_errors: false,
             },
@@ -1373,8 +1485,7 @@ mod tests {
                     severity: host::HostSeverity::Error,
                     code: "E_UTF".to_string(),
                     message: "unicode".to_string(),
-                    span_start: Some(1),
-                    span_end: Some(5),
+                    span: Some(verter_span::Span::new(1, 5)),
                 }],
                 has_errors: true,
             },
@@ -1472,15 +1583,13 @@ mod tests {
                         severity: host::HostSeverity::Error,
                         code: "PARSE_ERR".to_string(),
                         message: "unexpected token".to_string(),
-                        span_start: None,
-                        span_end: None,
+                        span: None,
                     },
                     host::HostDiagnostic {
                         severity: host::HostSeverity::Warning,
                         code: "WARN_01".to_string(),
                         message: "unused import".to_string(),
-                        span_start: None,
-                        span_end: None,
+                        span: None,
                     },
                 ],
                 has_errors: true,
@@ -1527,5 +1636,107 @@ mod tests {
         for (err, expected) in &cases {
             assert_eq!(err.to_string(), *expected);
         }
+    }
+
+    // ── byte_offset_to_utf16: FFI boundary edge cases ─────────────────
+
+    /// Empty source: byte_offset 0 → UTF-16 offset 0.
+    #[test]
+    fn utf16_empty_source() {
+        assert_eq!(byte_offset_to_utf16("", 0), 0);
+    }
+
+    /// Out-of-bounds offset: an offset beyond the end of the source clamps
+    /// to the end, returning the total UTF-16 length rather than panicking.
+    #[test]
+    fn utf16_out_of_bounds_clamps_to_end() {
+        let source = "hello"; // 5 bytes, 5 UTF-16 code units
+                              // offset 999 is way past the end
+        assert_eq!(byte_offset_to_utf16(source, 999), 5);
+        // offset exactly one past the end also clamps
+        assert_eq!(byte_offset_to_utf16(source, 6), 5);
+    }
+
+    /// Mid-character clamping for a 2-byte UTF-8 sequence (U+00E9, "é").
+    ///
+    /// "é" encodes as `[0xC3, 0xA9]` (2 bytes).  A byte offset that lands on
+    /// the continuation byte (offset 1 inside "é") must clamp backward to the
+    /// start of the character (offset 0) rather than producing an invalid
+    /// UTF-8 slice.  The resulting UTF-16 offset is 0 (nothing before "é").
+    #[test]
+    fn utf16_mid_char_2byte_clamps_to_char_start() {
+        // "é" = U+00E9, UTF-8: [0xC3, 0xA9] (2 bytes), 1 UTF-16 code unit
+        let source = "é"; // byte length == 2
+        assert_eq!(source.len(), 2, "sanity: é is 2 bytes");
+
+        // byte offset 0: before "é" → 0 UTF-16 code units
+        assert_eq!(byte_offset_to_utf16(source, 0), 0);
+
+        // byte offset 1 falls on the continuation byte → clamps to 0 → 0 UTF-16 CUs
+        assert_eq!(
+            byte_offset_to_utf16(source, 1),
+            0,
+            "mid-character offset must clamp to char start"
+        );
+
+        // byte offset 2: at/after end → 1 UTF-16 code unit (the full "é")
+        assert_eq!(byte_offset_to_utf16(source, 2), 1);
+    }
+
+    /// Mid-character clamping for a 4-byte UTF-8 sequence (U+1F600, "😀").
+    ///
+    /// "😀" encodes as 4 bytes and requires 2 UTF-16 code units (a surrogate
+    /// pair).  Any byte offset landing inside the 4-byte sequence must clamp
+    /// backward to byte 0 of the character, yielding 0 UTF-16 code units
+    /// (nothing before the emoji).
+    #[test]
+    fn utf16_mid_char_4byte_surrogate_pair_clamps_to_char_start() {
+        // "😀" = U+1F600, UTF-8: 4 bytes, UTF-16: 2 code units (surrogate pair)
+        let source = "😀";
+        assert_eq!(source.len(), 4, "sanity: 😀 is 4 bytes");
+
+        // offsets 1, 2, 3 all land inside the 4-byte sequence
+        for mid in 1u32..=3 {
+            assert_eq!(
+                byte_offset_to_utf16(source, mid),
+                0,
+                "byte offset {mid} inside 😀 must clamp to 0 UTF-16 CUs"
+            );
+        }
+
+        // byte offset 4 (past the char) → 2 UTF-16 code units
+        assert_eq!(byte_offset_to_utf16(source, 4), 2);
+    }
+
+    /// Verify that ASCII text is a 1:1 mapping (byte offset == UTF-16 offset).
+    #[test]
+    fn utf16_ascii_identity() {
+        let source = "hello world";
+        for i in 0..=(source.len() as u32) {
+            assert_eq!(
+                byte_offset_to_utf16(source, i),
+                i,
+                "ASCII byte offset {i} should equal its UTF-16 offset"
+            );
+        }
+    }
+
+    /// Mixed ASCII + multibyte: offset after a 2-byte char produces the
+    /// correct UTF-16 value (prior ASCII chars + 1 CU for the 2-byte char).
+    #[test]
+    fn utf16_mixed_ascii_and_multibyte() {
+        // "aé" = 'a' (1 byte) + 'é' (2 bytes) = 3 bytes total, 2 UTF-16 CUs
+        let source = "aé";
+        assert_eq!(source.len(), 3);
+
+        assert_eq!(byte_offset_to_utf16(source, 0), 0); // before 'a'
+        assert_eq!(byte_offset_to_utf16(source, 1), 1); // after 'a', before 'é'
+                                                        // byte offset 2 is the continuation byte of 'é' → clamps to byte 1 → 1 UTF-16 CU
+        assert_eq!(
+            byte_offset_to_utf16(source, 2),
+            1,
+            "continuation byte of é clamps to its char start"
+        );
+        assert_eq!(byte_offset_to_utf16(source, 3), 2); // after 'é'
     }
 }

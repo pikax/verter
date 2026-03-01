@@ -1360,6 +1360,7 @@ fn dfs_through_pipeline() {
                 prop_flag: crate::ast::types::PropFlag::empty(),
                 children_flag: crate::ast::types::ChildrenFlag::empty(),
                 children_mode: crate::ast::types::ChildrenMode::Empty,
+                is_fully_static: false,
             }
         )))
     );

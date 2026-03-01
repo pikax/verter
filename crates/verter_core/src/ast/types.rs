@@ -147,6 +147,20 @@ pub struct ElementNode {
 
     /// Pre-computed children mode for fast codegen branching.
     pub children_mode: ChildrenMode,
+
+    /// Whether this element and all its descendants are fully static.
+    ///
+    /// An element is fully static when:
+    /// 1. It is a plain HTML element (`tag_type.is_element()`)
+    /// 2. No structural directives (`v-if`, `v-for`, `v-slot`, `v-once`, `ref`)
+    /// 3. No dynamic props (no bits in `PropFlag::NEEDS_OXC_MASK`)
+    /// 4. No interpolation or structural children
+    /// 5. All child elements are also fully static (recursive)
+    ///
+    /// Used by VDOM codegen for static subtree hoisting: fully-static subtrees
+    /// are emitted as `_createStaticVNode("<html>", N)` instead of individual
+    /// `_createElementVNode()` calls.
+    pub is_fully_static: bool,
 }
 
 impl ElementNode {

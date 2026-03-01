@@ -252,6 +252,7 @@ mod tests {
             template_analysis: None,
             resolved_type_hashes: HashMap::new(),
             style_overrides: HashMap::new(),
+            content_overrides: HashMap::new(),
             compile_slots: HashMap::new(),
             latest_diagnostics: HashMap::new(),
             generation: 0,
@@ -262,6 +263,7 @@ mod tests {
                 CompileSlot {
                     semantic_hash: [0; 16],
                     style_override_hash: 0,
+                    content_override_hash: 0,
                     outputs: HashMap::new(),
                     diagnostics: DiagnosticsSnapshot::default(),
                     last_good_outputs: None,
@@ -347,6 +349,7 @@ mod tests {
             CompileSlot {
                 semantic_hash: [0; 16],
                 style_override_hash: 0,
+                content_override_hash: 0,
                 outputs,
                 diagnostics: DiagnosticsSnapshot::default(),
                 last_good_outputs: None,

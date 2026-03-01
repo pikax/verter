@@ -172,7 +172,7 @@ pub fn parse_script_with_companion<'a>(
     // Extract binding metadata (only for script setup)
     let bindings = match mode {
         ScriptMode::Setup => bindings::extract_bindings(program, &ctx),
-        ScriptMode::Options => Vec::new(),
+        ScriptMode::Options => options::extract_options_bindings(program),
     };
 
     ScriptParseResult {

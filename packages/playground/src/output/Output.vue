@@ -6,6 +6,11 @@ import Preview from "./Preview.vue";
 import CodeOutput from "./CodeOutput.vue";
 import AnalysisPanel from "./AnalysisPanel.vue";
 import LintPanel from "./LintPanel.vue";
+import OutlinePanel from "./OutlinePanel.vue";
+import VirtualFilesPanel from "./VirtualFilesPanel.vue";
+import CssMatchPanel from "./CssMatchPanel.vue";
+import SourceMapPanel from "./SourceMapPanel.vue";
+import DiagnosticsPanel from "./DiagnosticsPanel.vue";
 
 const props = defineProps<{
   store: Store;
@@ -16,27 +21,49 @@ const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "js", label: "JS" },
   { mode: "css", label: "CSS" },
   { mode: "types", label: "Types" },
+  { mode: "tsc", label: "TSC" },
   { mode: "analysis", label: "Analysis" },
   { mode: "lint", label: "Lint" },
+  { mode: "outline", label: "Outline" },
+  { mode: "files", label: "Files" },
+  { mode: "cssMatch", label: "CSS Match" },
+  { mode: "map", label: "Map" },
+  { mode: "diagnostics", label: "Diagnostics" },
 ];
 
-const tabs = computed(() => allTabs);
+const tabs = computed(() => {
+  if (props.store.compilerOptions.ssr) {
+    const list = [...allTabs];
+    const jsIdx = list.findIndex((t) => t.mode === "js");
+    list.splice(jsIdx + 1, 0, { mode: "ssr", label: "SSR" });
+    return list;
+  }
+  return allTabs;
+});
 
 function openSourceMapVisualization() {
   const file = props.store.activeFile;
   if (!file) return;
 
-  const map = file.compiled.verterSourceMap;
+  const mode = props.store.outputMode;
+  let code: string;
+  let map: string;
+  if (mode === "types") {
+    code = file.compiled.types;
+    map = file.compiled.typesSourceMap;
+  } else {
+    // The combined source map covers the full assembled JS (file.compiled.js),
+    // matching exactly what's displayed in the JS tab.
+    code = file.compiled.js;
+    map = file.compiled.verterSourceMap;
+  }
   if (!map) return;
-
-  const code = file.compiled.js;
 
   // evanw's source-map-visualization uses length-prefixed format:
   // btoa(`${utf8CodeLen}\0${utf8Code}${utf8MapLen}\0${utf8Map}`)
   const enc = new TextEncoder();
   const codeBytes = enc.encode(code);
   const mapBytes = enc.encode(map);
-  // Build binary string from UTF-8 bytes (latin1 decoding preserves raw bytes)
   let binary = "";
   const codeLenStr = String(codeBytes.length);
   binary += codeLenStr + "\0";
@@ -52,11 +79,25 @@ function openSourceMapVisualization() {
 const showSourceMapButton = computed(() => {
   const file = props.store.activeFile;
   if (!file) return false;
-  return props.store.outputMode === "js" && !!file.compiled.verterSourceMap;
+  const mode = props.store.outputMode;
+  return (
+    (mode === "js" && !!file.compiled.verterSourceMap) ||
+    (mode === "types" && !!file.compiled.typesSourceMap)
+  );
 });
 
 const lintCount = computed(() => {
   return props.store.activeFile?.compiled.lintDiagnostics?.length ?? 0;
+});
+
+const diagnosticCount = computed(() => {
+  const file = props.store.activeFile;
+  if (!file) return 0;
+  return (
+    file.compiled.compilerDiagnostics.length +
+    file.compiled.lintDiagnostics.length +
+    props.store.tsDiagnostics.length
+  );
 });
 
 function getTabTiming(mode: OutputMode): string | null {
@@ -74,6 +115,9 @@ function getTabTiming(mode: OutputMode): string | null {
 function getTabBadge(mode: OutputMode): string | null {
   if (mode === "lint" && lintCount.value > 0) {
     return String(lintCount.value);
+  }
+  if (mode === "diagnostics" && diagnosticCount.value > 0) {
+    return String(diagnosticCount.value);
   }
   return null;
 }
@@ -110,6 +154,11 @@ function getTabBadge(mode: OutputMode): string | null {
       <Preview v-if="store.outputMode === 'preview'" :store="store" />
       <AnalysisPanel v-else-if="store.outputMode === 'analysis'" :store="store" />
       <LintPanel v-else-if="store.outputMode === 'lint'" :store="store" />
+      <OutlinePanel v-else-if="store.outputMode === 'outline'" :store="store" />
+      <VirtualFilesPanel v-else-if="store.outputMode === 'files'" :store="store" />
+      <CssMatchPanel v-else-if="store.outputMode === 'cssMatch'" :store="store" />
+      <SourceMapPanel v-else-if="store.outputMode === 'map'" :store="store" />
+      <DiagnosticsPanel v-else-if="store.outputMode === 'diagnostics'" :store="store" />
       <CodeOutput v-else :store="store" :mode="store.outputMode" />
     </div>
   </div>

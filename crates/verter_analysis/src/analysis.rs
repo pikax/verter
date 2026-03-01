@@ -93,7 +93,9 @@ pub fn build_script_analysis_with_scope(
     let mut import_map = ImportBindingMap::new();
     let mut macros = Vec::new();
     let mut bindings = Vec::new();
-    let mut has_top_level_await = false;
+    let mut vue_api_calls = Vec::new();
+    let mut dom_query_calls = Vec::new();
+    let mut first_await_offset: Option<u32> = None;
     // Track local type → referenced type names (from extends and intersection)
     // e.g., `interface Local extends Base {}` → { "Local": ["Base"] }
     // e.g., `type Local = Base & { own: string }` → { "Local": ["Base"] }
@@ -109,8 +111,14 @@ pub fn build_script_analysis_with_scope(
 
             Statement::ExpressionStatement(expr_stmt) => {
                 try_extract_macro_from_expr(&expr_stmt.expression, &mut macros);
-                if !has_top_level_await && expr_contains_await(&expr_stmt.expression) {
-                    has_top_level_await = true;
+                // Detect Vue API call sites (e.g., onMounted(cb), watch(src, cb))
+                try_extract_vue_api_call(&expr_stmt.expression, &import_map, &mut vue_api_calls);
+                // Detect DOM query calls (e.g., document.querySelector('.foo'))
+                try_extract_dom_query(&expr_stmt.expression, &mut dom_query_calls);
+                if first_await_offset.is_none() {
+                    if let Some(offset) = find_await_offset(&expr_stmt.expression) {
+                        first_await_offset = Some(offset);
+                    }
                 }
             }
 
@@ -127,17 +135,18 @@ pub fn build_script_analysis_with_scope(
                 for decl in &var_decl.declarations {
                     try_extract_macro_from_var_decl(decl, &mut macros);
 
+                    let (initializer, is_reactive, mut reactivity_kind) =
+                        if let Some(ref init) = decl.init {
+                            classify_initializer(init, &imports, &import_map)
+                        } else {
+                            (None, false, ReactivityKind::None)
+                        };
+                    // let bindings are mutable regardless of initializer
+                    if kind == AnalyzedBindingKind::Let {
+                        reactivity_kind = ReactivityKind::Mutable;
+                    }
+
                     if let BindingPattern::BindingIdentifier(id) = &decl.id {
-                        let (initializer, is_reactive, mut reactivity_kind) =
-                            if let Some(ref init) = decl.init {
-                                classify_initializer(init, &imports, &import_map)
-                            } else {
-                                (None, false, ReactivityKind::None)
-                            };
-                        // let bindings are mutable regardless of initializer
-                        if kind == AnalyzedBindingKind::Let {
-                            reactivity_kind = ReactivityKind::Mutable;
-                        }
                         let type_annotation = decl.type_annotation.as_ref().map(|ann| {
                             content[ann.type_annotation.span().start as usize
                                 ..ann.type_annotation.span().end as usize]
@@ -150,15 +159,29 @@ pub fn build_script_analysis_with_scope(
                             reactivity_kind,
                             type_annotation,
                             initializer,
-                            span_start: id.span.start,
-                            span_end: id.span.end,
+                            span: id.span.into(),
                         });
+                    } else {
+                        // Destructured binding: ObjectPattern, ArrayPattern, etc.
+                        extract_destructured_bindings(
+                            &decl.id,
+                            kind,
+                            is_reactive,
+                            reactivity_kind,
+                            &initializer,
+                            &mut bindings,
+                        );
                     }
 
-                    if !has_top_level_await {
+                    // Extract DOM query from initializer
+                    if let Some(ref init) = decl.init {
+                        try_extract_dom_query(init, &mut dom_query_calls);
+                    }
+
+                    if first_await_offset.is_none() {
                         if let Some(ref init) = decl.init {
-                            if expr_contains_await(init) {
-                                has_top_level_await = true;
+                            if let Some(offset) = find_await_offset(init) {
+                                first_await_offset = Some(offset);
                             }
                         }
                     }
@@ -178,8 +201,7 @@ pub fn build_script_analysis_with_scope(
                         reactivity_kind: ReactivityKind::None,
                         type_annotation: None,
                         initializer: None,
-                        span_start: id.span.start,
-                        span_end: id.span.end,
+                        span: id.span.into(),
                     });
                 }
             }
@@ -193,8 +215,7 @@ pub fn build_script_analysis_with_scope(
                         reactivity_kind: ReactivityKind::None,
                         type_annotation: None,
                         initializer: None,
-                        span_start: id.span.start,
-                        span_end: id.span.end,
+                        span: id.span.into(),
                     });
                 }
             }
@@ -245,7 +266,9 @@ pub fn build_script_analysis_with_scope(
             }
 
             Statement::ForOfStatement(for_of) if for_of.r#await => {
-                has_top_level_await = true;
+                if first_await_offset.is_none() {
+                    first_await_offset = Some(for_of.span.start);
+                }
             }
 
             _ => {}
@@ -257,7 +280,7 @@ pub fn build_script_analysis_with_scope(
 
     // ── Derive: flags ──
     let mut flags = derive_flags(&imports, &macros, &bindings, &macro_type_deps);
-    if has_top_level_await {
+    if first_await_offset.is_some() {
         flags |= AnalysisFlags::ASYNC_SETUP;
     }
 
@@ -273,6 +296,9 @@ pub fn build_script_analysis_with_scope(
         bindings,
         macros,
         macro_type_deps,
+        vue_api_calls,
+        dom_query_calls,
+        first_await_offset,
         flags,
         exported_functions,
         type_enhancements: None,
@@ -299,6 +325,89 @@ pub fn build_export_signatures(
 
 /// Classify an initializer expression.
 /// Returns (initializer, is_reactive, reactivity_kind).
+/// Recursively extract all binding identifiers from a destructuring pattern.
+///
+/// Walks `ObjectPattern`, `ArrayPattern`, and `AssignmentPattern` nodes
+/// to collect each leaf `BindingIdentifier`. Each is emitted as an
+/// `AnalyzedBinding` with the given kind, reactivity, and initializer info.
+fn extract_destructured_bindings(
+    pattern: &BindingPattern<'_>,
+    kind: AnalyzedBindingKind,
+    is_reactive: bool,
+    reactivity_kind: ReactivityKind,
+    initializer: &Option<BindingInitializer>,
+    bindings: &mut Vec<AnalyzedBinding>,
+) {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => {
+            bindings.push(AnalyzedBinding {
+                name: id.name.to_string(),
+                kind,
+                is_reactive,
+                reactivity_kind,
+                type_annotation: None,
+                initializer: initializer.clone(),
+                span: id.span.into(),
+            });
+        }
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                extract_destructured_bindings(
+                    &prop.value,
+                    kind,
+                    is_reactive,
+                    reactivity_kind,
+                    initializer,
+                    bindings,
+                );
+            }
+            if let Some(rest) = &obj.rest {
+                extract_destructured_bindings(
+                    &rest.argument,
+                    kind,
+                    is_reactive,
+                    reactivity_kind,
+                    initializer,
+                    bindings,
+                );
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                extract_destructured_bindings(
+                    elem,
+                    kind,
+                    is_reactive,
+                    reactivity_kind,
+                    initializer,
+                    bindings,
+                );
+            }
+            if let Some(rest) = &arr.rest {
+                extract_destructured_bindings(
+                    &rest.argument,
+                    kind,
+                    is_reactive,
+                    reactivity_kind,
+                    initializer,
+                    bindings,
+                );
+            }
+        }
+        BindingPattern::AssignmentPattern(assign) => {
+            // `a = default` — extract the left-hand binding
+            extract_destructured_bindings(
+                &assign.left,
+                kind,
+                is_reactive,
+                reactivity_kind,
+                initializer,
+                bindings,
+            );
+        }
+    }
+}
+
 fn classify_initializer(
     expr: &Expression<'_>,
     imports: &[AnalyzedImport],
@@ -412,6 +521,237 @@ fn classify_reactivity_kind(
 fn call_callee_name<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
     match callee {
         Expression::Identifier(id) => Some(id.name.as_str()),
+        _ => None,
+    }
+}
+
+/// Extract Vue API call site from an expression (e.g., `onMounted(cb)`, `provide(key, val)`).
+/// Only records calls where the callee is a known Vue API import.
+fn try_extract_vue_api_call(
+    expr: &Expression<'_>,
+    import_map: &ImportBindingMap,
+    vue_api_calls: &mut Vec<VueApiCallSite>,
+) {
+    if let Expression::CallExpression(call) = expr {
+        if let Some(callee_name) = call_callee_name(&call.callee) {
+            if let Some(api) = import_map.vue_api(callee_name) {
+                // Extract first string argument for useTemplateRef, provide, inject
+                let arg_value = if matches!(
+                    api,
+                    VueApiClassification::UseTemplateRef
+                        | VueApiClassification::Provide
+                        | VueApiClassification::Inject
+                ) {
+                    first_string_arg(call)
+                } else {
+                    None
+                };
+                let is_async_callback = first_arg_is_async(call);
+                vue_api_calls.push(VueApiCallSite {
+                    api,
+                    span: call.span.into(),
+                    arg_value,
+                    is_async_callback,
+                });
+            }
+        }
+    }
+}
+
+/// Extract the first string literal argument from a call expression.
+fn first_string_arg(call: &oxc_ast::ast::CallExpression<'_>) -> Option<String> {
+    let arg = call.arguments.first()?;
+    match arg.as_expression()? {
+        Expression::StringLiteral(s) => Some(s.value.to_string()),
+        _ => None,
+    }
+}
+
+/// Check whether the first argument to a call is an async function or async arrow.
+/// Used to detect `computed(async () => ...)` patterns.
+fn first_arg_is_async(call: &oxc_ast::ast::CallExpression<'_>) -> bool {
+    let Some(first) = call.arguments.first() else {
+        return false;
+    };
+    let Some(expr) = first.as_expression() else {
+        return false;
+    };
+    match expr {
+        Expression::ArrowFunctionExpression(f) => f.r#async,
+        Expression::FunctionExpression(f) => f.r#async,
+        _ => false,
+    }
+}
+
+/// Extract a DOM query call site from an expression.
+/// Detects patterns like `document.querySelector('.foo')`, `el.value?.querySelector('.bar')`,
+/// `document.getElementById('app')`, `document.getElementsByClassName('btn')`.
+fn try_extract_dom_query(expr: &Expression<'_>, dom_query_calls: &mut Vec<DomQueryCallSite>) {
+    let call = match expr {
+        Expression::CallExpression(c) => c,
+        _ => return,
+    };
+
+    // Match member expressions: something.querySelector(...)
+    let method_name = match &call.callee {
+        Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+        Expression::ChainExpression(chain) => {
+            if let oxc_ast::ast::ChainElement::StaticMemberExpression(member) = &chain.expression {
+                member.property.name.as_str()
+            } else {
+                return;
+            }
+        }
+        _ => return,
+    };
+
+    let kind = match method_name {
+        "querySelector" => DomQueryKind::QuerySelector,
+        "querySelectorAll" => DomQueryKind::QuerySelectorAll,
+        "getElementById" => DomQueryKind::GetElementById,
+        "getElementsByClassName" => DomQueryKind::GetElementsByClassName,
+        _ => return,
+    };
+
+    // Extract the string argument
+    let arg = match call.arguments.first() {
+        Some(a) => a,
+        None => return,
+    };
+    let (selector_text, arg_span) = match arg.as_expression() {
+        Some(Expression::StringLiteral(s)) => {
+            (s.value.to_string(), verter_span::Span::from(s.span))
+        }
+        _ => return,
+    };
+
+    // Parse the selector for querySelector/querySelectorAll
+    let parsed = match kind {
+        DomQueryKind::QuerySelector | DomQueryKind::QuerySelectorAll => {
+            crate::style::parse_selector(&selector_text)
+        }
+        DomQueryKind::GetElementById => {
+            // Synthesize a selector: #id
+            crate::style::parse_selector(&format!("#{selector_text}"))
+        }
+        DomQueryKind::GetElementsByClassName => {
+            // Synthesize a selector: .class
+            crate::style::parse_selector(&format!(".{selector_text}"))
+        }
+    };
+
+    dom_query_calls.push(DomQueryCallSite {
+        kind,
+        selector_text,
+        parsed,
+        span: call.span.into(),
+        arg_span,
+    });
+}
+
+/// Find the byte offset of the first `await` expression in a top-level expression.
+/// Stops at function boundaries (arrow/function expressions don't make setup async).
+fn find_await_offset(expr: &Expression<'_>) -> Option<u32> {
+    match expr {
+        Expression::AwaitExpression(aw) => Some(aw.span.start),
+        // Stop at function boundaries
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => None,
+        Expression::CallExpression(call) => {
+            if let Some(offset) = find_await_offset(&call.callee) {
+                return Some(offset);
+            }
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    if let Some(offset) = find_await_offset(e) {
+                        return Some(offset);
+                    }
+                }
+            }
+            None
+        }
+        Expression::ArrayExpression(arr) => {
+            for elem in &arr.elements {
+                match elem {
+                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) => {
+                        if let Some(offset) = find_await_offset(&s.argument) {
+                            return Some(offset);
+                        }
+                    }
+                    oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
+                    _ => {
+                        if let Some(e) = elem.as_expression() {
+                            if let Some(offset) = find_await_offset(e) {
+                                return Some(offset);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        Expression::ObjectExpression(obj) => {
+            for prop in &obj.properties {
+                match prop {
+                    oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => {
+                        if let Some(offset) = find_await_offset(&p.value) {
+                            return Some(offset);
+                        }
+                    }
+                    oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => {
+                        if let Some(offset) = find_await_offset(&s.argument) {
+                            return Some(offset);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        Expression::AssignmentExpression(assign) => find_await_offset(&assign.right),
+        Expression::SequenceExpression(seq) => {
+            for expr in &seq.expressions {
+                if let Some(offset) = find_await_offset(expr) {
+                    return Some(offset);
+                }
+            }
+            None
+        }
+        Expression::ConditionalExpression(cond) => find_await_offset(&cond.test)
+            .or_else(|| find_await_offset(&cond.consequent))
+            .or_else(|| find_await_offset(&cond.alternate)),
+        Expression::BinaryExpression(bin) => {
+            find_await_offset(&bin.left).or_else(|| find_await_offset(&bin.right))
+        }
+        Expression::LogicalExpression(log) => {
+            find_await_offset(&log.left).or_else(|| find_await_offset(&log.right))
+        }
+        Expression::UnaryExpression(un) => find_await_offset(&un.argument),
+        Expression::TemplateLiteral(tpl) => {
+            for expr in &tpl.expressions {
+                if let Some(offset) = find_await_offset(expr) {
+                    return Some(offset);
+                }
+            }
+            None
+        }
+        Expression::TaggedTemplateExpression(tagged) => {
+            find_await_offset(&tagged.tag).or_else(|| {
+                tagged
+                    .quasi
+                    .expressions
+                    .iter()
+                    .find_map(|e| find_await_offset(e))
+            })
+        }
+        Expression::ComputedMemberExpression(m) => {
+            find_await_offset(&m.object).or_else(|| find_await_offset(&m.expression))
+        }
+        Expression::StaticMemberExpression(m) => find_await_offset(&m.object),
+        Expression::ParenthesizedExpression(p) => find_await_offset(&p.expression),
+        Expression::YieldExpression(y) => y.argument.as_ref().and_then(|a| find_await_offset(a)),
+        Expression::TSNonNullExpression(e) => find_await_offset(&e.expression),
+        Expression::TSAsExpression(e) => find_await_offset(&e.expression),
+        Expression::TSSatisfiesExpression(e) => find_await_offset(&e.expression),
+        Expression::TSTypeAssertion(e) => find_await_offset(&e.expression),
         _ => None,
     }
 }
@@ -1067,78 +1407,6 @@ fn detect_composable_return_shape(
 /// Check if an expression contains an `await` expression at any nesting depth.
 /// Walks the expression tree but stops at function/arrow boundaries (those
 /// create their own async context and don't make the *setup* async).
-fn expr_contains_await(expr: &Expression<'_>) -> bool {
-    match expr {
-        Expression::AwaitExpression(_) => true,
-        // Stop at function boundaries — await inside these doesn't make setup async
-        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
-        // Recurse into call arguments
-        Expression::CallExpression(call) => {
-            call.arguments
-                .iter()
-                .any(|arg| arg.as_expression().is_some_and(expr_contains_await))
-                || expr_contains_await(&call.callee)
-        }
-        // Recurse into array elements
-        Expression::ArrayExpression(arr) => arr.elements.iter().any(|elem| match elem {
-            oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) => {
-                expr_contains_await(&s.argument)
-            }
-            oxc_ast::ast::ArrayExpressionElement::Elision(_) => false,
-            _ => elem.as_expression().is_some_and(expr_contains_await),
-        }),
-        // Recurse into object properties
-        Expression::ObjectExpression(obj) => obj.properties.iter().any(|prop| match prop {
-            oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => expr_contains_await(&p.value),
-            oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => expr_contains_await(&s.argument),
-        }),
-        // Recurse into conditionals
-        Expression::ConditionalExpression(cond) => {
-            expr_contains_await(&cond.test)
-                || expr_contains_await(&cond.consequent)
-                || expr_contains_await(&cond.alternate)
-        }
-        // Recurse into binary/logical
-        Expression::BinaryExpression(bin) => {
-            expr_contains_await(&bin.left) || expr_contains_await(&bin.right)
-        }
-        Expression::LogicalExpression(log) => {
-            expr_contains_await(&log.left) || expr_contains_await(&log.right)
-        }
-        // Recurse into assignment
-        Expression::AssignmentExpression(assign) => expr_contains_await(&assign.right),
-        // Recurse into sequence (comma operator)
-        Expression::SequenceExpression(seq) => seq.expressions.iter().any(expr_contains_await),
-        // Recurse into unary/update
-        Expression::UnaryExpression(un) => expr_contains_await(&un.argument),
-        // Recurse into template literal expressions
-        Expression::TemplateLiteral(tpl) => tpl.expressions.iter().any(expr_contains_await),
-        // Recurse into tagged template
-        Expression::TaggedTemplateExpression(tagged) => {
-            expr_contains_await(&tagged.tag)
-                || tagged.quasi.expressions.iter().any(expr_contains_await)
-        }
-        // Recurse into member expressions
-        Expression::ComputedMemberExpression(m) => {
-            expr_contains_await(&m.object) || expr_contains_await(&m.expression)
-        }
-        Expression::StaticMemberExpression(m) => expr_contains_await(&m.object),
-        // Recurse into parenthesized
-        Expression::ParenthesizedExpression(p) => expr_contains_await(&p.expression),
-        // Recurse into spread-like (yield, etc)
-        Expression::YieldExpression(y) => {
-            y.argument.as_ref().is_some_and(|a| expr_contains_await(a))
-        }
-        // TS non-null / as / satisfies
-        Expression::TSNonNullExpression(e) => expr_contains_await(&e.expression),
-        Expression::TSAsExpression(e) => expr_contains_await(&e.expression),
-        Expression::TSSatisfiesExpression(e) => expr_contains_await(&e.expression),
-        Expression::TSTypeAssertion(e) => expr_contains_await(&e.expression),
-        // All other expressions (literals, identifiers, etc.) — no await
-        _ => false,
-    }
-}
-
 /// Match macro type references against import bindings to produce dependency entries.
 /// Also follows local type chains (extends/intersection) to discover transitive deps.
 fn derive_macro_type_deps(
@@ -1257,7 +1525,12 @@ fn derive_flags(
                 }
             }
             AnalyzedMacroKind::DefineExpose => flags |= AnalysisFlags::HAS_DEFINE_EXPOSE,
-            AnalyzedMacroKind::DefineOptions => flags |= AnalysisFlags::HAS_DEFINE_OPTIONS,
+            AnalyzedMacroKind::DefineOptions => {
+                flags |= AnalysisFlags::HAS_DEFINE_OPTIONS;
+                if m.has_inherit_attrs_false {
+                    flags |= AnalysisFlags::HAS_INHERIT_ATTRS_FALSE;
+                }
+            }
             AnalyzedMacroKind::DefineSlots => flags |= AnalysisFlags::HAS_DEFINE_SLOTS,
             AnalyzedMacroKind::WithDefaults => flags |= AnalysisFlags::HAS_WITH_DEFAULTS,
         }
@@ -1566,17 +1839,75 @@ const props = withDefaults(defineProps<{foo: MyType}>(), { foo: 'bar' });
         );
     }
 
-    /// @ai-generated - Destructured bindings are not captured as individual bindings
+    /// @ai-generated - Destructured object bindings are captured as individual bindings
     #[test]
-    fn destructured_bindings_not_captured() {
+    fn destructured_object_bindings_captured() {
         let result = analyze("const { a, b } = someObject;");
-        // Destructured bindings are not captured individually since we only
-        // handle BindingIdentifier patterns, not ObjectPattern/ArrayPattern
-        assert_eq!(
-            result.bindings.len(),
-            0,
-            "destructured bindings should not be captured as individual bindings"
-        );
+        assert_eq!(result.bindings.len(), 2);
+        assert_eq!(result.bindings[0].name, "a");
+        assert_eq!(result.bindings[0].kind, AnalyzedBindingKind::Const);
+        assert_eq!(result.bindings[1].name, "b");
+        assert_eq!(result.bindings[1].kind, AnalyzedBindingKind::Const);
+        // No type annotations on destructured bindings
+        assert!(result.bindings[0].type_annotation.is_none());
+    }
+
+    /// @ai-generated - Destructured array bindings are captured
+    #[test]
+    fn destructured_array_bindings_captured() {
+        let result = analyze("const [x, y] = someArray;");
+        assert_eq!(result.bindings.len(), 2);
+        assert_eq!(result.bindings[0].name, "x");
+        assert_eq!(result.bindings[1].name, "y");
+    }
+
+    /// @ai-generated - Nested destructured bindings are captured recursively
+    #[test]
+    fn nested_destructured_bindings_captured() {
+        let result = analyze("const { a: { b, c } } = obj;");
+        assert_eq!(result.bindings.len(), 2);
+        assert_eq!(result.bindings[0].name, "b");
+        assert_eq!(result.bindings[1].name, "c");
+        // 'a' is NOT a binding — it's the property key, not an identifier
+    }
+
+    /// @ai-generated - Rest element in destructured binding is captured
+    #[test]
+    fn destructured_rest_element_captured() {
+        let result = analyze("const { a, ...rest } = obj;");
+        assert_eq!(result.bindings.len(), 2);
+        assert_eq!(result.bindings[0].name, "a");
+        assert_eq!(result.bindings[1].name, "rest");
+    }
+
+    /// @ai-generated - Destructured from reactive call retains reactivity info
+    #[test]
+    fn destructured_from_reactive_call() {
+        let result = analyze("import { toRefs } from 'vue';\nconst { a, b } = toRefs(state);");
+        // toRefs is a reactivity API
+        assert_eq!(result.bindings.len(), 2);
+        assert_eq!(result.bindings[0].name, "a");
+        assert_eq!(result.bindings[1].name, "b");
+        assert!(result.bindings[0].is_reactive);
+        assert!(result.bindings[1].is_reactive);
+    }
+
+    /// @ai-generated - Destructured with default values
+    #[test]
+    fn destructured_with_defaults_captured() {
+        let result = analyze("const { a = 1, b = 'hello' } = obj;");
+        assert_eq!(result.bindings.len(), 2);
+        assert_eq!(result.bindings[0].name, "a");
+        assert_eq!(result.bindings[1].name, "b");
+    }
+
+    /// @ai-generated - Let destructured bindings are mutable
+    #[test]
+    fn destructured_let_bindings_are_mutable() {
+        let result = analyze("let { a, b } = obj;");
+        assert_eq!(result.bindings.len(), 2);
+        assert_eq!(result.bindings[0].kind, AnalyzedBindingKind::Let);
+        assert_eq!(result.bindings[0].reactivity_kind, ReactivityKind::Mutable);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -1798,7 +2129,7 @@ const model2 = defineModel<number>('count');
         assert_eq!(result.bindings.len(), 1);
         let b = &result.bindings[0];
         // "count" starts at position 6, ends at 11
-        assert_eq!(&code[b.span_start as usize..b.span_end as usize], "count");
+        assert_eq!(&code[b.span.start as usize..b.span.end as usize], "count");
     }
 
     /// @ai-generated - Import span covers full declaration
@@ -1809,7 +2140,7 @@ const model2 = defineModel<number>('count');
         assert_eq!(result.imports.len(), 1);
         let imp = &result.imports[0];
         assert_eq!(
-            &code[imp.span_start as usize..imp.span_end as usize],
+            &code[imp.span.start as usize..imp.span.end as usize],
             "import { ref } from 'vue';"
         );
     }
@@ -1822,11 +2153,11 @@ const model2 = defineModel<number>('count');
         let bindings = &result.imports[0].bindings;
         assert_eq!(bindings.len(), 2);
         assert_eq!(
-            &code[bindings[0].span_start as usize..bindings[0].span_end as usize],
+            &code[bindings[0].span.start as usize..bindings[0].span.end as usize],
             "ref"
         );
         assert_eq!(
-            &code[bindings[1].span_start as usize..bindings[1].span_end as usize],
+            &code[bindings[1].span.start as usize..bindings[1].span.end as usize],
             "computed"
         );
     }
@@ -1839,7 +2170,7 @@ const model2 = defineModel<number>('count');
         assert_eq!(result.macros.len(), 1);
         let m = &result.macros[0];
         // The call span should cover the entire call expression
-        let span_text = &code[m.span_start as usize..m.span_end as usize];
+        let span_text = &code[m.span.start as usize..m.span.end as usize];
         assert!(
             span_text.starts_with("defineProps"),
             "macro span should start with defineProps, got: {}",
@@ -1860,7 +2191,7 @@ const model2 = defineModel<number>('count');
         assert_eq!(result.bindings.len(), 1);
         let b = &result.bindings[0];
         assert_eq!(
-            &code[b.span_start as usize..b.span_end as usize],
+            &code[b.span.start as usize..b.span.end as usize],
             "handleClick"
         );
     }
@@ -1873,7 +2204,7 @@ const model2 = defineModel<number>('count');
         assert_eq!(result.bindings.len(), 1);
         let b = &result.bindings[0];
         assert_eq!(
-            &code[b.span_start as usize..b.span_end as usize],
+            &code[b.span.start as usize..b.span.end as usize],
             "MyService"
         );
     }
@@ -1886,10 +2217,10 @@ const model2 = defineModel<number>('count');
         assert_eq!(result.bindings.len(), 2);
         let a = &result.bindings[0];
         let b = &result.bindings[1];
-        assert_eq!(&code[a.span_start as usize..a.span_end as usize], "a");
-        assert_eq!(&code[b.span_start as usize..b.span_end as usize], "b");
+        assert_eq!(&code[a.span.start as usize..a.span.end as usize], "a");
+        assert_eq!(&code[b.span.start as usize..b.span.end as usize], "b");
         // Ensure spans don't overlap
-        assert!(a.span_end <= b.span_start);
+        assert!(a.span.end <= b.span.start);
     }
 
     /// @ai-generated - Import resolved_canonical_id is None by default

@@ -111,7 +111,7 @@ function toBuffer(v) {
   return typeof v === "string" ? Buffer.from(v) : v;
 }
 
-const { processStyle: _processStyle, VerterHost } = nativeBinding;
+const { processStyle: _processStyle, compileBatch, VerterHost } = nativeBinding;
 
 function processStyle(css, options) {
   return _processStyle(toBuffer(css), options);
@@ -138,5 +138,19 @@ VerterHost.prototype.applyStyleOverrides = function (request) {
   return _applyStyleOverrides.call(this, request);
 };
 
+const _applyBlockOverrides = VerterHost.prototype.applyBlockOverrides;
+VerterHost.prototype.applyBlockOverrides = function (request) {
+  if (request.overrides && request.overrides.some((o) => typeof o.code === "string")) {
+    request = {
+      ...request,
+      overrides: request.overrides.map((o) =>
+        typeof o.code === "string" ? { ...o, code: Buffer.from(o.code) } : o,
+      ),
+    };
+  }
+  return _applyBlockOverrides.call(this, request);
+};
+
 module.exports.processStyle = processStyle;
+module.exports.compileBatch = compileBatch;
 module.exports.VerterHost = VerterHost;

@@ -8,7 +8,9 @@
 
 use crate::ast::types::{ElementNode, PropFlags};
 use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::shared::helpers::{self, VaporHelper};
+use crate::template::code_gen::shared::helpers::{
+    self, is_member_expression, VaporHelper, DELEGATABLE_EVENTS,
+};
 use crate::template::code_gen::types::{
     CodeGenOutput, VaporCounters, VaporEffect, VaporElementState,
 };
@@ -30,51 +32,6 @@ pub struct VaporPropsContext<'a, 'alloc> {
     pub delegated_events_set: &'a mut rustc_hash::FxHashSet<&'alloc str>,
     pub force_js: bool,
 }
-
-/// Events that can be delegated (standard DOM event types).
-const DELEGATABLE_EVENTS: &[&str] = &[
-    "click",
-    "dblclick",
-    "mousedown",
-    "mouseup",
-    "mousemove",
-    "mouseenter",
-    "mouseleave",
-    "mouseover",
-    "mouseout",
-    "keydown",
-    "keyup",
-    "keypress",
-    "input",
-    "change",
-    "focus",
-    "blur",
-    "submit",
-    "reset",
-    "scroll",
-    "wheel",
-    "touchstart",
-    "touchmove",
-    "touchend",
-    "touchcancel",
-    "pointerdown",
-    "pointerup",
-    "pointermove",
-    "pointerenter",
-    "pointerleave",
-    "pointerover",
-    "pointerout",
-    "contextmenu",
-    "drag",
-    "dragstart",
-    "dragend",
-    "dragenter",
-    "dragleave",
-    "dragover",
-    "drop",
-    "focusin",
-    "focusout",
-];
 
 /// Runtime modifier names (wrapped via _withModifiers).
 const RUNTIME_MODIFIERS: &[&str] = &[
@@ -125,16 +82,6 @@ pub fn process_dynamic_props(
         if name.starts_with('@') || name == "v-on" {
             let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
             process_event(prop, name, ctx, oxc_exp);
-            continue;
-        }
-
-        // ===== Structural directives: skip (handled by element/directives) =====
-        if name == "v-if"
-            || name == "v-else-if"
-            || name == "v-else"
-            || name == "v-for"
-            || name == "v-slot"
-        {
             continue;
         }
 
@@ -508,16 +455,6 @@ fn push_inline_handler(buf: &mut String, resolved: &str, has_semicolons: bool) {
     }
 }
 
-/// Check if a string is a member expression (identifier or dotted path).
-fn is_member_expression(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
-}
-
 /// Process v-model directive.
 fn process_v_model(
     element: &ElementNode,
@@ -774,6 +711,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasDynamicClass),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -826,6 +764,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasDynamicStyle),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -878,6 +817,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasDynamicKey),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -925,6 +865,7 @@ mod tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -978,6 +919,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasStaticClass),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -1026,6 +968,7 @@ mod tests {
                 .add(PropFlags::HasDynamicKey),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -1081,6 +1024,7 @@ mod tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -1130,6 +1074,7 @@ mod tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -1179,6 +1124,7 @@ mod tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -1237,6 +1183,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasDynamicClass),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -1290,6 +1237,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasDynamicStyle),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -1343,6 +1291,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasDynamicKey),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();
@@ -1401,6 +1350,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasDynamicKey),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
 
         let mut del_events: Vec<&str> = Vec::new();

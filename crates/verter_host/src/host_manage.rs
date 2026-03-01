@@ -45,6 +45,8 @@ impl VerterHost {
                 stored_script
             };
             let style_analyses = crate::parse::build_style_analyses_from_source(&source);
+            let vue_api_calls = script_analysis.vue_api_calls.clone();
+            let dom_query_calls = script_analysis.dom_query_calls.clone();
             return Some(FileAnalysisSnapshot {
                 imports: script_analysis.imports,
                 bindings: script_analysis.bindings,
@@ -53,6 +55,8 @@ impl VerterHost {
                 script_flags: script_analysis.flags.bits(),
                 styles: style_analyses,
                 template,
+                vue_api_calls,
+                dom_query_calls,
             });
         }
 
@@ -64,6 +68,8 @@ impl VerterHost {
             script_flags: entry.script_analysis.flags.bits(),
             styles: entry.style_analyses.clone(),
             template: entry.template_analysis.clone(),
+            vue_api_calls: entry.script_analysis.vue_api_calls.clone(),
+            dom_query_calls: entry.script_analysis.dom_query_calls.clone(),
         })
     }
 
@@ -132,6 +138,17 @@ impl VerterHost {
         })
     }
 
+    /// Returns the list of virtual node kinds for a file.
+    /// Returns an empty vec if the file doesn't exist.
+    pub fn list_virtual_nodes(&self, canonical_or_alias: &str) -> Vec<VirtualNodeKind> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let files = read_lock(&self.files);
+        files
+            .get(&canonical)
+            .map(|e| e.all_virtual_nodes())
+            .unwrap_or_default()
+    }
+
     /// Provide caller-resolved import dependency canonical IDs.
     /// Called after upsert() when the caller resolves non-relative import paths
     /// (tsconfig paths, vite aliases, etc.) using bundler/LSP resolution.
@@ -153,5 +170,14 @@ impl VerterHost {
         };
 
         self.update_reverse_deps(&canonical, &old_deps, &new_deps);
+    }
+
+    /// Returns all known canonical file IDs and their file kinds.
+    pub fn list_files(&self) -> Vec<(String, FileKind)> {
+        let files = read_lock(&self.files);
+        files
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.file_kind))
+            .collect()
     }
 }

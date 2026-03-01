@@ -135,7 +135,14 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
 
             // Add child separators
-            children::add_children_separators_array(&children, out, &self.options);
+            children::add_children_separators_array(
+                &children,
+                out,
+                &self.options,
+                source,
+                self.ast,
+                el_children,
+            );
 
             // Close: ])
             buf.clear();
@@ -153,6 +160,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         }
     }
 
@@ -228,7 +237,14 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
 
             // Add child separators
-            children::add_children_separators_array(&children, out, &self.options);
+            children::add_children_separators_array(
+                &children,
+                out,
+                &self.options,
+                source,
+                self.ast,
+                el_children,
+            );
 
             // Close: `])`
             buf.clear();
@@ -253,6 +269,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         }
     }
 
@@ -333,7 +351,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
 
         // v-for prefix
         let v_for_prefix = self.v_for_prefixes.pop().flatten();
-        if let Some(prefix) = v_for_prefix.as_deref() {
+        if let Some((prefix, _)) = v_for_prefix.as_ref() {
             buf.push_str(prefix);
         }
 
@@ -412,10 +430,24 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             if any_dynamic {
                 // Dynamic slot format: each slot is `{ name: "x", fn: _withCtx(...) }`
                 // with ternary wrapping for conditional slots.
-                self.emit_dynamic_slot_wrappers(&entries, &children, &slot_names, out);
+                self.emit_dynamic_slot_wrappers(
+                    &entries,
+                    &children,
+                    &slot_names,
+                    out,
+                    source,
+                    el_children,
+                );
             } else {
                 // Static slot format: each slot is `name: _withCtx(...)`
-                self.emit_static_slot_wrappers(&entries, &children, &slot_names, out);
+                self.emit_static_slot_wrappers(
+                    &entries,
+                    &children,
+                    &slot_names,
+                    out,
+                    source,
+                    el_children,
+                );
             }
         }
 
@@ -527,6 +559,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         children: &[ChildRecord],
         slot_names: &FxHashMap<u32, &str>,
         out: &mut CodeGenOutput<'alloc>,
+        source: &'alloc str,
+        el_children: &[NodeId],
     ) {
         for (ei, entry) in entries.iter().enumerate() {
             // Comma separator between top-level slot entries
@@ -553,7 +587,14 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     // 1. Outer wrapper open FIRST (appears before inner wrappers)
                     out.prepend_static(group[0].start, "default: _withCtx(() => [");
                     // 2. Inner text wrapping (adds _createTextVNode etc.)
-                    children::add_children_separators_array(group, out, &self.options);
+                    children::add_children_separators_array(
+                        group,
+                        out,
+                        &self.options,
+                        source,
+                        self.ast,
+                        el_children,
+                    );
                     // 3. Outer wrapper close LAST (appears after inner closings)
                     out.prepend_static(group.last().unwrap().end, "])");
                 }
@@ -569,6 +610,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         children: &[ChildRecord],
         slot_names: &FxHashMap<u32, &str>,
         out: &mut CodeGenOutput<'alloc>,
+        source: &'alloc str,
+        el_children: &[NodeId],
     ) {
         for (ei, entry) in entries.iter().enumerate() {
             match entry {
@@ -635,7 +678,14 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     // 1. Outer wrapper open FIRST
                     out.prepend_static(group[0].start, "{ name: \"default\", fn: _withCtx(() => [");
                     // 2. Inner text wrapping
-                    children::add_children_separators_array(group, out, &self.options);
+                    children::add_children_separators_array(
+                        group,
+                        out,
+                        &self.options,
+                        source,
+                        self.ast,
+                        el_children,
+                    );
                     // 3. Outer wrapper close LAST
                     out.prepend_static(group.last().unwrap().end, "]) }");
                 }
@@ -691,7 +741,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         buf.clear();
 
         let v_for_prefix = self.v_for_prefixes.pop().flatten();
-        if let Some(prefix) = v_for_prefix.as_deref() {
+        if let Some((prefix, _)) = v_for_prefix.as_ref() {
             buf.push_str(prefix);
         }
 
@@ -794,7 +844,14 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
         }
 
-        children::add_children_separators_array(&children, out, &self.options);
+        children::add_children_separators_array(
+            &children,
+            out,
+            &self.options,
+            source,
+            self.ast,
+            el_children,
+        );
 
         buf.clear();
         buf.push_str("]), _: 1 /* STABLE */}");

@@ -2,17 +2,6 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "type": "node",
-      "request": "attach",
-      "name": "Attach debugger to language server",
-      "port": 6009,
-      "outFiles": [
-        "${workspaceRoot}/packages/language-server/dist/**/*.js",
-        "${workspaceRoot}/packages/vue-vscode/dist/**/*.js"
-      ],
-      "skipFiles": ["<node_internals>/**"]
-    },
-    {
       "type": "extensionHost",
       "request": "launch",
       "name": "Launch Client",
@@ -29,7 +18,6 @@
         "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
         "${workspaceRoot}/packages/core/dist/**/*.js",
         "${workspaceRoot}/packages/typescript-plugin/dist/**/*.js",
-        "${workspaceRoot}/packages/language-server/dist/**/*.js",
         "${workspaceRoot}/packages/language-shared/dist/**/*.js"
       ],
       "autoAttachChildProcesses": true
@@ -50,7 +38,6 @@
         "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
         "${workspaceRoot}/packages/core/dist/**/*.js",
         "${workspaceRoot}/packages/typescript-plugin/dist/**/*.js",
-        "${workspaceRoot}/packages/language-server/dist/**/*.js",
         "${workspaceRoot}/packages/language-shared/dist/**/*.js"
       ],
       "autoAttachChildProcesses": true
@@ -68,12 +55,11 @@
         "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
         "${workspaceRoot}/packages/core/dist/**/*.js",
         "${workspaceRoot}/packages/typescript-plugin/dist/**/*.js",
-        "${workspaceRoot}/packages/language-server/dist/**/*.js",
         "${workspaceRoot}/packages/language-shared/dist/**/*.js"
       ],
       "autoAttachChildProcesses": false
     },
-    
+
     {
       "type": "extensionHost",
       "request": "launch",
@@ -88,11 +74,13 @@
         // "${workspaceRoot}/samples/vue3/typescript-diagnostics"
       ],
       "outFiles": [
-        "${workspaceRoot}/extensions/vscode/dist/**/*.js",
+        "${workspaceRoot}/extensions/vscode/dist/**/*.js"
+      ],
       "autoAttachChildProcesses": true
       //   "preLaunchTask": {
       //     "type": "npm",
       //     "script": "dev-extension"
       //   }
-    },
-  ],}
+    }
+  ]
+}

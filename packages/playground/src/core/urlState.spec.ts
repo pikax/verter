@@ -96,6 +96,21 @@ describe("urlState", () => {
       expect(result?.verterVersion).toBe("release:0.0.1");
     });
 
+    it("preserves typeChecker", () => {
+      const state = makeState({ typeChecker: "tsgo" });
+      serializeToHash(state);
+      const result = deserializeFromHash();
+      expect(result?.typeChecker).toBe("tsgo");
+    });
+
+    it("omits typeChecker when tsc (default)", () => {
+      const state = makeState({ typeChecker: "tsc" });
+      serializeToHash(state);
+      const result = deserializeFromHash();
+      // When tsc, it's not serialized, so deserialization returns undefined
+      expect(result?.typeChecker).toBeUndefined();
+    });
+
     it("roundtrips multi-file state with import map and versions", () => {
       const state = makeState({
         files: {
@@ -234,6 +249,30 @@ describe("urlState", () => {
       expect(flat["_isProduction"]).toBe("true");
     });
 
+    it("serializes _typeChecker when not tsc", () => {
+      const state = makeState({ typeChecker: "tsgo" });
+      serializeToHash(state);
+      const hash = location.hash.slice(1);
+      const flat = decodeHash(hash);
+      expect(flat["_typeChecker"]).toBe("tsgo");
+    });
+
+    it("omits _typeChecker when tsc (default)", () => {
+      const state = makeState({ typeChecker: "tsc" });
+      serializeToHash(state);
+      const hash = location.hash.slice(1);
+      const flat = decodeHash(hash);
+      expect(flat["_typeChecker"]).toBeUndefined();
+    });
+
+    it("omits _typeChecker when undefined", () => {
+      const state = makeState();
+      serializeToHash(state);
+      const hash = location.hash.slice(1);
+      const flat = decodeHash(hash);
+      expect(flat["_typeChecker"]).toBeUndefined();
+    });
+
     it("includes _ssr when true", () => {
       const state = makeState({ compilerOptions: { isProduction: false, ssr: true } });
       serializeToHash(state);
@@ -355,6 +394,24 @@ describe("urlState", () => {
       window.location.hash = `#${encodeFlat(flat)}`;
       const result = deserializeFromHash();
       expect(result!.outputMode).toBe("js");
+    });
+
+    it("extracts _typeChecker metadata", () => {
+      const flat: Record<string, string> = {
+        "App.vue": "",
+        _typeChecker: "tsgo",
+      };
+      window.location.hash = `#${encodeFlat(flat)}`;
+      const result = deserializeFromHash();
+      expect(result!.typeChecker).toBe("tsgo");
+      expect(result!.files["_typeChecker"]).toBeUndefined();
+    });
+
+    it("returns undefined typeChecker when _typeChecker is absent", () => {
+      const flat: Record<string, string> = { "App.vue": "" };
+      window.location.hash = `#${encodeFlat(flat)}`;
+      const result = deserializeFromHash();
+      expect(result!.typeChecker).toBeUndefined();
     });
 
     it("extracts _isProduction and _ssr from flat object", () => {

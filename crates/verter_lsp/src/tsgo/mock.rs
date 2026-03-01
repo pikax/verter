@@ -66,6 +66,11 @@ mod inner {
             path: String,
             offset: u32,
         },
+        GetInlayHints {
+            path: String,
+            start_offset: u32,
+            end_offset: u32,
+        },
     }
 
     /// Shared state for the mock provider.
@@ -82,6 +87,7 @@ mod inner {
         signature_help_responses: Vec<(String, u32, Option<SignatureHelp>)>,
         code_action_responses: Vec<(String, u32, u32, Vec<TypeCodeAction>)>,
         semantic_token_responses: Vec<(String, Vec<SemanticToken>)>,
+        inlay_hint_responses: Vec<(String, u32, u32, Vec<InlayHint>)>,
     }
 
     /// A mock `TypeProvider` for testing.
@@ -187,6 +193,20 @@ mod inner {
                 .push((path.to_string(), tokens));
         }
 
+        /// Configure inlay hints for a specific path and offset range.
+        pub fn set_inlay_hints(
+            &self,
+            path: &str,
+            start_offset: u32,
+            end_offset: u32,
+            hints: Vec<InlayHint>,
+        ) {
+            let mut state = self.state.lock().unwrap();
+            state
+                .inlay_hint_responses
+                .push((path.to_string(), start_offset, end_offset, hints));
+        }
+
         /// Get all recorded calls.
         pub fn calls(&self) -> Vec<MockCall> {
             self.state.lock().unwrap().calls.clone()
@@ -210,6 +230,129 @@ mod inner {
         /// Clear all recorded calls.
         pub fn clear_calls(&self) {
             self.state.lock().unwrap().calls.clear();
+        }
+    }
+
+    /// A `TypeProvider` that always returns errors.
+    ///
+    /// Simulates a crashed/dead child process (e.g., tsgo pipe closed with OS error 232).
+    /// Used to test that callers handle provider errors gracefully.
+    pub struct FailingTypeProvider {
+        pub error_message: String,
+    }
+
+    impl FailingTypeProvider {
+        pub fn new(message: &str) -> Self {
+            Self {
+                error_message: message.to_string(),
+            }
+        }
+    }
+
+    impl TypeProvider for FailingTypeProvider {
+        fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn close_file(&self, _path: &str) -> ProviderFuture<'_, ()> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_completions(
+            &self,
+            _path: &str,
+            _offset: u32,
+            _trigger_character: Option<&str>,
+        ) -> ProviderFuture<'_, CompletionResult> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_references(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_rename_locations(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_signature_help(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_code_actions(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_document_highlights(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_inlay_hints(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<InlayHint>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
     }
 
@@ -240,19 +383,29 @@ mod inner {
             Box::pin(async { Ok(()) })
         }
 
-        fn get_completions(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<Completion>> {
+        fn get_completions(
+            &self,
+            path: &str,
+            offset: u32,
+            _trigger_character: Option<&str>,
+        ) -> ProviderFuture<'_, CompletionResult> {
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetCompletions {
                 path: path.to_string(),
                 offset,
             });
-            let result = state
+            let items = state
                 .completion_responses
                 .iter()
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, items)| items.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            Box::pin(async move {
+                Ok(CompletionResult {
+                    items,
+                    is_incomplete: false,
+                })
+            })
         }
 
         fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
@@ -400,6 +553,27 @@ mod inner {
                 .iter()
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, hl)| hl.clone())
+                .unwrap_or_default();
+            Box::pin(async move { Ok(result) })
+        }
+
+        fn get_inlay_hints(
+            &self,
+            path: &str,
+            start_offset: u32,
+            end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<InlayHint>> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::GetInlayHints {
+                path: path.to_string(),
+                start_offset,
+                end_offset,
+            });
+            let result = state
+                .inlay_hint_responses
+                .iter()
+                .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
+                .map(|(_, _, _, hints)| hints.clone())
                 .unwrap_or_default();
             Box::pin(async move { Ok(result) })
         }

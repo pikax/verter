@@ -57,10 +57,18 @@ impl ProjectSync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tsgo::mock::{MockCall, MockTypeProvider};
+    use crate::tsgo::mock::{FailingTypeProvider, MockCall, MockTypeProvider};
 
     fn make_sync(mock: &MockTypeProvider, mode: ProjectSyncMode) -> ProjectSync {
         ProjectSync::new(Arc::new(mock.clone()), mode)
+    }
+
+    fn make_sync_failing(provider: &FailingTypeProvider, mode: ProjectSyncMode) -> ProjectSync {
+        // FailingTypeProvider is not Clone, so wrap directly
+        ProjectSync {
+            provider: Arc::new(FailingTypeProvider::new(&provider.error_message)),
+            mode,
+        }
     }
 
     /// @ai-generated — TSX sync sends update_file in both modes
@@ -170,6 +178,95 @@ mod tests {
 
             let calls = mock.file_sync_calls();
             assert_eq!(calls.len(), 1, "TSX should be sent in {:?} mode", mode);
+        }
+    }
+
+    // ── Dead pipe / error propagation regression tests ───────────
+
+    /// @ai-generated — Regression: sync_tsx propagates provider errors (dead pipe scenario).
+    ///
+    /// When tsgo crashes (e.g., OS error 232 "The pipe is being closed"),
+    /// `sync_tsx` must return `Err`, not silently succeed or panic.
+    #[tokio::test]
+    async fn sync_tsx_propagates_provider_errors() {
+        let failing =
+            FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
+        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+
+        let result = sync.sync_tsx("App.vue.tsx", "export default {}").await;
+        assert!(result.is_err(), "sync_tsx should propagate provider error");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("pipe"),
+            "error should mention pipe: {err}"
+        );
+    }
+
+    /// @ai-generated — Regression: open_tsx propagates provider errors.
+    #[tokio::test]
+    async fn open_tsx_propagates_provider_errors() {
+        let failing =
+            FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
+        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+
+        let result = sync.open_tsx("App.vue.tsx", "const x = 1;").await;
+        assert!(result.is_err(), "open_tsx should propagate provider error");
+    }
+
+    /// @ai-generated — Regression: close_tsx propagates provider errors.
+    #[tokio::test]
+    async fn close_tsx_propagates_provider_errors() {
+        let failing =
+            FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
+        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+
+        let result = sync.close_tsx("App.vue.tsx").await;
+        assert!(result.is_err(), "close_tsx should propagate provider error");
+    }
+
+    /// @ai-generated — Regression: sync_file in FullProject mode propagates provider errors.
+    #[tokio::test]
+    async fn sync_file_full_project_propagates_provider_errors() {
+        let failing =
+            FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
+
+        let result = sync.sync_file("utils.ts", "export const x = 1;").await;
+        assert!(
+            result.is_err(),
+            "sync_file in FullProject mode should propagate error"
+        );
+    }
+
+    /// @ai-generated — sync_file in TsxOnly mode succeeds even with failing provider
+    /// because non-Vue files are skipped entirely (no provider call made).
+    #[tokio::test]
+    async fn sync_file_tsx_only_succeeds_with_failing_provider() {
+        let failing =
+            FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
+        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+
+        let result = sync.sync_file("utils.ts", "export const x = 1;").await;
+        assert!(
+            result.is_ok(),
+            "sync_file in TsxOnly mode should skip provider entirely"
+        );
+    }
+
+    /// @ai-generated — Multiple consecutive errors don't cause panic or unexpected state.
+    /// Simulates repeated operations after tsgo crashes.
+    #[tokio::test]
+    async fn repeated_operations_after_provider_death() {
+        let failing = FailingTypeProvider::new("write error: broken pipe");
+        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+
+        // All operations should return errors, none should panic
+        for i in 0..5 {
+            let result = sync.sync_tsx("App.vue.tsx", &format!("version {i}")).await;
+            assert!(
+                result.is_err(),
+                "operation {i} should still return error, not panic"
+            );
         }
     }
 }

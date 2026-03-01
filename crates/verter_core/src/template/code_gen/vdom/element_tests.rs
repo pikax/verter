@@ -36,6 +36,7 @@ fn make_element(
         prop_flag: PropFlag::empty(),
         children_flag,
         children_mode: children_flag.mode(),
+        is_fully_static: false,
     }
 }
 
@@ -47,6 +48,25 @@ fn make_options() -> TemplateCodeGenOptions {
     TemplateCodeGenOptions {
         is_production: false,
         ..Default::default()
+    }
+}
+
+fn make_ast() -> TemplateAst {
+    use crate::parser::types::RootNodeTemplate;
+    use crate::types::NodeTag;
+    TemplateAst {
+        nodes: Vec::new(),
+        root: RootNodeTemplate {
+            tag_open: NodeTag {
+                start: 0,
+                end: 0,
+                name_end: 0,
+            },
+            tag_close: None,
+            lang: None,
+            attributes: Vec::new(),
+            content: None,
+        },
     }
 }
 
@@ -70,6 +90,8 @@ fn resolve_ws_removes_leading_newline() {
             kind: ChildKind::WhitespaceNewline,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 3,
@@ -77,6 +99,8 @@ fn resolve_ws_removes_leading_newline() {
             kind: ChildKind::Text,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -99,6 +123,8 @@ fn resolve_ws_removes_trailing_newline() {
             kind: ChildKind::Text,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 5,
@@ -106,6 +132,8 @@ fn resolve_ws_removes_trailing_newline() {
             kind: ChildKind::WhitespaceNewline,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -127,6 +155,8 @@ fn resolve_ws_removes_leading_space() {
             kind: ChildKind::WhitespaceSpace,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 2,
@@ -134,6 +164,8 @@ fn resolve_ws_removes_leading_space() {
             kind: ChildKind::Text,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -154,6 +186,8 @@ fn resolve_ws_interior_newline_removed() {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 5,
@@ -161,6 +195,8 @@ fn resolve_ws_interior_newline_removed() {
             kind: ChildKind::WhitespaceNewline,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 8,
@@ -168,6 +204,8 @@ fn resolve_ws_interior_newline_removed() {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -190,6 +228,8 @@ fn resolve_ws_interior_space_becomes_text() {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 5,
@@ -197,6 +237,8 @@ fn resolve_ws_interior_space_becomes_text() {
             kind: ChildKind::WhitespaceSpace,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 6,
@@ -204,6 +246,8 @@ fn resolve_ws_interior_space_becomes_text() {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -225,6 +269,8 @@ fn resolve_ws_all_whitespace_removed() {
             kind: ChildKind::WhitespaceNewline,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 3,
@@ -232,6 +278,8 @@ fn resolve_ws_all_whitespace_removed() {
             kind: ChildKind::WhitespaceSpace,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -252,6 +300,8 @@ fn resolve_ws_no_whitespace_unchanged() {
             kind: ChildKind::Text,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 5,
@@ -259,6 +309,8 @@ fn resolve_ws_no_whitespace_unchanged() {
             kind: ChildKind::Interpolation,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -281,6 +333,8 @@ fn resolve_ws_newline_between_element_and_interpolation_kept() {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 5,
@@ -288,6 +342,8 @@ fn resolve_ws_newline_between_element_and_interpolation_kept() {
             kind: ChildKind::WhitespaceNewline,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 8,
@@ -295,6 +351,8 @@ fn resolve_ws_newline_between_element_and_interpolation_kept() {
             kind: ChildKind::Interpolation,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -317,6 +375,8 @@ fn resolve_ws_newline_between_interpolation_and_element_kept() {
             kind: ChildKind::Interpolation,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 5,
@@ -324,6 +384,8 @@ fn resolve_ws_newline_between_interpolation_and_element_kept() {
             kind: ChildKind::WhitespaceNewline,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 8,
@@ -331,6 +393,8 @@ fn resolve_ws_newline_between_interpolation_and_element_kept() {
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -363,6 +427,7 @@ fn self_closing_no_props() {
         &make_resolver(),
         &mut buf,
         None,
+        &make_ast(),
     );
 
     assert_eq!(record.kind, ChildKind::Element);
@@ -403,6 +468,7 @@ fn empty_element_no_props() {
         &make_resolver(),
         &mut buf,
         None,
+        &make_ast(),
     );
 
     assert_eq!(record.kind, ChildKind::Element);
@@ -434,6 +500,8 @@ fn element_with_static_text() {
         kind: ChildKind::Text,
         condition: None,
         condition_prefix: None,
+        condition_expr_start: None,
+        condition_binding_prefix_len: 0,
     }];
 
     let mut buf = String::new();
@@ -447,6 +515,7 @@ fn element_with_static_text() {
         &make_resolver(),
         &mut buf,
         None,
+        &make_ast(),
     );
 
     let result = apply_output(source, out, &alloc);
@@ -496,6 +565,7 @@ fn element_with_static_class() {
         &make_resolver(),
         &mut buf,
         None,
+        &make_ast(),
     );
 
     let result = apply_output(source, out, &alloc);
@@ -553,6 +623,7 @@ fn element_with_multiple_static_props() {
         &make_resolver(),
         &mut buf,
         None,
+        &make_ast(),
     );
 
     let result = apply_output(source, out, &alloc);
@@ -597,6 +668,8 @@ fn element_with_props_and_text_child() {
         kind: ChildKind::Text,
         condition: None,
         condition_prefix: None,
+        condition_expr_start: None,
+        condition_binding_prefix_len: 0,
     }];
 
     let mut buf = String::new();
@@ -610,6 +683,7 @@ fn element_with_props_and_text_child() {
         &make_resolver(),
         &mut buf,
         None,
+        &make_ast(),
     );
 
     let result = apply_output(source, out, &alloc);
@@ -653,6 +727,7 @@ fn element_with_boolean_attr() {
         &make_resolver(),
         &mut buf,
         None,
+        &make_ast(),
     );
 
     let result = apply_output(source, out, &alloc);
@@ -702,6 +777,7 @@ fn element_with_click_handler() {
         &make_resolver(),
         &mut buf,
         None,
+        &make_ast(),
     );
 
     let result = apply_output(source, out, &alloc);
@@ -739,6 +815,8 @@ fn element_with_leading_trailing_whitespace_removed() {
             kind: ChildKind::WhitespaceNewline,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 8,
@@ -746,6 +824,8 @@ fn element_with_leading_trailing_whitespace_removed() {
             kind: ChildKind::Text,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
         ChildRecord {
             start: 13,
@@ -753,6 +833,8 @@ fn element_with_leading_trailing_whitespace_removed() {
             kind: ChildKind::WhitespaceNewline,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         },
     ];
 
@@ -767,6 +849,7 @@ fn element_with_leading_trailing_whitespace_removed() {
         &make_resolver(),
         &mut buf,
         None,
+        &make_ast(),
     );
 
     let result = apply_output(source, out, &alloc);

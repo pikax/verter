@@ -7,7 +7,7 @@ The official VS Code extension for Verter — an experimental Vue compiler and l
 
 ## Overview
 
-`verter-vscode` is the VS Code extension that provides full-featured Vue language support powered by the Verter toolchain. It bundles the Verter language server, TypeScript plugin, and OXC parser bindings into a single extension, delivering intelligent completions, type checking, diagnostics, go-to-definition, hover information, and a compiled code viewer for Vue single-file components.
+`verter-vscode` is the VS Code extension that provides full-featured Vue language support powered by the Verter toolchain. It launches the Rust `verter-lsp` binary over stdio for language features, bundles the TypeScript plugin for `.vue` import resolution, and delivers intelligent completions, type checking, diagnostics, go-to-definition, hover information, and a compiled code viewer for Vue single-file components.
 
 ### Features
 
@@ -51,18 +51,18 @@ src/
 
 ### Bundled Packages
 
-The extension bundles four internal Verter packages:
+The extension launches the Rust LSP binary and bundles supporting TypeScript packages:
 
 ```mermaid
 graph TD
     EXT["verter-vscode<br/><i>VS Code extension</i>"]
-    LS["@verter/language-server<br/><i>LSP server</i>"]
+    LSP["verter-lsp<br/><i>Rust LSP binary (stdio)</i>"]
     TSP["@verter/typescript-plugin<br/><i>.vue import resolution</i>"]
     OXC["@verter/oxc-bindings<br/><i>OXC binary management</i>"]
     LSH["@verter/language-shared<br/><i>Shared protocol types</i>"]
     VLC["vscode-languageclient<br/><i>LSP client library</i>"]
 
-    EXT --> LS
+    EXT --> LSP
     EXT --> TSP
     EXT --> OXC
     EXT --> LSH
@@ -80,7 +80,7 @@ flowchart TD
     C -- Yes --> D["OXC parser available"]
     C -- No --> D2["Fall back to Babel parser"]
     D --> E
-    D2 --> E["2. Start language server<br/>(child process, IPC transport)"]
+    D2 --> E["2. Start verter-lsp binary<br/>(child process, stdio transport)"]
     E --> F["3. Configure TypeScript plugin<br/>_typescript.configurePlugin"]
     F --> G["4. Set up notification handlers<br/>(statistics, diagnostics)"]
     G --> H["Extension ready"]
@@ -92,7 +92,7 @@ flowchart TD
 **Step-by-step:**
 
 1. **Download OXC bindings** — ensures the platform-specific OXC parser binary is available for fast AST parsing. Falls back to Babel if unavailable.
-2. **Start language server** — spawns `@verter/language-server` as a child process communicating over IPC transport.
+2. **Start LSP binary** — spawns the Rust `verter-lsp` binary as a child process communicating over stdio.
 3. **Configure TypeScript plugin** — registers `@verter/typescript-plugin` with TypeScript so `.vue` imports are resolved in `.ts`/`.js` files.
 4. **Set up notification handlers** — listens for custom LSP notifications (statistics, diagnostics, etc.).
 
@@ -102,17 +102,17 @@ flowchart TD
 sequenceDiagram
     participant VSCode as VS Code
     participant Client as Language Client
-    participant Server as Language Server<br/>(child process)
+    participant Server as verter-lsp<br/>(Rust binary, stdio)
     participant TS as TypeScript Plugin
 
     VSCode->>Client: User opens .vue file
-    Client->>Server: textDocument/didOpen (IPC)
+    Client->>Server: textDocument/didOpen (stdio)
     Server->>Server: Parse SFC, run diagnostics
     Server-->>Client: textDocument/publishDiagnostics
     Client-->>VSCode: Display errors/warnings
 
     VSCode->>Client: User requests completions
-    Client->>Server: textDocument/completion (IPC)
+    Client->>Server: textDocument/completion (stdio)
     Server-->>Client: Completion items
     Client-->>VSCode: Show completions
 
@@ -176,7 +176,7 @@ pnpm --filter verter-vscode watch
 3. Press **F5** to launch the Extension Development Host.
 4. The extension activates in the new VS Code window with full debugging support (breakpoints, step-through, variable inspection).
 
-Alternatively, use `pnpm dev-extension` to watch-build the language server and extension simultaneously.
+Alternatively, use `pnpm dev-extension` to build the LSP binary and watch-build the extension.
 
 ### Packaging
 
@@ -197,8 +197,8 @@ pnpm --filter verter-vscode package
 
 | Dependency                  | Purpose                                                                |
 | --------------------------- | ---------------------------------------------------------------------- |
-| `@verter/language-server`   | LSP server providing completions, diagnostics, hover, go-to-definition |
-| `@verter/language-shared`   | Shared protocol types between extension client and language server     |
+| `verter-lsp` (Rust binary)  | LSP server providing completions, diagnostics, hover, go-to-definition (stdio) |
+| `@verter/language-shared`   | Shared custom protocol types between extension and LSP binary          |
 | `@verter/typescript-plugin` | TypeScript plugin for `.vue` import resolution in TS/JS files          |
 | `@verter/oxc-bindings`      | Platform-specific OXC parser binary management                         |
 | `vscode-languageclient`     | VS Code LSP client library                                             |

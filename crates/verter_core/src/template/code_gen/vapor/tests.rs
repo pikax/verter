@@ -763,6 +763,7 @@ fn single_static_element() {
         prop_flag: PropFlag::empty(),
         children_flag: ChildrenFlag::empty(),
         children_mode: ChildrenMode::TextOnlyStatic,
+        is_fully_static: false,
     };
 
     let text = TextNode {
@@ -852,6 +853,7 @@ fn inline_mode_uses_arrow_function() {
         prop_flag: PropFlag::empty(),
         children_flag: ChildrenFlag::empty(),
         children_mode: ChildrenMode::Empty,
+        is_fully_static: false,
     };
 
     gen.enter_template(&root, source, &mut out);
@@ -921,6 +923,7 @@ fn element_with_interpolation() {
         prop_flag: PropFlag::empty(),
         children_flag: ChildrenFlag::empty().add(ChildrenFlags::HasInterpolation),
         children_mode: ChildrenMode::TextOnlyDynamic,
+        is_fully_static: false,
     };
 
     let interp = InterpolationNode {
@@ -1021,5 +1024,179 @@ fn non_root_component_after_sibling() {
     assert!(
         result.contains(", null, 1, true)"),
         "Expected child index 1 for component after span, got: {result}"
+    );
+}
+
+// ==================== Phase 8: Named & scoped slots ====================
+
+/// @ai-generated — Named slot via <template #header>
+#[test]
+fn component_with_named_slot() {
+    let source =
+        "<template><my-comp><template #header><span>Header</span></template></my-comp></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("header: () => {"),
+        "Expected named slot 'header' closure, got: {result}"
+    );
+    assert!(
+        !result.contains("default: () => {"),
+        "Should not have default slot when only named slot is present, got: {result}"
+    );
+}
+
+/// @ai-generated — Multiple named slots
+#[test]
+fn component_with_multiple_named_slots() {
+    let source = "<template><my-comp><template #header><span>Header</span></template><template #footer><span>Footer</span></template></my-comp></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("header: () => {"),
+        "Expected named slot 'header', got: {result}"
+    );
+    assert!(
+        result.contains("footer: () => {"),
+        "Expected named slot 'footer', got: {result}"
+    );
+    assert!(
+        result.contains(", _: 2 }"),
+        "Expected slot flags, got: {result}"
+    );
+}
+
+/// @ai-generated — Named slot + implicit default slot from non-template children
+#[test]
+fn component_with_named_and_default_slots() {
+    let source = "<template><my-comp><template #header><span>Header</span></template><span>Default content</span></my-comp></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("header: () => {"),
+        "Expected named slot 'header', got: {result}"
+    );
+    assert!(
+        result.contains("default: () => {"),
+        "Expected implicit default slot, got: {result}"
+    );
+}
+
+/// @ai-generated — Scoped slot with destructured params
+#[test]
+fn component_with_scoped_slot() {
+    let source = "<template><my-comp><template #default=\"{ item }\"><span>{{ item }}</span></template></my-comp></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("default: ({ item }) => {"),
+        "Expected scoped default slot with params, got: {result}"
+    );
+}
+
+/// @ai-generated — Named scoped slot
+#[test]
+fn component_with_named_scoped_slot() {
+    let source = "<template><my-comp><template #header=\"{ title }\"><span>{{ title }}</span></template></my-comp></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("header: ({ title }) => {"),
+        "Expected scoped named slot 'header' with params, got: {result}"
+    );
+}
+
+/// @ai-generated — Bare v-slot (no name) defaults to "default"
+#[test]
+fn component_with_bare_v_slot() {
+    let source =
+        "<template><my-comp><template v-slot><span>Content</span></template></my-comp></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("default: () => {"),
+        "Expected bare v-slot to produce default slot, got: {result}"
+    );
+}
+
+/// @ai-generated — Slot name with hyphen gets quoted
+#[test]
+fn component_with_hyphenated_slot_name() {
+    let source = "<template><my-comp><template #my-slot><span>Content</span></template></my-comp></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("\"my-slot\": () => {"),
+        "Expected quoted hyphenated slot name, got: {result}"
+    );
+}
+
+// ==================== Phase 9: Built-in components ====================
+
+/// @ai-generated — Transition uses direct import, not _resolveComponent
+#[test]
+fn builtin_component_transition() {
+    let source = "<template><Transition name=\"fade\"><div>content</div></Transition></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("_Transition"),
+        "Expected _Transition helper, got: {result}"
+    );
+    assert!(
+        !result.contains("_resolveComponent"),
+        "Built-in should not use _resolveComponent, got: {result}"
+    );
+}
+
+/// @ai-generated — KeepAlive uses direct import
+#[test]
+fn builtin_component_keep_alive() {
+    let source = "<template><KeepAlive><div>content</div></KeepAlive></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("_KeepAlive"),
+        "Expected _KeepAlive helper, got: {result}"
+    );
+    assert!(
+        !result.contains("_resolveComponent"),
+        "Built-in should not use _resolveComponent, got: {result}"
+    );
+}
+
+/// @ai-generated — Teleport uses direct import
+#[test]
+fn builtin_component_teleport() {
+    let source = "<template><Teleport to=\"body\"><div>content</div></Teleport></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("_Teleport"),
+        "Expected _Teleport helper, got: {result}"
+    );
+    assert!(
+        !result.contains("_resolveComponent"),
+        "Built-in should not use _resolveComponent, got: {result}"
+    );
+}
+
+/// @ai-generated — Suspense uses direct import
+#[test]
+fn builtin_component_suspense() {
+    let source = "<template><Suspense><div>content</div></Suspense></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("_Suspense"),
+        "Expected _Suspense helper, got: {result}"
+    );
+    assert!(
+        !result.contains("_resolveComponent"),
+        "Built-in should not use _resolveComponent, got: {result}"
+    );
+}
+
+/// @ai-generated — kebab-case keep-alive resolves to built-in
+#[test]
+fn builtin_component_kebab_case_keep_alive() {
+    let source = "<template><keep-alive><div>content</div></keep-alive></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("_KeepAlive"),
+        "Expected _KeepAlive for kebab-case keep-alive, got: {result}"
+    );
+    assert!(
+        !result.contains("_resolveComponent"),
+        "Built-in should not use _resolveComponent, got: {result}"
     );
 }

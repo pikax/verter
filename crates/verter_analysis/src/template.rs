@@ -8,6 +8,7 @@
 //! - Linter rules (unused components, accessibility, etc.)
 
 use crate::types::ResolvedTypeInfo;
+use verter_span::Span;
 
 // =============================================================================
 // Core Template Analysis Snapshot
@@ -81,13 +82,11 @@ pub struct TemplateAnalysisSnapshot {
 // =============================================================================
 
 /// A component usage in a template with prop details.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TemplateComponentUsage {
     /// Component tag name (PascalCase normalized).
     pub name: String,
     /// Import source path if resolved from script imports (None for globals/unresolved).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_source: Option<String>,
     /// Whether this is a dynamic component (`<component :is="...">`).
     pub is_dynamic: bool,
@@ -96,17 +95,31 @@ pub struct TemplateComponentUsage {
     /// Whether `v-bind="obj"` spread was used.
     pub has_spread: bool,
     /// Slots used on this component (`<template #slotName>`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slots_used: Vec<String>,
-    /// Byte offset of component tag start in the SFC source.
-    pub span_start: u32,
-    /// Byte offset of component tag end in the SFC source.
-    pub span_end: u32,
+    /// Static class names from `class="foo bar"`.
+    pub static_classes: Vec<String>,
+    /// Whether `:class="..."` is present.
+    pub has_dynamic_class: bool,
+    /// Class names extracted from `:class` object syntax (e.g., `{ 'foo': cond }` → `["foo"]`).
+    /// These are conditional — the component may or may not receive these classes at runtime.
+    pub dynamic_classes: Vec<String>,
+    /// v-model directives used on this component.
+    pub v_models: Vec<TemplateComponentVModel>,
+    /// Byte span in SFC source.
+    pub span: Span,
+}
+
+/// A v-model directive used on a component in a template.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateComponentVModel {
+    /// The model property name (e.g., `"title"` for `v-model:title`, `"modelValue"` for `v-model`).
+    pub binding_name: String,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 /// A single prop passed to a component in a template.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TemplatePropUsage {
     /// Prop name (camelCase normalized from kebab-case).
     pub name: String,
@@ -115,10 +128,11 @@ pub struct TemplatePropUsage {
     /// Constness classification of the expression.
     pub constness: PropValueConstness,
     /// Bindings referenced in the prop expression.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub referenced_bindings: Vec<String>,
     /// If from v-bind spread, which object binding.
     pub from_spread: bool,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 /// How a prop value expression is classified at a call site.
@@ -142,15 +156,12 @@ pub enum PropValueConstness {
 
 /// A script binding referenced at a specific position in the template.
 /// Used for references, rename, and document highlights.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateBindingOccurrence {
     /// The binding name (matches a script `AnalyzedBinding.name`).
     pub name: String,
-    /// Byte offset in the SFC source where this occurrence starts.
-    pub span_start: u32,
-    /// Byte offset in the SFC source where this occurrence ends.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
     /// What kind of usage: interpolation, directive value, event handler, component tag.
     pub usage_kind: BindingUsageKind,
 }
@@ -174,15 +185,12 @@ pub enum BindingUsageKind {
 }
 
 /// An unresolved binding with its position.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedBinding {
     /// The binding name that couldn't be resolved.
     pub name: String,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 // =============================================================================
@@ -190,13 +198,16 @@ pub struct UnresolvedBinding {
 // =============================================================================
 
 /// A slot defined in this component's template.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefinedSlot {
     /// Slot name (`"default"`, `"header"`, etc.).
     pub name: String,
     /// Whether this is a scoped slot with bindings.
     pub has_bindings: bool,
+    /// Prop names from `:prop` bindings on the `<slot>` element.
+    pub binding_names: Vec<String>,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 // =============================================================================
@@ -220,16 +231,18 @@ pub struct TemplateRef {
 // =============================================================================
 
 /// An event handler in the template.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateEventHandler {
     /// Event name (`"click"`, `"input"`, etc.).
     pub event_name: String,
     /// Script binding name if simple handler.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handler_binding: Option<String>,
     /// Whether this is an inline expression (`@click="count++"` vs `@click="handleClick"`).
     pub is_inline: bool,
+    /// The tag name of the element this handler is on.
+    pub target_tag: String,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 // =============================================================================
@@ -237,69 +250,54 @@ pub struct TemplateEventHandler {
 // =============================================================================
 
 /// Full directive analysis for linter rules.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateDirective {
     /// Directive name (`"if"`, `"for"`, `"bind"`, `"on"`, `"model"`, `"show"`, `"html"`, `"slot"`).
     pub name: String,
     /// Raw directive name as written (`"@click"`, `":class"`, `"v-for"`).
     pub raw_name: String,
     /// Directive argument (e.g., `"click"` in `@click`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument: Option<String>,
     /// Directive modifiers (e.g., `["prevent"]` in `@click.prevent`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modifiers: Vec<String>,
     /// Expression value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 /// v-for analysis.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VForDirective {
     /// Iterator variable: `"item"` from `v-for="item in items"`.
     pub variable: String,
     /// Index variable: `"i"` from `(item, i) in items`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
     /// Iterable expression: `"items"`.
     pub iterable: String,
     /// Whether `:key` is present.
     pub has_key: bool,
     /// Key expression if present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_expression: Option<String>,
     /// Whether the key expression uses the index variable (common mistake).
     pub key_uses_index: bool,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 /// v-model analysis.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VModelDirective {
     /// Binding name (`"modelValue"` or custom argument).
     pub binding_name: String,
     /// Modifiers: `"lazy"`, `"number"`, `"trim"`, custom.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modifiers: Vec<String>,
     /// Whether the target is a component (vs native element).
     pub target_is_component: bool,
     /// The element/component tag name.
     pub target_tag: String,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 // =============================================================================
@@ -307,8 +305,7 @@ pub struct VModelDirective {
 // =============================================================================
 
 /// Element-level analysis for accessibility and HTML conformance.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TemplateElement {
     /// Tag name.
     pub tag: String,
@@ -323,10 +320,8 @@ pub struct TemplateElement {
     /// Directives on this element.
     pub directives: Vec<TemplateDirective>,
     /// v-for directive info (if present).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub v_for: Option<VForDirective>,
     /// v-model directive info (if present).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub v_model: Option<VModelDirective>,
     /// Whether v-if is present.
     pub has_v_if: bool,
@@ -340,16 +335,346 @@ pub struct TemplateElement {
     pub has_v_html: bool,
     /// Whether v-text is present.
     pub has_v_text: bool,
+    /// Whether this element has non-whitespace text or interpolation children.
+    /// Used by a11y rules to detect content (e.g., `<h1>text</h1>` has text content).
+    pub has_text_content: bool,
+    /// Whether this element has direct child elements (non-text, non-comment children).
+    /// Used by `no-child-content` rule to detect children alongside v-html/v-text.
+    pub has_element_children: bool,
     /// Nesting depth of this element in the template tree.
     pub nesting_depth: u16,
     /// Parent tag name (None for root elements).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_tag: Option<String>,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Index of the parent element in the `elements` vec. `None` for root elements.
+    pub parent_index: Option<u32>,
+    /// Class names extracted from `:class` object syntax (e.g., `{ 'foo': cond }` → `["foo"]`).
+    /// These are conditional — the element may or may not have these classes at runtime.
+    pub dynamic_classes: Vec<String>,
+    /// Byte span in SFC source.
+    pub span: Span,
+    /// Byte offset end of the opening tag only (`>` after attributes).
+    /// Use this for diagnostic squiggles — highlights just `<div class="x">`, not the whole element.
+    pub tag_span_end: u32,
 }
+
+impl TemplateElement {
+    /// Iterate over static class names from `class="foo bar"`.
+    pub fn static_classes(&self) -> impl Iterator<Item = &str> {
+        self.attributes
+            .iter()
+            .filter(|a| !a.is_dynamic && a.name == "class")
+            .flat_map(|a| a.value.as_deref().unwrap_or("").split_whitespace())
+    }
+
+    /// Get the static `id` attribute value if present.
+    pub fn static_id(&self) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|a| !a.is_dynamic && a.name == "id")
+            .and_then(|a| a.value.as_deref())
+    }
+}
+
+/// Extract class names from a `:class` binding expression (object syntax).
+///
+/// Handles common patterns:
+/// - `{ 'my-class': condition }` → `["my-class"]`
+/// - `{ active: isActive, 'text-bold': isBold }` → `["active", "text-bold"]`
+/// - `[{ foo: bar }, 'static']` → `["foo"]` (extracts from objects in arrays)
+///
+/// Returns empty vec for unparseable expressions (ternary, function calls, variables).
+pub fn extract_dynamic_class_names(expr: &str) -> Vec<String> {
+    extract_dynamic_class_names_rich(expr)
+        .into_iter()
+        .filter(|dcn| !dcn.is_partial)
+        .map(|dcn| dcn.name)
+        .collect()
+}
+
+/// Rich dynamic class name with offset and metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DynamicClassName {
+    /// The extracted class name (or prefix if partial).
+    pub name: String,
+    /// Byte offset within the expression where the class name text starts.
+    pub expr_offset: u32,
+    /// Whether this is conditional (vs always applied).
+    pub is_conditional: bool,
+    /// Whether this is a partial prefix from a template literal.
+    pub is_partial: bool,
+}
+
+/// Extract dynamic class names with rich metadata from a `:class` expression.
+///
+/// Handles:
+/// - Object syntax: `{ 'my-class': cond }` → class names from keys
+/// - Array syntax: `['foo', { bar: cond }]` → string literals + object keys
+/// - Ternary: `cond ? 'active' : 'inactive'` → both branch values
+/// - Logical: `cond && 'active'` → the string literal
+/// - Template literal keys: `` { `test-${foo}`: cond } `` → partial prefix
+pub fn extract_dynamic_class_names_rich(expr: &str) -> Vec<DynamicClassName> {
+    let trimmed = expr.trim();
+    let leading_ws = expr.len() - expr.trim_start().len();
+    if trimmed.starts_with('{') {
+        extract_object_class_keys_rich(trimmed, leading_ws)
+    } else if trimmed.starts_with('[') {
+        extract_array_class_keys_rich(trimmed, leading_ws)
+    } else {
+        // Ternary / logical expression at top level
+        extract_string_literals_from_expr(trimmed, leading_ws)
+    }
+}
+
+/// Extract rich class name info from object syntax `{ 'foo': cond, bar: cond2 }`.
+fn extract_object_class_keys_rich(expr: &str, base_offset: usize) -> Vec<DynamicClassName> {
+    let inner = expr.trim();
+    let brace_start = inner.find('{').unwrap_or(0);
+    let inner_content = &inner[brace_start + 1..];
+    let inner_content = inner_content.strip_suffix('}').unwrap_or(inner_content);
+    let content_offset = base_offset + brace_start + 1;
+
+    let mut results = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let bytes = inner_content.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        match bytes[i] {
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b'\'' | b'"' | b'`' if depth == 0 => {
+                let quote = bytes[i];
+                i += 1;
+                while i < len && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b',' if depth == 0 => {
+                if let Some(dcn) =
+                    extract_key_from_pair_rich(&inner_content[start..i], content_offset + start)
+                {
+                    results.push(dcn);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if start < len {
+        if let Some(dcn) =
+            extract_key_from_pair_rich(&inner_content[start..], content_offset + start)
+        {
+            results.push(dcn);
+        }
+    }
+    results
+}
+
+/// Extract key info from a single `key: value` pair with offset tracking.
+fn extract_key_from_pair_rich(pair: &str, pair_offset: usize) -> Option<DynamicClassName> {
+    let trimmed = pair.trim();
+    let trim_offset = pair.len() - pair.trim_start().len();
+    let abs_offset = pair_offset + trim_offset;
+    let bytes = trimmed.as_bytes();
+    let mut i = 0;
+    let len = bytes.len();
+    let mut colon_pos = None;
+    while i < len {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < len && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b':' => {
+                colon_pos = Some(i);
+                break;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let colon_pos = colon_pos?;
+    let key_part = trimmed[..colon_pos].trim();
+    let key_trim_offset = trimmed[..colon_pos].len() - trimmed[..colon_pos].trim_start().len();
+
+    if key_part.starts_with('`') && key_part.ends_with('`') {
+        // Template literal key — extract static prefix
+        let inner = &key_part[1..key_part.len() - 1];
+        if let Some(interp_start) = inner.find("${") {
+            let prefix = &inner[..interp_start];
+            if !prefix.is_empty() {
+                return Some(DynamicClassName {
+                    name: prefix.to_string(),
+                    expr_offset: (abs_offset + key_trim_offset + 1) as u32, // +1 for backtick
+                    is_conditional: true,
+                    is_partial: true,
+                });
+            }
+        }
+        // No interpolation — treat as regular string
+        let inner = &key_part[1..key_part.len() - 1];
+        return Some(DynamicClassName {
+            name: inner.to_string(),
+            expr_offset: (abs_offset + key_trim_offset + 1) as u32,
+            is_conditional: true,
+            is_partial: false,
+        });
+    }
+
+    if (key_part.starts_with('\'') && key_part.ends_with('\''))
+        || (key_part.starts_with('"') && key_part.ends_with('"'))
+    {
+        let name = key_part[1..key_part.len() - 1].to_string();
+        Some(DynamicClassName {
+            name,
+            expr_offset: (abs_offset + key_trim_offset + 1) as u32, // +1 for opening quote
+            is_conditional: true,
+            is_partial: false,
+        })
+    } else if key_part
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'$')
+        && !key_part.is_empty()
+    {
+        Some(DynamicClassName {
+            name: key_part.to_string(),
+            expr_offset: (abs_offset + key_trim_offset) as u32,
+            is_conditional: true,
+            is_partial: false,
+        })
+    } else {
+        None
+    }
+}
+
+/// Extract rich class names from array syntax `['foo', { bar: cond }, baz && 'qux']`.
+fn extract_array_class_keys_rich(expr: &str, base_offset: usize) -> Vec<DynamicClassName> {
+    let inner = expr.trim();
+    let bracket_start = inner.find('[').unwrap_or(0);
+    let inner_content = &inner[bracket_start + 1..];
+    let inner_content = inner_content.strip_suffix(']').unwrap_or(inner_content);
+    let content_offset = base_offset + bracket_start + 1;
+
+    let mut results = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let bytes = inner_content.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        match bytes[i] {
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => {
+                depth -= 1;
+            }
+            b'\'' | b'"' | b'`' if depth == 0 => {
+                let quote = bytes[i];
+                i += 1;
+                while i < len && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b',' if depth == 0 => {
+                results.extend(extract_array_element_rich(
+                    &inner_content[start..i],
+                    content_offset + start,
+                ));
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if start < len {
+        results.extend(extract_array_element_rich(
+            &inner_content[start..],
+            content_offset + start,
+        ));
+    }
+    results
+}
+
+/// Process a single array element: string literal, object, or expression with strings.
+fn extract_array_element_rich(elem: &str, elem_offset: usize) -> Vec<DynamicClassName> {
+    let trimmed = elem.trim();
+    let trim_offset = elem.len() - elem.trim_start().len();
+    let abs_offset = elem_offset + trim_offset;
+
+    if trimmed.starts_with('{') {
+        return extract_object_class_keys_rich(trimmed, abs_offset);
+    }
+
+    // Check for direct string literal: 'foo' or "foo"
+    if (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+        || (trimmed.starts_with('"') && trimmed.ends_with('"'))
+    {
+        let name = trimmed[1..trimmed.len() - 1].to_string();
+        if !name.is_empty() {
+            return vec![DynamicClassName {
+                name,
+                expr_offset: (abs_offset + 1) as u32,
+                is_conditional: false,
+                is_partial: false,
+            }];
+        }
+        return vec![];
+    }
+
+    // Expression containing string literals (ternary, logical, etc.)
+    extract_string_literals_from_expr(trimmed, abs_offset)
+}
+
+/// Extract string literals from expressions like `cond ? 'active' : 'inactive'`
+/// or `cond && 'active'`.
+fn extract_string_literals_from_expr(expr: &str, base_offset: usize) -> Vec<DynamicClassName> {
+    let mut results = Vec::new();
+    let bytes = expr.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'\'' || bytes[i] == b'"' {
+            let quote = bytes[i];
+            let str_start = i + 1;
+            i += 1;
+            while i < len && bytes[i] != quote {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if i < len {
+                let name = &expr[str_start..i];
+                if !name.is_empty() {
+                    results.push(DynamicClassName {
+                        name: name.to_string(),
+                        expr_offset: (base_offset + str_start) as u32,
+                        is_conditional: true,
+                        is_partial: false,
+                    });
+                }
+            }
+        }
+        i += 1;
+    }
+    results
+}
+
+// Old extract_object_class_keys, extract_key_from_pair, extract_array_class_keys
+// removed — all callers now use extract_dynamic_class_names_rich.
 
 /// Element namespace.
 #[derive(
@@ -364,20 +689,16 @@ pub enum ElementNamespace {
 }
 
 /// A template attribute (static or dynamic).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateAttribute {
     /// Attribute name.
     pub name: String,
     /// Attribute value (None if boolean attribute like `disabled`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// Whether this is a dynamic attribute (`:attr` vs `attr`).
     pub is_dynamic: bool,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 // =============================================================================
@@ -397,13 +718,11 @@ pub struct IfChain {
 // =============================================================================
 
 /// Props analysis enriched for linter.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedPropDefinition {
     /// Prop name.
     pub name: String,
     /// TypeScript type annotation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
     /// Whether this prop has a default value.
     pub has_default: bool,
@@ -415,15 +734,12 @@ pub struct AnalyzedPropDefinition {
     pub used_in_template: bool,
     /// Whether this prop is used in the script.
     pub used_in_script: bool,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 /// Emit analysis.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedEmitDefinition {
     /// Event name.
     pub event_name: String,
@@ -432,12 +748,9 @@ pub struct AnalyzedEmitDefinition {
     /// Whether this emit is declared in defineEmits (vs ad-hoc `emit()`).
     pub is_declared: bool,
     /// Locations where this event is actually emitted: `(span_start, span_end)`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emit_locations: Vec<(u32, u32)>,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 // =============================================================================
@@ -445,18 +758,14 @@ pub struct AnalyzedEmitDefinition {
 // =============================================================================
 
 /// A comment directive for linter control.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentDirective {
     /// Directive kind.
     pub kind: CommentDirectiveKind,
     /// Optional message or rule name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
     /// Whether this directive affects the next line only.
     pub affects_next_line: bool,
 }
@@ -481,6 +790,9 @@ pub enum CommentDirectiveKind {
     IgnoreStart,
     /// `@verter:ignore-end`
     IgnoreEnd,
+    /// `@verter:level(warn|error|off)` — override severity for the next line.
+    /// The `message` field contains `"warn"`, `"error"`, or `"off"`.
+    Level,
 }
 
 // =============================================================================
@@ -506,13 +818,10 @@ pub struct TemplateTypeEnhancements {
 }
 
 /// A type mismatch detected by the type checker.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeMismatch {
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
     /// Expected type.
     pub expected: String,
     /// Actual type.
@@ -528,50 +837,36 @@ pub struct TypeMismatch {
 /// Vue macro analysis -- rich data for each macro call.
 /// Tracks defineProps, defineEmits, defineModel, defineSlots, defineExpose,
 /// defineOptions, withDefaults and their type-level and runtime arguments.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnalyzedMacroUsage {
     /// Which macro was called.
     pub kind: MacroKind,
     /// Whether this macro uses type-based syntax.
     pub is_type_based: bool,
     /// Type parameter content (e.g., the `{ msg: string }` in `defineProps<{ msg: string }>()`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_param: Option<String>,
     /// Runtime argument content (e.g., the `['click']` in `defineEmits(['click'])`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_arg: Option<String>,
     /// Binding name if assigned (e.g., `props` in `const props = defineProps()`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_name: Option<String>,
     /// For defineProps: extracted prop definitions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub props: Option<Vec<AnalyzedPropDefinition>>,
     /// For defineEmits: extracted emit definitions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emits: Option<Vec<AnalyzedEmitDefinition>>,
     /// For defineModel: model name + type.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
     /// For defineSlots: slot definitions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slots: Option<Vec<DefinedSlot>>,
     /// For defineExpose: exposed bindings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposed: Option<Vec<String>>,
     /// For withDefaults: default values per prop.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<rustc_hash::FxHashMap<String, String>>,
     /// Type references for cross-file resolution.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub type_references: Vec<String>,
     /// TODO(type-provider): Enhanced type info from TSGO.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_enhancement: Option<ResolvedTypeInfo>,
-    /// Byte offset start.
-    pub span_start: u32,
-    /// Byte offset end.
-    pub span_end: u32,
+    /// Byte span in SFC source.
+    pub span: Span,
 }
 
 /// Macro kind for enriched macro usage.
@@ -590,6 +885,902 @@ pub enum MacroKind {
 // =============================================================================
 // Tests
 // =============================================================================
+
+// =============================================================================
+// Custom Serialize/Deserialize impls (preserves spanStart/spanEnd JSON keys)
+// =============================================================================
+
+impl serde::Serialize for TemplateComponentUsage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", &self.name)?;
+        if self.import_source.is_some() {
+            map.serialize_entry("importSource", &self.import_source)?;
+        }
+        map.serialize_entry("isDynamic", &self.is_dynamic)?;
+        if !self.props.is_empty() {
+            map.serialize_entry("props", &self.props)?;
+        }
+        map.serialize_entry("hasSpread", &self.has_spread)?;
+        if !self.slots_used.is_empty() {
+            map.serialize_entry("slotsUsed", &self.slots_used)?;
+        }
+        if !self.static_classes.is_empty() {
+            map.serialize_entry("staticClasses", &self.static_classes)?;
+        }
+        map.serialize_entry("hasDynamicClass", &self.has_dynamic_class)?;
+        if !self.dynamic_classes.is_empty() {
+            map.serialize_entry("dynamicClasses", &self.dynamic_classes)?;
+        }
+        if !self.v_models.is_empty() {
+            map.serialize_entry("vModels", &self.v_models)?;
+        }
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TemplateComponentUsage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            #[serde(default)]
+            import_source: Option<String>,
+            #[serde(default)]
+            is_dynamic: bool,
+            #[serde(default)]
+            props: Vec<TemplatePropUsage>,
+            #[serde(default)]
+            has_spread: bool,
+            #[serde(default)]
+            slots_used: Vec<String>,
+            #[serde(default)]
+            static_classes: Vec<String>,
+            #[serde(default)]
+            has_dynamic_class: bool,
+            #[serde(default)]
+            dynamic_classes: Vec<String>,
+            #[serde(default)]
+            v_models: Vec<TemplateComponentVModel>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            import_source: w.import_source,
+            is_dynamic: w.is_dynamic,
+            props: w.props,
+            has_spread: w.has_spread,
+            slots_used: w.slots_used,
+            static_classes: w.static_classes,
+            has_dynamic_class: w.has_dynamic_class,
+            dynamic_classes: w.dynamic_classes,
+            v_models: w.v_models,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for TemplateComponentVModel {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("bindingName", &self.binding_name)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TemplateComponentVModel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            binding_name: String,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            binding_name: w.binding_name,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for TemplatePropUsage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("isBound", &self.is_bound)?;
+        map.serialize_entry("constness", &self.constness)?;
+        if !self.referenced_bindings.is_empty() {
+            map.serialize_entry("referencedBindings", &self.referenced_bindings)?;
+        }
+        map.serialize_entry("fromSpread", &self.from_spread)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TemplatePropUsage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            #[serde(default)]
+            is_bound: bool,
+            constness: PropValueConstness,
+            #[serde(default)]
+            referenced_bindings: Vec<String>,
+            #[serde(default)]
+            from_spread: bool,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            is_bound: w.is_bound,
+            constness: w.constness,
+            referenced_bindings: w.referenced_bindings,
+            from_spread: w.from_spread,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for TemplateBindingOccurrence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.serialize_entry("usageKind", &self.usage_kind)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TemplateBindingOccurrence {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+            usage_kind: BindingUsageKind,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            span: Span::new(w.span_start, w.span_end),
+            usage_kind: w.usage_kind,
+        })
+    }
+}
+
+impl serde::Serialize for UnresolvedBinding {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for UnresolvedBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for DefinedSlot {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("hasBindings", &self.has_bindings)?;
+        if !self.binding_names.is_empty() {
+            map.serialize_entry("bindingNames", &self.binding_names)?;
+        }
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DefinedSlot {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            #[serde(default)]
+            has_bindings: bool,
+            #[serde(default)]
+            binding_names: Vec<String>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            has_bindings: w.has_bindings,
+            binding_names: w.binding_names,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for TemplateEventHandler {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("eventName", &self.event_name)?;
+        if self.handler_binding.is_some() {
+            map.serialize_entry("handlerBinding", &self.handler_binding)?;
+        }
+        map.serialize_entry("isInline", &self.is_inline)?;
+        map.serialize_entry("targetTag", &self.target_tag)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TemplateEventHandler {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            event_name: String,
+            #[serde(default)]
+            handler_binding: Option<String>,
+            #[serde(default)]
+            is_inline: bool,
+            target_tag: String,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            event_name: w.event_name,
+            handler_binding: w.handler_binding,
+            is_inline: w.is_inline,
+            target_tag: w.target_tag,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for TemplateDirective {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("rawName", &self.raw_name)?;
+        if self.argument.is_some() {
+            map.serialize_entry("argument", &self.argument)?;
+        }
+        if !self.modifiers.is_empty() {
+            map.serialize_entry("modifiers", &self.modifiers)?;
+        }
+        if self.expression.is_some() {
+            map.serialize_entry("expression", &self.expression)?;
+        }
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TemplateDirective {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            raw_name: String,
+            #[serde(default)]
+            argument: Option<String>,
+            #[serde(default)]
+            modifiers: Vec<String>,
+            #[serde(default)]
+            expression: Option<String>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            raw_name: w.raw_name,
+            argument: w.argument,
+            modifiers: w.modifiers,
+            expression: w.expression,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for VForDirective {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("variable", &self.variable)?;
+        if self.index.is_some() {
+            map.serialize_entry("index", &self.index)?;
+        }
+        map.serialize_entry("iterable", &self.iterable)?;
+        map.serialize_entry("hasKey", &self.has_key)?;
+        if self.key_expression.is_some() {
+            map.serialize_entry("keyExpression", &self.key_expression)?;
+        }
+        map.serialize_entry("keyUsesIndex", &self.key_uses_index)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for VForDirective {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            variable: String,
+            #[serde(default)]
+            index: Option<String>,
+            iterable: String,
+            #[serde(default)]
+            has_key: bool,
+            #[serde(default)]
+            key_expression: Option<String>,
+            #[serde(default)]
+            key_uses_index: bool,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            variable: w.variable,
+            index: w.index,
+            iterable: w.iterable,
+            has_key: w.has_key,
+            key_expression: w.key_expression,
+            key_uses_index: w.key_uses_index,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for VModelDirective {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("bindingName", &self.binding_name)?;
+        if !self.modifiers.is_empty() {
+            map.serialize_entry("modifiers", &self.modifiers)?;
+        }
+        map.serialize_entry("targetIsComponent", &self.target_is_component)?;
+        map.serialize_entry("targetTag", &self.target_tag)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for VModelDirective {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            binding_name: String,
+            #[serde(default)]
+            modifiers: Vec<String>,
+            #[serde(default)]
+            target_is_component: bool,
+            target_tag: String,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            binding_name: w.binding_name,
+            modifiers: w.modifiers,
+            target_is_component: w.target_is_component,
+            target_tag: w.target_tag,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for TemplateElement {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("tag", &self.tag)?;
+        map.serialize_entry("isComponent", &self.is_component)?;
+        map.serialize_entry("isSelfClosing", &self.is_self_closing)?;
+        map.serialize_entry("namespace", &self.namespace)?;
+        if !self.attributes.is_empty() {
+            map.serialize_entry("attributes", &self.attributes)?;
+        }
+        if !self.directives.is_empty() {
+            map.serialize_entry("directives", &self.directives)?;
+        }
+        if self.v_for.is_some() {
+            map.serialize_entry("vFor", &self.v_for)?;
+        }
+        if self.v_model.is_some() {
+            map.serialize_entry("vModel", &self.v_model)?;
+        }
+        map.serialize_entry("hasVIf", &self.has_v_if)?;
+        map.serialize_entry("hasVElse", &self.has_v_else)?;
+        map.serialize_entry("hasVElseIf", &self.has_v_else_if)?;
+        map.serialize_entry("hasVShow", &self.has_v_show)?;
+        map.serialize_entry("hasVHtml", &self.has_v_html)?;
+        map.serialize_entry("hasVText", &self.has_v_text)?;
+        map.serialize_entry("hasTextContent", &self.has_text_content)?;
+        if self.has_element_children {
+            map.serialize_entry("hasElementChildren", &self.has_element_children)?;
+        }
+        map.serialize_entry("nestingDepth", &self.nesting_depth)?;
+        if self.parent_tag.is_some() {
+            map.serialize_entry("parentTag", &self.parent_tag)?;
+        }
+        if self.parent_index.is_some() {
+            map.serialize_entry("parentIndex", &self.parent_index)?;
+        }
+        if !self.dynamic_classes.is_empty() {
+            map.serialize_entry("dynamicClasses", &self.dynamic_classes)?;
+        }
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        if self.tag_span_end != 0 {
+            map.serialize_entry("tagSpanEnd", &self.tag_span_end)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TemplateElement {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            tag: String,
+            #[serde(default)]
+            is_component: bool,
+            #[serde(default)]
+            is_self_closing: bool,
+            #[serde(default)]
+            namespace: ElementNamespace,
+            #[serde(default)]
+            attributes: Vec<TemplateAttribute>,
+            #[serde(default)]
+            directives: Vec<TemplateDirective>,
+            #[serde(default)]
+            v_for: Option<VForDirective>,
+            #[serde(default)]
+            v_model: Option<VModelDirective>,
+            #[serde(default)]
+            has_v_if: bool,
+            #[serde(default)]
+            has_v_else: bool,
+            #[serde(default)]
+            has_v_else_if: bool,
+            #[serde(default)]
+            has_v_show: bool,
+            #[serde(default)]
+            has_v_html: bool,
+            #[serde(default)]
+            has_v_text: bool,
+            #[serde(default)]
+            has_text_content: bool,
+            #[serde(default)]
+            has_element_children: bool,
+            #[serde(default)]
+            nesting_depth: u16,
+            #[serde(default)]
+            parent_tag: Option<String>,
+            #[serde(default)]
+            parent_index: Option<u32>,
+            #[serde(default)]
+            dynamic_classes: Vec<String>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+            #[serde(default)]
+            tag_span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            tag: w.tag,
+            is_component: w.is_component,
+            is_self_closing: w.is_self_closing,
+            namespace: w.namespace,
+            attributes: w.attributes,
+            directives: w.directives,
+            v_for: w.v_for,
+            v_model: w.v_model,
+            has_v_if: w.has_v_if,
+            has_v_else: w.has_v_else,
+            has_v_else_if: w.has_v_else_if,
+            has_v_show: w.has_v_show,
+            has_v_html: w.has_v_html,
+            has_v_text: w.has_v_text,
+            has_text_content: w.has_text_content,
+            has_element_children: w.has_element_children,
+            nesting_depth: w.nesting_depth,
+            parent_tag: w.parent_tag,
+            parent_index: w.parent_index,
+            dynamic_classes: w.dynamic_classes,
+            span: Span::new(w.span_start, w.span_end),
+            tag_span_end: w.tag_span_end,
+        })
+    }
+}
+
+impl serde::Serialize for TemplateAttribute {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", &self.name)?;
+        if self.value.is_some() {
+            map.serialize_entry("value", &self.value)?;
+        }
+        map.serialize_entry("isDynamic", &self.is_dynamic)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TemplateAttribute {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            #[serde(default)]
+            value: Option<String>,
+            #[serde(default)]
+            is_dynamic: bool,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            value: w.value,
+            is_dynamic: w.is_dynamic,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for AnalyzedPropDefinition {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", &self.name)?;
+        if self.type_annotation.is_some() {
+            map.serialize_entry("typeAnnotation", &self.type_annotation)?;
+        }
+        map.serialize_entry("hasDefault", &self.has_default)?;
+        map.serialize_entry("isRequired", &self.is_required)?;
+        map.serialize_entry("isBoolean", &self.is_boolean)?;
+        map.serialize_entry("usedInTemplate", &self.used_in_template)?;
+        map.serialize_entry("usedInScript", &self.used_in_script)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnalyzedPropDefinition {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            #[serde(default)]
+            type_annotation: Option<String>,
+            #[serde(default)]
+            has_default: bool,
+            #[serde(default)]
+            is_required: bool,
+            #[serde(default)]
+            is_boolean: bool,
+            #[serde(default)]
+            used_in_template: bool,
+            #[serde(default)]
+            used_in_script: bool,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            type_annotation: w.type_annotation,
+            has_default: w.has_default,
+            is_required: w.is_required,
+            is_boolean: w.is_boolean,
+            used_in_template: w.used_in_template,
+            used_in_script: w.used_in_script,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for AnalyzedEmitDefinition {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("eventName", &self.event_name)?;
+        map.serialize_entry("hasValidator", &self.has_validator)?;
+        map.serialize_entry("isDeclared", &self.is_declared)?;
+        if !self.emit_locations.is_empty() {
+            map.serialize_entry("emitLocations", &self.emit_locations)?;
+        }
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnalyzedEmitDefinition {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            event_name: String,
+            #[serde(default)]
+            has_validator: bool,
+            #[serde(default)]
+            is_declared: bool,
+            #[serde(default)]
+            emit_locations: Vec<(u32, u32)>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            event_name: w.event_name,
+            has_validator: w.has_validator,
+            is_declared: w.is_declared,
+            emit_locations: w.emit_locations,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for CommentDirective {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("kind", &self.kind)?;
+        if self.message.is_some() {
+            map.serialize_entry("message", &self.message)?;
+        }
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.serialize_entry("affectsNextLine", &self.affects_next_line)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CommentDirective {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            kind: CommentDirectiveKind,
+            #[serde(default)]
+            message: Option<String>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+            #[serde(default)]
+            affects_next_line: bool,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            kind: w.kind,
+            message: w.message,
+            span: Span::new(w.span_start, w.span_end),
+            affects_next_line: w.affects_next_line,
+        })
+    }
+}
+
+impl serde::Serialize for TypeMismatch {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.serialize_entry("expected", &self.expected)?;
+        map.serialize_entry("actual", &self.actual)?;
+        map.serialize_entry("message", &self.message)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TypeMismatch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+            expected: String,
+            actual: String,
+            message: String,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            span: Span::new(w.span_start, w.span_end),
+            expected: w.expected,
+            actual: w.actual,
+            message: w.message,
+        })
+    }
+}
+
+impl serde::Serialize for AnalyzedMacroUsage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("kind", &self.kind)?;
+        map.serialize_entry("isTypeBased", &self.is_type_based)?;
+        if self.type_param.is_some() {
+            map.serialize_entry("typeParam", &self.type_param)?;
+        }
+        if self.runtime_arg.is_some() {
+            map.serialize_entry("runtimeArg", &self.runtime_arg)?;
+        }
+        if self.binding_name.is_some() {
+            map.serialize_entry("bindingName", &self.binding_name)?;
+        }
+        if self.props.is_some() {
+            map.serialize_entry("props", &self.props)?;
+        }
+        if self.emits.is_some() {
+            map.serialize_entry("emits", &self.emits)?;
+        }
+        if self.model_name.is_some() {
+            map.serialize_entry("modelName", &self.model_name)?;
+        }
+        if self.slots.is_some() {
+            map.serialize_entry("slots", &self.slots)?;
+        }
+        if self.exposed.is_some() {
+            map.serialize_entry("exposed", &self.exposed)?;
+        }
+        if self.defaults.is_some() {
+            map.serialize_entry("defaults", &self.defaults)?;
+        }
+        if !self.type_references.is_empty() {
+            map.serialize_entry("typeReferences", &self.type_references)?;
+        }
+        if self.type_enhancement.is_some() {
+            map.serialize_entry("typeEnhancement", &self.type_enhancement)?;
+        }
+        map.serialize_entry("spanStart", &self.span.start)?;
+        map.serialize_entry("spanEnd", &self.span.end)?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnalyzedMacroUsage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            kind: MacroKind,
+            #[serde(default)]
+            is_type_based: bool,
+            #[serde(default)]
+            type_param: Option<String>,
+            #[serde(default)]
+            runtime_arg: Option<String>,
+            #[serde(default)]
+            binding_name: Option<String>,
+            #[serde(default)]
+            props: Option<Vec<AnalyzedPropDefinition>>,
+            #[serde(default)]
+            emits: Option<Vec<AnalyzedEmitDefinition>>,
+            #[serde(default)]
+            model_name: Option<String>,
+            #[serde(default)]
+            slots: Option<Vec<DefinedSlot>>,
+            #[serde(default)]
+            exposed: Option<Vec<String>>,
+            #[serde(default)]
+            defaults: Option<rustc_hash::FxHashMap<String, String>>,
+            #[serde(default)]
+            type_references: Vec<String>,
+            #[serde(default)]
+            type_enhancement: Option<ResolvedTypeInfo>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            kind: w.kind,
+            is_type_based: w.is_type_based,
+            type_param: w.type_param,
+            runtime_arg: w.runtime_arg,
+            binding_name: w.binding_name,
+            props: w.props,
+            emits: w.emits,
+            model_name: w.model_name,
+            slots: w.slots,
+            exposed: w.exposed,
+            defaults: w.defaults,
+            type_references: w.type_references,
+            type_enhancement: w.type_enhancement,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -626,26 +1817,30 @@ mod tests {
                     constness: PropValueConstness::Const,
                     referenced_bindings: vec![],
                     from_spread: false,
+                    span: Span::new(0, 0),
                 }],
                 has_spread: false,
                 slots_used: vec!["default".to_string()],
-                span_start: 10,
-                span_end: 50,
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_classes: vec![],
+                v_models: vec![],
+                span: Span::new(10, 50),
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {
                 name: "count".to_string(),
-                span_start: 20,
-                span_end: 25,
+                span: Span::new(20, 25),
                 usage_kind: BindingUsageKind::Interpolation,
             }],
             unresolved_bindings: vec![UnresolvedBinding {
                 name: "unknown".to_string(),
-                span_start: 30,
-                span_end: 37,
+                span: Span::new(30, 37),
             }],
             defined_slots: vec![DefinedSlot {
                 name: "header".to_string(),
                 has_bindings: true,
+                binding_names: vec![],
+                span: Span::new(0, 0),
             }],
             template_refs: vec![TemplateRef {
                 name: "myEl".to_string(),
@@ -656,6 +1851,8 @@ mod tests {
                 event_name: "click".to_string(),
                 handler_binding: Some("handleClick".to_string()),
                 is_inline: false,
+                target_tag: "div".to_string(),
+                span: Span::new(0, 0),
             }],
             ..Default::default()
         };
@@ -690,8 +1887,7 @@ mod tests {
                 name: "class".to_string(),
                 value: Some("container".to_string()),
                 is_dynamic: false,
-                span_start: 0,
-                span_end: 20,
+                span: Span::new(0, 20),
             }],
             directives: vec![TemplateDirective {
                 name: "if".to_string(),
@@ -699,8 +1895,7 @@ mod tests {
                 argument: None,
                 modifiers: vec![],
                 expression: Some("visible".to_string()),
-                span_start: 21,
-                span_end: 35,
+                span: Span::new(21, 35),
             }],
             v_for: None,
             v_model: None,
@@ -710,10 +1905,14 @@ mod tests {
             has_v_show: false,
             has_v_html: false,
             has_v_text: false,
+            has_text_content: false,
+            has_element_children: false,
             nesting_depth: 1,
             parent_tag: None,
-            span_start: 0,
-            span_end: 50,
+            parent_index: None,
+            dynamic_classes: vec![],
+            span: Span::new(0, 50),
+            tag_span_end: 50,
         };
 
         let json = serde_json::to_string(&element).expect("serialize");
@@ -731,8 +1930,7 @@ mod tests {
             has_key: true,
             key_expression: Some("item.id".to_string()),
             key_uses_index: false,
-            span_start: 0,
-            span_end: 30,
+            span: Span::new(0, 30),
         };
 
         let json = serde_json::to_string(&v_for).expect("serialize");
@@ -748,8 +1946,7 @@ mod tests {
             modifiers: vec!["lazy".to_string(), "trim".to_string()],
             target_is_component: false,
             target_tag: "input".to_string(),
-            span_start: 0,
-            span_end: 25,
+            span: Span::new(0, 25),
         };
 
         let json = serde_json::to_string(&v_model).expect("serialize");
@@ -763,8 +1960,7 @@ mod tests {
         let directive = CommentDirective {
             kind: CommentDirectiveKind::Disable,
             message: Some("no-v-html".to_string()),
-            span_start: 0,
-            span_end: 40,
+            span: Span::new(0, 40),
             affects_next_line: false,
         };
 
@@ -790,8 +1986,7 @@ mod tests {
                 is_boolean: false,
                 used_in_template: true,
                 used_in_script: false,
-                span_start: 5,
-                span_end: 16,
+                span: Span::new(5, 16),
             }]),
             emits: None,
             model_name: None,
@@ -800,8 +1995,7 @@ mod tests {
             defaults: None,
             type_references: vec!["Props".to_string()],
             type_enhancement: None,
-            span_start: 0,
-            span_end: 50,
+            span: Span::new(0, 50),
         };
 
         let json = serde_json::to_string(&usage).expect("serialize");
@@ -859,8 +2053,11 @@ mod tests {
             props: vec![],
             has_spread: false,
             slots_used: vec![],
-            span_start: 0,
-            span_end: 30,
+            static_classes: vec![],
+            has_dynamic_class: false,
+            dynamic_classes: vec![],
+            v_models: vec![],
+            span: Span::new(0, 30),
         };
 
         assert!(component.is_dynamic);
@@ -876,9 +2073,134 @@ mod tests {
             constness: PropValueConstness::Unknown,
             referenced_bindings: vec!["obj".to_string()],
             from_spread: true,
+            span: Span::new(0, 0),
         };
 
         assert!(prop.from_spread);
         assert_eq!(prop.constness, PropValueConstness::Unknown);
+    }
+
+    #[test]
+    fn extract_dynamic_classes_object_syntax() {
+        let result = extract_dynamic_class_names("{ 'my-class': isFoo, active: isActive }");
+        assert_eq!(result, vec!["my-class", "active"]);
+    }
+
+    #[test]
+    fn extract_dynamic_classes_quoted_keys() {
+        let result = extract_dynamic_class_names(r#"{ "text-bold": isBold, 'text-red': isRed }"#);
+        assert_eq!(result, vec!["text-bold", "text-red"]);
+    }
+
+    #[test]
+    fn extract_dynamic_classes_bare_identifiers() {
+        let result = extract_dynamic_class_names("{ active: isActive, disabled: isDisabled }");
+        assert_eq!(result, vec!["active", "disabled"]);
+    }
+
+    #[test]
+    fn extract_dynamic_classes_array_with_objects() {
+        let result = extract_dynamic_class_names("[{ foo: bar }, 'static']");
+        assert_eq!(result, vec!["foo", "static"]);
+    }
+
+    #[test]
+    fn extract_dynamic_classes_variable_returns_empty() {
+        let result = extract_dynamic_class_names("myClasses");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_dynamic_classes_ternary() {
+        let result = extract_dynamic_class_names("isActive ? 'active' : 'inactive'");
+        assert_eq!(result, vec!["active", "inactive"]);
+    }
+
+    #[test]
+    fn extract_dynamic_classes_nested_value() {
+        // The value expression can be complex but we only care about keys
+        let result = extract_dynamic_class_names(
+            "{ highlighted: items.length > 0, 'fade-in': show && ready }",
+        );
+        assert_eq!(result, vec!["highlighted", "fade-in"]);
+    }
+
+    #[test]
+    fn extract_dynamic_classes_empty_object() {
+        let result = extract_dynamic_class_names("{}");
+        assert!(result.is_empty());
+    }
+
+    // =========================================================================
+    // Rich dynamic class extraction tests (A0b)
+    // =========================================================================
+
+    /// @ai-generated - Array string literals extracted with offsets
+    #[test]
+    fn extract_rich_array_string_literals() {
+        let result = extract_dynamic_class_names_rich("['foo', isLoading && 'bar']");
+        let names: Vec<&str> = result.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["foo", "bar"]);
+        assert!(!result[0].is_partial);
+        assert!(!result[0].is_conditional); // direct string literal
+        assert!(result[1].is_conditional); // conditional from &&
+    }
+
+    /// @ai-generated - Ternary expressions extract both branches
+    #[test]
+    fn extract_rich_ternary() {
+        let result = extract_dynamic_class_names_rich("isActive ? 'active' : 'inactive'");
+        let names: Vec<&str> = result.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["active", "inactive"]);
+        assert!(result.iter().all(|d| d.is_conditional));
+        assert!(result.iter().all(|d| !d.is_partial));
+    }
+
+    /// @ai-generated - Template literal key extracts partial prefix
+    #[test]
+    fn extract_rich_template_literal_prefix() {
+        let result = extract_dynamic_class_names_rich("{ `test-${foo}`: cond }");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "test-");
+        assert!(result[0].is_partial);
+        assert!(result[0].is_conditional);
+    }
+
+    /// @ai-generated - Mixed array with objects, strings, and logical expressions
+    #[test]
+    fn extract_rich_mixed_array() {
+        let result = extract_dynamic_class_names_rich("['foo', { bar: cond }, baz && 'qux']");
+        let names: Vec<&str> = result.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["foo", "bar", "qux"]);
+    }
+
+    /// @ai-generated - Backward compat: extract_dynamic_class_names delegates to rich
+    #[test]
+    fn extract_dynamic_classes_backward_compat() {
+        // Object syntax still works
+        let result = extract_dynamic_class_names("{ active: cond }");
+        assert_eq!(result, vec!["active"]);
+        // Ternary now works via rich path
+        let result = extract_dynamic_class_names("cond ? 'a' : 'b'");
+        assert_eq!(result, vec!["a", "b"]);
+        // Partial prefixes are filtered out
+        let result = extract_dynamic_class_names("{ `test-${foo}`: cond }");
+        assert!(result.is_empty());
+    }
+
+    /// @ai-generated - expr_offset values are correct for object keys
+    #[test]
+    fn extract_rich_offsets_correct() {
+        // "{ 'bar': cond }" — 'bar' starts at offset 3 (after "{ '")
+        let expr = "{ 'bar': cond }";
+        let result = extract_dynamic_class_names_rich(expr);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "bar");
+        let offset = result[0].expr_offset as usize;
+        assert_eq!(
+            &expr[offset..offset + 3],
+            "bar",
+            "offset should point to 'bar' text"
+        );
     }
 }

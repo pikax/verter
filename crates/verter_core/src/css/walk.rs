@@ -89,6 +89,14 @@ pub fn walk_and_transform_selectors(
                 }
                 last_block_end = output.len();
             }
+            // Track semicolons inside blocks for CSS nesting support.
+            // Declarations end with ';', so updating last_block_end here
+            // ensures nested selectors (e.g. `& .child`) are correctly
+            // isolated from preceding declarations.
+            ';' if !in_string && !in_comment && brace_depth > 0 => {
+                output.push(c);
+                last_block_end = output.len();
+            }
             // Handle rule blocks
             '{' if !in_string => {
                 let selector_end = output.len();
@@ -339,6 +347,81 @@ mod tests {
         assert!(
             !result.contains("from[scoped]"),
             "from should not be transformed. Got: {}",
+            result
+        );
+    }
+
+    // ===================================================================
+    // @ai-generated - CSS nesting tests
+    // ===================================================================
+
+    /// Nested selectors with `&` must be found by the walker.
+    #[test]
+    fn css_nesting_nested_selectors_found() {
+        let css = ".parent { color: red; & .child { color: blue; } }";
+        let selectors = collect_selectors(css);
+        assert_eq!(selectors, vec![".parent", "& .child"]);
+    }
+
+    /// Multiple nested selectors in one block.
+    #[test]
+    fn css_nesting_multiple_nested_selectors() {
+        let css = ".parent { color: red; & .a { } & .b { } }";
+        let selectors = collect_selectors(css);
+        assert_eq!(selectors, vec![".parent", "& .a", "& .b"]);
+    }
+
+    /// Nested selector with `&:hover` pseudo-class.
+    #[test]
+    fn css_nesting_pseudo_class() {
+        let css = ".btn { color: red; &:hover { color: blue; } }";
+        let selectors = collect_selectors(css);
+        assert_eq!(selectors, vec![".btn", "&:hover"]);
+    }
+
+    /// Nested selector with `&.modifier` (no space).
+    #[test]
+    fn css_nesting_modifier() {
+        let css = ".card { padding: 1rem; &.active { border: 1px solid; } }";
+        let selectors = collect_selectors(css);
+        assert_eq!(selectors, vec![".card", "&.active"]);
+    }
+
+    /// Deeply nested CSS (nesting within nesting).
+    #[test]
+    fn css_nesting_deep() {
+        let css = ".a { color: red; & .b { font-size: 14px; & .c { margin: 0; } } }";
+        let selectors = collect_selectors(css);
+        assert_eq!(selectors, vec![".a", "& .b", "& .c"]);
+    }
+
+    /// Nested selectors inside @media.
+    #[test]
+    fn css_nesting_inside_media() {
+        let css =
+            "@media (max-width: 768px) { .parent { color: red; & .child { display: none; } } }";
+        let selectors = collect_selectors(css);
+        assert_eq!(selectors, vec![".parent", "& .child"]);
+    }
+
+    /// Declarations should be preserved in output, not treated as selectors.
+    #[test]
+    fn css_nesting_declarations_preserved() {
+        let css = ".parent { color: red; font-size: 14px; & .child { color: blue; } }";
+        let result = walk_and_transform_selectors(css, |sel| format!("{}[s]", sel));
+        assert!(
+            result.contains("color: red"),
+            "Declaration must be preserved. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("font-size: 14px"),
+            "Declaration must be preserved. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("& .child[s]"),
+            "Nested selector must be transformed. Got: {}",
             result
         );
     }

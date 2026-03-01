@@ -8,13 +8,13 @@
 //! The main entry point is [`process_element_leave`], called from
 //! `VdomCodeGen::leave_element` after all children have been visited.
 
-use crate::ast::types::{ChildrenMode, ElementNode};
+use crate::ast::types::{ChildrenMode, ElementNode, TemplateAst};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::vapor::find_prop_oxc_exp;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
 use crate::template::oxc::types::{ExpressionFlag, OxcParsedElement, OxcParsedExpression};
 
-use super::super::shared::helpers::{self, VdomHelper};
+use super::super::shared::helpers::{self, is_member_expression, VdomHelper};
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput};
 use super::super::TemplateCodeGenOptions;
 use super::children::add_children_separators;
@@ -283,25 +283,13 @@ fn contains_assignment_operator(s: &str) -> bool {
     }
     false
 }
-/// Check whether an expression is a simple member expression (identifier or
-/// dot-separated property access like `foo`, `foo.bar`, `_ctx.onClick`).
-/// Used to distinguish event handler references from inline handlers.
-fn is_member_expression(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
-}
-
 /// Resolve an expression using OXC binding data when available, falling back
 /// to simple identifier resolution.
 ///
 /// Decodes HTML entities in the expression value first (e.g., `&quot;` → `"`),
 /// since template attribute values may contain HTML-encoded characters from
 /// preprocessor plugins (markdown, docs blocks, etc.).
-pub(super) fn resolve_expr(
+pub(crate) fn resolve_expr(
     expr: &str,
     value_start: u32,
     oxc_exp: Option<&OxcParsedExpression<'_>>,
@@ -418,40 +406,27 @@ fn determine_native_vmodel_directive(
     }
 }
 
-/// Build the static props object into a buffer.
-///
-/// Handles static attributes and directive values with binding resolution.
-/// Wraps `:class` values with `_normalizeClass()` and `:style` with `_normalizeStyle()`.
-/// When `skip_prop_index` is `Some(i)`, prop at index `i` is excluded
-/// (used for `:is` on `<component>` elements).
-pub(crate) fn build_props_object_into(
-    buf: &mut String,
-    element: &ElementNode,
-    source: &str,
-    resolver: &BindingResolver<'_>,
-    oxc_el: Option<&OxcParsedElement<'_>>,
-    skip_prop_index: Option<usize>,
-    force_js: bool,
-) -> PropsResult {
-    let mut dynamic_props: Vec<String> = Vec::with_capacity(4);
-    // Collect spread expressions from v-bind/v-on without args.
-    // These need _mergeProps() wrapping when mixed with regular props.
-    let mut spreads: Vec<String> = Vec::with_capacity(2);
-    let mut has_regular_props = false;
-    let mut uses_normalize_class = false;
-    let mut uses_normalize_style = false;
-    let mut uses_with_modifiers = false;
-    let mut uses_with_keys = false;
-    let mut native_vmodel: Option<NativeVModel> = None;
+// ── Pre-scan helpers for build_props_object_into ──────────────────
 
-    // Pre-scan: detect if both static `class`/`style` and dynamic `:class`/`:style` exist.
-    // When both exist, we must merge them into a single `class:`/`style:` prop using
-    // _normalizeClass / _normalizeStyle, otherwise the second key overwrites the first.
+/// Result of pre-scanning for class/style merge requirements.
+struct ClassStyleMerge<'a> {
+    /// Static class value when both static `class` and dynamic `:class` exist.
+    merge_class: Option<&'a str>,
+    /// Static style value when both static `style` and dynamic `:style` exist.
+    merge_style: Option<&'a str>,
+}
+
+/// Pre-scan element props to detect if both static and dynamic class/style exist.
+/// When both exist, they must be merged via `_normalizeClass()`/`_normalizeStyle()`.
+fn pre_scan_class_style_merge<'a>(
+    element_props: &[crate::types::NodeProp],
+    source: &'a str,
+) -> ClassStyleMerge<'a> {
     let mut static_class_value: Option<&str> = None;
     let mut has_dynamic_class = false;
     let mut static_style_value: Option<&str> = None;
     let mut has_dynamic_style = false;
-    for prop in &element.props {
+    for prop in element_props {
         if prop.is_directive {
             let directive_name = &source[prop.start as usize..prop.name_end as usize];
             let is_bind = directive_name == ":" || directive_name == "v-bind";
@@ -478,17 +453,177 @@ pub(crate) fn build_props_object_into(
             }
         }
     }
-    // Only keep the merge values when both static and dynamic co-exist
-    let merge_class = if has_dynamic_class {
-        static_class_value
-    } else {
-        None
-    };
-    let merge_style = if has_dynamic_style {
-        static_style_value
-    } else {
-        None
-    };
+    ClassStyleMerge {
+        merge_class: if has_dynamic_class {
+            static_class_value
+        } else {
+            None
+        },
+        merge_style: if has_dynamic_style {
+            static_style_value
+        } else {
+            None
+        },
+    }
+}
+
+/// Pre-scan for v-model directives paired with explicit `@update:<name>` handlers.
+/// Returns `(vmodel_prop_idx, handler_prop_idx)` pairs that need merging into arrays.
+fn pre_scan_vmodel_handler_merge(element: &ElementNode, source: &str) -> Vec<(usize, usize)> {
+    let mut vmodel_keys: Vec<(usize, String)> = Vec::with_capacity(2);
+    for (idx, prop) in element.props.iter().enumerate() {
+        if !prop.is_directive {
+            continue;
+        }
+        let dname = &source[prop.start as usize..prop.name_end as usize];
+        if dname != "v-model" || !element.tag_type.is_component() {
+            continue;
+        }
+        let event_key = if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+            let arg = &source[as_ as usize..ae as usize];
+            format!("update:{}", props::camelize(arg))
+        } else {
+            "update:modelValue".to_string()
+        };
+        vmodel_keys.push((idx, event_key));
+    }
+
+    let mut targets = Vec::with_capacity(2);
+    for (idx, prop) in element.props.iter().enumerate() {
+        if !prop.is_directive {
+            continue;
+        }
+        let dname = &source[prop.start as usize..prop.name_end as usize];
+        if dname != "@" && dname != "v-on" {
+            continue;
+        }
+        if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+            let arg = &source[as_ as usize..ae as usize];
+            let normalized = format!(
+                "update:{}",
+                props::camelize(arg.strip_prefix("update:").unwrap_or(arg))
+            );
+            for &(vmodel_idx, ref vmodel_key) in &vmodel_keys {
+                if normalized == *vmodel_key {
+                    targets.push((vmodel_idx, idx));
+                }
+            }
+        }
+    }
+    targets
+}
+
+/// Result of pre-scanning for duplicate event handler keys.
+struct EventHandlerMerge {
+    /// First handler index → all handler indices with the same key.
+    first_to_group: std::collections::HashMap<usize, Vec<usize>>,
+    /// Handler indices that are secondary (should be skipped in main loop).
+    secondary: std::collections::HashSet<usize>,
+}
+
+/// Pre-scan for duplicate event handler keys that need array merging.
+/// Vue's `dedupeProperties` merges props with the same `isOn` key into arrays.
+fn pre_scan_event_handler_merge(
+    element: &ElementNode,
+    source: &str,
+    skip_prop_index: Option<usize>,
+    merged_handler_indices: &std::collections::HashSet<usize>,
+) -> EventHandlerMerge {
+    let mut event_key_groups: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, prop) in element.props.iter().enumerate() {
+        if !prop.is_directive
+            || skip_prop_index == Some(idx)
+            || merged_handler_indices.contains(&idx)
+        {
+            continue;
+        }
+        let dname = &source[prop.start as usize..prop.name_end as usize];
+        let is_on = dname == "@" || dname == "v-on";
+        let is_bind = dname == ":" || dname == "v-bind";
+        if !is_on && !is_bind {
+            continue;
+        }
+        let (arg_start, arg_end) = match (prop.arg_start, prop.arg_end) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+        if prop.is_dynamic == Some(true) {
+            continue;
+        }
+        let arg_name = &source[arg_start as usize..arg_end as usize];
+        let key = if is_on {
+            let mut k = String::with_capacity(arg_name.len() + 10);
+            props::format_event_handler_key_into(&mut k, arg_name);
+            for modifier in &prop.modifiers {
+                let m = &source[modifier.start as usize..modifier.end as usize];
+                if matches!(m, "capture" | "once" | "passive") {
+                    let first_char = m.as_bytes()[0].to_ascii_uppercase() as char;
+                    k.push(first_char);
+                    k.push_str(&m[1..]);
+                }
+            }
+            k
+        } else {
+            let camelized = props::camelize(arg_name);
+            if camelized.len() > 2
+                && camelized.starts_with("on")
+                && camelized.as_bytes()[2].is_ascii_uppercase()
+            {
+                camelized.to_string()
+            } else {
+                continue;
+            }
+        };
+        event_key_groups.entry(key).or_default().push(idx);
+    }
+
+    let mut first_to_group = std::collections::HashMap::new();
+    let mut secondary = std::collections::HashSet::new();
+    for indices in event_key_groups.into_values() {
+        if indices.len() > 1 {
+            for &idx in &indices[1..] {
+                secondary.insert(idx);
+            }
+            first_to_group.insert(indices[0], indices);
+        }
+    }
+    EventHandlerMerge {
+        first_to_group,
+        secondary,
+    }
+}
+
+/// Build the static props object into a buffer.
+///
+/// Handles static attributes and directive values with binding resolution.
+/// Wraps `:class` values with `_normalizeClass()` and `:style` with `_normalizeStyle()`.
+/// When `skip_prop_index` is `Some(i)`, prop at index `i` is excluded
+/// (used for `:is` on `<component>` elements).
+pub(crate) fn build_props_object_into(
+    buf: &mut String,
+    element: &ElementNode,
+    source: &str,
+    resolver: &BindingResolver<'_>,
+    oxc_el: Option<&OxcParsedElement<'_>>,
+    skip_prop_index: Option<usize>,
+    force_js: bool,
+) -> PropsResult {
+    let mut dynamic_props: Vec<String> = Vec::with_capacity(4);
+    // Collect spread expressions from v-bind/v-on without args.
+    // These need _mergeProps() wrapping when mixed with regular props.
+    let mut spreads: Vec<String> = Vec::with_capacity(2);
+    let mut has_regular_props = false;
+    let mut uses_normalize_class = false;
+    let mut uses_normalize_style = false;
+    let mut uses_with_modifiers = false;
+    let mut uses_with_keys = false;
+    let mut native_vmodel: Option<NativeVModel> = None;
+
+    let ClassStyleMerge {
+        merge_class,
+        merge_style,
+    } = pre_scan_class_style_merge(&element.props, source);
 
     for (prop_idx, prop) in element.props.iter().enumerate() {
         if skip_prop_index == Some(prop_idx) {
@@ -563,129 +698,14 @@ pub(crate) fn build_props_object_into(
             first = false;
         }
 
-        // Pre-scan: detect v-model + explicit @update:<name> on the same element.
-        // When both exist, we must merge them into an array (like Vue does)
-        // instead of emitting duplicate object keys.
-        let mut vmodel_merge_targets: Vec<(usize, usize)> = Vec::with_capacity(2); // (vmodel_idx, handler_idx)
-        {
-            // Collect v-model prop indices and their event key names
-            let mut vmodel_keys: Vec<(usize, String)> = Vec::with_capacity(2);
-            for (idx, prop) in element.props.iter().enumerate() {
-                if !prop.is_directive {
-                    continue;
-                }
-                let dname = &source[prop.start as usize..prop.name_end as usize];
-                if dname != "v-model" || !element.tag_type.is_component() {
-                    continue;
-                }
-                let event_key = if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
-                    let arg = &source[as_ as usize..ae as usize];
-                    format!("update:{}", props::camelize(arg))
-                } else {
-                    "update:modelValue".to_string()
-                };
-                vmodel_keys.push((idx, event_key));
-            }
-            // Find matching explicit @update:<name> handlers
-            for (idx, prop) in element.props.iter().enumerate() {
-                if !prop.is_directive {
-                    continue;
-                }
-                let dname = &source[prop.start as usize..prop.name_end as usize];
-                if dname != "@" && dname != "v-on" {
-                    continue;
-                }
-                if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
-                    let arg = &source[as_ as usize..ae as usize];
-                    // Normalize: "update:model-value" → "update:modelValue"
-                    let normalized = format!(
-                        "update:{}",
-                        props::camelize(arg.strip_prefix("update:").unwrap_or(arg))
-                    );
-                    for &(vmodel_idx, ref vmodel_key) in &vmodel_keys {
-                        if normalized == *vmodel_key {
-                            vmodel_merge_targets.push((vmodel_idx, idx));
-                        }
-                    }
-                }
-            }
-        }
-        // Build a set of handler prop indices that should be skipped
-        // (they'll be merged into the v-model array instead)
+        let vmodel_merge_targets = pre_scan_vmodel_handler_merge(element, source);
         let merged_handler_indices: std::collections::HashSet<usize> =
             vmodel_merge_targets.iter().map(|&(_, hi)| hi).collect();
 
-        // Pre-scan: detect duplicate event handler keys on the same element.
-        // Vue's `dedupeProperties` merges props with the same key into arrays when
-        // the key matches `isOn` (starts with "on" + uppercase). This covers both
-        // @event directives and :onXxx bindings producing the same computed key.
-        let mut event_merge_first_to_group: std::collections::HashMap<usize, Vec<usize>> =
-            std::collections::HashMap::new();
-        let mut event_merge_secondary: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
-        {
-            let mut event_key_groups: std::collections::HashMap<String, Vec<usize>> =
-                std::collections::HashMap::new();
-            for (idx, prop) in element.props.iter().enumerate() {
-                if !prop.is_directive
-                    || skip_prop_index == Some(idx)
-                    || merged_handler_indices.contains(&idx)
-                {
-                    continue;
-                }
-                let dname = &source[prop.start as usize..prop.name_end as usize];
-                let is_on = dname == "@" || dname == "v-on";
-                let is_bind = dname == ":" || dname == "v-bind";
-                if !is_on && !is_bind {
-                    continue;
-                }
-                let (arg_start, arg_end) = match (prop.arg_start, prop.arg_end) {
-                    (Some(a), Some(b)) => (a, b),
-                    _ => continue, // no arg = spread, skip
-                };
-                // Skip dynamic event names — can't pre-compute key
-                if prop.is_dynamic == Some(true) {
-                    continue;
-                }
-                let arg_name = &source[arg_start as usize..arg_end as usize];
-                let key = if is_on {
-                    // @event → "on" + PascalCase(arg) + option modifier suffixes
-                    let mut k = String::with_capacity(arg_name.len() + 10);
-                    props::format_event_handler_key_into(&mut k, arg_name);
-                    for modifier in &prop.modifiers {
-                        let m = &source[modifier.start as usize..modifier.end as usize];
-                        if matches!(m, "capture" | "once" | "passive") {
-                            let first_char = m.as_bytes()[0].to_ascii_uppercase() as char;
-                            k.push(first_char);
-                            k.push_str(&m[1..]);
-                        }
-                    }
-                    k
-                } else {
-                    // :onXxx → camelize to onXxx; only merge if it matches isOn pattern
-                    let camelized = props::camelize(arg_name);
-                    // isOn check: starts with "on" followed by non-lowercase (Vue's isOn)
-                    if camelized.len() > 2
-                        && camelized.starts_with("on")
-                        && camelized.as_bytes()[2].is_ascii_uppercase()
-                    {
-                        camelized.to_string()
-                    } else {
-                        continue;
-                    }
-                };
-                event_key_groups.entry(key).or_default().push(idx);
-            }
-            // Only keep groups with >1 handler
-            for indices in event_key_groups.into_values() {
-                if indices.len() > 1 {
-                    for &idx in &indices[1..] {
-                        event_merge_secondary.insert(idx);
-                    }
-                    event_merge_first_to_group.insert(indices[0], indices);
-                }
-            }
-        }
+        let EventHandlerMerge {
+            first_to_group: event_merge_first_to_group,
+            secondary: event_merge_secondary,
+        } = pre_scan_event_handler_merge(element, source, skip_prop_index, &merged_handler_indices);
 
         for (prop_idx, prop) in element.props.iter().enumerate() {
             if skip_prop_index == Some(prop_idx) {
@@ -1308,6 +1328,7 @@ pub fn process_element_leave<'alloc>(
     resolver: &BindingResolver<'alloc>,
     buf: &mut String,
     v_for_prefix: Option<&str>,
+    ast: &TemplateAst,
 ) -> ChildRecord {
     let tag_open = &element.tag_open;
     debug_assert!((tag_open.start as usize + 1) <= source.len());
@@ -1527,6 +1548,8 @@ pub fn process_element_leave<'alloc>(
             kind: ChildKind::Element,
             condition: None,
             condition_prefix: None,
+            condition_expr_start: None,
+            condition_binding_prefix_len: 0,
         };
     }
 
@@ -1555,7 +1578,20 @@ pub fn process_element_leave<'alloc>(
     }
 
     // Step 4: Add children separators (and text run wrapping for array modes)
-    add_children_separators(children, element.children_mode, out, options);
+    let ast_children = element
+        .content
+        .as_ref()
+        .map(|c| c.children.as_slice())
+        .unwrap_or(&[]);
+    add_children_separators(
+        children,
+        element.children_mode,
+        out,
+        options,
+        source,
+        ast,
+        ast_children,
+    );
 
     // Step 5: Build close tag overwrite (reuse buffer)
     buf.clear();
@@ -1619,6 +1655,8 @@ pub fn process_element_leave<'alloc>(
         kind: ChildKind::Element,
         condition: None,
         condition_prefix: None,
+        condition_expr_start: None,
+        condition_binding_prefix_len: 0,
     }
 }
 

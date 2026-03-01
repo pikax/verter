@@ -1,6 +1,53 @@
 import type { File, CompilerOptions, CompileTiming, FileAnalysis, LintDiagnostic, HostDiagnostic } from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
+import { combineSourceMaps } from "./sourcemap";
+
+// Inline types matching Rust WASM bindings (avoid @verter/wasm import resolution issues)
+export interface HostTextEdit {
+  spanStart: number;
+  spanEnd: number;
+  newText: string;
+}
+
+export interface HostCodeAction {
+  title: string;
+  kind: string;
+  edits: HostTextEdit[];
+  isPreferred: boolean;
+  diagnosticRule?: string;
+}
+
+export interface HostLintRuleMetadata {
+  name: string;
+  category: string;
+  defaultSeverity: string;
+}
+
+export interface HostDocumentSymbol {
+  name: string;
+  detail?: string;
+  kind: number;
+  spanStart: number;
+  spanEnd: number;
+  selectionStart: number;
+  selectionEnd: number;
+  children: HostDocumentSymbol[];
+}
+
+export interface HostElementMatch {
+  tag: string;
+  spanStart: number;
+  spanEnd: number;
+  result: "match" | "maybe" | "no";
+}
+
+export interface HostSelectorMatchResult {
+  selectorText: string;
+  selectorStart: number;
+  selectorEnd: number;
+  matches: HostElementMatch[];
+}
 
 interface HostCompileProfile {
   filename?: string;
@@ -9,7 +56,7 @@ interface HostCompileProfile {
   hmrStrategy?: "none" | "vite" | "webpack";
   forceJs?: boolean;
   sourceMap?: boolean;
-  enableTypes?: boolean;
+  target?: "bundler" | "ide" | "analysis" | "full";
 }
 
 interface HostVirtualNodeKind {
@@ -55,7 +102,12 @@ interface HostBinding {
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
   getAnalysis?(canonicalOrAlias: string): FileAnalysis | null;
   getTsx?(canonicalId: string, profile?: HostCompileProfile): HostTsxResponse | null;
+  getTsc?(canonicalId: string): HostTsxResponse | null;
   lint?(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
+  getCodeActions?(canonicalOrAlias: string, offset: number): HostCodeAction[];
+  getLintRuleMetadata?(): HostLintRuleMetadata[];
+  getDocumentSymbols?(canonicalOrAlias: string): HostDocumentSymbol[];
+  matchCssSelectors?(canonicalOrAlias: string): HostSelectorMatchResult[];
 }
 
 /** Convert structured host diagnostics to display strings. */
@@ -79,7 +131,7 @@ function toHostProfile(file: File, options?: CompilerOptions): HostCompileProfil
     hmrStrategy: "none",
     forceJs: true,
     sourceMap: true,
-    enableTypes: true,
+    target: "full",
   };
 }
 
@@ -179,8 +231,9 @@ export function mergeRenderIntoComponent(code: string): string {
     }
   }
 
-  // Only attach render if the output contains a render function declaration
+  // Attach render or ssrRender if the output contains their function declarations
   const hasRender = /^function render\s*\(/m.test(merged);
+  const hasSsrRender = /^function ssrRender\s*\(/m.test(merged);
 
   // Find insertion point: before existing "export default __sfc__" or at end
   const exportMatch = merged.indexOf("\nexport default __sfc__");
@@ -189,6 +242,9 @@ export function mergeRenderIntoComponent(code: string): string {
   let attachment = "";
   if (hasRender) {
     attachment += "\n__sfc__.render = render;";
+  }
+  if (hasSsrRender) {
+    attachment += "\n__sfc__.ssrRender = ssrRender;";
   }
   if (exportMatch === -1) {
     // No "export default __sfc__" yet — add it
@@ -207,7 +263,9 @@ export function applyTsxOutput(file: File, tsx: HostTsxResponse | null | undefin
 
 function compileVueWithHost(file: File, options: CompilerOptions | undefined): CompileTiming {
   const start = performance.now();
+  // Always compile client output with ssr: false
   const profile = toHostProfile(file, options);
+  profile.ssr = false;
 
   const upsertResult = wasmHost!.upsert({
     inputId: file.filename,
@@ -222,6 +280,9 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [upsertResult.diagnostics];
 
   let assembledJs = "";
+  let scriptCode = "";
+  let scriptSourceMap = "";
+  let templateCode = "";
   let templateSourceMap = "";
 
   if (nodeKinds.has("script")) {
@@ -230,6 +291,8 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
       compileProfile: profile,
     });
     diagnosticsSnapshots.push(script.diagnostics);
+    scriptCode = script.code;
+    scriptSourceMap = script.sourceMap ?? "";
     assembledJs += script.code;
   }
 
@@ -241,7 +304,9 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
     diagnosticsSnapshots.push(template.diagnostics);
     if (assembledJs) assembledJs += "\n";
     assembledJs += template.code;
+    templateCode = template.code;
     templateSourceMap = template.sourceMap ?? "";
+    file.compiled.templateCode = template.code;
   }
 
   if (!assembledJs) {
@@ -271,7 +336,16 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   const allDiagnostics = collectUniqueHostDiagnostics(diagnosticsSnapshots);
   file.compiled.js = mergeRenderIntoComponent(assembledJs);
   file.compiled.css = styleChunks.join("\n");
-  file.compiled.verterSourceMap = templateSourceMap;
+  // Combine script + template source maps into a single map covering file.compiled.js.
+  // This handles all offsets: SFC prefix lines, host import prepend, mergeRenderIntoComponent.
+  file.compiled.verterSourceMap = combineSourceMaps({
+    scriptMap: scriptSourceMap,
+    scriptCode,
+    templateMap: templateSourceMap,
+    templateCode,
+    vueSource: file.code,
+    finalJs: file.compiled.js,
+  });
   file.compiled.errors = formatDiagnostics(allDiagnostics);
   file.compiled.compilerDiagnostics = allDiagnostics;
 
@@ -307,6 +381,62 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
     }
   } else {
     applyTsxOutput(file, null);
+  }
+
+  // Retrieve TSC output (minimal .d.ts declarations)
+  if (typeof wasmHost!.getTsc === "function") {
+    try {
+      const tsc = wasmHost!.getTsc(file.filename);
+      file.compiled.tscCode = tsc?.code ?? "";
+    } catch {
+      file.compiled.tscCode = "";
+    }
+  } else {
+    file.compiled.tscCode = "";
+  }
+
+  // SSR compilation pass: when SSR is toggled on, compile again with ssr: true
+  if (options?.ssr) {
+    try {
+      const ssrProfile = { ...profile, ssr: true };
+      // Upsert with SSR profile (host caches by profile, so this is a separate entry)
+      wasmHost!.upsert({
+        inputId: file.filename,
+        source: file.code,
+        fileKind: "vue",
+        aliases: [],
+        compileProfile: ssrProfile,
+      });
+
+      let ssrJs = "";
+      if (nodeKinds.has("script")) {
+        const ssrScript = wasmHost!.getVirtualFile({
+          rawId: `${file.filename}?vue&type=script`,
+          compileProfile: ssrProfile,
+        });
+        ssrJs += ssrScript.code;
+      }
+      if (nodeKinds.has("template")) {
+        const ssrTemplate = wasmHost!.getVirtualFile({
+          rawId: `${file.filename}?vue&type=template`,
+          compileProfile: ssrProfile,
+        });
+        if (ssrJs) ssrJs += "\n";
+        ssrJs += ssrTemplate.code;
+      }
+      if (!ssrJs) {
+        const ssrMain = wasmHost!.getVirtualFile({
+          rawId: file.filename,
+          compileProfile: ssrProfile,
+        });
+        ssrJs = ssrMain.code;
+      }
+      file.compiled.ssrCode = mergeRenderIntoComponent(ssrJs);
+    } catch {
+      file.compiled.ssrCode = "// SSR compilation failed";
+    }
+  } else {
+    file.compiled.ssrCode = "";
   }
 
   return {
@@ -378,6 +508,18 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
     applyTsxOutput(file, null);
   }
 
+  // TSC output for TS-only mode
+  if (typeof wasmHost!.getTsc === "function") {
+    try {
+      const tsc = wasmHost!.getTsc(vueFilename);
+      file.compiled.tscCode = tsc?.code ?? "";
+    } catch {
+      file.compiled.tscCode = "";
+    }
+  } else {
+    file.compiled.tscCode = "";
+  }
+
   return {
     verterNew: null,
     verterNewJs: performance.now() - start,
@@ -417,4 +559,48 @@ export async function compileFile(
   }
 
   return timing;
+}
+
+// =============================================================================
+// Host accessor functions for new playground features
+// =============================================================================
+
+/** Returns code actions at a UTF-16 offset, or empty array if unavailable. */
+export function getCodeActions(canonicalOrAlias: string, offset: number): HostCodeAction[] {
+  if (!wasmHost || typeof wasmHost.getCodeActions !== "function") return [];
+  try {
+    return wasmHost.getCodeActions(canonicalOrAlias, offset) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Returns metadata for all registered lint rules, or empty array if unavailable. */
+export function getLintRuleMetadata(): HostLintRuleMetadata[] {
+  if (!wasmHost || typeof wasmHost.getLintRuleMetadata !== "function") return [];
+  try {
+    return wasmHost.getLintRuleMetadata() ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Returns document symbols for a file, or empty array if unavailable. */
+export function getDocumentSymbols(canonicalOrAlias: string): HostDocumentSymbol[] {
+  if (!wasmHost || typeof wasmHost.getDocumentSymbols !== "function") return [];
+  try {
+    return wasmHost.getDocumentSymbols(canonicalOrAlias) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Returns CSS selector match matrix, or empty array if unavailable. */
+export function matchCssSelectors(canonicalOrAlias: string): HostSelectorMatchResult[] {
+  if (!wasmHost || typeof wasmHost.matchCssSelectors !== "function") return [];
+  try {
+    return wasmHost.matchCssSelectors(canonicalOrAlias) ?? [];
+  } catch {
+    return [];
+  }
 }

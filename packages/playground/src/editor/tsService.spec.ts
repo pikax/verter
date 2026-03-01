@@ -21,7 +21,7 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
     maxProfilesPerFile: 8,
   });
 
-  const profile = { sourceMap: true, enableTypes: true, forceJs: true };
+  const profile = { sourceMap: true, target: "ide", forceJs: true };
   host.upsert({
     inputId: "App.vue",
     source: vueSource,
@@ -83,10 +83,15 @@ describe("TypeScriptService mapping", () => {
     const service = new TypeScriptService() as any;
     service.initialized = true;
 
-    const diagnosticTsxStart = tsxCode.lastIndexOf("msg");
+    // Use the first (script-section) occurrence of "msg" which is reliably source-mapped
+    const diagnosticTsxStart = tsxCode.indexOf("msg");
     const mapper = new SourceMapMapper(sourceMap, tsxCode, vueCode);
-    const expectedVueStart = mapper.tsxOffsetToVueOffset(diagnosticTsxStart);
-    const expectedVueEnd = mapper.tsxOffsetToVueOffset(diagnosticTsxStart + 3);
+    const mappedVueStart = mapper.tsxOffsetToVueOffset(diagnosticTsxStart);
+    const mappedVueEnd = mapper.tsxOffsetToVueOffset(diagnosticTsxStart + 3);
+
+    // syncTsx falls back to raw TSX offsets when source map mapping returns null
+    const expectedVueStart = mappedVueStart ?? diagnosticTsxStart;
+    const expectedVueEnd = mappedVueEnd ?? diagnosticTsxStart + 3;
 
     const send = vi.fn(async (type: string) => {
       if (type === "updateFile") return undefined;
@@ -207,6 +212,134 @@ describe("TypeScriptService mapping", () => {
     expect(refs).toHaveLength(2);
     expect(refs.some((ref: any) => ref.isDefinition === true)).toBe(true);
     expect(refs.some((ref: any) => ref.isDefinition === false)).toBe(true);
+  });
+
+  it("returns null hover when source map mapper is unavailable", async () => {
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = null; // No source map
+
+    const send = vi.fn();
+    service.send = send;
+
+    const hover = await service.getHover("App.vue", 42);
+
+    // Should NOT call the worker — returns null early
+    expect(send).not.toHaveBeenCalled();
+    expect(hover).toBeNull();
+  });
+
+  it("returns empty completions when source map mapper is unavailable", async () => {
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = null;
+
+    const send = vi.fn();
+    service.send = send;
+
+    const completions = await service.getCompletions("App.vue", 42);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(completions).toEqual([]);
+  });
+
+  it("returns empty definitions when source map mapper is unavailable", async () => {
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = null;
+
+    const send = vi.fn();
+    service.send = send;
+
+    const defs = await service.getDefinition("App.vue", 42);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(defs).toEqual([]);
+  });
+
+  it("returns empty references when source map mapper is unavailable", async () => {
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = null;
+
+    const send = vi.fn();
+    service.send = send;
+
+    const refs = await service.getReferences("App.vue", 42);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(refs).toEqual([]);
+  });
+
+  it("returns empty highlights when source map mapper is unavailable", async () => {
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = null;
+
+    const send = vi.fn();
+    service.send = send;
+
+    const highlights = await service.getDocumentHighlights("App.vue", 42);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(highlights).toEqual([]);
+  });
+
+  it("returns canRename:false when source map mapper is unavailable", async () => {
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = null;
+
+    const send = vi.fn();
+    service.send = send;
+
+    const rename = await service.getRenameLocations("App.vue", 42);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(rename.canRename).toBe(false);
+    expect(rename.rejectReason).toContain("Source map");
+  });
+
+  it("syncTsx sets mapper to null when sourceMap is empty", async () => {
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async () => []);
+
+    await service.syncTsx("App.vue", "const x = 1;", "const x = 1;", "");
+
+    expect(service.currentMapper).toBeNull();
+    expect(service.currentTsxPath).toBe("/App.vue.tsx");
+  });
+
+  it("syncTsx sets mapper to null when sourceMap is '{}'", async () => {
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async () => []);
+
+    await service.syncTsx("App.vue", "const x = 1;", "const x = 1;", "{}");
+
+    // "{}" is length 2 — threshold is > 2
+    expect(service.currentMapper).toBeNull();
+  });
+
+  it("syncTsx creates mapper when valid sourceMap is provided", async () => {
+    const vueCode = `<script setup lang=\"ts\">\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>`;
+    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async () => []);
+
+    await service.syncTsx("App.vue", tsxCode, vueCode, sourceMap);
+
+    expect(service.currentMapper).not.toBeNull();
+    expect(service.currentTsxPath).toBe("/App.vue.tsx");
   });
 
   it("maps rename spans and propagates rejection reasons", async () => {

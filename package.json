@@ -12,28 +12,38 @@
   "author": "",
   "main": "index.js",
   "scripts": {
-    "test": "pnpm --filter @verter/types --filter @verter/language-server --filter @verter/core test",
+    "test": "pnpm --filter @verter/types --filter @verter/core test",
     "fmt": "oxfmt",
-    "build": "pnpm run build:native && pnpm run build:wasm && pnpm run build:ts && pnpm run build:unplugin",
+    "build": "pnpm run build:native && pnpm run build:lsp && pnpm run build:wasm && pnpm run build:ts",
     "build:native": "pnpm --filter @verter/native build",
+    "build:lsp": "cargo build -p verter_lsp",
+    "build:lsp:release": "cargo build -p verter_lsp --release",
     "build:wasm": "pnpm --filter @verter/wasm build",
     "build:ts": "pnpm -r --filter './packages/**' --filter '!@verter/native' --filter '!@verter/wasm' --filter '!@verter/playground' --filter '!example' build",
+    "build:tsc": "cargo build -p verter_tsc",
+    "build:tsc:release": "cargo build -p verter_tsc --release",
+    "build:mcp": "cargo build -p verter_mcp",
+    "build:mcp:release": "cargo build -p verter_mcp --release",
     "build:playground": "pnpm --filter @verter/playground build",
     "build:unplugin": "pnpm --filter @verter/unplugin build",
-    "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter @verter/language-server --filter verter-vscode --filter @verter/typescript-plugin watch",
-    "dev-extension": "pnpm --filter @verter/language-server --filter verter-vscode watch",
-    "update-all": "pnpm up -r -i -L",
     "build:package": "rollup -c rollup.config.js",
+    "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
+    "dev-extension": "pnpm run build:lsp && pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
+    "update-all": "pnpm up -r -i -L",
     "package": "cd extensions/vscode && npm install --omit=dev && npx shx mkdir -p node_modules/@verter && npx shx cp -r ../typescript-plugin node_modules/@verter/typescript-plugin && npx shx rm -r node_modules/@oxc-parser && npx vsce package",
     "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
-    "integration-test": "node scripts/integration-test/run.mjs"
-    ,"profile:hotpath": "cargo run -p verter_bench --example profile_ast --release --features=hotpath"
-    ,"profile:hotpath:alloc": "cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc"
-    ,"profile:hotpath:mcp": "cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp"
-    ,"profile:hotpath:full": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath"
-    ,"profile:hotpath:full:alloc": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc"
-    ,"profile:hotpath:full:mcp": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp"
+    "integration-test": "node scripts/integration-test/run.mjs",
+    "docs:dev": "pnpm --filter docs dev",
+    "docs:build": "pnpm --filter docs build",
+    "docs:preview": "pnpm --filter docs preview",
+    "compare:ssr": "node scripts/ssr-baseline/compare.mjs",
+    "profile:hotpath": "cargo run -p verter_bench --example profile_ast --release --features=hotpath",
+    "profile:hotpath:alloc": "cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc",
+    "profile:hotpath:mcp": "cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp",
+    "profile:hotpath:full": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath",
+    "profile:hotpath:full:alloc": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc",
+    "profile:hotpath:full:mcp": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp"
   },
   "dependencies": {
     "@vue/compiler-core": "^3.6.0-beta.6",

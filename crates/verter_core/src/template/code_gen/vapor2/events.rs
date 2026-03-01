@@ -3,54 +3,9 @@
 //! Handles event delegation, modifiers, and dynamic events.
 
 use crate::ast::types::{ElementNode, PropFlags};
-use crate::template::code_gen::shared::helpers::{self, push_u32, VaporHelper};
+use crate::template::code_gen::shared::helpers::{self, push_u32, VaporHelper, DELEGATABLE_EVENTS};
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::types::NodeId;
-
-/// Events that can be delegated (standard DOM event types).
-const DELEGATABLE_EVENTS: &[&str] = &[
-    "click",
-    "dblclick",
-    "mousedown",
-    "mouseup",
-    "mousemove",
-    "mouseenter",
-    "mouseleave",
-    "mouseover",
-    "mouseout",
-    "keydown",
-    "keyup",
-    "keypress",
-    "input",
-    "change",
-    "focus",
-    "blur",
-    "submit",
-    "reset",
-    "scroll",
-    "wheel",
-    "touchstart",
-    "touchmove",
-    "touchend",
-    "touchcancel",
-    "pointerdown",
-    "pointerup",
-    "pointermove",
-    "pointerenter",
-    "pointerleave",
-    "pointerover",
-    "pointerout",
-    "contextmenu",
-    "drag",
-    "dragstart",
-    "dragend",
-    "dragenter",
-    "dragleave",
-    "dragover",
-    "drop",
-    "focusin",
-    "focusout",
-];
 
 /// Check if an event name is delegatable (standard DOM events without capture/passive/once).
 fn is_delegatable(event_name: &str) -> bool {

@@ -99,6 +99,8 @@ pub struct Syntax {
     prop_lang: Option<Span>,
     /// Root-level `src="..."` attribute value span (script only).
     prop_src: Option<Span>,
+    /// Root-level `generic="..."` attribute value span (script only).
+    prop_generic: Option<Span>,
     /// Root-level `setup` attribute was present (script only).
     prop_setup: bool,
     /// Root-level `scoped` attribute was present (style only).
@@ -178,6 +180,7 @@ impl Syntax {
 
             prop_lang: None,
             prop_src: None,
+            prop_generic: None,
             prop_setup: false,
             prop_scoped: false,
             prop_module: false,
@@ -428,7 +431,11 @@ impl Syntax {
         if let Some(builder) = self.ast_builder.as_mut() {
             let is_sfc_root = !self.template_mode && self.stack_elements.len() == 1;
             if !is_sfc_root {
-                let open_tag = make_open_tag(self.stack_elements.last().unwrap());
+                let open_tag = make_open_tag(
+                    self.stack_elements
+                        .last()
+                        .expect("invariant: stack non-empty after push"),
+                );
                 builder.open_element(open_tag);
 
                 // Classify tag type from bytes
@@ -461,14 +468,20 @@ impl Syntax {
         if is_sfc_root {
             // StackElement is Copy (4 × u32 = 16 bytes) — cheap copy avoids borrow conflict
             // with &mut self in handle_root_open.
-            let root_event = *self.stack_elements.last().unwrap();
+            let root_event = *self
+                .stack_elements
+                .last()
+                .expect("invariant: stack non-empty when is_sfc_root");
             let name = root_event.name_bytes(ctx);
             self.handle_root_open(&root_event, name, ctx);
         } else {
             // Check if this is a void HTML element (e.g., <img>, <br>, <input>).
             // Void elements cannot have children or closing tags — auto-close them
             // immediately, the same way self-closing tags are handled.
-            let se = *self.stack_elements.last().unwrap();
+            let se = *self
+                .stack_elements
+                .last()
+                .expect("invariant: stack non-empty in non-root branch");
             let tag_name = &ctx.bytes[se.name_start as usize..se.name_end as usize];
             let is_void = is_void_tag(tag_name);
 
@@ -607,7 +620,10 @@ impl Syntax {
             !self.stack_elements.is_empty(),
             "stack_elements should not be empty after name match"
         );
-        let open = self.stack_elements.pop().unwrap();
+        let open = self
+            .stack_elements
+            .pop()
+            .expect("invariant: stack non-empty after name match");
 
         let was_sfc_root = !self.template_mode && self.stack_elements.is_empty();
         let tag_close = make_close_tag(start, end, name_end);
@@ -760,6 +776,7 @@ impl Syntax {
             tag_close,
             is_setup: self.prop_setup,
             src: self.prop_src.take(),
+            generic: self.prop_generic.take(),
             lang: self.prop_lang.take().map(|lang| {
                 ScriptLanguage::from_bytes(&ctx.bytes[lang.start as usize..lang.end as usize])
             }),
@@ -841,6 +858,7 @@ impl Syntax {
     fn reset_prop_state(&mut self) {
         self.prop_lang = None;
         self.prop_src = None;
+        self.prop_generic = None;
         self.prop_setup = false;
         self.prop_scoped = false;
         self.prop_module = false;
@@ -942,7 +960,11 @@ impl Syntax {
                 .zip(prop.value_end)
                 .map(|(vs, ve)| Span::new(vs, ve));
 
-            let root_name = self.stack_elements.last().unwrap().name_bytes(ctx);
+            let root_name = self
+                .stack_elements
+                .last()
+                .expect("invariant: stack non-empty when is_root_tag")
+                .name_bytes(ctx);
             let root_kind = resolve_root_kind(root_name);
 
             match attr_name {
@@ -951,6 +973,7 @@ impl Syntax {
                 // script-only
                 b"setup" if root_kind == RootNodeKind::Script => self.prop_setup = true,
                 b"src" if root_kind == RootNodeKind::Script => self.prop_src = value_span,
+                b"generic" if root_kind == RootNodeKind::Script => self.prop_generic = value_span,
                 // style-only
                 b"scoped" if root_kind == RootNodeKind::Style => self.prop_scoped = true,
                 b"module" if root_kind == RootNodeKind::Style => self.prop_module = true,
@@ -968,8 +991,9 @@ impl Syntax {
             // First occurrence wins; duplicates emit a warning diagnostic.
             // Cached directives are moved into the cache field and NOT added to props.
             let mut prop = Some(prop);
-            if prop.as_ref().unwrap().is_directive {
-                let p = prop.as_ref().unwrap();
+            // SAFETY: `prop` is `Some` here and `.take()` is called at most once per match arm
+            if prop.as_ref().expect("invariant: prop is Some").is_directive {
+                let p = prop.as_ref().expect("invariant: prop is Some");
                 let dir_name = &ctx.bytes[p.start as usize..p.name_end as usize];
                 let prop_start = p.start;
                 let prop_name_end = p.name_end;
@@ -992,22 +1016,41 @@ impl Syntax {
                         };
                         let cond = ElementNodeCondition {
                             kind,
-                            prop: prop.take().unwrap(),
+                            prop: prop
+                                .take()
+                                .expect("invariant: prop not yet taken in v-if branch"),
                         };
                         warn_if_dup(builder.set_v_condition(cond));
                     }
                     b"v-for" => {
-                        warn_if_dup(builder.set_v_for(prop.take().unwrap()));
+                        warn_if_dup(
+                            builder.set_v_for(
+                                prop.take()
+                                    .expect("invariant: prop not yet taken in v-for branch"),
+                            ),
+                        );
                     }
                     b"v-slot" | b"#" => {
-                        warn_if_dup(builder.set_v_slot(prop.take().unwrap()));
+                        warn_if_dup(
+                            builder.set_v_slot(
+                                prop.take()
+                                    .expect("invariant: prop not yet taken in v-slot branch"),
+                            ),
+                        );
                     }
                     b"v-once" => {
-                        warn_if_dup(builder.set_v_once(prop.take().unwrap()));
+                        warn_if_dup(
+                            builder.set_v_once(
+                                prop.take()
+                                    .expect("invariant: prop not yet taken in v-once branch"),
+                            ),
+                        );
                     }
                     // v-bind / : shorthand — classify arg for key/class/style, or spread
                     b"v-bind" | b":" => {
-                        let p = prop.as_ref().unwrap();
+                        let p = prop
+                            .as_ref()
+                            .expect("invariant: prop not yet taken in v-bind branch");
                         if let (Some(arg_s), Some(arg_e)) = (p.arg_start, p.arg_end) {
                             let arg = &ctx.bytes[arg_s as usize..arg_e as usize];
                             match arg {
@@ -1023,7 +1066,9 @@ impl Syntax {
                     }
                     // v-on / @ shorthand — event listener or spread
                     b"v-on" | b"@" => {
-                        let p = prop.as_ref().unwrap();
+                        let p = prop
+                            .as_ref()
+                            .expect("invariant: prop not yet taken in v-on branch");
                         if p.arg_start.is_some() {
                             builder.add_prop_flag(PropFlags::HasEventListener);
                         } else {
@@ -1056,12 +1101,17 @@ impl Syntax {
                 }
             } else {
                 // Non-directive attribute — check for ref, class, style
-                let p = prop.as_ref().unwrap();
+                let p = prop
+                    .as_ref()
+                    .expect("invariant: prop is Some in non-directive branch");
                 let attr_name = &ctx.bytes[p.start as usize..p.name_end as usize];
                 match attr_name {
                     b"ref" => {
                         builder.add_prop_flag(PropFlags::HasRef);
-                        builder.set_v_ref(prop.take().unwrap());
+                        builder.set_v_ref(
+                            prop.take()
+                                .expect("invariant: prop not yet taken in ref branch"),
+                        );
                     }
                     b"class" => builder.add_prop_flag(PropFlags::HasStaticClass),
                     b"style" => builder.add_prop_flag(PropFlags::HasStaticStyle),

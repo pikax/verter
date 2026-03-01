@@ -99,8 +99,7 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
                         name: local_name,
                         is_type_only: spec_type_only,
                         vue_api,
-                        span_start: s.local.span.start,
-                        span_end: s.local.span.end,
+                        span: s.local.span.into(),
                     });
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
@@ -108,8 +107,7 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
                         name: s.local.name.to_string(),
                         is_type_only: false,
                         vue_api: None,
-                        span_start: s.local.span.start,
-                        span_end: s.local.span.end,
+                        span: s.local.span.into(),
                     });
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
@@ -117,8 +115,7 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
                         name: s.local.name.to_string(),
                         is_type_only: false,
                         vue_api: None,
-                        span_start: s.local.span.start,
-                        span_end: s.local.span.end,
+                        span: s.local.span.into(),
                     });
                 }
             }
@@ -129,8 +126,7 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
         source,
         is_type_only,
         bindings,
-        span_start: decl.span.start,
-        span_end: decl.span.end,
+        span: decl.span.into(),
         resolved_canonical_id: None,
     }
 }

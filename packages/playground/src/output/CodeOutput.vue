@@ -19,10 +19,14 @@ const code = computed(() => {
   switch (props.mode) {
     case "js":
       return file.compiled.js;
+    case "ssr":
+      return file.compiled.ssrCode;
     case "css":
       return file.compiled.css;
     case "types":
       return file.compiled.types;
+    case "tsc":
+      return file.compiled.tscCode;
     default:
       return "";
   }
@@ -31,10 +35,12 @@ const code = computed(() => {
 const language = computed(() => {
   switch (props.mode) {
     case "js":
+    case "ssr":
       return "javascript";
     case "css":
       return "css";
     case "types":
+    case "tsc":
       return "typescript";
     default:
       return "plaintext";

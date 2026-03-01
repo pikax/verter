@@ -1,4 +1,4 @@
-// Phase 2: Document symbols from SFC structure + verter_host analysis.
+// Document symbols from SFC structure + verter_host analysis.
 
 use tower_lsp_server::lsp_types::*;
 use verter_host::FileAnalysisSnapshot;
@@ -11,21 +11,15 @@ use crate::documents::sfc_scanner::SfcBlock;
 /// Returns a hierarchical structure:
 /// - Top-level: SFC blocks (script, template, style)
 /// - Children of script: bindings, imports, macros from analysis
-///
-/// ## Analysis data needed (not yet available with positions):
-/// - `AnalyzedBinding` with byte span (`span_start`, `span_end`) — needed for
-///   precise child symbol ranges within script blocks
-/// - `AnalyzedImport` with byte span — needed for import symbol positions
-/// - `AnalyzedMacro` with byte span — needed for macro symbol positions
-///
-/// Currently, child symbols use the entire block content range as a fallback
-/// until span data is added to `verter_analysis`.
+/// - Children of template: component usages and root elements from analysis
+/// - Children of style: CSS classes, custom properties, at-rules from analysis
 pub fn build_document_symbols(
     blocks: &[SfcBlock],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
+    let mut style_index = 0usize;
 
     for block in blocks {
         let open_start = line_index
@@ -42,12 +36,18 @@ pub fn build_document_symbols(
         let detail = build_block_detail(block);
         let kind = block_symbol_kind(&block.tag_name);
 
-        let children = if block.tag_name == "script" {
-            analysis
+        let children = match block.tag_name.as_str() {
+            "script" => analysis
                 .map(|a| build_script_children(a, block, line_index))
-                .unwrap_or_default()
-        } else {
-            None
+                .unwrap_or_default(),
+            "template" => analysis.and_then(|a| build_template_children(a, block, line_index)),
+            "style" => {
+                let result =
+                    analysis.and_then(|a| build_style_children(a, style_index, block, line_index));
+                style_index += 1;
+                result
+            }
+            _ => None,
         };
 
         #[allow(deprecated)] // DocumentSymbol::deprecated field is deprecated itself
@@ -152,7 +152,7 @@ fn build_script_children(
             None => format!("{}()", macro_kind_display(&mac.kind)),
         };
 
-        let range = span_to_range(mac.span_start, mac.span_end, line_index, fallback_range);
+        let range = span_to_range(mac.span.start, mac.span.end, line_index, fallback_range);
 
         #[allow(deprecated)]
         children.push(DocumentSymbol {
@@ -172,8 +172,8 @@ fn build_script_children(
         let kind = binding_symbol_kind(&binding.kind);
         let detail = build_binding_detail(binding);
         let range = span_to_range(
-            binding.span_start,
-            binding.span_end,
+            binding.span.start,
+            binding.span.end,
             line_index,
             fallback_range,
         );
@@ -202,13 +202,13 @@ fn build_script_children(
             };
 
             let range = span_to_range(
-                import.span_start,
-                import.span_end,
+                import.span.start,
+                import.span.end,
                 line_index,
                 fallback_range,
             );
             let selection_range =
-                span_to_range(binding.span_start, binding.span_end, line_index, range);
+                span_to_range(binding.span.start, binding.span.end, line_index, range);
 
             #[allow(deprecated)]
             children.push(DocumentSymbol {
@@ -280,6 +280,158 @@ fn build_binding_detail(binding: &verter_analysis::AnalyzedBinding) -> Option<St
     }
 }
 
+/// Build child symbols for template elements and components.
+///
+/// Shows root-level elements (nesting_depth == 0) and component usages
+/// with their props as children.
+fn build_template_children(
+    analysis: &FileAnalysisSnapshot,
+    block: &SfcBlock,
+    line_index: &LineIndex,
+) -> Option<Vec<DocumentSymbol>> {
+    let template = analysis.template.as_ref()?;
+    let mut children = Vec::new();
+    let (content_start, content_end) = block.content_range();
+    let fallback_range = Range {
+        start: line_index
+            .offset_to_position(content_start)
+            .unwrap_or_default(),
+        end: line_index
+            .offset_to_position(content_end)
+            .unwrap_or_default(),
+    };
+
+    // Add component usages (with precise spans)
+    for comp in &template.components {
+        let detail = comp.import_source.as_deref().map(|s| format!("from '{s}'"));
+        let range = span_to_range(comp.span.start, comp.span.end, line_index, fallback_range);
+
+        #[allow(deprecated)]
+        children.push(DocumentSymbol {
+            name: format!("<{}>", comp.name),
+            detail,
+            kind: SymbolKind::OBJECT,
+            tags: None,
+            deprecated: None,
+            range,
+            selection_range: range,
+            children: None,
+        });
+    }
+
+    // Add root-level native elements (depth 0, not components)
+    for elem in &template.elements {
+        if elem.nesting_depth != 0 || elem.is_component {
+            continue;
+        }
+        let range = span_to_range(elem.span.start, elem.span.end, line_index, fallback_range);
+
+        let detail = if !elem.directives.is_empty() {
+            let dirs: Vec<_> = elem
+                .directives
+                .iter()
+                .map(|d| d.raw_name.as_str())
+                .collect();
+            Some(dirs.join(" "))
+        } else {
+            None
+        };
+
+        #[allow(deprecated)]
+        children.push(DocumentSymbol {
+            name: format!("<{}>", elem.tag),
+            detail,
+            kind: SymbolKind::FIELD,
+            tags: None,
+            deprecated: None,
+            range,
+            selection_range: range,
+            children: None,
+        });
+    }
+
+    if children.is_empty() {
+        None
+    } else {
+        Some(children)
+    }
+}
+
+/// Build child symbols for CSS classes, custom properties, and at-rules in a style block.
+///
+/// Uses the style block index to match the correct `StyleBlockAnalysis` entry.
+fn build_style_children(
+    analysis: &FileAnalysisSnapshot,
+    style_index: usize,
+    block: &SfcBlock,
+    line_index: &LineIndex,
+) -> Option<Vec<DocumentSymbol>> {
+    let style_analysis = analysis.styles.get(style_index)?;
+    let css = style_analysis.css.as_ref()?;
+
+    let mut children = Vec::new();
+    let (content_start, content_end) = block.content_range();
+    let fallback_range = Range {
+        start: line_index
+            .offset_to_position(content_start)
+            .unwrap_or_default(),
+        end: line_index
+            .offset_to_position(content_end)
+            .unwrap_or_default(),
+    };
+
+    // CSS class selectors
+    for class in &css.classes {
+        #[allow(deprecated)]
+        children.push(DocumentSymbol {
+            name: format!(".{}", class.name),
+            detail: Some("class".to_string()),
+            kind: SymbolKind::STRING,
+            tags: None,
+            deprecated: None,
+            range: fallback_range,
+            selection_range: fallback_range,
+            children: None,
+        });
+    }
+
+    // CSS custom properties
+    for prop in &css.custom_properties {
+        #[allow(deprecated)]
+        children.push(DocumentSymbol {
+            name: prop.name.clone(),
+            detail: Some("custom property".to_string()),
+            kind: SymbolKind::PROPERTY,
+            tags: None,
+            deprecated: None,
+            range: fallback_range,
+            selection_range: fallback_range,
+            children: None,
+        });
+    }
+
+    // At-rules
+    for rule in &css.at_rules {
+        #[allow(deprecated)]
+        children.push(DocumentSymbol {
+            name: format!("@{}", rule.name),
+            detail: Some(format!("{:?}", rule.kind)),
+            kind: SymbolKind::NAMESPACE,
+            tags: None,
+            deprecated: None,
+            range: fallback_range,
+            selection_range: fallback_range,
+            children: None,
+        });
+    }
+
+    if children.is_empty() {
+        None
+    } else {
+        Some(children)
+    }
+}
+
 fn macro_kind_display(kind: &verter_analysis::AnalyzedMacroKind) -> &'static str {
     match kind {
         verter_analysis::AnalyzedMacroKind::DefineProps => "defineProps",
@@ -296,6 +448,7 @@ fn macro_kind_display(kind: &verter_analysis::AnalyzedMacroKind) -> &'static str
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use verter_analysis::style::{AnalyzedCssClass, CssAnalysis, StyleBlockAnalysis};
     use verter_analysis::*;
 
     fn make_analysis(
@@ -307,10 +460,7 @@ mod tests {
             bindings,
             imports,
             macros,
-            macro_type_deps: vec![],
-            script_flags: 0,
-            styles: vec![],
-            template: None,
+            ..Default::default()
         }
     }
 
@@ -318,7 +468,7 @@ mod tests {
     fn test_basic_sfc_structure() {
         let source = "<template>\n  <div/>\n</template>\n\n<script setup>\nconst x = 1;\n</script>\n\n<style scoped>\n.foo {}\n</style>\n";
         let blocks = scan_sfc_blocks(source);
-        let line_index = LineIndex::new(source);
+        let line_index = LineIndex::new_utf16(source);
 
         let symbols = build_document_symbols(&blocks, None, &line_index);
         assert_eq!(symbols.len(), 3);
@@ -332,7 +482,7 @@ mod tests {
     fn test_script_children_from_analysis() {
         let source = "<script setup lang=\"ts\">\nconst x = ref(0);\n</script>\n";
         let blocks = scan_sfc_blocks(source);
-        let line_index = LineIndex::new(source);
+        let line_index = LineIndex::new_utf16(source);
 
         let analysis = make_analysis(
             vec![AnalyzedBinding {
@@ -346,8 +496,7 @@ mod tests {
                     callee_import_source: Some("vue".to_string()),
                     vue_api: Some(VueApiClassification::Ref),
                 }),
-                span_start: 0,
-                span_end: 0,
+                span: verter_span::Span::new(0, 0),
             }],
             vec![AnalyzedImport {
                 source: "vue".to_string(),
@@ -356,11 +505,9 @@ mod tests {
                     name: "ref".to_string(),
                     is_type_only: false,
                     vue_api: Some(VueApiClassification::Ref),
-                    span_start: 0,
-                    span_end: 0,
+                    span: verter_span::Span::new(0, 0),
                 }],
-                span_start: 0,
-                span_end: 0,
+                span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: None,
             }],
             vec![],
@@ -381,7 +528,7 @@ mod tests {
     fn test_macro_symbols() {
         let source = "<script setup>\nconst props = defineProps<{ msg: string }>()\n</script>\n";
         let blocks = scan_sfc_blocks(source);
-        let line_index = LineIndex::new(source);
+        let line_index = LineIndex::new_utf16(source);
 
         let analysis = make_analysis(
             vec![],
@@ -391,8 +538,9 @@ mod tests {
                 is_type_based: true,
                 type_references: vec![],
                 binding_name: Some("props".to_string()),
-                span_start: 0,
-                span_end: 0,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                span: verter_span::Span::new(0, 0),
             }],
         );
 
@@ -408,7 +556,7 @@ mod tests {
         let source =
             "<script setup lang=\"ts\">\n</script>\n<style scoped lang=\"scss\">\n</style>";
         let blocks = scan_sfc_blocks(source);
-        let line_index = LineIndex::new(source);
+        let line_index = LineIndex::new_utf16(source);
 
         let symbols = build_document_symbols(&blocks, None, &line_index);
         assert_eq!(symbols[0].name, "script setup (ts)");
@@ -421,10 +569,117 @@ mod tests {
     fn test_no_children_for_empty_analysis() {
         let source = "<script setup>\n</script>\n";
         let blocks = scan_sfc_blocks(source);
-        let line_index = LineIndex::new(source);
+        let line_index = LineIndex::new_utf16(source);
 
         let analysis = make_analysis(vec![], vec![], vec![]);
         let symbols = build_document_symbols(&blocks, Some(&analysis), &line_index);
         assert!(symbols[0].children.is_none());
+    }
+
+    #[test]
+    fn test_template_children_components() {
+        let source = "<template>\n<MyButton @click=\"handle\">Click</MyButton>\n</template>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let analysis = FileAnalysisSnapshot {
+            template: Some(TemplateAnalysisSnapshot {
+                components: vec![TemplateComponentUsage {
+                    name: "MyButton".to_string(),
+                    import_source: Some("./MyButton.vue".to_string()),
+                    is_dynamic: false,
+                    props: vec![],
+                    has_spread: false,
+                    slots_used: vec![],
+                    static_classes: vec![],
+                    has_dynamic_class: false,
+                    dynamic_classes: vec![],
+                    v_models: vec![],
+                    span: verter_span::Span::new(11, 52),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let symbols = build_document_symbols(&blocks, Some(&analysis), &line_index);
+        let template = &symbols[0];
+        let children = template.children.as_ref().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "<MyButton>");
+        assert_eq!(children[0].detail.as_deref(), Some("from './MyButton.vue'"));
+    }
+
+    #[test]
+    fn test_template_children_root_elements() {
+        let source = "<template>\n<div><span>inner</span></div>\n</template>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let analysis = FileAnalysisSnapshot {
+            template: Some(TemplateAnalysisSnapshot {
+                elements: vec![
+                    TemplateElement {
+                        tag: "div".to_string(),
+                        nesting_depth: 0,
+                        dynamic_classes: vec![],
+                        span: verter_span::Span::new(11, 42),
+                        ..Default::default()
+                    },
+                    TemplateElement {
+                        tag: "span".to_string(),
+                        nesting_depth: 1,
+                        dynamic_classes: vec![],
+                        span: verter_span::Span::new(16, 35),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let symbols = build_document_symbols(&blocks, Some(&analysis), &line_index);
+        let template = &symbols[0];
+        let children = template.children.as_ref().unwrap();
+        // Only root element (depth 0) shown
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "<div>");
+    }
+
+    #[test]
+    fn test_style_children_classes() {
+        let source =
+            "<style scoped>\n.container { padding: 16px; }\n.title { font-size: 2rem; }\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let analysis = FileAnalysisSnapshot {
+            styles: vec![StyleBlockAnalysis {
+                scoped: true,
+                css: Some(CssAnalysis {
+                    classes: vec![
+                        AnalyzedCssClass {
+                            name: "container".to_string(),
+                            span: verter_span::Span::new(0, 0),
+                        },
+                        AnalyzedCssClass {
+                            name: "title".to_string(),
+                            span: verter_span::Span::new(0, 0),
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let symbols = build_document_symbols(&blocks, Some(&analysis), &line_index);
+        let style = &symbols[0];
+        let children = style.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].name, ".container");
+        assert_eq!(children[1].name, ".title");
     }
 }

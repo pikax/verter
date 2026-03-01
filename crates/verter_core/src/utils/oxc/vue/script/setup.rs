@@ -15,7 +15,8 @@ use super::macros::{
     MacroTypeParams, ScriptMacro, VueMacroKind,
 };
 use super::resolve_type::{
-    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, TypeResolutionContext,
+    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, RuntimeType,
+    TypeResolutionContext,
 };
 use super::shared::ScriptParseContext;
 use super::types::{
@@ -870,7 +871,119 @@ fn extract_array_arg_from_call(
     })
 }
 
-/// Extract object argument details
+/// Map a JS constructor identifier name to a `RuntimeType`.
+fn constructor_ident_to_runtime_type(name: &str) -> Option<RuntimeType> {
+    match name {
+        "String" => Some(RuntimeType::String),
+        "Number" => Some(RuntimeType::Number),
+        "Boolean" => Some(RuntimeType::Boolean),
+        "Object" => Some(RuntimeType::Object),
+        "Array" => Some(RuntimeType::Array),
+        "Function" => Some(RuntimeType::Function),
+        "Symbol" => Some(RuntimeType::Symbol),
+        _ => None,
+    }
+}
+
+/// Extract runtime types from an AST expression.
+///
+/// Handles:
+/// - `String` → `[RuntimeType::String]`
+/// - `[String, Number]` → `[RuntimeType::String, RuntimeType::Number]`
+/// - `Number as PropType<number[]>` → `[RuntimeType::Number]` (uses the constructor before `as`)
+fn extract_runtime_types_from_expr(expr: &Expression<'_>) -> Vec<RuntimeType> {
+    match expr {
+        Expression::Identifier(id) => {
+            if let Some(rt) = constructor_ident_to_runtime_type(id.name.as_str()) {
+                vec![rt]
+            } else {
+                vec![]
+            }
+        }
+        Expression::ArrayExpression(arr) => {
+            let mut types = Vec::new();
+            for elem in &arr.elements {
+                if let Some(Expression::Identifier(id)) = elem.as_expression() {
+                    if let Some(rt) = constructor_ident_to_runtime_type(id.name.as_str()) {
+                        types.push(rt);
+                    }
+                }
+            }
+            types
+        }
+        Expression::TSAsExpression(ts_as) => extract_runtime_types_from_expr(&ts_as.expression),
+        _ => vec![],
+    }
+}
+
+/// Extract the `PropType<T>` type annotation span from a `TSAsExpression`.
+///
+/// For `X as PropType<T>`, returns the span of `T`.
+fn extract_prop_type_annotation(expr: &Expression<'_>) -> Option<Span> {
+    let Expression::TSAsExpression(ts_as) = expr else {
+        return None;
+    };
+    let TSType::TSTypeReference(type_ref) = &ts_as.type_annotation else {
+        return None;
+    };
+    let TSTypeName::IdentifierReference(id) = &type_ref.type_name else {
+        return None;
+    };
+    if id.name.as_str() != "PropType" {
+        return None;
+    }
+    let Some(type_args) = &type_ref.type_arguments else {
+        return None;
+    };
+    type_args
+        .params
+        .first()
+        .map(|p: &TSType<'_>| Span::from(p.span()))
+}
+
+/// Extract prop metadata from an object-form prop value:
+/// `{ type: X, required: true, default: ... }`.
+///
+/// Returns `(required, has_default, runtime_types, prop_type_annotation)`.
+fn extract_prop_object_metadata(
+    obj: &ObjectExpression<'_>,
+) -> (bool, bool, Vec<RuntimeType>, Option<Span>) {
+    let mut required = false;
+    let mut has_default = false;
+    let mut runtime_types = Vec::new();
+    let mut prop_type_annotation = None;
+
+    for prop in &obj.properties {
+        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+            let key_name = match &p.key {
+                PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+                _ => None,
+            };
+            match key_name {
+                Some("type") => {
+                    runtime_types = extract_runtime_types_from_expr(&p.value);
+                    prop_type_annotation = extract_prop_type_annotation(&p.value);
+                }
+                Some("required") => {
+                    if let Expression::BooleanLiteral(b) = &p.value {
+                        required = b.value;
+                    }
+                }
+                Some("default") => {
+                    has_default = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (required, has_default, runtime_types, prop_type_annotation)
+}
+
+/// Extract object argument details.
+///
+/// For each property, extracts AST-level metadata: runtime types, required flag,
+/// default flag, and PropType<T> annotation span.
 fn extract_object_arg<'a>(
     obj: &ObjectExpression<'a>,
     ctx: &ScriptParseContext<'a>,
@@ -885,11 +998,34 @@ fn extract_object_arg<'a>(
                 } else {
                     Some(Span::from(p.value.span()))
                 };
+
+                let (required, has_default, runtime_types, prop_type_annotation) = if p.shorthand {
+                    (false, false, vec![], None)
+                } else {
+                    match &p.value {
+                        Expression::Identifier(_) | Expression::ArrayExpression(_) => {
+                            let types = extract_runtime_types_from_expr(&p.value);
+                            (false, false, types, None)
+                        }
+                        Expression::TSAsExpression(_) => {
+                            let types = extract_runtime_types_from_expr(&p.value);
+                            let annotation = extract_prop_type_annotation(&p.value);
+                            (false, false, types, annotation)
+                        }
+                        Expression::ObjectExpression(obj) => extract_prop_object_metadata(obj),
+                        _ => (false, false, vec![], None),
+                    }
+                };
+
                 properties.push(MacroProperty {
                     name,
                     name_span,
                     value_span,
                     is_method: p.method,
+                    required,
+                    has_default,
+                    runtime_types,
+                    prop_type_annotation,
                 });
             }
         }

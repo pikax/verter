@@ -1,0 +1,23 @@
+[package]
+name = "verter_tsc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "verter-tsc — vue-tsc replacement: parallel Vue SFC type checker using verter codegen"
+
+[[bin]]
+name = "verter-tsc"
+path = "src/main.rs"
+
+[dependencies]
+verter_core = { path = "../verter_core" }
+verter_host = { path = "../verter_host" }
+clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = "1"
+tempfile = "3"
+base64 = "0.22"
+oxc_allocator = { workspace = true }
+oxc_sourcemap = "6.0.2"
+walkdir = "2"

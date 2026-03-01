@@ -272,17 +272,60 @@ fn try_extract_macro(expr: &Expression<'_>, binding_name: Option<String>) -> Opt
                 (false, Vec::new())
             };
 
+            // Extract model name from defineModel('name') first string argument
+            let model_name = if kind == AnalyzedMacroKind::DefineModel {
+                call.arguments.first().and_then(|arg| {
+                    if let Some(Expression::StringLiteral(lit)) = arg.as_expression() {
+                        Some(lit.value.to_string())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
+            // Detect defineOptions({ inheritAttrs: false })
+            let has_inherit_attrs_false =
+                kind == AnalyzedMacroKind::DefineOptions && has_inherit_attrs_false_in_args(call);
+
             Some(AnalyzedMacro {
                 kind,
                 is_type_based,
                 type_references,
                 binding_name,
-                span_start: call.span.start,
-                span_end: call.span.end,
+                model_name,
+                has_inherit_attrs_false,
+                span: call.span.into(),
             })
         }
         _ => None,
     }
+}
+
+/// Check if a `defineOptions()` call has `inheritAttrs: false` in its first object argument.
+fn has_inherit_attrs_false_in_args(call: &CallExpression<'_>) -> bool {
+    let Some(first_arg) = call.arguments.first() else {
+        return false;
+    };
+    let Some(Expression::ObjectExpression(obj)) = first_arg.as_expression() else {
+        return false;
+    };
+    for prop in &obj.properties {
+        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+            let is_inherit_attrs = match &p.key {
+                PropertyKey::StaticIdentifier(id) => id.name == "inheritAttrs",
+                PropertyKey::StringLiteral(lit) => lit.value == "inheritAttrs",
+                _ => false,
+            };
+            if is_inherit_attrs {
+                if let Expression::BooleanLiteral(b) = &p.value {
+                    return !b.value; // inheritAttrs: false
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

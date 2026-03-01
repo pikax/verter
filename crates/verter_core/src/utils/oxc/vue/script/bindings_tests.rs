@@ -69,11 +69,11 @@ fn const_static_template_literal() {
     assert_eq!(find(&b, "x"), Some(BindingType::LiteralConst));
 }
 
-/// @ai-generated
+/// @ai-generated — dynamic template literal might evaluate to a ref
 #[test]
 fn const_dynamic_template_literal() {
     let b = classify("const x = `${dynamic}`;");
-    assert_eq!(find(&b, "x"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
 }
 
 // ── Variable declarations: reactivity helpers ────────────────────────
@@ -562,20 +562,20 @@ fn import_multiple_named() {
 
 // ── Destructuring ────────────────────────────────────────────────────
 
-/// @ai-generated
+/// @ai-generated — destructured from identifier (might be ref) → SetupMaybeRef
 #[test]
 fn const_object_destructure() {
     let b = classify("const { a, b } = someObj;");
-    assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
-    assert_eq!(find(&b, "b"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupMaybeRef));
 }
 
-/// @ai-generated
+/// @ai-generated — destructured from identifier (might be ref) → SetupMaybeRef
 #[test]
 fn const_array_destructure() {
     let b = classify("const [a, b] = someArr;");
-    assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
-    assert_eq!(find(&b, "b"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupMaybeRef));
 }
 
 /// @ai-generated
@@ -586,36 +586,73 @@ fn let_object_destructure() {
     assert_eq!(find(&b, "b"), Some(BindingType::SetupLet));
 }
 
-/// @ai-generated
+/// @ai-generated — destructured from identifier with default → SetupMaybeRef
 #[test]
 fn const_destructure_with_default() {
     let b = classify("const { a = 1 } = someObj;");
-    assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
 }
 
-/// @ai-generated
+/// @ai-generated — nested destructure from identifier → SetupMaybeRef
 #[test]
 fn const_nested_destructure() {
     let b = classify("const { a: { b } } = someObj;");
-    assert_eq!(find(&b, "b"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupMaybeRef));
     // 'a' is not bound — it's a property key, not a binding
     assert_eq!(find(&b, "a"), None);
 }
 
-/// @ai-generated
+/// @ai-generated — array rest from identifier → SetupMaybeRef
 #[test]
 fn const_array_rest() {
     let b = classify("const [a, ...rest] = someArr;");
-    assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
-    assert_eq!(find(&b, "rest"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "rest"), Some(BindingType::SetupMaybeRef));
 }
 
-/// @ai-generated
+/// @ai-generated — object rest from identifier → SetupMaybeRef
 #[test]
 fn const_object_rest() {
     let b = classify("const { a, ...rest } = someObj;");
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "rest"), Some(BindingType::SetupMaybeRef));
+}
+
+/// @ai-generated — destructured from array literal (canNeverBeRef) → SetupConst
+#[test]
+fn const_destructure_from_array_literal() {
+    let b = classify("const [a, b] = [1, 2];");
     assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
-    assert_eq!(find(&b, "rest"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupConst));
+}
+
+/// @ai-generated — destructured from object literal (canNeverBeRef) → SetupConst
+#[test]
+fn const_destructure_from_object_literal() {
+    let b = classify("const { a, b } = { a: 1, b: 2 };");
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupConst));
+}
+
+/// @ai-generated — ternary expression might be ref → SetupMaybeRef
+#[test]
+fn const_ternary_expression() {
+    let b = classify("const x = cond ? a : b;");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
+}
+
+/// @ai-generated — member expression might be ref → SetupMaybeRef
+#[test]
+fn const_member_expression() {
+    let b = classify("const x = obj.prop;");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
+}
+
+/// @ai-generated — await expression might be ref → SetupMaybeRef
+#[test]
+fn const_await_expression() {
+    let b = classify("const x = await fetchData();");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
 }
 
 // ── Edge cases ───────────────────────────────────────────────────────
@@ -694,13 +731,13 @@ fn standalone_define_slots_no_binding() {
     );
 }
 
-/// @ai-generated — array destructure with holes
+/// @ai-generated — array destructure with holes from identifier → SetupMaybeRef
 #[test]
 fn array_destructure_with_holes() {
     let b = classify("const [, b, , d] = arr;");
     assert_eq!(b.len(), 2);
-    assert_eq!(find(&b, "b"), Some(BindingType::SetupConst));
-    assert_eq!(find(&b, "d"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "d"), Some(BindingType::SetupMaybeRef));
 }
 
 /// @ai-generated — const arrow function expression

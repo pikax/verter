@@ -94,6 +94,18 @@ fn transform_single_selector(selector: &str, scope_attr: &str, slotted_attr: &st
         return transform_global(selector);
     }
 
+    // WS 5.3: Strip :deep() with empty parens — prepass leaves it unchanged,
+    // lightningcss preserves it. Remove the pseudo-class and scope normally.
+    if selector.contains(":deep()") {
+        let stripped = selector.replace(":deep()", "");
+        let trimmed = stripped.trim();
+        if trimmed.is_empty() {
+            // Bare `:deep()` with no other selector — just scope the universal selector
+            return scope_attr.to_string();
+        }
+        return add_scope_to_selector(trimmed, scope_attr);
+    }
+
     // Regular selector: add scope to each compound selector
     add_scope_to_selector(selector, scope_attr)
 }
@@ -896,6 +908,78 @@ mod tests {
         );
     }
 
+    // ===================================================================
+    // @ai-generated - CSS nesting tests (apply_scoped_raw path)
+    // ===================================================================
+
+    /// Native CSS nesting: nested `& .child` must be scoped.
+    #[test]
+    fn test_css_nesting_raw_basic() {
+        let css = ".parent { color: red; & .child { color: blue; } }";
+        let result = apply_scoped_raw(css, "a4f2eed6");
+        assert!(
+            result.contains(".parent[data-v-a4f2eed6]"),
+            "Parent must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".child[data-v-a4f2eed6]"),
+            "Nested .child must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("color: red"),
+            "Parent declarations preserved. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("color: blue"),
+            "Nested declarations preserved. Got: {}",
+            result
+        );
+    }
+
+    /// Native CSS nesting: `&:hover` pseudo-class.
+    #[test]
+    fn test_css_nesting_raw_pseudo() {
+        let css = ".btn { color: red; &:hover { color: blue; } }";
+        let result = apply_scoped_raw(css, "a4f2eed6");
+        assert!(
+            result.contains(".btn[data-v-a4f2eed6]"),
+            "Parent must be scoped. Got: {}",
+            result
+        );
+        // &:hover → &[data-v-xxx]:hover
+        assert!(
+            result.contains("[data-v-a4f2eed6]:hover"),
+            "Nested &:hover must have scope before :hover. Got: {}",
+            result
+        );
+    }
+
+    /// Native CSS nesting: multiple nested selectors.
+    #[test]
+    fn test_css_nesting_raw_multiple() {
+        let css =
+            ".card { padding: 1rem; & .title { font-size: 18px; } & .body { padding: 8px; } }";
+        let result = apply_scoped_raw(css, "a4f2eed6");
+        assert!(
+            result.contains(".card[data-v-a4f2eed6]"),
+            "Parent must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".title[data-v-a4f2eed6]"),
+            ".title must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".body[data-v-a4f2eed6]"),
+            ".body must be scoped. Got: {}",
+            result
+        );
+    }
+
     /// @font-face at-rule should not be scoped.
     #[test]
     fn test_font_face_not_scoped() {
@@ -907,5 +991,149 @@ mod tests {
             ".text must be scoped after @font-face. Got: {}",
             result
         );
+    }
+
+    // ===================================================================
+    // WS 10.2 — :deep() edge cases (end-to-end through prepass + scoped)
+    // ===================================================================
+
+    /// Full pipeline helper: prepass → normalize → scope (matches `process_style`).
+    /// Unlike `scoped()` which skips the prepass, this exercises the real pipeline.
+    fn scoped_e2e(css: &str) -> String {
+        use super::super::types::ProcessStyleOptions;
+        super::super::process_style(
+            css,
+            &ProcessStyleOptions {
+                scope_id: "a4f2eed6",
+                scoped: true,
+                is_module: false,
+                module_name: None,
+                filename: None,
+                sourcemap: false,
+            },
+        )
+        .unwrap()
+        .code
+    }
+
+    /// WS 5.1: :deep(.a, .b) — each comma-separated selector gets its own
+    /// [data-v-xxx] prefix; neither inner selector should receive a scope attr.
+    #[test]
+    fn test_deep_with_comma_e2e() {
+        let result = scoped_e2e(":deep(.a, .b) { color: red; }");
+        // Each branch must have the scope attr as a prefix (from prepass expansion)
+        assert!(
+            result.contains("[data-v-a4f2eed6] .a"),
+            ":deep(.a, .b) — .a branch must have scope prefix. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("[data-v-a4f2eed6] .b"),
+            ":deep(.a, .b) — .b branch must have scope prefix. Got: {}",
+            result
+        );
+        // The inner selectors must NOT themselves be scoped
+        assert!(
+            !result.contains(".a[data-v"),
+            ".a inside :deep() must not be scoped. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains(".b[data-v"),
+            ".b inside :deep() must not be scoped. Got: {}",
+            result
+        );
+        // The raw Vue syntax must not leak into the output
+        assert!(
+            !result.contains(":deep("),
+            ":deep() must be removed from output. Got: {}",
+            result
+        );
+    }
+
+    /// WS 5.1: .parent :deep(.a, .b) — scope attr placed between parent and
+    /// each inner selector branch.
+    #[test]
+    fn test_deep_with_comma_and_parent_e2e() {
+        let result = scoped_e2e(".parent :deep(.a, .b) { color: red; }");
+        // After prepass: ".parent [__v_deep__] .a, .parent [__v_deep__] .b { ... }"
+        // After scoped: ".parent [data-v-xxx] .a, .parent [data-v-xxx] .b { ... }"
+        assert!(
+            result.contains("[data-v-a4f2eed6] .a"),
+            ".a branch must have scope prefix. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("[data-v-a4f2eed6] .b"),
+            ".b branch must have scope prefix. Got: {}",
+            result
+        );
+        // Inner selectors must NOT be scoped
+        assert!(
+            !result.contains(".a[data-v"),
+            ".a inside :deep() must not be scoped. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains(".b[data-v"),
+            ".b inside :deep() must not be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// WS 5.3: :deep() with empty parens — prepass leaves the token unchanged;
+    /// lightningcss may drop the unknown pseudo-class; either way no deep marker
+    /// and no crash should occur.
+    #[test]
+    fn test_deep_empty_parens_e2e() {
+        // process_style() runs prepass → normalize → scope.
+        // Prepass returns :deep() unchanged (empty inner = no transform).
+        // lightningcss may strip the unknown pseudo or error; the result must
+        // not contain the internal deep marker and must not panic.
+        use super::super::types::ProcessStyleOptions;
+        let result = super::super::process_style(
+            ":deep() { color: red; }",
+            &ProcessStyleOptions {
+                scope_id: "a4f2eed6",
+                scoped: true,
+                is_module: false,
+                module_name: None,
+                filename: None,
+                sourcemap: false,
+            },
+        );
+        // We don't assert Ok/Err since lightningcss may reject :deep() —
+        // the important constraint is that if it succeeds, no deep marker leaks.
+        if let Ok(r) = result {
+            assert!(
+                !r.code.contains("__v_deep__"),
+                "deep marker must not appear in output. Got: {}",
+                r.code
+            );
+            assert!(
+                !r.code.contains(":deep()"),
+                ":deep() syntax must not appear in output. Got: {}",
+                r.code
+            );
+        }
+        // A parse error is also an acceptable outcome — :deep() is not valid CSS.
+    }
+
+    /// WS 5.3: bare :deep (no parens) — prepass does not touch it; it should
+    /// pass through without injecting any deep marker.
+    #[test]
+    fn test_deep_bare_no_parens_e2e() {
+        // :deep without parens is not recognized by prepass (pattern ":deep(" required).
+        // Lightningcss may strip the unknown pseudo-class; result must not contain
+        // the internal marker.
+        let result = apply_scoped(":deep { color: red; }", "a4f2eed6");
+        if let Ok(css) = result {
+            assert!(
+                !css.contains("__v_deep__"),
+                "deep marker must not appear for bare :deep. Got: {}",
+                css
+            );
+        }
+        // A parse error is also acceptable — bare :deep is not valid CSS.
     }
 }

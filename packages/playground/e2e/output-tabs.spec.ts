@@ -23,7 +23,7 @@ test.describe("Output tabs", () => {
   });
 
   test("CSS tab is visible", async ({ page }) => {
-    const cssTab = page.locator(".output-tabs button", { hasText: "CSS" });
+    const cssTab = page.getByRole("button", { name: "CSS", exact: true });
     await expect(cssTab).toBeVisible({ timeout: 5000 });
   });
 
@@ -38,7 +38,7 @@ test.describe("Output tabs", () => {
   });
 
   test("clicking CSS tab shows compiled CSS", async ({ page }) => {
-    const cssTab = page.locator(".output-tabs button", { hasText: "CSS" });
+    const cssTab = page.getByRole("button", { name: "CSS", exact: true });
     await cssTab.click();
     await page.waitForTimeout(1000);
 

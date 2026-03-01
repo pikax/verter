@@ -6,11 +6,23 @@ use crate::types::{FileMeta, ParsedRawId, VirtualNodeKind};
 
 pub(crate) fn canonicalize_id(input: &str) -> Cow<'_, str> {
     let trimmed = input.trim();
+
+    // Check if the path has a Windows drive letter that needs lowercasing
+    // (e.g., `C:/...` or `C:\...` → `c:/...`)
+    let needs_drive_lower = {
+        let b = trimmed.as_bytes();
+        b.len() >= 2
+            && b[0].is_ascii_uppercase()
+            && b[1] == b':'
+            && (b.len() == 2 || b[2] == b'/' || b[2] == b'\\')
+    };
+
     // Fast path: no transformations needed — avoid allocations
     if trimmed.len() == input.len()
         && !trimmed.contains('\\')
         && !trimmed.contains('?')
         && !trimmed.contains("._VERTER_.")
+        && !needs_drive_lower
     {
         return Cow::Borrowed(trimmed);
     }
@@ -20,6 +32,13 @@ pub(crate) fn canonicalize_id(input: &str) -> Cow<'_, str> {
     }
     if let Some((base, _)) = s.split_once("._VERTER_.") {
         s = base.to_string();
+    }
+    // Normalize Windows drive letter to lowercase
+    if needs_drive_lower {
+        // Safety: drive letter is always ASCII, so byte-level mutation is safe
+        unsafe {
+            s.as_bytes_mut()[0] = s.as_bytes()[0].to_ascii_lowercase();
+        }
     }
     Cow::Owned(s)
 }
@@ -275,7 +294,7 @@ mod tests {
     #[test]
     fn parse_raw_id_windows_backslashes_normalized() {
         let result = parse_raw_id("C:\\Users\\foo\\Comp.vue").unwrap();
-        assert_eq!(result.canonical_id, "C:/Users/foo/Comp.vue");
+        assert_eq!(result.canonical_id, "c:/Users/foo/Comp.vue");
     }
 
     #[test]
@@ -515,5 +534,20 @@ mod tests {
     fn resolve_external_no_directory() {
         let result = resolve_external("Comp.vue", "./helper.ts");
         assert_eq!(result, "helper.ts");
+    }
+
+    /// @ai-generated - Windows drive letter normalization: C:\ and c:\ should match
+    #[test]
+    fn canonicalize_id_normalizes_drive_letter_case() {
+        let upper = canonicalize_id("C:/src/App.vue");
+        let lower = canonicalize_id("c:/src/App.vue");
+        assert_eq!(upper, lower, "drive letter case should be normalized");
+    }
+
+    /// @ai-generated - Windows backslash + uppercase drive letter
+    #[test]
+    fn canonicalize_id_backslash_and_drive_letter() {
+        let result = canonicalize_id("D:\\src\\App.vue");
+        assert_eq!(result, "d:/src/App.vue");
     }
 }

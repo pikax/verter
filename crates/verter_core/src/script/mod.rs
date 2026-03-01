@@ -34,6 +34,8 @@ pub struct ScriptCodeGenOptions<'a> {
     pub inline_template: bool,
     /// Vapor mode output.
     pub is_vapor: bool,
+    /// SSR mode output — emits `__ssrInlineRender: true`.
+    pub ssr: bool,
     /// Whether any `<style scoped>` block exists.
     pub has_scoped_style: bool,
     /// CSS v-bind vars from style codegen (for `_useCssVars` injection).
@@ -114,7 +116,7 @@ pub fn generate_script<'alloc>(
 
     // Apply all accumulated operations to CodeTransform
     let codegen_imports = ctx.out.apply_to(ct);
-    ctx.imports.extend(codegen_imports);
+    ctx.imports.extend(codegen_imports.vue);
 
     // Deduplicate imports (multiple defineModel/useSlots calls can push the same import)
     ctx.imports.sort_unstable();

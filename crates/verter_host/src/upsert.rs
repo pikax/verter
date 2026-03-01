@@ -81,6 +81,7 @@ pub(crate) struct UpsertResultData {
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
     pub(crate) imports: Vec<verter_analysis::AnalyzedImport>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
+    pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
 }
 
 /// Render bundler and LSP IDs for a list of virtual nodes.
@@ -154,6 +155,7 @@ pub(crate) fn build_upsert_result(
         diagnostics,
         external_source_requests: data.external_requests,
         import_specifiers,
+        preprocessor_requests: data.preprocessor_requests,
         parse_duration_ms,
     })
 }

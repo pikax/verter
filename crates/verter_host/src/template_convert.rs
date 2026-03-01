@@ -7,9 +7,9 @@
 use verter_analysis::template::{
     BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace,
     IfChain, PropValueConstness, TemplateAnalysisSnapshot, TemplateAttribute,
-    TemplateBindingOccurrence, TemplateComponentUsage, TemplateDirective, TemplateElement,
-    TemplateEventHandler, TemplatePropUsage, TemplateRef, UnresolvedBinding, VForDirective,
-    VModelDirective,
+    TemplateBindingOccurrence, TemplateComponentUsage, TemplateComponentVModel, TemplateDirective,
+    TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef, UnresolvedBinding,
+    VForDirective, VModelDirective,
 };
 use verter_core::compile::template_data::RawTemplateData;
 
@@ -26,9 +26,10 @@ pub fn convert_raw_to_analysis(
         .components
         .iter()
         .map(|c| {
+            let pascal_tag = to_pascal_case(&c.tag_name);
             let import_source = script_imports
                 .iter()
-                .find(|(name, _)| name == &c.tag_name)
+                .find(|(name, _)| name == &c.tag_name || *name == pascal_tag)
                 .map(|(_, source)| source.clone());
 
             let props = c
@@ -53,6 +54,37 @@ pub fn convert_raw_to_analysis(
                         constness,
                         referenced_bindings: p.referenced_bindings.clone(),
                         from_spread: p.from_spread,
+                        span: p.span,
+                    }
+                })
+                .collect();
+
+            // Extract class names from :class object syntax
+            let dynamic_classes = c
+                .dynamic_class_expr
+                .as_deref()
+                .map(verter_analysis::extract_dynamic_class_names)
+                .unwrap_or_default();
+
+            // Collect v-model directives that target this component
+            let v_models: Vec<TemplateComponentVModel> = raw
+                .v_model_directives
+                .iter()
+                .filter(|vm| vm.target_is_component && vm.target_tag == c.tag_name)
+                .filter(|vm| {
+                    // Match by span overlap: the v-model's span should be within this component's span
+                    vm.span.start >= c.span.start && vm.span.end <= c.span.end
+                })
+                .map(|vm| {
+                    // v-model without an argument name defaults to "modelValue"
+                    let binding_name = if vm.binding_name.is_empty() {
+                        "modelValue".to_string()
+                    } else {
+                        vm.binding_name.clone()
+                    };
+                    TemplateComponentVModel {
+                        binding_name,
+                        span: vm.span,
                     }
                 })
                 .collect();
@@ -64,8 +96,11 @@ pub fn convert_raw_to_analysis(
                 props,
                 has_spread: c.has_spread,
                 slots_used: c.slots_used.clone(),
-                span_start: c.span_start,
-                span_end: c.span_end,
+                static_classes: c.static_classes.clone(),
+                has_dynamic_class: c.has_dynamic_class,
+                dynamic_classes,
+                v_models,
+                span: c.span,
             }
         })
         .collect();
@@ -87,15 +122,13 @@ pub fn convert_raw_to_analysis(
         if b.is_in_bindings_map {
             binding_occurrences.push(TemplateBindingOccurrence {
                 name: b.name.clone(),
-                span_start: b.span_start,
-                span_end: b.span_end,
+                span: b.span,
                 usage_kind,
             });
         } else {
             unresolved_bindings.push(UnresolvedBinding {
                 name: b.name.clone(),
-                span_start: b.span_start,
-                span_end: b.span_end,
+                span: b.span,
             });
         }
     }
@@ -106,6 +139,8 @@ pub fn convert_raw_to_analysis(
         .map(|s| DefinedSlot {
             name: s.name.clone(),
             has_bindings: s.has_bindings,
+            binding_names: s.binding_names.clone(),
+            span: s.span,
         })
         .collect();
 
@@ -132,6 +167,8 @@ pub fn convert_raw_to_analysis(
                 event_name: h.event_name.clone(),
                 handler_binding,
                 is_inline: h.is_inline,
+                target_tag: h.target_tag.clone(),
+                span: h.span,
             }
         })
         .collect();
@@ -162,8 +199,7 @@ pub fn convert_raw_to_analysis(
             CommentDirective {
                 kind,
                 message: d.rule_or_message.clone(),
-                span_start: d.span_start,
-                span_end: d.span_end,
+                span: d.span,
                 affects_next_line: d.affects_next_line,
             }
         })
@@ -175,9 +211,15 @@ pub fn convert_raw_to_analysis(
         .elements
         .iter()
         .map(|e| {
-            // Detect v-if + v-for on same element
+            // Detect v-if + v-for on same element — use the v-if directive span
             if e.has_v_if && e.v_for_idx.is_some() {
-                v_if_v_for_conflicts.push((e.span_start, e.span_end));
+                let (start, end) = e
+                    .directives
+                    .iter()
+                    .find(|d| d.name == "if")
+                    .map(|d| (d.span.start, d.span.end))
+                    .unwrap_or((e.span.start, e.span.end));
+                v_if_v_for_conflicts.push((start, end));
             }
 
             let attributes = e
@@ -187,8 +229,7 @@ pub fn convert_raw_to_analysis(
                     name: a.name.clone(),
                     value: a.value.clone(),
                     is_dynamic: a.is_dynamic,
-                    span_start: a.span_start,
-                    span_end: a.span_end,
+                    span: a.span,
                 })
                 .collect();
 
@@ -201,8 +242,7 @@ pub fn convert_raw_to_analysis(
                     argument: d.argument.clone(),
                     modifiers: d.modifiers.clone(),
                     expression: d.expression.clone(),
-                    span_start: d.span_start,
-                    span_end: d.span_end,
+                    span: d.span,
                 })
                 .collect();
 
@@ -215,8 +255,7 @@ pub fn convert_raw_to_analysis(
                     has_key: vf.has_key,
                     key_expression: vf.key_expression.clone(),
                     key_uses_index: vf.key_uses_index,
-                    span_start: vf.span_start,
-                    span_end: vf.span_end,
+                    span: vf.span,
                 }
             });
 
@@ -227,10 +266,18 @@ pub fn convert_raw_to_analysis(
                     modifiers: vm.modifiers.clone(),
                     target_is_component: vm.target_is_component,
                     target_tag: vm.target_tag.clone(),
-                    span_start: vm.span_start,
-                    span_end: vm.span_end,
+                    span: vm.span,
                 }
             });
+
+            // Extract class names from :class object syntax (e.g., { 'foo': cond })
+            let dynamic_classes: Vec<String> = e
+                .attributes
+                .iter()
+                .filter(|a| a.is_dynamic && a.name == "class")
+                .filter_map(|a| a.value.as_deref())
+                .flat_map(verter_analysis::extract_dynamic_class_names)
+                .collect();
 
             TemplateElement {
                 tag: e.tag.clone(),
@@ -247,10 +294,14 @@ pub fn convert_raw_to_analysis(
                 has_v_show: e.has_v_show,
                 has_v_html: e.has_v_html,
                 has_v_text: e.has_v_text,
+                has_text_content: e.has_text_content,
+                has_element_children: e.has_element_children,
                 nesting_depth: e.nesting_depth,
                 parent_tag: e.parent_tag.clone(),
-                span_start: e.span_start,
-                span_end: e.span_end,
+                parent_index: e.parent_index,
+                dynamic_classes,
+                span: e.span,
+                tag_span_end: e.tag_span_end,
             }
         })
         .collect();
@@ -272,9 +323,27 @@ pub fn convert_raw_to_analysis(
     }
 }
 
+/// Convert a kebab-case or snake_case string to PascalCase.
+fn to_pascal_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut capitalize_next = true;
+    for ch in s.chars() {
+        if ch == '-' || ch == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.extend(ch.to_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_core::common::Span;
     use verter_core::compile::template_data::*;
 
     /// @ai-generated - Empty raw data converts to empty snapshot
@@ -306,11 +375,14 @@ mod tests {
                     referenced_bindings: vec![],
                     all_bindings_static: None,
                     from_spread: false,
+                    span: Span::new(0, 0),
                 }],
                 has_spread: false,
                 slots_used: vec![],
-                span_start: 10,
-                span_end: 40,
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_class_expr: None,
+                span: Span::new(10, 40),
             }],
             ..Default::default()
         };
@@ -341,14 +413,44 @@ mod tests {
                 props: vec![],
                 has_spread: false,
                 slots_used: vec![],
-                span_start: 0,
-                span_end: 20,
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_class_expr: None,
+                span: Span::new(0, 20),
             }],
             ..Default::default()
         };
 
         let result = convert_raw_to_analysis(&raw, &[]);
         assert!(result.components[0].import_source.is_none());
+    }
+
+    /// @ai-generated - Kebab-case tag name matches PascalCase import
+    #[test]
+    fn component_kebab_case_matches_pascal_import() {
+        let raw = RawTemplateData {
+            components: vec![RawComponentUsage {
+                tag_name: "my-header".to_string(),
+                is_dynamic: false,
+                props: vec![],
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_class_expr: None,
+                span: Span::new(0, 20),
+            }],
+            ..Default::default()
+        };
+
+        let imports = vec![("MyHeader".to_string(), "./MyHeader.vue".to_string())];
+        let result = convert_raw_to_analysis(&raw, &imports);
+
+        assert_eq!(
+            result.components[0].import_source.as_deref(),
+            Some("./MyHeader.vue"),
+            "kebab-case tag should match PascalCase import"
+        );
     }
 
     /// @ai-generated - Binding occurrences split into resolved and unresolved
@@ -358,15 +460,13 @@ mod tests {
             binding_occurrences: vec![
                 RawBindingOccurrence {
                     name: "msg".to_string(),
-                    span_start: 10,
-                    span_end: 13,
+                    span: Span::new(10, 13),
                     is_in_bindings_map: true,
                     usage_kind: 0,
                 },
                 RawBindingOccurrence {
                     name: "unknown".to_string(),
-                    span_start: 20,
-                    span_end: 27,
+                    span: Span::new(20, 27),
                     is_in_bindings_map: false,
                     usage_kind: 0,
                 },
@@ -400,6 +500,7 @@ mod tests {
                         referenced_bindings: vec![],
                         all_bindings_static: None,
                         from_spread: false,
+                        span: Span::new(0, 0),
                     },
                     RawPropData {
                         name: "const_bound".to_string(),
@@ -408,6 +509,7 @@ mod tests {
                         referenced_bindings: vec!["LABEL".to_string()],
                         all_bindings_static: Some(true),
                         from_spread: false,
+                        span: Span::new(0, 0),
                     },
                     RawPropData {
                         name: "dynamic_bound".to_string(),
@@ -416,6 +518,7 @@ mod tests {
                         referenced_bindings: vec!["count".to_string()],
                         all_bindings_static: Some(false),
                         from_spread: false,
+                        span: Span::new(0, 0),
                     },
                     RawPropData {
                         name: "".to_string(),
@@ -424,12 +527,15 @@ mod tests {
                         referenced_bindings: vec![],
                         all_bindings_static: None,
                         from_spread: true,
+                        span: Span::new(0, 0),
                     },
                 ],
                 has_spread: true,
                 slots_used: vec![],
-                span_start: 0,
-                span_end: 50,
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_class_expr: None,
+                span: Span::new(0, 50),
             }],
             ..Default::default()
         };
@@ -451,15 +557,13 @@ mod tests {
                     name: "el".to_string(),
                     is_dynamic: false,
                     target_tag: "div".to_string(),
-                    span_start: 0,
-                    span_end: 20,
+                    span: Span::new(0, 20),
                 },
                 RawTemplateRef {
                     name: "elRef".to_string(),
                     is_dynamic: true,
                     target_tag: "input".to_string(),
-                    span_start: 25,
-                    span_end: 50,
+                    span: Span::new(25, 50),
                 },
             ],
             ..Default::default()
@@ -480,15 +584,15 @@ mod tests {
                     event_name: "click".to_string(),
                     handler_expression: Some("handleClick".to_string()),
                     is_inline: false,
-                    span_start: 0,
-                    span_end: 20,
+                    target_tag: "div".to_string(),
+                    span: Span::new(0, 20),
                 },
                 RawEventHandler {
                     event_name: "click".to_string(),
                     handler_expression: Some("count++".to_string()),
                     is_inline: true,
-                    span_start: 25,
-                    span_end: 50,
+                    target_tag: "div".to_string(),
+                    span: Span::new(25, 50),
                 },
             ],
             ..Default::default()
@@ -513,15 +617,13 @@ mod tests {
                 RawCommentDirective {
                     kind: 0,
                     rule_or_message: Some("no-v-html".to_string()),
-                    span_start: 0,
-                    span_end: 40,
+                    span: Span::new(0, 40),
                     affects_next_line: false,
                 },
                 RawCommentDirective {
                     kind: 1,
                     rule_or_message: Some("require-v-for-key".to_string()),
-                    span_start: 45,
-                    span_end: 80,
+                    span: Span::new(45, 80),
                     affects_next_line: true,
                 },
             ],
@@ -579,43 +681,37 @@ mod tests {
             binding_occurrences: vec![
                 RawBindingOccurrence {
                     name: "a".to_string(),
-                    span_start: 0,
-                    span_end: 1,
+                    span: Span::new(0, 1),
                     is_in_bindings_map: true,
                     usage_kind: 0,
                 },
                 RawBindingOccurrence {
                     name: "b".to_string(),
-                    span_start: 5,
-                    span_end: 6,
+                    span: Span::new(5, 6),
                     is_in_bindings_map: true,
                     usage_kind: 1,
                 },
                 RawBindingOccurrence {
                     name: "c".to_string(),
-                    span_start: 10,
-                    span_end: 11,
+                    span: Span::new(10, 11),
                     is_in_bindings_map: true,
                     usage_kind: 2,
                 },
                 RawBindingOccurrence {
                     name: "d".to_string(),
-                    span_start: 15,
-                    span_end: 16,
+                    span: Span::new(15, 16),
                     is_in_bindings_map: true,
                     usage_kind: 3,
                 },
                 RawBindingOccurrence {
                     name: "e".to_string(),
-                    span_start: 20,
-                    span_end: 21,
+                    span: Span::new(20, 21),
                     is_in_bindings_map: true,
                     usage_kind: 4,
                 },
                 RawBindingOccurrence {
                     name: "f".to_string(),
-                    span_start: 25,
-                    span_end: 26,
+                    span: Span::new(25, 26),
                     is_in_bindings_map: true,
                     usage_kind: 5,
                 },

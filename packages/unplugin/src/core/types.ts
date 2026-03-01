@@ -1,3 +1,20 @@
+/**
+ * A function that preprocesses a custom block's content.
+ *
+ * @param content - Raw content of the block.
+ * @param lang - The `lang` attribute value (e.g., "yaml"), or undefined.
+ * @param filename - The SFC filename (canonical ID).
+ * @returns Preprocessed `{ code, sourceMap? }`, or `null` to skip.
+ */
+export type BlockPreprocessor = (
+  content: string,
+  lang: string | undefined,
+  filename: string,
+) =>
+  | { code: string; sourceMap?: string }
+  | Promise<{ code: string; sourceMap?: string }>
+  | null;
+
 export interface VerterPluginOptions {
   /** Custom component ID generator */
   componentId?: (filename: string, source: string, isProd: boolean) => string;
@@ -31,6 +48,12 @@ export interface VerterPluginOptions {
     };
     [key: string]: unknown;
   };
+  /**
+   * Custom block preprocessors keyed by block type.
+   * Called when a custom block (e.g., `<i18n>`, `<docs>`) needs preprocessing.
+   * @example { i18n: (content, lang) => ({ code: JSON.stringify(yaml.load(content)) }) }
+   */
+  customBlocks?: Record<string, BlockPreprocessor>;
 }
 
 /**

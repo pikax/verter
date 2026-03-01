@@ -21,7 +21,19 @@ const files = new Map<string, VirtualFile>();
 let tsLib: typeof ts | null = null;
 let languageService: ts.LanguageService | null = null;
 
-const TS_CDN_BASE = "https://cdn.jsdelivr.net/npm/typescript@6/lib/";
+const TS_CDN_BASE = "https://cdn.jsdelivr.net/npm/typescript@5/lib/";
+const VUE_CDN_BASE = "https://cdn.jsdelivr.net/npm/";
+
+// Vue packages whose .d.ts files we need for type checking
+const VUE_TYPE_PACKAGES = [
+  { pkg: "vue", file: "dist/vue.d.ts", path: "/node_modules/vue/index.d.ts" },
+  { pkg: "vue", file: "jsx.d.ts", path: "/node_modules/vue/jsx.d.ts" },
+  { pkg: "vue", file: "jsx-runtime/index.d.ts", path: "/node_modules/vue/jsx-runtime/index.d.ts" },
+  { pkg: "@vue/runtime-dom", file: "dist/runtime-dom.d.ts", path: "/node_modules/@vue/runtime-dom/index.d.ts" },
+  { pkg: "@vue/runtime-core", file: "dist/runtime-core.d.ts", path: "/node_modules/@vue/runtime-core/index.d.ts" },
+  { pkg: "@vue/reactivity", file: "dist/reactivity.d.ts", path: "/node_modules/@vue/reactivity/index.d.ts" },
+  { pkg: "@vue/shared", file: "dist/shared.d.ts", path: "/node_modules/@vue/shared/index.d.ts" },
+];
 
 // Lib files to load for a reasonable type checking experience
 const LIB_FILES = [
@@ -153,16 +165,50 @@ function createLanguageServiceHost(): ts.LanguageServiceHost {
   };
 }
 
+// ── Vue type loading ──
+
+let currentVueVersion = "3.5";
+
+async function fetchVueTypes(vueVersion: string, db: IDBDatabase): Promise<void> {
+  currentVueVersion = vueVersion;
+
+  const typePromises = VUE_TYPE_PACKAGES.map(async ({ pkg, file, path }) => {
+    const cacheKey = `vue-types:${pkg}@${vueVersion}/${file}`;
+    try {
+      // Try IndexedDB cache first
+      const cached = await getCachedLib(db, cacheKey);
+      if (cached) {
+        files.set(path, { content: cached, version: 1 });
+        return;
+      }
+
+      // Fetch from CDN
+      const url = `${VUE_CDN_BASE}${pkg}@${vueVersion}/${file}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`${resp.status}`);
+      const content = await resp.text();
+
+      files.set(path, { content, version: 1 });
+      await setCachedLib(db, cacheKey, content).catch(() => {});
+    } catch {
+      // Non-fatal — type checking will be incomplete
+    }
+  });
+
+  await Promise.all(typePromises);
+}
+
 // ── Initialization ──
 
-async function init(verterTypesContent?: string): Promise<void> {
+async function init(payload?: { verterTypesContent?: string; vueVersion?: string }): Promise<void> {
   // Load TypeScript from CDN
   // @ts-expect-error -- dynamic import from CDN
-  const tsModule = await import("https://cdn.jsdelivr.net/npm/typescript@6/+esm");
+  const tsModule = await import("https://cdn.jsdelivr.net/npm/typescript@5/+esm");
   tsLib = tsModule.default ?? tsModule;
 
-  // Load lib files
   const db = await openDb();
+
+  // Load lib files
   const libPromises = LIB_FILES.map(async (name) => {
     try {
       const content = await fetchLibFile(name, db);
@@ -171,19 +217,37 @@ async function init(verterTypesContent?: string): Promise<void> {
       // Skip failed lib files — type checking will be incomplete but functional
     }
   });
-  await Promise.all(libPromises);
+
+  // Load Vue types from CDN
+  const vueVersion = payload?.vueVersion ?? "3.5";
+  const vueTypesPromise = fetchVueTypes(vueVersion, db);
+
+  await Promise.all([...libPromises, vueTypesPromise]);
   db.close();
 
   // Add Verter type helpers if provided
-  if (verterTypesContent) {
+  if (payload?.verterTypesContent) {
     files.set("/node_modules/@verter/types/index.d.ts", {
-      content: verterTypesContent,
+      content: payload.verterTypesContent,
       version: 1,
     });
   }
 
   // Create the language service
   languageService = tsLib!.createLanguageService(createLanguageServiceHost());
+}
+
+async function updateVueTypes(vueVersion: string): Promise<void> {
+  if (vueVersion === currentVueVersion) return;
+
+  const db = await openDb();
+  await fetchVueTypes(vueVersion, db);
+  db.close();
+
+  // Recreate language service with updated files
+  if (tsLib) {
+    languageService = tsLib.createLanguageService(createLanguageServiceHost());
+  }
 }
 
 // ── Worker message handling ──
@@ -211,7 +275,14 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
   try {
     switch (type) {
       case "init": {
-        await init(payload?.verterTypesContent);
+        await init(payload);
+        respond("ok");
+        break;
+      }
+
+      case "updateVueTypes": {
+        const { vueVersion } = payload;
+        await updateVueTypes(vueVersion);
         respond("ok");
         break;
       }

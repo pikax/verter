@@ -16,29 +16,21 @@ pub fn map_diagnostics(snapshot: &DiagnosticsSnapshot, line_index: &LineIndex) -
 }
 
 fn map_single_diagnostic(diag: &HostDiagnostic, line_index: &LineIndex) -> Diagnostic {
-    let range = match (diag.span_start, diag.span_end) {
-        (Some(start), Some(end)) => {
-            let start_pos = line_index.offset_to_position(start).unwrap_or(Position {
-                line: 0,
-                character: 0,
-            });
-            let end_pos = line_index.offset_to_position(end).unwrap_or(start_pos);
+    let range = match diag.span {
+        Some(span) => {
+            let start_pos = line_index
+                .offset_to_position(span.start)
+                .unwrap_or(Position {
+                    line: 0,
+                    character: 0,
+                });
+            let end_pos = line_index.offset_to_position(span.end).unwrap_or(start_pos);
             Range {
                 start: start_pos,
                 end: end_pos,
             }
         }
-        (Some(start), None) => {
-            let pos = line_index.offset_to_position(start).unwrap_or(Position {
-                line: 0,
-                character: 0,
-            });
-            Range {
-                start: pos,
-                end: pos,
-            }
-        }
-        _ => Range {
+        None => Range {
             start: Position {
                 line: 0,
                 character: 0,
@@ -73,7 +65,7 @@ mod tests {
     use super::*;
 
     fn make_line_index(source: &str) -> LineIndex {
-        LineIndex::new(source)
+        LineIndex::new_utf16(source)
     }
 
     fn make_diag(
@@ -87,8 +79,10 @@ mod tests {
             severity,
             code: code.to_string(),
             message: message.to_string(),
-            span_start: start,
-            span_end: end,
+            span: match (start, end) {
+                (Some(s), Some(e)) => Some(verter_span::Span::new(s, e)),
+                _ => None,
+            },
         }
     }
 

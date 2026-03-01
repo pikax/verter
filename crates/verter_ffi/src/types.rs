@@ -48,10 +48,12 @@ pub struct FfiCompileProfile {
     pub custom_elements: Option<Vec<String>>,
     pub comments: Option<bool>,
     pub runtime_module_name: Option<String>,
+    pub types_module_name: Option<String>,
     pub force_vapor: Option<bool>,
     pub force_js: Option<bool>,
     pub source_map: Option<bool>,
-    pub enable_types: Option<bool>,
+    /// Compilation target preset: "bundler" (default), "ide", or "analysis".
+    pub target: Option<String>,
 }
 
 /// Request to upsert a file into the host.
@@ -81,6 +83,29 @@ pub struct FfiStyleOverrideRequest {
     pub canonical_id: String,
     pub compile_profile: Option<FfiCompileProfile>,
     pub overrides: Vec<FfiStyleOverrideEntry>,
+}
+
+/// A single preprocessed block override (template, script, style, or custom).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiBlockOverrideEntry {
+    /// Block type: "template", "script", "style", or "custom".
+    pub block_type: String,
+    /// Block index (0 for template/script, 0..N for styles/custom blocks).
+    pub index: u32,
+    /// Preprocessed code.
+    pub code: String,
+    /// Source map from the preprocessor, if available.
+    pub source_map: Option<String>,
+}
+
+/// Request to apply preprocessed block overrides (unified API).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiBlockOverrideRequest {
+    pub canonical_id: String,
+    pub compile_profile: Option<FfiCompileProfile>,
+    pub overrides: Vec<FfiBlockOverrideEntry>,
 }
 
 /// Query for a specific virtual file.
@@ -148,6 +173,20 @@ pub struct FfiScriptImportInfo {
     pub bindings: Vec<String>,
 }
 
+/// A block that needs external preprocessing before compilation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPreprocessorRequest {
+    /// Block type: "template", "script", "style", or "custom".
+    pub block_type: String,
+    /// Block index (0 for template/script, 0..N for styles/custom blocks).
+    pub index: u32,
+    /// The `lang` attribute value (e.g., "pug", "coffee", "scss").
+    pub lang: String,
+    /// Raw content of the block that needs preprocessing.
+    pub content: String,
+}
+
 /// Result of an upsert or style override operation.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -164,6 +203,7 @@ pub struct FfiUpdateResult {
     pub diagnostics: FfiDiagnosticsSnapshot,
     pub external_source_requests: Vec<FfiExternalSourceRequest>,
     pub import_specifiers: Vec<FfiScriptImportInfo>,
+    pub preprocessor_requests: Vec<FfiPreprocessorRequest>,
     pub parse_duration_ms: f64,
 }
 
@@ -235,4 +275,110 @@ pub struct FfiCrossFileDiagnostic {
     pub file_id: String,
     pub code: String,
     pub message: String,
+}
+
+// =============================================================================
+// Code action types (Phase 1)
+// =============================================================================
+
+/// A code action (quick fix, refactoring, or source action) for the playground.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiCodeAction {
+    /// Human-readable title displayed in the IDE.
+    pub title: String,
+    /// Action kind: "quickfix", "refactor", or "source".
+    pub kind: String,
+    /// Text edits to apply.
+    pub edits: Vec<FfiTextEdit>,
+    /// Whether this is the preferred action for the diagnostic.
+    pub is_preferred: bool,
+    /// The lint rule this action fixes (if any).
+    pub diagnostic_rule: Option<String>,
+}
+
+/// A single text edit within a code action.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiTextEdit {
+    /// Start offset (UTF-16 for browser consumption).
+    pub span_start: u32,
+    /// End offset (UTF-16 for browser consumption).
+    pub span_end: u32,
+    /// Replacement text.
+    pub new_text: String,
+}
+
+// =============================================================================
+// Lint rule metadata (Phase 5)
+// =============================================================================
+
+/// Metadata for a single lint rule, used by the rule browser UI.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiLintRuleMetadata {
+    /// Rule name (e.g., "require-v-for-key").
+    pub name: String,
+    /// Rule category (e.g., "vue-essential").
+    pub category: String,
+    /// Default severity: "error", "warning", "info", or "hint".
+    pub default_severity: String,
+}
+
+// =============================================================================
+// Document symbol types (Phase 2)
+// =============================================================================
+
+/// A document symbol for the outline/go-to-symbol panel.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiDocumentSymbol {
+    /// Symbol name.
+    pub name: String,
+    /// Additional detail (e.g., type annotation).
+    pub detail: Option<String>,
+    /// Symbol kind (Monaco SymbolKind number).
+    pub kind: u32,
+    /// Full span start (UTF-16).
+    pub span_start: u32,
+    /// Full span end (UTF-16).
+    pub span_end: u32,
+    /// Selection span start (UTF-16).
+    pub selection_start: u32,
+    /// Selection span end (UTF-16).
+    pub selection_end: u32,
+    /// Child symbols.
+    pub children: Vec<FfiDocumentSymbol>,
+}
+
+// =============================================================================
+// CSS selector match types (Phase 7)
+// =============================================================================
+
+/// Result of matching all CSS selectors against all template elements.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiSelectorMatchResult {
+    /// The CSS selector text.
+    pub selector_text: String,
+    /// Selector span start (UTF-16).
+    pub selector_start: u32,
+    /// Selector span end (UTF-16).
+    pub selector_end: u32,
+    /// Match results against template elements.
+    pub matches: Vec<FfiElementMatch>,
+}
+
+/// Match result for a single element against a selector.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiElementMatch {
+    /// Element tag name.
+    pub tag: String,
+    /// Element span start (UTF-16).
+    pub span_start: u32,
+    /// Element span end (UTF-16).
+    pub span_end: u32,
+    /// Match result: "match", "maybe", or "no".
+    pub result: String,
 }

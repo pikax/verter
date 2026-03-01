@@ -322,6 +322,7 @@ mod tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
         let mut state = VaporElementState::new();
         build_open_tag(&element, source, &mut state);
@@ -361,6 +362,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasStaticClass),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
         let mut state = VaporElementState::new();
         build_open_tag(&element, source, &mut state);
@@ -386,6 +388,7 @@ mod tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
         let mut state = VaporElementState::new();
         build_open_tag(&element, source, &mut state);
@@ -440,6 +443,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasDynamicClass),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
         let mut state = VaporElementState::new();
         build_open_tag(&element, source, &mut state);

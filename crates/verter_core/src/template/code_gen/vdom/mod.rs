@@ -87,7 +87,8 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// `process_element_leave` to include in the open tag overwrite. This
     /// ensures correct ordering when a sibling text node ends at the same
     /// position as the v-for element starts.
-    v_for_prefixes: Vec<Option<String>>,
+    /// Tuple: (prefix_string, iterable_source_start) for source map mapping.
+    v_for_prefixes: Vec<Option<(String, Option<u32>)>>,
     /// Pre-computed condition prefixes with binding resolution.
     /// Populated during `enter_element` (where OXC data is available) and
     /// consumed by `build_child_records` (which only sees AST data).
@@ -135,6 +136,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                             kind,
                             condition: None,
                             condition_prefix: None,
+                            condition_expr_start: None,
+                            condition_binding_prefix_len: 0,
                         });
                     }
                 }
@@ -145,6 +148,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         kind: ChildKind::Interpolation,
                         condition: None,
                         condition_prefix: None,
+                        condition_expr_start: None,
+                        condition_binding_prefix_len: 0,
                     });
                 }
                 AstNodeKind::Element(el) => {
@@ -153,54 +158,78 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         .as_ref()
                         .map(|tc| tc.end)
                         .unwrap_or(el.tag_open.end);
-                    let (condition, condition_prefix) = match el.v_condition.as_ref() {
-                        Some(c) => {
-                            let role = match c.kind {
-                                ElementNodeConditionKind::If => ConditionChainRole::Start,
-                                ElementNodeConditionKind::ElseIf
-                                | ElementNodeConditionKind::Else => {
-                                    ConditionChainRole::Continuation
-                                }
-                            };
-                            // Build condition prefix for v-if/v-else-if (not v-else).
-                            // Uses pre-resolved expression from enter_element (which has
-                            // OXC binding data for correct $setup./$props. prefixes).
-                            let prefix = match c.kind {
-                                ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
-                                    // Use pre-resolved expression (avoids clone + format!):
-                                    // borrow from the HashMap if available, else compute from AST.
-                                    let resolved =
-                                        self.resolved_condition_prefixes.get(&child_id.0);
-                                    let expr_str = match resolved {
-                                        Some(s) => s.as_str(),
-                                        None => {
-                                            let e =
-                                                helpers::extract_directive_value(&c.prop, source);
-                                            if e.is_empty() {
-                                                "true"
-                                            } else {
-                                                e
+
+                    // Static subtree hoisting: classify fully-static elements
+                    // (without structural directives) as StaticVNode.
+                    if self.options.hoist_static && el.is_fully_static && el.v_condition.is_none() {
+                        records.push(ChildRecord {
+                            start: el.tag_open.start,
+                            end,
+                            kind: ChildKind::StaticVNode { count: 1 },
+                            condition: None,
+                            condition_prefix: None,
+                            condition_expr_start: None,
+                            condition_binding_prefix_len: 0,
+                        });
+                        continue;
+                    }
+
+                    let (condition, condition_prefix, condition_expr_start, cond_prefix_len) =
+                        match el.v_condition.as_ref() {
+                            Some(c) => {
+                                let role = match c.kind {
+                                    ElementNodeConditionKind::If => ConditionChainRole::Start,
+                                    ElementNodeConditionKind::ElseIf
+                                    | ElementNodeConditionKind::Else => {
+                                        ConditionChainRole::Continuation
+                                    }
+                                };
+                                // Build condition prefix for v-if/v-else-if (not v-else).
+                                // Uses pre-resolved expression from enter_element (which has
+                                // OXC binding data for correct $setup./$props. prefixes).
+                                let (prefix, expr_start, binding_prefix_len) = match c.kind {
+                                    ElementNodeConditionKind::If
+                                    | ElementNodeConditionKind::ElseIf => {
+                                        // Use pre-resolved expression (avoids clone + format!):
+                                        // borrow from the HashMap if available, else compute.
+                                        let resolved =
+                                            self.resolved_condition_prefixes.get(&child_id.0);
+                                        let raw_expr =
+                                            helpers::extract_directive_value(&c.prop, source);
+                                        let expr_str = match resolved {
+                                            Some(s) => s.as_str(),
+                                            None => {
+                                                if raw_expr.is_empty() {
+                                                    "true"
+                                                } else {
+                                                    raw_expr
+                                                }
                                             }
-                                        }
-                                    };
-                                    let mut s = String::with_capacity(expr_str.len() + 5);
-                                    s.push('(');
-                                    s.push_str(expr_str);
-                                    s.push_str(") ? ");
-                                    Some(s)
-                                }
-                                ElementNodeConditionKind::Else => None,
-                            };
-                            (Some(role), prefix)
-                        }
-                        None => (None, None),
-                    };
+                                        };
+                                        // Compute binding prefix length so we can split
+                                        // the condition prefix into unmapped + mapped
+                                        // segments for accurate source mapping.
+                                        let bp_len = self.resolver.simple_expr_prefix_len(raw_expr);
+                                        let mut s = String::with_capacity(expr_str.len() + 5);
+                                        s.push('(');
+                                        s.push_str(expr_str);
+                                        s.push_str(") ? ");
+                                        (Some(s), c.prop.value_start, bp_len)
+                                    }
+                                    ElementNodeConditionKind::Else => (None, None, 0),
+                                };
+                                (Some(role), prefix, expr_start, binding_prefix_len)
+                            }
+                            None => (None, None, None, 0),
+                        };
                     records.push(ChildRecord {
                         start: el.tag_open.start,
                         end,
                         kind: ChildKind::Element,
                         condition,
                         condition_prefix,
+                        condition_expr_start,
+                        condition_binding_prefix_len: cond_prefix_len,
                     });
                 }
                 AstNodeKind::Comment(comment) => {
@@ -211,13 +240,71 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                             kind: ChildKind::Comment,
                             condition: None,
                             condition_prefix: None,
+                            condition_expr_start: None,
+                            condition_binding_prefix_len: 0,
                         });
                     }
                 }
             }
         }
+
+        // Consolidate consecutive StaticVNode records into a single record.
+        // This merges e.g. 3 consecutive static <p> elements into one
+        // `_createStaticVNode("<p>a</p><p>b</p><p>c</p>", 3)`.
+        if self.options.hoist_static {
+            consolidate_static_vnodes(&mut records);
+        }
+
         records
     }
+}
+
+/// Merge consecutive `StaticVNode` records into a single record.
+///
+/// Scans the records vec and when it finds a run of consecutive StaticVNode
+/// entries, replaces them with a single StaticVNode spanning [first.start, last.end]
+/// with the sum of their counts.
+fn consolidate_static_vnodes(records: &mut Vec<ChildRecord>) {
+    if records.len() < 2 {
+        return;
+    }
+    let mut write = 0;
+    let mut read = 0;
+    while read < records.len() {
+        if let ChildKind::StaticVNode { count } = records[read].kind {
+            // Start of a potential run
+            let mut total_count = count;
+            let start = records[read].start;
+            let mut end = records[read].end;
+            read += 1;
+            while read < records.len() {
+                if let ChildKind::StaticVNode { count: c } = records[read].kind {
+                    total_count += c;
+                    end = records[read].end;
+                    read += 1;
+                } else {
+                    break;
+                }
+            }
+            records[write] = ChildRecord {
+                start,
+                end,
+                kind: ChildKind::StaticVNode { count: total_count },
+                condition: None,
+                condition_prefix: None,
+                condition_expr_start: None,
+                condition_binding_prefix_len: 0,
+            };
+            write += 1;
+        } else {
+            if write != read {
+                records.swap(write, read);
+            }
+            write += 1;
+            read += 1;
+        }
+    }
+    records.truncate(write);
 }
 
 impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
@@ -329,23 +416,44 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 let is_v_if = child.condition == Some(ConditionChainRole::Start);
 
                 if is_v_if {
-                    // Root-level v-if chain — include condition prefix in the
-                    // overwrite so `return (expr) ? ` is a single operation.
+                    // Root-level v-if chain — overwrite up to child.start with
+                    // the function signature + "return ", then emit the condition
+                    // prefix as a separate source-mapped prepend.
                     let mut prefix = String::with_capacity(fn_sig.len() + 32);
                     prefix.push_str(fn_sig);
                     prefix.push_str("return ");
-                    if let Some(ref cond) = child.condition_prefix {
-                        prefix.push_str(cond);
-                    }
                     out.overwrite(tag_open.start, child.start, &prefix);
 
+                    // Emit the v-if condition prefix with source mapping
+                    if let Some(ref cond) = child.condition_prefix {
+                        if let Some(expr_start) = child.condition_expr_start {
+                            children::emit_condition_prefix_mapped(
+                                out,
+                                child.start,
+                                expr_start,
+                                cond,
+                                child.condition_binding_prefix_len,
+                            );
+                        } else {
+                            out.prepend_alloc(child.start, cond);
+                        }
+                    }
+
                     // Emit condition prefixes for continuation children
-                    // (v-else-if elements in the chain). These were moved from
-                    // enter_element to parent separator logic but the single-root
-                    // case must also emit them.
+                    // (v-else-if elements in the chain) with source mapping.
                     for cont in children.iter().skip(1) {
                         if let Some(ref cond) = cont.condition_prefix {
-                            out.prepend_alloc(cont.start, cond);
+                            if let Some(expr_start) = cont.condition_expr_start {
+                                children::emit_condition_prefix_mapped(
+                                    out,
+                                    cont.start,
+                                    expr_start,
+                                    cond,
+                                    cont.condition_binding_prefix_len,
+                                );
+                            } else {
+                                out.prepend_alloc(cont.start, cond);
+                            }
                         }
                     }
 
@@ -378,7 +486,14 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 // - _createTextVNode() wrapping for text/interpolation runs
                 // - Condition prefix emission (v-if/v-else-if)
                 // - v-for prefix ordering (comma at prev_item_end)
-                children::add_children_separators_array(&children, out, &self.options);
+                children::add_children_separators_array(
+                    &children,
+                    out,
+                    &self.options,
+                    source,
+                    self.ast,
+                    root_children,
+                );
 
                 // Close fragment + render function
                 let flag_str = helpers::format_patch_flag(
@@ -402,13 +517,25 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         oxc: Option<&OxcParsedElement<'alloc>>,
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
-    ) {
+    ) -> super::WalkAction {
         helpers::debug_assert_element_bounds(
             source,
             element.tag_open.start,
             element.tag_open.end,
             element.tag_open.name_end,
         );
+
+        // Static subtree hoisting: skip children for fully-static elements.
+        // The actual _createStaticVNode emission is handled by the parent's
+        // build_child_records consolidation in leave_element/leave_template.
+        // Note: root elements (scope_closes is empty) are never hoisted —
+        // they must remain as block roots (_createElementBlock).
+        if self.options.hoist_static && element.is_fully_static && !self.scope_closes.is_empty() {
+            self.scope_closes.push(None);
+            self.v_for_prefixes.push(None);
+            return super::WalkAction::SkipChildren;
+        }
+
         // Process structural directives: v-if/v-else-if/v-else, v-for
         if let Some(condition) = &element.v_condition {
             let mut close = directives::condition_scope_close(&condition.kind);
@@ -486,19 +613,20 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     false
                 }
             });
-            let (prefix, close) =
+            let (prefix, close, iterable_src) =
                 directives::build_for_prefix(v_for, source, is_keyed, oxc, &self.resolver);
             directives::collect_scope_imports(&close, out);
             // NOTE: v-for prefix is NOT prepended here. It is stored and
             // included in the open tag overwrite by process_element_leave.
             // This ensures correct ordering when a sibling text node's
             // closing marker is at the same position as this element's start.
-            self.v_for_prefixes.push(Some(prefix));
+            self.v_for_prefixes.push(Some((prefix, iterable_src)));
             self.scope_closes.push(Some(close));
         } else {
             self.scope_closes.push(None);
             self.v_for_prefixes.push(None);
         }
+        super::WalkAction::Continue
     }
 
     fn leave_element(
@@ -516,12 +644,32 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             el.tag_open.name_end,
         );
 
+        // Static subtree hoisting: the actual _createStaticVNode emission
+        // is handled by the parent's build_child_records consolidation.
+        // Just pop the placeholder scope entries pushed in enter_element.
+        // Note: scope_closes.len() > 1 ensures root elements are not skipped —
+        // they must remain as block roots (_createElementBlock).
+        if self.options.hoist_static
+            && el.is_fully_static
+            && el.v_condition.is_none()
+            && el.v_for.is_none()
+            && self.scope_closes.len() > 1
+        {
+            self.scope_closes.pop();
+            self.v_for_prefixes.pop();
+            return;
+        }
+
         // Handle <slot> outlet: generates _renderSlot(_ctx.$slots, "name")
         if el.tag_type.is_slot_outlet() {
             let record = self.process_slot_outlet(el, source, out);
             // Apply v-for prefix (e.g., `_renderList(items, (item) => {\nreturn `).
-            if let Some(prefix) = self.v_for_prefixes.pop().flatten() {
-                out.prepend_alloc(record.start, &prefix);
+            if let Some((prefix, iterable_src)) = self.v_for_prefixes.pop().flatten() {
+                if let Some(src_pos) = iterable_src {
+                    out.prepend_alloc_mapped(record.start, src_pos, &prefix);
+                } else {
+                    out.prepend_alloc(record.start, &prefix);
+                }
             }
             // Apply scope close suffix for structural directives (v-if/v-for).
             if let Some(scope_close) = self.scope_closes.pop().flatten() {
@@ -588,7 +736,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             &self.options,
             &self.resolver,
             &mut buf,
-            v_for_prefix.as_deref(),
+            v_for_prefix.as_ref().map(|(s, _)| s.as_str()),
+            self.ast,
         );
         buf.clear();
         self.buf = buf;
@@ -718,6 +867,7 @@ mod tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         }
     }
 

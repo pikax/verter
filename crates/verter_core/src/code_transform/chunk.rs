@@ -23,6 +23,20 @@ pub(super) enum Chunk<'a> {
         end: u32,
         content: &'a str,
     },
+    /// Inserted content mapped to a specific source position.
+    /// Unlike `Inserted` (unmapped), this emits a source map token at `source_start`.
+    /// Used for generated code that corresponds to a known source location
+    /// (e.g., resolved v-if expression relocated to ternary prefix).
+    ///
+    /// `content_offset` shifts the source map token within the content. Characters
+    /// before `content_offset` are unmapped; the token is placed at `content_offset`,
+    /// mapping to `source_start`. This accounts for binding prefixes like `__props.`
+    /// or `_ctx.` that precede the original identifier in the resolved expression.
+    InsertedMapped {
+        content: &'a str,
+        source_start: u32,
+        content_offset: u32,
+    },
 }
 
 impl<'a> Chunk<'a> {
@@ -52,6 +66,21 @@ impl<'a> Chunk<'a> {
             start,
             end,
             content,
+        }
+    }
+
+    /// Create an inserted chunk mapped to a source position, with a content offset.
+    /// Characters before `content_offset` are unmapped; the source map token is
+    /// placed at `content_offset`, pointing to `source_start`.
+    pub fn inserted_mapped_with_offset(
+        content: &'a str,
+        source_start: u32,
+        content_offset: u32,
+    ) -> Self {
+        Self::InsertedMapped {
+            content,
+            source_start,
+            content_offset,
         }
     }
 

@@ -8,7 +8,9 @@
     "bench": "node --import tsx src/index.ts",
     "bench:json": "node --import tsx src/index.ts --json",
     "bench:ffi": "node --import tsx src/ffi-bench.ts",
-    "bench:edit-ops": "node --import tsx src/edit-ops-bench.ts"
+    "bench:edit-ops": "node --import tsx src/edit-ops-bench.ts",
+    "bench:apple": "node --import tsx src/apple-to-apple.ts",
+    "bench:type-check": "node --import tsx src/type-check-bench.ts"
   },
   "dependencies": {
     "@verter/native": "workspace:*",

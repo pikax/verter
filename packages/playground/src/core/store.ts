@@ -5,6 +5,8 @@ import {
   type StoreState,
   type CompilerOptions,
   type CompileTiming,
+  type TypeCheckerMode,
+  type TsDiagnosticEntry,
 } from "./types";
 import { compileFile, initCompilers, switchWasmVersion } from "./compiler";
 import { getDefaultImportMap, extractVueVersion, type ImportMap } from "./importMap";
@@ -50,6 +52,7 @@ export interface Store extends StoreState {
   importMap: ImportMap;
   verterVersion: string;
   versionLoading: boolean;
+  tsDiagnostics: TsDiagnosticEntry[];
   init(): Promise<void>;
   setActiveFile(filename: string): void;
   addFile(filename: string): void;
@@ -61,8 +64,11 @@ export interface Store extends StoreState {
   toggleAutoSave(): void;
   toggleProduction(): void;
   toggleSSR(): void;
+  setTypeChecker(mode: TypeCheckerMode): void;
   recompile(): Promise<void>;
   switchVerterVersion(entry: VersionEntry): Promise<void>;
+  setVueVersion(version: string): void;
+  vueVersion: string;
 }
 
 export function useStore(): Store {
@@ -85,11 +91,14 @@ export function useStore(): Store {
     verterNewJs: null,
     parseDurationMs: null,
   });
+  const typeChecker = ref<TypeCheckerMode>("tsc");
 
   const verterVersion = ref("local");
   const versionLoading = ref(false);
+  const tsDiagnostics: Ref<TsDiagnosticEntry[]> = ref([]);
 
   const importMap = reactive(getDefaultImportMap());
+  const vueVersion = computed(() => extractVueVersion(importMap) ?? "3.5.26");
 
   const activeFile = computed(() => {
     if (activeFilename.value === IMPORT_MAP_FILENAME) {
@@ -136,6 +145,9 @@ export function useStore(): Store {
       if (savedState.verterVersion && savedState.verterVersion !== verterVersion.value) {
         verterVersion.value = savedState.verterVersion;
         // Version switch will happen after init compilers are ready
+      }
+      if (savedState.typeChecker) {
+        typeChecker.value = savedState.typeChecker;
       }
     }
 
@@ -196,6 +208,7 @@ export function useStore(): Store {
         },
         vueVersion: extractVueVersion(importMap),
         verterVersion: verterVersion.value,
+        typeChecker: typeChecker.value,
       }),
       (state) => {
         if (saveTimeout) clearTimeout(saveTimeout);
@@ -276,6 +289,15 @@ export function useStore(): Store {
     recompile();
   }
 
+  function setTypeChecker(mode: TypeCheckerMode) {
+    typeChecker.value = mode;
+  }
+
+  function setVueVersion(version: string) {
+    const defaults = getDefaultImportMap(version);
+    Object.assign(importMap, defaults);
+  }
+
   async function recompile() {
     if (activeFilename.value === IMPORT_MAP_FILENAME) return;
     const file = activeFile.value;
@@ -325,7 +347,12 @@ export function useStore(): Store {
     toggleAutoSave,
     toggleProduction,
     toggleSSR,
+    typeChecker,
+    setTypeChecker,
     recompile,
+    tsDiagnostics,
     switchVerterVersion: switchVersion,
+    setVueVersion,
+    vueVersion,
   }) as Store;
 }

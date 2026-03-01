@@ -1,12 +1,13 @@
 import type { UnpluginFactory } from "unplugin";
 import { createUnplugin } from "unplugin";
 import type { ResolvedConfig } from "vite";
-import type { VerterPluginOptions, HmrStrategy } from "./core/types";
+import type { VerterPluginOptions, HmrStrategy, BlockPreprocessor } from "./core/types";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
-import type { HostCompileProfile, HostUpdateResult } from "@verter/native";
+import type { HostCompileProfile, HostUpdateResult, NativeBlockOverrideEntry } from "@verter/native";
 import type { VerterHost } from "@verter/native";
 import { loadHost, generateComponentId, processStyle } from "./core/compiler";
 import { parseVueRequest } from "./core/utils";
+import { preprocessBlock } from "./core/preprocessor";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
 
@@ -71,6 +72,43 @@ async function resolveUpsertDependencies(
         }
       }
     }
+  }
+}
+
+/**
+ * Processes preprocessor requests from an upsert result.
+ * For each non-native block (e.g., Pug template, SCSS style), invokes the
+ * appropriate preprocessor and sends the results back to the host via
+ * `applyBlockOverrides`.
+ */
+async function applyPreprocessorRequests(
+  host: VerterHost,
+  filename: string,
+  upsertResult: HostUpdateResult,
+  profile: HostCompileProfile | undefined,
+  viteConfig: unknown | null,
+  customBlocks?: Record<string, BlockPreprocessor>,
+): Promise<void> {
+  if (!upsertResult.preprocessorRequests?.length) return;
+
+  const overrides: NativeBlockOverrideEntry[] = [];
+  for (const req of upsertResult.preprocessorRequests) {
+    const result = await preprocessBlock(req, filename, viteConfig, customBlocks);
+    if (result) {
+      overrides.push({
+        blockType: req.blockType,
+        index: req.index,
+        code: result.code,
+        sourceMap: result.sourceMap,
+      });
+    }
+  }
+  if (overrides.length > 0) {
+    host.applyBlockOverrides({
+      canonicalId: filename,
+      compileProfile: profile,
+      overrides,
+    });
   }
 }
 
@@ -243,6 +281,11 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 
         await resolveUpsertDependencies(host, filename, upsertResult);
 
+        // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
+        await applyPreprocessorRequests(
+          host, filename, upsertResult, profile, viteConfig, opts.customBlocks,
+        );
+
         const main = host.getVirtualFile({
           rawId: filename,
           compileProfile: profile,
@@ -351,6 +394,11 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       const t1 = timing ? performance.now() : 0;
 
       await resolveUpsertDependencies(host, filename, upsertResult);
+
+      // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
+      await applyPreprocessorRequests(
+        host, filename, upsertResult, profile, viteConfig, opts.customBlocks,
+      );
       const t2 = timing ? performance.now() : 0;
 
       // Get the main module from the host (assembled in Rust)

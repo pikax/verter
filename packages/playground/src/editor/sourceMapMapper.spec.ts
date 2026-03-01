@@ -37,7 +37,7 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
     maxProfilesPerFile: 8,
   });
 
-  const profile = { sourceMap: true, enableTypes: true, forceJs: true };
+  const profile = { sourceMap: true, target: "ide", forceJs: true };
   host.upsert({
     inputId: "App.vue",
     source: vueSource,
@@ -162,6 +162,50 @@ describe("SourceMapMapper", () => {
         expect(vue).not.toBeNull();
         const tsx = mapper.vueOffsetToTsxOffset(vue!);
         expect(tsx).toBe(i);
+      }
+    });
+  });
+
+  describe("script block mapping", () => {
+    it("maps script block positions (const, function) via real source map", async () => {
+      const vueCode = `<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+const message = ref('Hello from Verter!')
+
+function increment() {
+  count.value++
+}
+</script>
+
+<template>
+  <div class="app">
+    <h1>{{ message }}</h1>
+    <button @click="increment">Count: {{ count }}</button>
+  </div>
+</template>
+`;
+      const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+      const mapper = new SourceMapMapper(sourceMap, tsxCode, vueCode);
+
+      // Test several script block positions
+      const testWords = ["const count", "message", "increment", "ref"];
+      for (const word of testWords) {
+        const vueIdx = vueCode.indexOf(word);
+        const tsxIdx = tsxCode.indexOf(word);
+        const mapped = mapper.vueOffsetToTsxOffset(vueIdx);
+
+        // Should NOT be null — script positions must map
+        expect(mapped, `vueOffsetToTsxOffset for '${word}' should not be null`).not.toBeNull();
+
+        // The mapped TSX offset should be close to the actual TSX position
+        if (mapped !== null && tsxIdx >= 0) {
+          expect(
+            Math.abs(mapped - tsxIdx),
+            `vueOffsetToTsxOffset for '${word}': mapped=${mapped} vs actual tsx=${tsxIdx}`,
+          ).toBeLessThanOrEqual(5);
+        }
       }
     });
   });

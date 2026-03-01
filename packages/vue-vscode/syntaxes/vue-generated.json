@@ -517,13 +517,19 @@
           "include": "#tag-stuff"
         },
         {
+          "contentName": "source.css",
           "begin": "(>)",
           "beginCaptures": {
             "1": {
               "name": "punctuation.definition.tag.end.html"
             }
           },
-          "end": "(?=</style>)"
+          "end": "(?=</style>)",
+          "patterns": [
+            {
+              "include": "source.css"
+            }
+          ]
         }
       ]
     },

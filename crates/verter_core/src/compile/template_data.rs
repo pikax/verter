@@ -4,6 +4,7 @@
 //! `verter_host` converts them into `verter_analysis::TemplateAnalysisSnapshot`.
 
 use crate::ast::types::{AstNodeKind, ElementNode, TemplateAst};
+use crate::common::Span;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::oxc::types::{OxcNodeData, OxcParsedAst};
 use crate::types::NodeId;
@@ -34,8 +35,13 @@ pub struct RawComponentUsage {
     pub props: Vec<RawPropData>,
     pub has_spread: bool,
     pub slots_used: Vec<String>,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Static class names from `class="foo bar"`.
+    pub static_classes: Vec<String>,
+    /// Whether `:class="..."` is present.
+    pub has_dynamic_class: bool,
+    /// Raw `:class` expression text (for dynamic class name extraction by verter_host).
+    pub dynamic_class_expr: Option<String>,
+    pub span: Span,
 }
 
 /// A single prop passed to a component or element.
@@ -49,14 +55,15 @@ pub struct RawPropData {
     /// `None` = unknown (parse error, complex expression).
     pub all_bindings_static: Option<bool>,
     pub from_spread: bool,
+    /// Byte span of the prop attribute in the SFC source.
+    pub span: Span,
 }
 
 /// A script binding referenced at a specific position in the template.
 #[derive(Debug, Clone)]
 pub struct RawBindingOccurrence {
     pub name: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    pub span: Span,
     /// Whether this binding exists in the script bindings map.
     pub is_in_bindings_map: bool,
     /// Usage kind: 0=interpolation, 1=directive, 2=event, 3=component, 4=ref, 5=iterator
@@ -75,10 +82,17 @@ pub struct RawElementData {
     pub has_v_show: bool,
     pub has_v_html: bool,
     pub has_v_text: bool,
+    /// Whether this element has non-whitespace text or interpolation children.
+    pub has_text_content: bool,
+    /// Whether this element has direct child elements (non-text, non-comment children).
+    pub has_element_children: bool,
     pub nesting_depth: u16,
     pub parent_tag: Option<String>,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Index of the parent element in `RawTemplateData::elements`. `None` for root elements.
+    pub parent_index: Option<u32>,
+    pub span: Span,
+    /// Byte offset end of the opening tag only (past the `>`).
+    pub tag_span_end: u32,
     pub attributes: Vec<RawAttributeData>,
     pub directives: Vec<RawDirectiveData>,
     /// Index into `RawTemplateData::v_for_directives` if this element has v-for.
@@ -93,8 +107,7 @@ pub struct RawAttributeData {
     pub name: String,
     pub value: Option<String>,
     pub is_dynamic: bool,
-    pub span_start: u32,
-    pub span_end: u32,
+    pub span: Span,
 }
 
 /// A directive on an element.
@@ -107,8 +120,7 @@ pub struct RawDirectiveData {
     pub argument: Option<String>,
     pub modifiers: Vec<String>,
     pub expression: Option<String>,
-    pub span_start: u32,
-    pub span_end: u32,
+    pub span: Span,
 }
 
 /// A slot defined in this component's template.
@@ -116,8 +128,9 @@ pub struct RawDirectiveData {
 pub struct RawSlotDef {
     pub name: String,
     pub has_bindings: bool,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Prop names from `:prop` bindings on the `<slot>` element.
+    pub binding_names: Vec<String>,
+    pub span: Span,
 }
 
 /// A template ref attribute.
@@ -126,8 +139,7 @@ pub struct RawTemplateRef {
     pub name: String,
     pub is_dynamic: bool,
     pub target_tag: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    pub span: Span,
 }
 
 /// An event handler in the template.
@@ -136,8 +148,9 @@ pub struct RawEventHandler {
     pub event_name: String,
     pub handler_expression: Option<String>,
     pub is_inline: bool,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// The tag name of the element this handler is on.
+    pub target_tag: String,
+    pub span: Span,
 }
 
 /// v-for directive data.
@@ -149,8 +162,7 @@ pub struct RawVForData {
     pub has_key: bool,
     pub key_expression: Option<String>,
     pub key_uses_index: bool,
-    pub span_start: u32,
-    pub span_end: u32,
+    pub span: Span,
 }
 
 /// v-model directive data.
@@ -160,8 +172,7 @@ pub struct RawVModelData {
     pub modifiers: Vec<String>,
     pub target_is_component: bool,
     pub target_tag: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    pub span: Span,
 }
 
 /// A v-if/v-else-if chain.
@@ -173,10 +184,9 @@ pub struct RawIfChain {
 /// A comment directive (e.g., `<!-- @verter:disable no-v-html -->`).
 #[derive(Debug, Clone)]
 pub struct RawCommentDirective {
-    pub kind: u8, // 0=disable, 1=disable-next-line, 2=enable, 3=todo, 4=fixme, 5=deprecated, 6=ignore-start, 7=ignore-end
+    pub kind: u8, // 0=disable, 1=disable-next-line, 2=enable, 3=todo, 4=fixme, 5=deprecated, 6=ignore-start, 7=ignore-end, 8=level
     pub rule_or_message: Option<String>,
-    pub span_start: u32,
-    pub span_end: u32,
+    pub span: Span,
     pub affects_next_line: bool,
 }
 
@@ -221,6 +231,7 @@ pub fn extract_raw_template_data(
                 child_id,
                 0, // depth
                 None,
+                None, // parent_element_index
                 &mut data,
                 &mut max_depth,
                 &mut current_if_chain,
@@ -239,11 +250,13 @@ pub fn extract_raw_template_data(
     data
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_node_for_extraction(
     ctx: &ExtractCtx<'_>,
     node_id: NodeId,
     depth: u16,
     parent_tag: Option<&str>,
+    parent_element_index: Option<u32>,
     data: &mut RawTemplateData,
     max_depth: &mut u16,
     current_if_chain: &mut Option<RawIfChain>,
@@ -265,9 +278,20 @@ fn walk_node_for_extraction(
                 .as_ref()
                 .map(|tc| tc.end)
                 .unwrap_or(el.tag_open.end);
+            let tag_span_end = el.tag_open.end;
 
+            let this_element_index = data.elements.len() as u32;
             extract_element_data(
-                el, &tag_name, depth, parent_tag, span_start, span_end, ctx.source, data,
+                el,
+                &tag_name,
+                depth,
+                parent_tag,
+                parent_element_index,
+                span_start,
+                span_end,
+                tag_span_end,
+                ctx.source,
+                data,
             );
             handle_if_chain(el, ctx.source, span_start, span_end, current_if_chain, data);
 
@@ -293,7 +317,7 @@ fn walk_node_for_extraction(
                 .prop_flag
                 .has(crate::ast::types::PropFlags::HasEventListener)
             {
-                extract_event_handlers(el, ctx.source, span_start, span_end, data);
+                extract_event_handlers(el, ctx.source, &tag_name, span_start, span_end, data);
             }
 
             if let Some(ref v_for_prop) = el.v_for {
@@ -323,6 +347,7 @@ fn walk_node_for_extraction(
                         child_id,
                         current_depth,
                         Some(&tag_name),
+                        Some(this_element_index),
                         data,
                         max_depth,
                         &mut child_if_chain,
@@ -344,8 +369,10 @@ fn walk_node_for_extraction(
                         if !binding.ignore {
                             data.binding_occurrences.push(RawBindingOccurrence {
                                 name: binding.name.to_string(),
-                                span_start: binding.pos,
-                                span_end: binding.pos + binding.name.len() as u32,
+                                span: Span::new(
+                                    binding.pos,
+                                    binding.pos + binding.name.len() as u32,
+                                ),
                                 is_in_bindings_map: ctx.bindings.contains_key(binding.name),
                                 usage_kind: 0, // interpolation
                             });
@@ -380,8 +407,10 @@ fn extract_element_data(
     tag_name: &str,
     depth: u16,
     parent_tag: Option<&str>,
+    parent_element_index: Option<u32>,
     span_start: u32,
     span_end: u32,
+    tag_span_end: u32,
     source: &str,
     data: &mut RawTemplateData,
 ) {
@@ -415,8 +444,7 @@ fn extract_element_data(
                 argument,
                 modifiers,
                 expression,
-                span_start: prop.start,
-                span_end: prop_end,
+                span: Span::new(prop.start, prop_end),
             });
         } else {
             let name = source[prop.start as usize..prop.name_end as usize].to_string();
@@ -428,8 +456,7 @@ fn extract_element_data(
                 name,
                 value,
                 is_dynamic: false,
-                span_start: prop.start,
-                span_end: prop_end,
+                span: Span::new(prop.start, prop_end),
             });
         }
     }
@@ -452,8 +479,7 @@ fn extract_element_data(
             argument: None,
             modifiers: Vec::new(),
             expression,
-            span_start: cond.prop.start,
-            span_end: prop_span_end(&cond.prop, source),
+            span: Span::new(cond.prop.start, prop_span_end(&cond.prop, source)),
         });
     }
 
@@ -468,8 +494,7 @@ fn extract_element_data(
             argument: None,
             modifiers: Vec::new(),
             expression,
-            span_start: v_for.start,
-            span_end: prop_span_end(v_for, source),
+            span: Span::new(v_for.start, prop_span_end(v_for, source)),
         });
     }
 
@@ -489,8 +514,7 @@ fn extract_element_data(
             argument,
             modifiers: Vec::new(),
             expression,
-            span_start: v_slot.start,
-            span_end: prop_span_end(v_slot, source),
+            span: Span::new(v_slot.start, prop_span_end(v_slot, source)),
         });
     }
 
@@ -501,8 +525,7 @@ fn extract_element_data(
             argument: None,
             modifiers: Vec::new(),
             expression: None,
-            span_start: v_once.start,
-            span_end: prop_span_end(v_once, source),
+            span: Span::new(v_once.start, prop_span_end(v_once, source)),
         });
     }
 
@@ -516,8 +539,7 @@ fn extract_element_data(
             name: "ref".to_string(),
             value,
             is_dynamic: false,
-            span_start: v_ref.start,
-            span_end: prop_span_end(v_ref, source),
+            span: Span::new(v_ref.start, prop_span_end(v_ref, source)),
         });
     }
 
@@ -540,10 +562,20 @@ fn extract_element_data(
         has_v_show: el.prop_flag.has(crate::ast::types::PropFlags::HasShow),
         has_v_html: el.prop_flag.has(crate::ast::types::PropFlags::HasVHtml),
         has_v_text: el.prop_flag.has(crate::ast::types::PropFlags::HasVText),
+        has_text_content: el
+            .children_flag
+            .has(crate::ast::types::ChildrenFlags::HasText)
+            || el
+                .children_flag
+                .has(crate::ast::types::ChildrenFlags::HasInterpolation),
+        has_element_children: el
+            .children_flag
+            .has(crate::ast::types::ChildrenFlags::HasElement),
         nesting_depth: depth,
         parent_tag: parent_tag.map(|s| s.to_string()),
-        span_start,
-        span_end,
+        parent_index: parent_element_index,
+        span: Span::new(span_start, span_end),
+        tag_span_end,
         attributes,
         directives,
         v_for_idx: None,
@@ -765,6 +797,14 @@ fn extract_component_usage(
             }
         }
 
+        // Compute the full span of this prop attribute.
+        // span_start = prop.start (the beginning of the attribute name or directive prefix)
+        // span_end = past the closing quote of the value, or name_end if no value
+        let prop_span_end = prop
+            .value_end
+            .map(|ve| ve + 1) // +1 to skip past the closing quote
+            .unwrap_or(prop.name_end);
+
         props.push(RawPropData {
             name: actual_name,
             is_bound,
@@ -772,6 +812,7 @@ fn extract_component_usage(
             referenced_bindings: referenced,
             all_bindings_static: all_static,
             from_spread: false,
+            span: Span::new(prop.start, prop_span_end),
         });
     }
 
@@ -784,7 +825,45 @@ fn extract_component_usage(
             referenced_bindings: Vec::new(),
             all_bindings_static: None,
             from_spread: true,
+            span: Span::new(0, 0),
         });
+    }
+
+    // Extract static classes, dynamic class flag, and dynamic class expression from attributes
+    let mut static_classes = Vec::new();
+    let mut has_dynamic_class = false;
+    let mut dynamic_class_expr: Option<String> = None;
+    for prop in el.props.iter() {
+        let base = &source[prop.start as usize..prop.name_end as usize];
+        let arg = prop
+            .arg_start
+            .zip(prop.arg_end)
+            .map(|(s, e)| &source[s as usize..e as usize]);
+        if !prop.is_directive && base == "class" {
+            // Static class attribute: class="foo bar"
+            if let Some((vs, ve)) = prop.value_start.zip(prop.value_end) {
+                let value = &source[vs as usize..ve as usize];
+                for cls in value.split_whitespace() {
+                    if !cls.is_empty() {
+                        static_classes.push(cls.to_string());
+                    }
+                }
+            }
+        } else if prop.is_directive {
+            // Check for :class or v-bind:class
+            let is_class_binding = if base == ":" || base == "v-bind" {
+                arg == Some("class")
+            } else {
+                base == ":class"
+            };
+            if is_class_binding {
+                has_dynamic_class = true;
+                // Store the expression value for dynamic class name extraction
+                if let Some((vs, ve)) = prop.value_start.zip(prop.value_end) {
+                    dynamic_class_expr = Some(source[vs as usize..ve as usize].to_string());
+                }
+            }
+        }
     }
 
     data.components.push(RawComponentUsage {
@@ -793,8 +872,10 @@ fn extract_component_usage(
         props,
         has_spread,
         slots_used,
-        span_start,
-        span_end,
+        static_classes,
+        has_dynamic_class,
+        dynamic_class_expr,
+        span: Span::new(span_start, span_end),
     });
 }
 
@@ -808,6 +889,7 @@ fn extract_slot_def(
     // Find the "name" attribute on the <slot> element
     let mut name = "default".to_string();
     let mut has_bindings = false;
+    let mut binding_names = Vec::new();
 
     for prop in &el.props {
         if prop.is_directive {
@@ -818,8 +900,9 @@ fn extract_slot_def(
                     .arg_start
                     .zip(prop.arg_end)
                     .map(|(s, e)| &source[s as usize..e as usize]);
-                if arg.is_some() {
+                if let Some(arg_name) = arg {
                     has_bindings = true;
+                    binding_names.push(arg_name.to_string());
                 }
             }
         } else {
@@ -835,8 +918,8 @@ fn extract_slot_def(
     data.slot_definitions.push(RawSlotDef {
         name,
         has_bindings,
-        span_start,
-        span_end,
+        binding_names,
+        span: Span::new(span_start, span_end),
     });
 }
 
@@ -859,8 +942,7 @@ fn extract_template_ref(
             name,
             is_dynamic: false,
             target_tag: tag_name.to_string(),
-            span_start,
-            span_end,
+            span: Span::new(span_start, span_end),
         });
         return;
     }
@@ -887,8 +969,7 @@ fn extract_template_ref(
                     name,
                     is_dynamic: true,
                     target_tag: tag_name.to_string(),
-                    span_start,
-                    span_end,
+                    span: Span::new(span_start, span_end),
                 });
                 return;
             }
@@ -899,6 +980,7 @@ fn extract_template_ref(
 fn extract_event_handlers(
     el: &ElementNode,
     source: &str,
+    tag_name: &str,
     span_start: u32,
     span_end: u32,
     data: &mut RawTemplateData,
@@ -930,8 +1012,8 @@ fn extract_event_handlers(
             event_name: event_name.to_string(),
             handler_expression: handler_expr,
             is_inline,
-            span_start,
-            span_end,
+            target_tag: tag_name.to_string(),
+            span: Span::new(span_start, span_end),
         });
     }
 }
@@ -979,6 +1061,17 @@ fn extract_v_for(
             // First reference is typically the iterable
             if let Some(reference) = vfor.parsed.references.first() {
                 iterable = reference.slice(source).to_string();
+            }
+            // Fallback: literal iterables (arrays, objects, `as const`) have no
+            // identifier references. Extract the full iterable text from source.
+            if iterable.is_empty() {
+                if let Some(ve) = v_for_prop.value_end {
+                    let right_start = vfor.parsed.result.right_offset as usize;
+                    let right_end = ve as usize;
+                    if right_start < right_end && right_end <= source.len() {
+                        iterable = source[right_start..right_end].trim().to_string();
+                    }
+                }
             }
         }
     }
@@ -1043,8 +1136,7 @@ fn extract_v_for(
         has_key,
         key_expression,
         key_uses_index,
-        span_start,
-        span_end,
+        span: Span::new(span_start, span_end),
     });
 }
 
@@ -1082,8 +1174,7 @@ fn extract_v_model(
             modifiers,
             target_is_component: el.tag_type.is_component(),
             target_tag: tag_name.to_string(),
-            span_start,
-            span_end,
+            span: Span::new(span_start, span_end),
         });
         break; // Only one v-model per element
     }
@@ -1107,8 +1198,7 @@ fn extract_binding_occurrences(
                     if !b.ignore {
                         data.binding_occurrences.push(RawBindingOccurrence {
                             name: b.name.to_string(),
-                            span_start: b.pos,
-                            span_end: b.pos + b.name.len() as u32,
+                            span: Span::new(b.pos, b.pos + b.name.len() as u32),
                             is_in_bindings_map: bindings.contains_key(b.name),
                             usage_kind: 1, // directive value
                         });
@@ -1125,8 +1215,7 @@ fn extract_binding_occurrences(
                 if !b.ignore {
                     data.binding_occurrences.push(RawBindingOccurrence {
                         name: b.name.to_string(),
-                        span_start: b.pos,
-                        span_end: b.pos + b.name.len() as u32,
+                        span: Span::new(b.pos, b.pos + b.name.len() as u32),
                         is_in_bindings_map: bindings.contains_key(b.name),
                         usage_kind: 1, // directive value
                     });
@@ -1164,6 +1253,13 @@ fn parse_comment_directive(content: &str, start: u32, end: u32) -> Option<RawCom
             (6, false, None)
         } else if rest.starts_with("ignore-end") {
             (7, false, None)
+        } else if let Some(r) = rest.strip_prefix("level") {
+            // @verter:level(warn) or @verter:level(error) or @verter:level(off)
+            // Extract the argument inside parens, e.g. "level(warn)" → "warn"
+            let arg = r.trim();
+            let arg = arg.strip_prefix('(').and_then(|s| s.strip_suffix(')'));
+            let msg = arg.map(str::trim).map(|s| s.to_string());
+            (8, false, msg)
         } else {
             return None;
         };
@@ -1180,8 +1276,7 @@ fn parse_comment_directive(content: &str, start: u32, end: u32) -> Option<RawCom
     Some(RawCommentDirective {
         kind,
         rule_or_message,
-        span_start: start,
-        span_end: end,
+        span: Span::new(start, end),
         affects_next_line,
     })
 }
@@ -1408,6 +1503,33 @@ mod tests {
         );
         assert_eq!(data.v_for_directives.len(), 1);
         assert!(!data.v_for_directives[0].has_key);
+    }
+
+    /// @ai-generated - Literal array iterable in v-for must populate iterable field.
+    #[test]
+    fn v_for_literal_array_iterable() {
+        let data = extract(
+            r#"<template><button v-for="route in ['dashboard', 'settings', 'profile'] as const" :key="route">{{ route }}</button></template>"#,
+        );
+        assert_eq!(data.v_for_directives.len(), 1);
+        assert_eq!(data.v_for_directives[0].variable, "route");
+        assert!(
+            !data.v_for_directives[0].iterable.is_empty(),
+            "iterable must not be empty for literal array v-for"
+        );
+    }
+
+    /// @ai-generated - Numeric array literal iterable in v-for.
+    #[test]
+    fn v_for_numeric_array_iterable() {
+        let data =
+            extract(r#"<template><div v-for="item in [1, 2, 3]" :key="item"></div></template>"#);
+        assert_eq!(data.v_for_directives.len(), 1);
+        assert_eq!(data.v_for_directives[0].variable, "item");
+        assert!(
+            !data.v_for_directives[0].iterable.is_empty(),
+            "iterable must not be empty for numeric array literal v-for"
+        );
     }
 
     // ── v-model ──

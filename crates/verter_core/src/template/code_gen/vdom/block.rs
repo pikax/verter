@@ -158,14 +158,21 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         // IMPORTANT: pop() already consumes the entry -- do NOT pop again in
         // the else branch, or a nested <template v-if> inside a <template v-for>
         // will double-pop and corrupt the stack.
-        if let Some(v_for_prefix) = self.v_for_prefixes.pop().flatten() {
+        if let Some((v_for_prefix, _iterable_src)) = self.v_for_prefixes.pop().flatten() {
             prefix.push_str(&v_for_prefix);
         }
         prefix.push_str("(_openBlock(), _createElementBlock(_Fragment, null, [\n");
         out.overwrite(el.tag_open.start, el.tag_open.end, &prefix);
 
         // Add child separators for array mode
-        children::add_children_separators_array(&children, out, &self.options);
+        children::add_children_separators_array(
+            &children,
+            out,
+            &self.options,
+            source,
+            self.ast,
+            el_children,
+        );
 
         // Build close tag replacement: ], 64 /* STABLE_FRAGMENT */))
         let suffix = if self.options.is_production {

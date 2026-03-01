@@ -43,6 +43,8 @@ pub fn process_interpolation<'alloc>(
         kind: ChildKind::Interpolation,
         condition: None,
         condition_prefix: None,
+        condition_expr_start: None,
+        condition_binding_prefix_len: 0,
     }
 }
 
@@ -145,7 +147,7 @@ mod tests {
             bindings: Some(BindingExtractionResult {
                 bindings: vec![crate::utils::oxc::Binding {
                     name: "msg",
-                    span: crate::common::Span::new(3, 6),
+                    span: crate::common::RelativeSpan::new(3, 6),
                     pos: 3,
                     ignore: false,
                     is_shorthand: false,
@@ -179,7 +181,7 @@ mod tests {
             bindings: Some(BindingExtractionResult {
                 bindings: vec![crate::utils::oxc::Binding {
                     name: "count",
-                    span: crate::common::Span::new(3, 8),
+                    span: crate::common::RelativeSpan::new(3, 8),
                     pos: 3,
                     ignore: false,
                     is_shorthand: false,

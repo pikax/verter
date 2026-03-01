@@ -160,17 +160,5 @@ pub(super) fn resolve_dynamic_component<'a>(
 
 /// Convert a kebab-case or camelCase string to PascalCase.
 pub(crate) fn to_pascal_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut capitalize_next = true;
-    for ch in s.chars() {
-        if ch == '-' || ch == '_' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.extend(ch.to_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(ch);
-        }
-    }
-    result
+    super::super::shared::helpers::to_pascal_case(s)
 }

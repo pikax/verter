@@ -28,9 +28,17 @@ export interface HostCompileProfile {
   customElements?: string[];
   comments?: boolean;
   runtimeModuleName?: string;
+  typesModuleName?: string;
   forceVapor?: boolean;
   forceJs?: boolean;
   sourceMap?: boolean;
+  /** Compilation target preset: "bundler" (default), "ide", or "analysis". */
+  target?: "bundler" | "ide" | "analysis";
+}
+
+export interface HostTsxResponse {
+  code: string;
+  sourceMap?: string;
 }
 
 export interface HostVirtualNodeKind {
@@ -74,6 +82,34 @@ export interface HostScriptImportInfo {
   bindings: string[];
 }
 
+export interface HostPreprocessorRequest {
+  /** Block type: "template", "script", "style", or "custom". */
+  blockType: "template" | "script" | "style" | "custom";
+  /** Block index (0 for template/script, 0..N for styles/custom blocks). */
+  index: number;
+  /** The `lang` attribute value (e.g., "pug", "coffee", "scss"). */
+  lang: string;
+  /** Raw content of the block that needs preprocessing. */
+  content: string;
+}
+
+export interface HostBlockOverrideEntry {
+  /** Block type: "template", "script", "style", or "custom". */
+  blockType: "template" | "script" | "style" | "custom";
+  /** Block index (0 for template/script, 0..N for styles/custom blocks). */
+  index: number;
+  /** Preprocessed code. */
+  code: string;
+  /** Source map from the preprocessor, if available. */
+  sourceMap?: string;
+}
+
+export interface HostBlockOverrideRequest {
+  canonicalId: string;
+  compileProfile?: HostCompileProfile;
+  overrides: HostBlockOverrideEntry[];
+}
+
 export interface HostUpdateResult {
   canonicalId: string;
   changed: boolean;
@@ -87,6 +123,7 @@ export interface HostUpdateResult {
   diagnostics: HostDiagnosticsSnapshot;
   externalSourceRequests: HostExternalSourceRequest[];
   importSpecifiers: HostScriptImportInfo[];
+  preprocessorRequests: HostPreprocessorRequest[];
   parseDurationMs: number;
 }
 
@@ -144,4 +181,82 @@ export interface HostVirtualQuery {
 
 export interface HostRemoveResult {
   canonicalId: string;
+}
+
+// =============================================================================
+// Code Actions
+// =============================================================================
+
+export interface HostTextEdit {
+  spanStart: number;
+  spanEnd: number;
+  newText: string;
+}
+
+export interface HostCodeAction {
+  title: string;
+  kind: string;
+  edits: HostTextEdit[];
+  isPreferred: boolean;
+  diagnosticRule?: string;
+}
+
+// =============================================================================
+// Lint Rule Metadata
+// =============================================================================
+
+export interface HostLintRuleMetadata {
+  name: string;
+  category: string;
+  defaultSeverity: string;
+}
+
+// =============================================================================
+// Lint Diagnostics
+// =============================================================================
+
+export interface HostLintDiagnostic {
+  rule: string;
+  category: string;
+  severity: string;
+  message: string;
+  spanStart: number;
+  spanEnd: number;
+  tags: string[];
+  spanKind: string;
+}
+
+// =============================================================================
+// Document Symbols
+// =============================================================================
+
+export interface HostDocumentSymbol {
+  name: string;
+  detail?: string;
+  /** Monaco SymbolKind constant */
+  kind: number;
+  spanStart: number;
+  spanEnd: number;
+  selectionStart: number;
+  selectionEnd: number;
+  children: HostDocumentSymbol[];
+}
+
+// =============================================================================
+// CSS Selector Matching
+// =============================================================================
+
+export interface HostElementMatch {
+  tag: string;
+  spanStart: number;
+  spanEnd: number;
+  /** "match", "maybe", or "no" */
+  result: "match" | "maybe" | "no";
+}
+
+export interface HostSelectorMatchResult {
+  selectorText: string;
+  selectorStart: number;
+  selectorEnd: number;
+  matches: HostElementMatch[];
 }

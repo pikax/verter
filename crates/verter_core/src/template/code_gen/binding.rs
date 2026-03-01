@@ -206,7 +206,21 @@ impl<'alloc> BindingResolver<'alloc> {
                     "$setup."
                 }
             }
-            Some(BindingType::Data | BindingType::Options) => "_ctx.",
+            Some(BindingType::Data) => {
+                if self.is_inline {
+                    // Inline mode: data properties are on the component proxy
+                    "_ctx."
+                } else {
+                    "$data."
+                }
+            }
+            Some(BindingType::Options) => {
+                if self.is_inline {
+                    "_ctx."
+                } else {
+                    "$options."
+                }
+            }
             None => "_ctx.",
             // unreachable but needed for exhaustiveness since we use guards above
             _ => "_ctx.",
@@ -225,6 +239,31 @@ impl<'alloc> BindingResolver<'alloc> {
         match self.bindings.get(ident) {
             Some(bt) if bt.needs_value_access() => ".value",
             _ => "",
+        }
+    }
+
+    /// Returns the binding prefix length for a simple identifier expression.
+    ///
+    /// For simple identifiers like `show` → prefix `_ctx.` → returns 5.
+    /// For compound expressions or unresolved identifiers, returns 0.
+    /// The prefix length indicates where the original identifier starts within
+    /// the resolved expression string.
+    pub fn simple_expr_prefix_len(&self, expr: &str) -> usize {
+        let trimmed = expr.trim();
+        if !is_simple_ident(trimmed) {
+            return 0;
+        }
+        let is_kw = is_keyword(trimmed.as_bytes());
+        if (is_kw && !self.bindings.contains_key(trimmed)) || is_global(trimmed.as_bytes()) {
+            return 0;
+        }
+        let prefix = self.resolve_prefix(trimmed);
+        if is_kw && !prefix.is_empty() {
+            // Bracket notation: `$props["` → prefix.trim('.').len() + 2
+            let base = prefix.trim_end_matches('.');
+            base.len() + 2 // e.g., `$props["` = 8
+        } else {
+            prefix.len()
         }
     }
 
@@ -461,14 +500,26 @@ mod tests {
     }
 
     #[test]
-    fn data_prefix_is_ctx() {
+    fn data_prefix_is_data_in_standalone() {
+        let resolver = make_resolver(&[("count", BindingType::Data)], false);
+        assert_eq!(resolver.resolve_prefix("count"), "$data.");
+    }
+
+    #[test]
+    fn data_prefix_is_ctx_in_inline() {
         let resolver = make_resolver(&[("count", BindingType::Data)], true);
         assert_eq!(resolver.resolve_prefix("count"), "_ctx.");
     }
 
     #[test]
-    fn options_prefix_is_ctx() {
+    fn options_prefix_is_options_in_standalone() {
         let resolver = make_resolver(&[("count", BindingType::Options)], false);
+        assert_eq!(resolver.resolve_prefix("count"), "$options.");
+    }
+
+    #[test]
+    fn options_prefix_is_ctx_in_inline() {
+        let resolver = make_resolver(&[("count", BindingType::Options)], true);
         assert_eq!(resolver.resolve_prefix("count"), "_ctx.");
     }
 
@@ -540,7 +591,7 @@ mod tests {
         let bindings = BindingExtractionResult {
             bindings: vec![crate::utils::oxc::Binding {
                 name: "count",
-                span: crate::common::Span::new(10, 15),
+                span: crate::common::RelativeSpan::new(10, 15),
                 pos: 10,
                 ignore: false,
                 is_shorthand: false,
@@ -568,7 +619,7 @@ mod tests {
         let bindings = BindingExtractionResult {
             bindings: vec![crate::utils::oxc::Binding {
                 name: "msg",
-                span: crate::common::Span::new(5, 8),
+                span: crate::common::RelativeSpan::new(5, 8),
                 pos: 5,
                 ignore: false,
                 is_shorthand: false,
@@ -596,7 +647,7 @@ mod tests {
         let bindings = BindingExtractionResult {
             bindings: vec![crate::utils::oxc::Binding {
                 name: "item",
-                span: crate::common::Span::new(0, 4),
+                span: crate::common::RelativeSpan::new(0, 4),
                 pos: 0,
                 ignore: true, // v-for local
                 is_shorthand: false,
@@ -622,7 +673,7 @@ mod tests {
         let bindings = BindingExtractionResult {
             bindings: vec![crate::utils::oxc::Binding {
                 name: "foo",
-                span: crate::common::Span::new(0, 3),
+                span: crate::common::RelativeSpan::new(0, 3),
                 pos: 0,
                 ignore: false,
                 is_shorthand: false,
@@ -657,14 +708,14 @@ mod tests {
             bindings: vec![
                 crate::utils::oxc::Binding {
                     name: "count",
-                    span: crate::common::Span::new(0, 5),
+                    span: crate::common::RelativeSpan::new(0, 5),
                     pos: 0,
                     ignore: false,
                     is_shorthand: false,
                 },
                 crate::utils::oxc::Binding {
                     name: "msg",
-                    span: crate::common::Span::new(8, 11),
+                    span: crate::common::RelativeSpan::new(8, 11),
                     pos: 8,
                     ignore: false,
                     is_shorthand: false,
@@ -874,17 +925,14 @@ mod tests {
     use crate::utils::oxc::BindingExtractionResult;
 
     fn make_bindings_result<'a>(names: &[(&'a str, bool)]) -> BindingExtractionResult<'a> {
-        use crate::common::Span;
+        use crate::common::RelativeSpan;
         use crate::utils::oxc::bindings::Binding;
         BindingExtractionResult {
             bindings: names
                 .iter()
                 .map(|&(name, ignore)| Binding {
                     name,
-                    span: Span {
-                        start: 0,
-                        end: name.len() as u32,
-                    },
+                    span: RelativeSpan::new(0, name.len() as u32),
                     pos: 0,
                     ignore,
                     is_shorthand: false,

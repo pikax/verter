@@ -195,6 +195,10 @@ jobs:
         if: steps.source.outputs.source == 'artifact'
         run: pnpm --filter @verter/unplugin build
 
+      - name: Build nuxt module
+        if: steps.source.outputs.source == 'artifact'
+        run: pnpm --filter @verter/nuxt build
+
       - name: Create local registry tarball
         if: steps.source.outputs.source == 'artifact'
         run: |
@@ -202,6 +206,7 @@ jobs:
           # Pack packages
           cd packages/native && pnpm pack --pack-destination ../../dist && cd ../..
           cd packages/unplugin && pnpm pack --pack-destination ../../dist && cd ../..
+          cd packages/nuxt && pnpm pack --pack-destination ../../dist && cd ../..
 
           echo "✅ Packages packed:"
           ls -lh dist/*.tgz
@@ -548,22 +553,35 @@ jobs:
           echo "📦 Installing Verter from tarballs"
           NATIVE_TGZ=$(ls ../verter-packages/verter-native-*.tgz)
           UNPLUGIN_TGZ=$(ls ../verter-packages/verter-unplugin-*.tgz)
+          NUXT_TGZ=$(ls ../verter-packages/verter-nuxt-*.tgz 2>/dev/null || true)
           echo "  native: $NATIVE_TGZ"
           echo "  unplugin: $UNPLUGIN_TGZ"
+          echo "  nuxt: ${NUXT_TGZ:-n/a}"
 
+          BUNDLER="${{ matrix.project.bundler }}"
           PKG_MGR="${{ matrix.project.package-manager }}"
 
+          # Build install list: always native + unplugin, add nuxt for Nuxt projects
+          INSTALL_PKGS="$NATIVE_TGZ $UNPLUGIN_TGZ"
+          if [ "$BUNDLER" = "nuxt" ] && [ -n "$NUXT_TGZ" ]; then
+            INSTALL_PKGS="$INSTALL_PKGS $NUXT_TGZ"
+          fi
+
           if [ "$PKG_MGR" = "pnpm" ]; then
-            # 1. Install both packages (use -w only for workspace projects)
+            # 1. Install packages (use -w only for workspace projects)
             PNPM_W=""
             if [ -f "pnpm-workspace.yaml" ] || [ -f "pnpm-workspace.yml" ]; then
               PNPM_W="-w"
             fi
-            pnpm add $PNPM_W "$NATIVE_TGZ" "$UNPLUGIN_TGZ"
+            pnpm add $PNPM_W $INSTALL_PKGS
 
             # 2. Add pnpm overrides using file: protocol to the tarballs.
             #    The $packageName syntax doesn't work with tarball-installed packages —
             #    pnpm resolves the semver version separately, missing the native binary.
+            NUXT_OVERRIDE=""
+            if [ "$BUNDLER" = "nuxt" ] && [ -n "$NUXT_TGZ" ]; then
+              NUXT_OVERRIDE="pkg.pnpm.overrides['@verter/nuxt'] = 'file:${NUXT_TGZ}';"
+            fi
             node -e "
               const fs = require('fs');
               const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -571,6 +589,7 @@ jobs:
               pkg.pnpm.overrides = pkg.pnpm.overrides || {};
               pkg.pnpm.overrides['@verter/native'] = 'file:${NATIVE_TGZ}';
               pkg.pnpm.overrides['@verter/unplugin'] = 'file:${UNPLUGIN_TGZ}';
+              ${NUXT_OVERRIDE}
               fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
             "
 
@@ -583,16 +602,21 @@ jobs:
               pnpm install
             fi
           else
-            # 1. Install both packages
-            npm install --legacy-peer-deps "$NATIVE_TGZ" "$UNPLUGIN_TGZ"
+            # 1. Install packages
+            npm install --legacy-peer-deps $INSTALL_PKGS
 
             # 2. Add npm overrides using file: protocol
+            NUXT_OVERRIDE=""
+            if [ "$BUNDLER" = "nuxt" ] && [ -n "$NUXT_TGZ" ]; then
+              NUXT_OVERRIDE="pkg.overrides['@verter/nuxt'] = 'file:${NUXT_TGZ}';"
+            fi
             node -e "
               const fs = require('fs');
               const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
               pkg.overrides = pkg.overrides || {};
               pkg.overrides['@verter/native'] = 'file:${NATIVE_TGZ}';
               pkg.overrides['@verter/unplugin'] = 'file:${UNPLUGIN_TGZ}';
+              ${NUXT_OVERRIDE}
               fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
             "
 
@@ -601,19 +625,24 @@ jobs:
           fi
           echo "✅ Verter packages installed from tarballs"
 
-      - name: Install Verter unplugin (from npm)
+      - name: Install Verter packages (from npm)
         if: steps.source.outputs.source == 'npm'
         working-directory: test-project
         run: |
           echo "Installing from npm with dist-tag: ${{ steps.source.outputs.dist-tag }}"
+          BUNDLER="${{ matrix.project.bundler }}"
+          EXTRA_PKGS=""
+          if [ "$BUNDLER" = "nuxt" ]; then
+            EXTRA_PKGS="@verter/nuxt@${{ steps.source.outputs.dist-tag }}"
+          fi
           if [ "${{ matrix.project.package-manager }}" = "pnpm" ]; then
             PNPM_W=""
             if [ -f "pnpm-workspace.yaml" ] || [ -f "pnpm-workspace.yml" ]; then
               PNPM_W="-w"
             fi
-            pnpm add $PNPM_W @verter/unplugin@${{ steps.source.outputs.dist-tag }}
+            pnpm add $PNPM_W @verter/unplugin@${{ steps.source.outputs.dist-tag }} $EXTRA_PKGS
           else
-            npm install --legacy-peer-deps @verter/unplugin@${{ steps.source.outputs.dist-tag }}
+            npm install --legacy-peer-deps @verter/unplugin@${{ steps.source.outputs.dist-tag }} $EXTRA_PKGS
           fi
 
       - name: Replace vue plugin with verter in build configs
@@ -622,23 +651,7 @@ jobs:
           BUNDLER="${{ matrix.project.bundler }}"
 
           if [ "$BUNDLER" = "nuxt" ]; then
-            # For Nuxt projects: inject a Nuxt module that replaces vite:vue plugin at runtime
-            OVERRIDE_MODULE='import { defineNuxtModule } from "@nuxt/kit"
-          import verter from "@verter/unplugin/vite"
-
-          export default defineNuxtModule({
-            meta: { name: "verter-override" },
-            setup(_options, nuxt) {
-              nuxt.hook("vite:extendConfig", (config) => {
-                config.plugins = (config.plugins || []).filter(
-                  (p) => !(p && typeof p === "object" && "name" in p && p.name === "vite:vue")
-                )
-                config.plugins.push(verter())
-              })
-            }
-          })'
-
-            # Find all nuxt.config files and inject the override module
+            # For Nuxt projects: inject @verter/nuxt module into nuxt.config
             NUXT_CONFIGS=$(find . -name 'nuxt.config.*' -not -path '*/node_modules/*' -not -path '*/.git/*')
             if [ -z "$NUXT_CONFIGS" ]; then
               echo "❌ No nuxt.config files found"
@@ -646,16 +659,11 @@ jobs:
             fi
 
             for CONFIG_FILE in $NUXT_CONFIGS; do
-              CONFIG_DIR=$(dirname "$CONFIG_FILE")
-              MODULE_FILE="$CONFIG_DIR/.verter-nuxt-override.mjs"
-              echo "$OVERRIDE_MODULE" > "$MODULE_FILE"
-              echo "📝 Created $MODULE_FILE"
-
-              # Inject module reference into nuxt.config
+              # Inject @verter/nuxt module reference into nuxt.config
               if grep -q 'modules\s*:' "$CONFIG_FILE"; then
-                sed -i "s|modules\s*:\s*\[|modules: [\n    './.verter-nuxt-override',|" "$CONFIG_FILE"
+                sed -i "s|modules\s*:\s*\[|modules: [\n    '@verter/nuxt',|" "$CONFIG_FILE"
               else
-                sed -i "s|defineNuxtConfig\s*(\s*{|defineNuxtConfig({\n  modules: ['./.verter-nuxt-override'],|" "$CONFIG_FILE"
+                sed -i "s|defineNuxtConfig\s*(\s*{|defineNuxtConfig({\n  modules: ['@verter/nuxt'],|" "$CONFIG_FILE"
               fi
               echo "📝 Modified $CONFIG_FILE"
             done
@@ -778,13 +786,15 @@ jobs:
         run: |
           BUNDLER="${{ matrix.project.bundler }}"
           if [ "$BUNDLER" = "nuxt" ]; then
-            # For Nuxt: verify override module exists and is referenced
-            FOUND=$(find . -name '.verter-nuxt-override.mjs' -not -path '*/node_modules/*' || true)
+            # For Nuxt: verify @verter/nuxt is referenced in nuxt.config
+            FOUND=$(grep -rl "@verter/nuxt" \
+              --include="nuxt.config.*" \
+              --exclude-dir=node_modules --exclude-dir=.git . || true)
             if [ -z "$FOUND" ]; then
-              echo "::error::No .verter-nuxt-override.mjs files found!"
+              echo "::error::No nuxt.config files reference @verter/nuxt!"
               exit 1
             fi
-            echo "✅ Verified Nuxt override module:"
+            echo "✅ Verified @verter/nuxt in:"
             echo "$FOUND"
           elif [ "$BUNDLER" = "rollup" ]; then
             FOUND=$(grep -rl "@verter/unplugin/rollup" \

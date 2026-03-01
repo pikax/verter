@@ -67,8 +67,16 @@ pub fn format_event_handler_key(event_name: &str) -> String {
 /// Same transformation as [`format_event_handler_key`] but avoids allocation.
 pub fn format_event_handler_key_into(buf: &mut String, event_name: &str) {
     buf.push_str("on");
+    // Vue lifecycle hooks: @vue:mounted → onVnodeMounted
+    // Convert "vue:" prefix to "vnode-" so the camelCase logic produces the correct result.
+    let chars: Box<dyn Iterator<Item = char>> = if let Some(rest) = event_name.strip_prefix("vue:")
+    {
+        Box::new("vnode-".chars().chain(rest.chars()))
+    } else {
+        Box::new(event_name.chars())
+    };
     let mut capitalize_next = true;
-    for ch in event_name.chars() {
+    for ch in chars {
         if ch == '-' {
             capitalize_next = true;
             continue;

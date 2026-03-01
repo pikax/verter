@@ -25,6 +25,11 @@ use verter_ffi::types::*;
 use verter_host as host;
 use wasm_bindgen::prelude::*;
 
+// Re-imports for code actions and diagnostics
+use verter_actions::{ActionContext, ActionEngine};
+use verter_diagnostics::rules::RuleRegistry;
+use verter_diagnostics::Linter;
+
 /// WASM module initialiser — called automatically by the JS runtime when the
 /// module is instantiated.
 ///
@@ -170,6 +175,26 @@ impl WasmVerterHost {
         to_wasm_value(&host_update_to_ffi(result, source.as_deref()))
     }
 
+    /// Replaces one or more blocks with preprocessed content (e.g. the output
+    /// of Pug, CoffeeScript, SCSS, or custom block preprocessors) and
+    /// recompiles affected virtual nodes.
+    ///
+    /// This is the unified API that handles template, script, style, AND
+    /// custom block preprocessing.
+    ///
+    /// Returns the same changeset structure as [`upsert`](Self::upsert).
+    ///
+    /// Throws if the canonical ID is unknown or the request is malformed.
+    #[wasm_bindgen(js_name = applyBlockOverrides)]
+    pub fn apply_block_overrides(&self, request: JsValue) -> Result<JsValue, JsValue> {
+        let ffi_req = parse_wasm_input::<FfiBlockOverrideRequest>(request)?;
+        let host_req = ffi_block_override_to_host(ffi_req).map_err(ffi_err)?;
+        let result =
+            catch_panic(|| self.inner.apply_block_overrides(host_req))?.map_err(host_err)?;
+        let source = self.inner.get_source(&result.canonical_id);
+        to_wasm_value(&host_update_to_ffi(result, source.as_deref()))
+    }
+
     /// Retrieves a single compiled virtual file (script, template, or style).
     ///
     /// The query can identify the file by raw import ID or by canonical ID +
@@ -267,6 +292,21 @@ impl WasmVerterHost {
         }))
     }
 
+    /// Retrieve TSC declaration output for a file.
+    ///
+    /// Generates a minimal TypeScript declaration file for a Vue SFC.
+    /// Unlike `getTsx`, this does NOT require a prior compilation pass.
+    ///
+    /// Returns `{ code: string, sourceMap?: string }` or `null`.
+    #[wasm_bindgen(js_name = getTsc)]
+    pub fn get_tsc(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
+        let result = catch_panic(|| self.inner.get_tsc(canonical_id))?;
+        to_wasm_value(&result.map(|r| FfiTsxResponse {
+            code: r.code.to_string(),
+            source_map: r.source_map.map(|s| s.to_string()),
+        }))
+    }
+
     /// Runs cross-file analysis and returns prop constness optimizations.
     ///
     /// Builds a render tree from all compiled SFCs' template analysis data,
@@ -315,28 +355,20 @@ impl WasmVerterHost {
     #[wasm_bindgen]
     pub fn lint(&self, canonical_or_alias: &str, config: JsValue) -> Result<JsValue, JsValue> {
         let lint_config = if config.is_undefined() || config.is_null() {
-            verter_linter::LintConfig::default()
+            verter_diagnostics::LintConfig::default()
         } else {
-            parse_wasm_input::<verter_linter::LintConfig>(config)?
+            parse_wasm_input::<verter_diagnostics::LintConfig>(config)?
         };
 
         let analysis = catch_panic(|| self.inner.get_analysis(canonical_or_alias))?;
 
         let diagnostics = match analysis {
             Some(snapshot) => {
-                let linter = verter_linter::Linter::new(lint_config);
-                let script = verter_analysis::types::ScriptAnalysisSnapshot {
-                    imports: snapshot.imports,
-                    bindings: snapshot.bindings,
-                    macros: snapshot.macros,
-                    macro_type_deps: snapshot.macro_type_deps,
-                    flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(
-                        snapshot.script_flags,
-                    ),
-                    exported_functions: Vec::new(),
-                    type_enhancements: None,
-                };
-                linter.lint(Some(&script), snapshot.template.as_ref(), &snapshot.styles)
+                let linter = Linter::new(lint_config);
+                let script = build_script_snapshot(&snapshot);
+                linter
+                    .lint(Some(&script), snapshot.template.as_ref(), &snapshot.styles)
+                    .into_diagnostics()
             }
             None => Vec::new(),
         };
@@ -344,6 +376,402 @@ impl WasmVerterHost {
         let diagnostics = lint_diagnostics_to_utf16(diagnostics, source.as_deref());
         to_wasm_value(&diagnostics)
     }
+
+    /// Returns code actions (quick fixes) available for a file at a given
+    /// UTF-16 offset.
+    ///
+    /// Runs lint rules, then queries the action engine for fixes matching
+    /// diagnostics at the given position. Returns an array of code actions
+    /// with UTF-16 spans.
+    ///
+    /// - `canonical_or_alias` — the file to get actions for.
+    /// - `offset` — UTF-16 cursor offset in the SFC source.
+    #[wasm_bindgen(js_name = getCodeActions)]
+    pub fn get_code_actions(
+        &self,
+        canonical_or_alias: &str,
+        offset: u32,
+    ) -> Result<JsValue, JsValue> {
+        let analysis = catch_panic(|| self.inner.get_analysis(canonical_or_alias))?;
+        let source = self.inner.get_source(canonical_or_alias);
+
+        let actions = match (analysis, source.as_deref()) {
+            (Some(snapshot), Some(source)) => {
+                // Convert UTF-16 offset to byte offset for the action engine
+                let byte_offset = utf16_to_byte_offset(source, offset);
+
+                let script = build_script_snapshot(&snapshot);
+                let linter = Linter::default();
+                let diag_set = linter.lint_with_source(
+                    Some(&script),
+                    snapshot.template.as_ref(),
+                    &snapshot.styles,
+                    Some(source),
+                );
+
+                let engine = ActionEngine::default();
+                let ctx = ActionContext {
+                    source,
+                    file_id: canonical_or_alias,
+                    diagnostics: &diag_set,
+                    template: snapshot.template.as_ref(),
+                    script: Some(&script),
+                    styles: &snapshot.styles,
+                };
+
+                // Collect fixes for diagnostics that overlap the cursor
+                let mut actions = Vec::new();
+                for diag in diag_set.iter() {
+                    if diag.span.start <= byte_offset && byte_offset <= diag.span.end {
+                        actions.extend(engine.fixes_for(diag, &ctx));
+                    }
+                }
+
+                // Also collect position-based actions (refactorings)
+                actions.extend(engine.actions_at(byte_offset, &ctx));
+
+                // Deduplicate by title
+                let mut seen = std::collections::HashSet::new();
+                actions.retain(|a| seen.insert(a.title.clone()));
+
+                actions
+                    .iter()
+                    .map(|a| code_action_to_ffi(a, source))
+                    .collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        };
+
+        to_wasm_value(&actions)
+    }
+
+    /// Returns metadata for all registered lint rules.
+    ///
+    /// Used by the lint rule browser UI to display available rules,
+    /// their categories, and default severities.
+    #[wasm_bindgen(js_name = getLintRuleMetadata)]
+    pub fn get_lint_rule_metadata(&self) -> Result<JsValue, JsValue> {
+        let registry = RuleRegistry::default();
+        let metadata: Vec<FfiLintRuleMetadata> = registry
+            .rules()
+            .iter()
+            .map(|rule| lint_rule_to_ffi_metadata(rule.as_ref()))
+            .collect();
+        to_wasm_value(&metadata)
+    }
+
+    /// Returns document symbols for a file (outline / Ctrl+Shift+O).
+    ///
+    /// Generates a hierarchical tree of symbols: SFC blocks at the top,
+    /// with script bindings, template components, and style classes as
+    /// children.
+    #[wasm_bindgen(js_name = getDocumentSymbols)]
+    pub fn get_document_symbols(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
+        let analysis = catch_panic(|| self.inner.get_analysis(canonical_or_alias))?;
+        let source = self.inner.get_source(canonical_or_alias);
+
+        let symbols = match (analysis, source.as_deref()) {
+            (Some(snapshot), Some(source)) => {
+                build_document_symbols_from_analysis(&snapshot, source)
+            }
+            _ => Vec::new(),
+        };
+
+        to_wasm_value(&symbols)
+    }
+
+    /// Matches CSS selectors against template elements, returning a
+    /// three-valued match matrix.
+    ///
+    /// Each selector is tested against each template element, producing
+    /// "match", "maybe", or "no" results. Used by the CSS selector
+    /// matching visualization panel.
+    #[wasm_bindgen(js_name = matchCssSelectors)]
+    pub fn match_css_selectors(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
+        let analysis = catch_panic(|| self.inner.get_analysis(canonical_or_alias))?;
+        let source = self.inner.get_source(canonical_or_alias);
+
+        let results = match (analysis, source.as_deref()) {
+            (Some(snapshot), Some(source)) => build_selector_match_results(&snapshot, source),
+            _ => Vec::new(),
+        };
+
+        to_wasm_value(&results)
+    }
+}
+
+// =============================================================================
+// Helper functions
+// =============================================================================
+
+/// Build a `ScriptAnalysisSnapshot` from a `FileAnalysisSnapshot`.
+///
+/// Extracts all script-related fields, preserving `vue_api_calls` and
+/// `dom_query_calls` from the snapshot (fixes Phase 2 zeroed-fields bug).
+fn build_script_snapshot(
+    snapshot: &host::FileAnalysisSnapshot,
+) -> verter_analysis::types::ScriptAnalysisSnapshot {
+    verter_analysis::types::ScriptAnalysisSnapshot {
+        imports: snapshot.imports.clone(),
+        bindings: snapshot.bindings.clone(),
+        macros: snapshot.macros.clone(),
+        macro_type_deps: snapshot.macro_type_deps.clone(),
+        flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(snapshot.script_flags),
+        exported_functions: Vec::new(),
+        vue_api_calls: snapshot.vue_api_calls.clone(),
+        dom_query_calls: snapshot.dom_query_calls.clone(),
+        first_await_offset: None,
+        type_enhancements: None,
+    }
+}
+
+/// Convert a UTF-16 offset to a UTF-8 byte offset.
+fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
+    let mut utf16_count = 0u32;
+    for (byte_idx, ch) in source.char_indices() {
+        if utf16_count >= utf16_offset {
+            return byte_idx as u32;
+        }
+        utf16_count += ch.len_utf16() as u32;
+    }
+    source.len() as u32
+}
+
+/// Monaco SymbolKind constants (subset used for document symbols).
+mod symbol_kind {
+    pub const MODULE: u32 = 1;
+    pub const VARIABLE: u32 = 12;
+    pub const FUNCTION: u32 = 11;
+    pub const CLASS: u32 = 4;
+    pub const STRUCT: u32 = 22;
+    pub const PROPERTY: u32 = 6;
+    pub const KEY: u32 = 19;
+}
+
+/// Build document symbols from analysis data.
+///
+/// Generates a hierarchical tree of SFC blocks → children.
+fn build_document_symbols_from_analysis(
+    snapshot: &host::FileAnalysisSnapshot,
+    source: &str,
+) -> Vec<FfiDocumentSymbol> {
+    let mut symbols = Vec::new();
+
+    // Script block with bindings/imports/macros
+    if !snapshot.bindings.is_empty() || !snapshot.imports.is_empty() || !snapshot.macros.is_empty()
+    {
+        let mut children = Vec::new();
+
+        for imp in &snapshot.imports {
+            children.push(FfiDocumentSymbol {
+                name: imp.source.clone(),
+                detail: if imp.is_type_only {
+                    Some("type import".to_string())
+                } else {
+                    None
+                },
+                kind: symbol_kind::MODULE,
+                span_start: 0,
+                span_end: 0,
+                selection_start: 0,
+                selection_end: 0,
+                children: Vec::new(),
+            });
+        }
+
+        for binding in &snapshot.bindings {
+            let kind = match binding.kind {
+                verter_analysis::AnalyzedBindingKind::Function
+                | verter_analysis::AnalyzedBindingKind::AsyncFunction => symbol_kind::FUNCTION,
+                verter_analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
+                _ => symbol_kind::VARIABLE,
+            };
+            children.push(FfiDocumentSymbol {
+                name: binding.name.clone(),
+                detail: binding.type_annotation.clone(),
+                kind,
+                span_start: byte_offset_to_utf16_safe(source, binding.span.start),
+                span_end: byte_offset_to_utf16_safe(source, binding.span.end),
+                selection_start: byte_offset_to_utf16_safe(source, binding.span.start),
+                selection_end: byte_offset_to_utf16_safe(source, binding.span.end),
+                children: Vec::new(),
+            });
+        }
+
+        for m in &snapshot.macros {
+            children.push(FfiDocumentSymbol {
+                name: format!("{:?}", m.kind),
+                detail: if m.is_type_based {
+                    Some("type-based".to_string())
+                } else {
+                    None
+                },
+                kind: symbol_kind::FUNCTION,
+                span_start: 0,
+                span_end: 0,
+                selection_start: 0,
+                selection_end: 0,
+                children: Vec::new(),
+            });
+        }
+
+        symbols.push(FfiDocumentSymbol {
+            name: "script".to_string(),
+            detail: Some(format!(
+                "{} binding(s), {} import(s)",
+                snapshot.bindings.len(),
+                snapshot.imports.len()
+            )),
+            kind: symbol_kind::MODULE,
+            span_start: 0,
+            span_end: 0,
+            selection_start: 0,
+            selection_end: 0,
+            children,
+        });
+    }
+
+    // Template block with components
+    if let Some(template) = &snapshot.template {
+        let mut children = Vec::new();
+
+        for comp in &template.components {
+            children.push(FfiDocumentSymbol {
+                name: comp.name.clone(),
+                detail: Some(format!("{} prop(s)", comp.props.len())),
+                kind: symbol_kind::CLASS,
+                span_start: byte_offset_to_utf16_safe(source, comp.span.start),
+                span_end: byte_offset_to_utf16_safe(source, comp.span.end),
+                selection_start: byte_offset_to_utf16_safe(source, comp.span.start),
+                selection_end: byte_offset_to_utf16_safe(source, comp.span.end),
+                children: Vec::new(),
+            });
+        }
+
+        symbols.push(FfiDocumentSymbol {
+            name: "template".to_string(),
+            detail: Some(format!("{} component(s)", template.components.len())),
+            kind: symbol_kind::STRUCT,
+            span_start: 0,
+            span_end: source.encode_utf16().count() as u32,
+            selection_start: 0,
+            selection_end: 0,
+            children,
+        });
+    }
+
+    // Style blocks with classes
+    for (i, style) in snapshot.styles.iter().enumerate() {
+        let mut children = Vec::new();
+
+        if let Some(css) = &style.css {
+            for class in &css.classes {
+                children.push(FfiDocumentSymbol {
+                    name: format!(".{}", class.name),
+                    detail: None,
+                    kind: symbol_kind::PROPERTY,
+                    span_start: byte_offset_to_utf16_safe(source, class.span.start),
+                    span_end: byte_offset_to_utf16_safe(source, class.span.end),
+                    selection_start: byte_offset_to_utf16_safe(source, class.span.start),
+                    selection_end: byte_offset_to_utf16_safe(source, class.span.end),
+                    children: Vec::new(),
+                });
+            }
+        }
+
+        symbols.push(FfiDocumentSymbol {
+            name: format!(
+                "style{}{}",
+                if i > 0 {
+                    format!(" {}", i)
+                } else {
+                    String::new()
+                },
+                if style.scoped { " (scoped)" } else { "" }
+            ),
+            detail: None,
+            kind: symbol_kind::KEY,
+            span_start: 0,
+            span_end: 0,
+            selection_start: 0,
+            selection_end: 0,
+            children,
+        });
+    }
+
+    symbols
+}
+
+/// Safe UTF-16 conversion that handles 0 as identity.
+fn byte_offset_to_utf16_safe(source: &str, byte_offset: u32) -> u32 {
+    if byte_offset == 0 || source.is_empty() {
+        return 0;
+    }
+    let clamped = source.len().min(byte_offset as usize);
+    source[..clamped].encode_utf16().count() as u32
+}
+
+/// Build CSS selector match results for visualization.
+fn build_selector_match_results(
+    snapshot: &host::FileAnalysisSnapshot,
+    source: &str,
+) -> Vec<FfiSelectorMatchResult> {
+    let template = match &snapshot.template {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+
+    for style in &snapshot.styles {
+        let css = match &style.css {
+            Some(c) => c,
+            None => continue,
+        };
+
+        for selector in &css.selectors {
+            // Use pre-parsed structure if available, otherwise parse
+            let parsed = match &selector.structure {
+                Some(s) => s.clone(),
+                None => match verter_analysis::style::parse_selector(&selector.text) {
+                    Some(s) => s,
+                    None => continue,
+                },
+            };
+
+            let mut matches = Vec::new();
+            for (idx, element) in template.elements.iter().enumerate() {
+                let result = verter_analysis::selector_match::match_selector(
+                    &parsed,
+                    idx,
+                    &template.elements,
+                );
+                matches.push(FfiElementMatch {
+                    tag: element.tag.clone(),
+                    span_start: byte_offset_to_utf16_safe(source, element.span.start),
+                    span_end: byte_offset_to_utf16_safe(source, element.span.end),
+                    result: match result {
+                        verter_analysis::selector_match::MatchResult::Matches => {
+                            "match".to_string()
+                        }
+                        verter_analysis::selector_match::MatchResult::MaybeMatches => {
+                            "maybe".to_string()
+                        }
+                        verter_analysis::selector_match::MatchResult::NoMatch => "no".to_string(),
+                    },
+                });
+            }
+
+            results.push(FfiSelectorMatchResult {
+                selector_text: selector.text.clone(),
+                selector_start: byte_offset_to_utf16_safe(source, selector.span.start),
+                selector_end: byte_offset_to_utf16_safe(source, selector.span.end),
+                matches,
+            });
+        }
+    }
+
+    results
 }
 
 #[cfg(test)]
@@ -353,20 +781,20 @@ mod tests {
     #[test]
     fn lint_utf16_conversion_uses_shared_ffi_helper() {
         let source = "a😀b";
-        let diagnostics = vec![verter_linter::LintDiagnostic {
+        let diagnostics = vec![verter_diagnostics::LintDiagnostic {
             rule: "r".to_string(),
             category: "c".to_string(),
-            severity: verter_linter::Severity::Error,
+            severity: verter_diagnostics::Severity::Error,
             message: "m".to_string(),
-            span_start: 1,
-            span_end: 5,
-            fix: None,
+            span: verter_span::Span::new(1, 5),
+            tags: vec![],
+            span_kind: verter_diagnostics::DiagnosticSpanKind::ElementOpenTag,
         }];
 
         let out = lint_diagnostics_to_utf16(diagnostics, Some(source));
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].span_start, 1);
-        assert_eq!(out[0].span_end, 3);
-        assert!(out[0].fix.is_none());
+        assert_eq!(out[0].span.start, 1);
+        assert_eq!(out[0].span.end, 3);
+        assert!(out[0].tags.is_empty());
     }
 }

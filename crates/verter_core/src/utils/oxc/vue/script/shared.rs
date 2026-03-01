@@ -39,8 +39,15 @@ impl<'a> ScriptParseContext<'a> {
     /// Get a slice of the source as str
     #[inline]
     pub fn slice_str(&self, start: u32, end: u32) -> &'a str {
-        // Safety: OXC guarantees valid UTF-8 boundaries
-        unsafe { std::str::from_utf8_unchecked(&self.source_bytes[start as usize..end as usize]) }
+        // Safety: OXC guarantees valid UTF-8 boundaries from the parsed source
+        let bytes = &self.source_bytes[start as usize..end as usize];
+        debug_assert!(
+            std::str::from_utf8(bytes).is_ok(),
+            "OXC span {}..{} is not valid UTF-8",
+            start,
+            end,
+        );
+        unsafe { std::str::from_utf8_unchecked(bytes) }
     }
 }
 

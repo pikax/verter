@@ -34,7 +34,7 @@ pub fn condition_scope_close(kind: &ElementNodeConditionKind) -> ScopeClose {
 
 /// Build the scope prefix string for a v-for directive.
 ///
-/// Returns the full prefix to prepend before the element's VNode call.
+/// Returns `(prefix, scope_close, iterable_source_start)`.
 ///
 /// `v-for="(item, i) in items"` →
 /// `"(_openBlock(true), _createElementBlock(_Fragment, null, _renderList($setup.items, (item, i) => {return "`
@@ -42,6 +42,10 @@ pub fn condition_scope_close(kind: &ElementNodeConditionKind) -> ScopeClose {
 /// The iterable and parameter parts are extracted from source using v-for
 /// parsing conventions: `value_start..value_end` contains the full expression
 /// like `"(item, i) in items"` or `"item in items"`.
+///
+/// `iterable_source_start` is the byte offset of the iterable expression in the
+/// source, used for source-mapped prepends so the LSP can map the `_renderList`
+/// call back to the original `v-for` iterable.
 ///
 /// When `oxc` and `resolver` are provided, the iterable expression is resolved
 /// through the binding resolver for correct `$setup.`/`$props.` prefixes.
@@ -51,11 +55,17 @@ pub fn build_for_prefix<'alloc>(
     is_keyed: bool,
     oxc: Option<&OxcParsedElement<'alloc>>,
     resolver: &BindingResolver<'alloc>,
-) -> (String, ScopeClose) {
+) -> (String, ScopeClose, Option<u32>) {
     let full_expr = extract_directive_value(v_for, source);
 
     // Parse v-for expression: "(params) in/of iterable"
     let (params, iterable) = parse_v_for_expression(full_expr);
+
+    // Compute the iterable's source byte offset for source map mapping.
+    let iterable_source_start = v_for.value_start.map(|vs| {
+        let iterable_offset_in_expr = full_expr.len() - iterable.len();
+        vs + iterable_offset_in_expr as u32
+    });
 
     // Resolve the iterable expression through the binding resolver.
     // For simple identifiers like `items`, this adds `$setup.` prefix.
@@ -84,14 +94,14 @@ pub fn build_for_prefix<'alloc>(
     prefix.push_str(params);
     prefix.push_str(") => {return ");
 
-    (prefix, ScopeClose::For { is_keyed })
+    (prefix, ScopeClose::For { is_keyed }, iterable_source_start)
 }
 
 /// Build a prefixed iterable string using v-for reference spans.
 ///
 /// Walks the external references extracted by OXC and inserts binding prefixes
 /// at their positions within the iterable text.
-fn build_prefixed_iterable(
+pub(crate) fn build_prefixed_iterable(
     iterable: &str,
     source: &str,
     v_for: &NodeProp,
@@ -319,7 +329,7 @@ mod tests {
         let resolver = make_empty_resolver();
         let prop = make_directive_prop(Some(7), Some(21));
         let source = "v-for=\"item in items\"";
-        let (prefix, close) = build_for_prefix(&prop, source, false, None, &resolver);
+        let (prefix, close, iterable_src) = build_for_prefix(&prop, source, false, None, &resolver);
 
         assert!(prefix
             .starts_with("(_openBlock(true), _createElementBlock(_Fragment, null, _renderList("));
@@ -327,6 +337,8 @@ mod tests {
         assert!(prefix.contains("(item)"));
         assert!(prefix.ends_with("{return "));
         assert!(matches!(close, ScopeClose::For { is_keyed: false }));
+        // "item in items" — iterable "items" starts at offset 7 + 8 = 15
+        assert_eq!(iterable_src, Some(15));
     }
 
     #[test]
@@ -334,7 +346,7 @@ mod tests {
         let resolver = make_empty_resolver();
         let prop = make_directive_prop(Some(7), Some(21));
         let source = "v-for=\"item in items\"";
-        let (_, close) = build_for_prefix(&prop, source, true, None, &resolver);
+        let (_, close, _) = build_for_prefix(&prop, source, true, None, &resolver);
         assert!(matches!(close, ScopeClose::For { is_keyed: true }));
     }
 
@@ -343,9 +355,13 @@ mod tests {
         let resolver = make_empty_resolver();
         let prop = make_directive_prop(Some(7), Some(29));
         let source = "v-for=\"(item, index) in items\"";
-        let (prefix, _) = build_for_prefix(&prop, source, false, None, &resolver);
+        let (prefix, _, iterable_src) = build_for_prefix(&prop, source, false, None, &resolver);
 
         assert!(prefix.contains("items, (item, index)"));
+        // "(item, index) in items" — iterable "items" starts at offset 7 + 22 = 29
+        // Wait: full_expr = "(item, index) in items" (22 chars), iterable = "items" (5 chars)
+        // iterable_offset_in_expr = 22 - 5 = 17, iterable_file_offset = 7 + 17 = 24
+        assert_eq!(iterable_src, Some(24));
     }
 
     // ==================== format_scope_close ====================

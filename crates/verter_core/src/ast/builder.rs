@@ -84,6 +84,7 @@ impl TemplateAstBuilder {
                 prop_flag: PropFlag::empty(),
                 children_flag: ChildrenFlag::empty(), // computed in close_element
                 children_mode: ChildrenMode::Empty,   // computed in close_element
+                is_fully_static: false,               // computed in close_element
             })));
         self.open_stack.push(id);
     }
@@ -128,12 +129,14 @@ impl TemplateAstBuilder {
             .expect("close_element called with empty open_stack");
 
         let (children_flag, children_mode) = self.compute_children_meta(id);
+        let is_fully_static = self.compute_is_fully_static(id, children_flag);
 
         {
             let el = element_mut(&mut self.ast.nodes[id.0]);
             el.tag_close = tag_close;
             el.children_flag = children_flag;
             el.children_mode = children_mode;
+            el.is_fully_static = is_fully_static;
             if let Some(content) = el.content.as_mut() {
                 content.end = content_end;
             }
@@ -214,6 +217,72 @@ impl TemplateAstBuilder {
         }
 
         (flag, flag.mode())
+    }
+
+    /// Determine whether an element is fully static (eligible for static hoisting).
+    ///
+    /// An element is fully static when ALL of these hold:
+    /// 1. Plain HTML element (`tag_type.is_element()`)
+    /// 2. No structural directives (`v_condition`, `v_for`, `v_slot`, `v_once`, `v_ref`)
+    /// 3. No dynamic props (no bits in `NEEDS_OXC_MASK`)
+    /// 4. No interpolation children (`!HasInterpolation`)
+    /// 5. No structural children (`!has_structural()`)
+    /// 6. No child with v-slot (`!HasChildWithVSlot`)
+    /// 7. All child elements have `is_fully_static == true`
+    ///
+    /// Text and comment nodes are inherently static.
+    /// Children are always closed before parents, so child `is_fully_static` is available.
+    fn compute_is_fully_static(&self, id: NodeId, children_flag: ChildrenFlag) -> bool {
+        let el = element_ref(&self.ast.nodes[id.0]);
+
+        // Rule 1: must be a plain HTML element
+        if !el.tag_type.is_element() {
+            return false;
+        }
+
+        // Rule 2: no structural directives
+        if el.v_condition.is_some()
+            || el.v_for.is_some()
+            || el.v_slot.is_some()
+            || el.v_once.is_some()
+            || el.v_ref.is_some()
+        {
+            return false;
+        }
+
+        // Rule 3: no dynamic props
+        if el.prop_flag.has_any(PropFlag::NEEDS_OXC_MASK) {
+            return false;
+        }
+
+        // Rule 4: no interpolation children
+        if children_flag.has(ChildrenFlags::HasInterpolation) {
+            return false;
+        }
+
+        // Rule 5: no structural children
+        if children_flag.has_structural() {
+            return false;
+        }
+
+        // Rule 6: no child with v-slot
+        if children_flag.has(ChildrenFlags::HasChildWithVSlot) {
+            return false;
+        }
+
+        // Rule 7: all child elements must be fully static
+        if let Some(content) = &el.content {
+            for &child_id in &content.children {
+                if let AstNodeKind::Element(child_el) = &self.ast.nodes[child_id.0].kind {
+                    if !child_el.is_fully_static {
+                        return false;
+                    }
+                }
+                // Text and comment nodes are inherently static — no check needed
+            }
+        }
+
+        true
     }
 
     /// Add a prop to the currently open element.

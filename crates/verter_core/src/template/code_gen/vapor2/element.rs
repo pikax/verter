@@ -221,6 +221,7 @@ mod tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
         let mut html = String::new();
         build_open_tag_html(&element, source, &mut html);
@@ -259,6 +260,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasStaticClass),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
         let mut html = String::new();
         build_open_tag_html(&element, source, &mut html);
@@ -283,6 +285,7 @@ mod tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
         let mut html = String::new();
         build_open_tag_html(&element, source, &mut html);
@@ -334,6 +337,7 @@ mod tests {
             prop_flag: PropFlag::empty().add(PropFlags::HasDynamicClass),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         };
         let mut html = String::new();
         build_open_tag_html(&element, source, &mut html);

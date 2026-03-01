@@ -1,0 +1,920 @@
+    Checking verter_core v0.0.1-alpha.3 (D:\dev\personal\verter\crates\verter_core)
+    Checking verter_host v0.0.1-alpha.3 (D:\dev\personal\verter\crates\verter_host)
+    Checking verter_bench v0.0.1-alpha.3 (D:\dev\personal\verter\crates\verter_bench)
+    Checking verter_ffi v0.0.1-alpha.3 (D:\dev\personal\verter\crates\verter_ffi)
+    Checking verter_lsp v0.0.1-alpha.3 (D:\dev\personal\verter\crates\verter_lsp)
+    Checking verter_mcp v0.0.1-alpha.3 (D:\dev\personal\verter\crates\verter_mcp)
+    Checking verter_wasm v0.0.1-alpha.3 (D:\dev\personal\verter\crates\verter_wasm)
+    Checking verter_napi v0.0.1-alpha.3 (D:\dev\personal\verter\crates\verter_napi)
+error[E0609]: no field `span_start` on type `&TemplateBindingOccurrence`
+    --> crates\verter_mcp\src\server.rs:1516:50
+     |
+1516 |                         "span_start": occurrence.span_start,
+     |                                                  ^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_end` on type `&TemplateBindingOccurrence`
+    --> crates\verter_mcp\src\server.rs:1517:48
+     |
+1517 |                         "span_end": occurrence.span_end,
+     |                                                ^^^^^^^^ unknown field
+     |
+     = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_start` on type `&VueApiCallSite`
+    --> crates\verter_mcp\src\server.rs:1578:36
+     |
+1578 |                 "span_start": call.span_start,
+     |                                    ^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `api`, `span`, `arg_value`
+
+error[E0609]: no field `span_end` on type `&VueApiCallSite`
+    --> crates\verter_mcp\src\server.rs:1579:34
+     |
+1579 |                 "span_end": call.span_end,
+     |                                  ^^^^^^^^ unknown field
+     |
+     = note: available fields are: `api`, `span`, `arg_value`
+
+error[E0609]: no field `span_start` on type `&DomQueryCallSite`
+    --> crates\verter_mcp\src\server.rs:1588:37
+     |
+1588 |                 "span_start": query.span_start,
+     |                                     ^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `kind`, `selector_text`, `parsed`, `span`, `arg_span`
+
+error[E0609]: no field `span_end` on type `&DomQueryCallSite`
+    --> crates\verter_mcp\src\server.rs:1589:35
+     |
+1589 |                 "span_end": query.span_end,
+     |                                   ^^^^^^^^ unknown field
+     |
+     = note: available fields are: `kind`, `selector_text`, `parsed`, `span`, `arg_span`
+
+error[E0609]: no field `span_start` on type `&UnresolvedBinding`
+    --> crates\verter_mcp\src\server.rs:2001:46
+     |
+2001 |                     "span_start": unresolved.span_start,
+     |                                              ^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `name`, `span`
+
+error[E0609]: no field `span_end` on type `&UnresolvedBinding`
+    --> crates\verter_mcp\src\server.rs:2002:44
+     |
+2002 |                     "span_end": unresolved.span_end,
+     |                                            ^^^^^^^^ unknown field
+     |
+     = note: available fields are: `name`, `span`
+
+For more information about this error, try `rustc --explain E0609`.
+error: could not compile `verter_mcp` (bin "verter-mcp") due to 8 previous errors
+warning: build failed, waiting for other jobs to finish...
+error[E0609]: no field `span_start` on type `&TemplateElement`
+   --> crates\verter_lsp\src\css\mod.rs:328:32
+    |
+328 |         .offset_to_position(el.span_start)
+    |                                ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `tag`, `is_component`, `is_self_closing`, `namespace`, `attributes` ... and 16 others
+
+error[E0609]: no field `span_start` on type `&TemplatePropUsage`
+   --> crates\verter_lsp\src\features\component_diagnostics.rs:137:34
+    |
+137 |                 span_start: prop.span_start,
+    |                                  ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `is_bound`, `constness`, `referenced_bindings`, `from_spread`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplatePropUsage`
+   --> crates\verter_lsp\src\features\component_diagnostics.rs:138:32
+    |
+138 |                 span_end: prop.span_end,
+    |                                ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `is_bound`, `constness`, `referenced_bindings`, `from_spread`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateComponentVModel`
+   --> crates\verter_lsp\src\features\component_diagnostics.rs:226:40
+    |
+226 |                     span_start: vmodel.span_start,
+    |                                        ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `binding_name`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateComponentVModel`
+   --> crates\verter_lsp\src\features\component_diagnostics.rs:227:38
+    |
+227 |                     span_end: vmodel.span_end,
+    |                                      ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `binding_name`, `span`
+
+error[E0609]: no field `span_start` on type `&AnalyzedImport`
+  --> crates\verter_lsp\src\features\definition.rs:76:31
+   |
+76 |                     if import.span_start > 0 || import.span_end > 0 {
+   |                               ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImport`
+  --> crates\verter_lsp\src\features\definition.rs:76:56
+   |
+76 |                     if import.span_start > 0 || import.span_end > 0 {
+   |                                                        ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_start` on type `&AnalyzedImport`
+  --> crates\verter_lsp\src\features\definition.rs:77:55
+   |
+77 |                         return span_definition(import.span_start, import.span_end, line_index);
+   |                                                       ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImport`
+  --> crates\verter_lsp\src\features\definition.rs:77:74
+   |
+77 |                         return span_definition(import.span_start, import.span_end, line_index);
+   |                                                                          ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_start` on type `&AnalyzedBinding`
+   --> crates\verter_lsp\src\features\definition.rs:116:28
+    |
+116 |                 if binding.span_start > 0 || binding.span_end > 0 {
+    |                            ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedBinding`
+   --> crates\verter_lsp\src\features\definition.rs:116:54
+    |
+116 |                 if binding.span_start > 0 || binding.span_end > 0 {
+    |                                                      ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedBinding`
+   --> crates\verter_lsp\src\features\definition.rs:117:52
+    |
+117 |                     return span_definition(binding.span_start, binding.span_end, line_index);
+    |                                                    ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedBinding`
+   --> crates\verter_lsp\src\features\definition.rs:117:72
+    |
+117 |                     return span_definition(binding.span_start, binding.span_end, line_index);
+    |                                                                        ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedMacro`
+   --> crates\verter_lsp\src\features\definition.rs:123:29
+    |
+123 |                     && (mac.span_start > 0 || mac.span_end > 0)
+    |                             ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `kind`, `is_type_based`, `type_references`, `binding_name`, `model_name` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedMacro`
+   --> crates\verter_lsp\src\features\definition.rs:123:51
+    |
+123 |                     && (mac.span_start > 0 || mac.span_end > 0)
+    |                                                   ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `kind`, `is_type_based`, `type_references`, `binding_name`, `model_name` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedMacro`
+   --> crates\verter_lsp\src\features\definition.rs:125:48
+    |
+125 |                     return span_definition(mac.span_start, mac.span_end, line_index);
+    |                                                ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `kind`, `is_type_based`, `type_references`, `binding_name`, `model_name` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedMacro`
+   --> crates\verter_lsp\src\features\definition.rs:125:64
+    |
+125 |                     return span_definition(mac.span_start, mac.span_end, line_index);
+    |                                                                ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `kind`, `is_type_based`, `type_references`, `binding_name`, `model_name` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\definition.rs:274:39
+    |
+274 |             if (offset as u32) < attr.span_start || (offset as u32) >= attr.span_end {
+    |                                       ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\definition.rs:274:77
+    |
+274 |             if (offset as u32) < attr.span_start || (offset as u32) >= attr.span_end {
+    |                                                                             ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\definition.rs:286:42
+    |
+286 |             let attr_text = &source[attr.span_start as usize..attr.span_end as usize];
+    |                                          ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\definition.rs:286:68
+    |
+286 |             let attr_text = &source[attr.span_start as usize..attr.span_end as usize];
+    |                                                                    ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\definition.rs:288:36
+    |
+288 |             let value_start = attr.span_start as usize + value_offset_in_attr;
+    |                                    ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\definition.rs:380:53
+    |
+380 |                         return span_definition(attr.span_start, attr.span_end, line_index);
+    |                                                     ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\definition.rs:380:70
+    |
+380 |                         return span_definition(attr.span_start, attr.span_end, line_index);
+    |                                                                      ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\definition.rs:385:53
+    |
+385 |                         return span_definition(attr.span_start, attr.span_end, line_index);
+    |                                                     ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\definition.rs:385:70
+    |
+385 |                         return span_definition(attr.span_start, attr.span_end, line_index);
+    |                                                                      ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&AnalyzedImport`
+   --> crates\verter_lsp\src\features\definition.rs:451:19
+    |
+451 |         if import.span_start == 0 && import.span_end == 0 {
+    |                   ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImport`
+   --> crates\verter_lsp\src\features\definition.rs:451:45
+    |
+451 |         if import.span_start == 0 && import.span_end == 0 {
+    |                                             ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_start` on type `&AnalyzedImport`
+   --> crates\verter_lsp\src\features\definition.rs:455:33
+    |
+455 |         let span_start = import.span_start as usize;
+    |                                 ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImport`
+   --> crates\verter_lsp\src\features\definition.rs:456:31
+    |
+456 |         let span_end = import.span_end as usize;
+    |                               ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_start` on type `&AnalyzedImport`
+   --> crates\verter_lsp\src\features\definition.rs:484:51
+    |
+484 |                     return span_definition(import.span_start, import.span_end, line_index);
+    |                                                   ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImport`
+   --> crates\verter_lsp\src\features\definition.rs:484:70
+    |
+484 |                     return span_definition(import.span_start, import.span_end, line_index);
+    |                                                                      ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `arg_span_start` on type `&&DomQueryCallSite`
+   --> crates\verter_lsp\src\features\definition.rs:514:31
+    |
+514 |         .find(|c| offset >= c.arg_span_start as usize && offset < c.arg_span_end as usize)?;
+    |                               ^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `kind`, `selector_text`, `parsed`, `span`, `arg_span`
+
+error[E0609]: no field `arg_span_end` on type `&&DomQueryCallSite`
+   --> crates\verter_lsp\src\features\definition.rs:514:69
+    |
+514 |         .find(|c| offset >= c.arg_span_start as usize && offset < c.arg_span_end as usize)?;
+    |                                                                     ^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+514 -         .find(|c| offset >= c.arg_span_start as usize && offset < c.arg_span_end as usize)?;
+514 +         .find(|c| offset >= c.arg_span_start as usize && offset < c.arg_span as usize)?;
+    |
+
+error[E0609]: no field `span_start` on type `&TemplateElement`
+   --> crates\verter_lsp\src\features\definition.rs:530:15
+    |
+530 |         if el.span_start > 0 || el.span_end > 0 {
+    |               ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `tag`, `is_component`, `is_self_closing`, `namespace`, `attributes` ... and 16 others
+
+error[E0609]: no field `span_end` on type `&TemplateElement`
+   --> crates\verter_lsp\src\features\definition.rs:530:36
+    |
+530 |         if el.span_start > 0 || el.span_end > 0 {
+    |                                    ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `tag`, `is_component`, `is_self_closing`, `namespace`, `attributes` ... and 16 others
+
+error[E0609]: no field `span_start` on type `&TemplateElement`
+   --> crates\verter_lsp\src\features\definition.rs:531:39
+    |
+531 |             return span_definition(el.span_start, el.span_end, line_index);
+    |                                       ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `tag`, `is_component`, `is_self_closing`, `namespace`, `attributes` ... and 16 others
+
+error[E0609]: no field `span_end` on type `&TemplateElement`
+   --> crates\verter_lsp\src\features\definition.rs:531:54
+    |
+531 |             return span_definition(el.span_start, el.span_end, line_index);
+    |                                                      ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `tag`, `is_component`, `is_self_closing`, `namespace`, `attributes` ... and 16 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedBinding`
+  --> crates\verter_lsp\src\features\document_highlight.rs:51:20
+   |
+51 |         if binding.span_start > 0 || binding.span_end > 0 {
+   |                    ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedBinding`
+  --> crates\verter_lsp\src\features\document_highlight.rs:51:46
+   |
+51 |         if binding.span_start > 0 || binding.span_end > 0 {
+   |                                              ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedBinding`
+  --> crates\verter_lsp\src\features\document_highlight.rs:53:25
+   |
+53 |                 binding.span_start,
+   |                         ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedBinding`
+  --> crates\verter_lsp\src\features\document_highlight.rs:54:25
+   |
+54 |                 binding.span_end,
+   |                         ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedImportBinding`
+  --> crates\verter_lsp\src\features\document_highlight.rs:64:49
+   |
+64 |             if binding.name == word && (binding.span_start > 0 || binding.span_end > 0) {
+   |                                                 ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImportBinding`
+  --> crates\verter_lsp\src\features\document_highlight.rs:64:75
+   |
+64 |             if binding.name == word && (binding.span_start > 0 || binding.span_end > 0) {
+   |                                                                           ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_start` on type `&AnalyzedImportBinding`
+  --> crates\verter_lsp\src\features\document_highlight.rs:66:29
+   |
+66 |                     binding.span_start,
+   |                             ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImportBinding`
+  --> crates\verter_lsp\src\features\document_highlight.rs:67:29
+   |
+67 |                     binding.span_end,
+   |                             ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateBindingOccurrence`
+  --> crates\verter_lsp\src\features\document_highlight.rs:89:42
+   |
+89 |                     hl_start == Some(occ.span_start)
+   |                                          ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_start` on type `&TemplateBindingOccurrence`
+  --> crates\verter_lsp\src\features\document_highlight.rs:95:25
+   |
+95 |                     occ.span_start,
+   |                         ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_end` on type `&TemplateBindingOccurrence`
+  --> crates\verter_lsp\src\features\document_highlight.rs:96:25
+   |
+96 |                     occ.span_end,
+   |                         ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_start` on type `&AnalyzedImport`
+  --> crates\verter_lsp\src\features\document_link.rs:32:28
+   |
+32 |                     import.span_start,
+   |                            ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImport`
+  --> crates\verter_lsp\src\features\document_link.rs:33:28
+   |
+33 |                     import.span_end,
+   |                            ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `source`, `is_type_only`, `bindings`, `span`, `resolved_canonical_id`
+
+error[E0609]: no field `span_start` on type `&TemplateEventHandler`
+   --> crates\verter_lsp\src\features\event_type_hints.rs:129:40
+    |
+129 |     let span_text = source.get(handler.span_start as usize..handler.span_end as usize)?;
+    |                                        ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `event_name`, `handler_binding`, `is_inline`, `target_tag`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateEventHandler`
+   --> crates\verter_lsp\src\features\event_type_hints.rs:129:69
+    |
+129 |     let span_text = source.get(handler.span_start as usize..handler.span_end as usize)?;
+    |                                                                     ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `event_name`, `handler_binding`, `is_inline`, `target_tag`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateEventHandler`
+   --> crates\verter_lsp\src\features\event_type_hints.rs:135:31
+    |
+135 |     let value_start = handler.span_start + quote_start as u32 + 1;
+    |                               ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `event_name`, `handler_binding`, `is_inline`, `target_tag`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateEventHandler`
+   --> crates\verter_lsp\src\features\event_type_hints.rs:136:29
+    |
+136 |     let value_end = handler.span_start + quote_start as u32 + 1 + quote_end as u32;
+    |                             ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `event_name`, `handler_binding`, `is_inline`, `target_tag`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateElement`
+  --> crates\verter_lsp\src\features\folding_range.rs:50:52
+   |
+50 |                 line_index.offset_to_position(elem.span_start),
+   |                                                    ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `tag`, `is_component`, `is_self_closing`, `namespace`, `attributes` ... and 16 others
+
+error[E0609]: no field `span_end` on type `&TemplateElement`
+  --> crates\verter_lsp\src\features\folding_range.rs:51:52
+   |
+51 |                 line_index.offset_to_position(elem.span_end),
+   |                                                    ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `tag`, `is_component`, `is_self_closing`, `namespace`, `attributes` ... and 16 others
+
+error[E0609]: no field `span_start` on type `&TemplateElement`
+  --> crates\verter_lsp\src\features\linked_editing.rs:43:36
+   |
+43 |         let open_name_start = elem.span_start + 1;
+   |                                    ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `tag`, `is_component`, `is_self_closing`, `namespace`, `attributes` ... and 16 others
+
+error[E0609]: no field `span_end` on type `&TemplateElement`
+  --> crates\verter_lsp\src\features\linked_editing.rs:49:60
+   |
+49 |         let close_range = find_close_tag_name(source, elem.span_end, &elem.tag)?;
+   |                                                            ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `tag`, `is_component`, `is_self_closing`, `namespace`, `attributes` ... and 16 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedBinding`
+  --> crates\verter_lsp\src\features\references.rs:56:24
+   |
+56 |             if binding.span_start > 0 || binding.span_end > 0 {
+   |                        ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedBinding`
+  --> crates\verter_lsp\src\features\references.rs:56:50
+   |
+56 |             if binding.span_start > 0 || binding.span_end > 0 {
+   |                                                  ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedBinding`
+  --> crates\verter_lsp\src\features\references.rs:58:46
+   |
+58 |                     span_to_location(binding.span_start, binding.span_end, line_index)
+   |                                              ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedBinding`
+  --> crates\verter_lsp\src\features\references.rs:58:66
+   |
+58 |                     span_to_location(binding.span_start, binding.span_end, line_index)
+   |                                                                  ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedImportBinding`
+  --> crates\verter_lsp\src\features\references.rs:66:53
+   |
+66 |                 if binding.name == word && (binding.span_start > 0 || binding.span_end > 0) {
+   |                                                     ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImportBinding`
+  --> crates\verter_lsp\src\features\references.rs:66:79
+   |
+66 |                 if binding.name == word && (binding.span_start > 0 || binding.span_end > 0) {
+   |                                                                               ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_start` on type `&AnalyzedImportBinding`
+  --> crates\verter_lsp\src\features\references.rs:68:50
+   |
+68 |                         span_to_location(binding.span_start, binding.span_end, line_index)
+   |                                                  ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImportBinding`
+  --> crates\verter_lsp\src\features\references.rs:68:70
+   |
+68 |                         span_to_location(binding.span_start, binding.span_end, line_index)
+   |                                                                      ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_start` on type `&AnalyzedMacro`
+  --> crates\verter_lsp\src\features\references.rs:77:25
+   |
+77 |                 && (mac.span_start > 0 || mac.span_end > 0)
+   |                         ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `kind`, `is_type_based`, `type_references`, `binding_name`, `model_name` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedMacro`
+  --> crates\verter_lsp\src\features\references.rs:77:47
+   |
+77 |                 && (mac.span_start > 0 || mac.span_end > 0)
+   |                                               ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `kind`, `is_type_based`, `type_references`, `binding_name`, `model_name` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedMacro`
+  --> crates\verter_lsp\src\features\references.rs:79:57
+   |
+79 |                 if let Some(loc) = span_to_location(mac.span_start, mac.span_end, line_index) {
+   |                                                         ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `kind`, `is_type_based`, `type_references`, `binding_name`, `model_name` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedMacro`
+  --> crates\verter_lsp\src\features\references.rs:79:73
+   |
+79 |                 if let Some(loc) = span_to_location(mac.span_start, mac.span_end, line_index) {
+   |                                                                         ^^^^^^^^ unknown field
+   |
+   = note: available fields are: `kind`, `is_type_based`, `type_references`, `binding_name`, `model_name` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&TemplateBindingOccurrence`
+  --> crates\verter_lsp\src\features\references.rs:99:43
+   |
+99 |                     loc_start == Some(occ.span_start)
+   |                                           ^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_start` on type `&TemplateBindingOccurrence`
+   --> crates\verter_lsp\src\features\references.rs:104:57
+    |
+104 |                 if let Some(loc) = span_to_location(occ.span_start, occ.span_end, line_index) {
+    |                                                         ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_end` on type `&TemplateBindingOccurrence`
+   --> crates\verter_lsp\src\features\references.rs:104:73
+    |
+104 |                 if let Some(loc) = span_to_location(occ.span_start, occ.span_end, line_index) {
+    |                                                                         ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:245:50
+    |
+245 | ...                   &source[attr.span_start as usize..attr.span_end as usize];
+    |                                    ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:245:76
+    |
+245 | ...                   &source[attr.span_start as usize..attr.span_end as usize];
+    |                                                              ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:252:50
+    |
+252 | ...                   attr.span_start as usize + val_start_in_attr;
+    |                            ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:284:54
+    |
+284 | ...                   &source[attr.span_start as usize..attr.span_end as usize];
+    |                                    ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:284:80
+    |
+284 | ...                   &source[attr.span_start as usize..attr.span_end as usize];
+    |                                                              ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:286:62
+    |
+286 | ...                   let abs_start = attr.span_start + pos as u32;
+    |                                            ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:305:46
+    |
+305 | ...                   &source[attr.span_start as usize..attr.span_end as usize];
+    |                                    ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:305:72
+    |
+305 | ...                   &source[attr.span_start as usize..attr.span_end as usize];
+    |                                                              ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:307:54
+    |
+307 | ...                   let val_start = attr.span_start as usize + val_offset;
+    |                                            ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:328:46
+    |
+328 | ...                   &source[attr.span_start as usize..attr.span_end as usize];
+    |                                    ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:328:72
+    |
+328 | ...                   &source[attr.span_start as usize..attr.span_end as usize];
+    |                                                              ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:330:54
+    |
+330 | ...                   let abs_start = attr.span_start + val_offset as u32;
+    |                                            ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:382:39
+    |
+382 |             if (offset as u32) < attr.span_start || (offset as u32) >= attr.span_end {
+    |                                       ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:382:77
+    |
+382 |             if (offset as u32) < attr.span_start || (offset as u32) >= attr.span_end {
+    |                                                                             ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:392:46
+    |
+392 |                 let attr_text = &source[attr.span_start as usize..attr.span_end as usize];
+    |                                              ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:392:72
+    |
+392 |                 let attr_text = &source[attr.span_start as usize..attr.span_end as usize];
+    |                                                                        ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:398:50
+    |
+398 |                         let val_abs_start = attr.span_start as usize + val_start_in_attr;
+    |                                                  ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:438:42
+    |
+438 |             let attr_text = &source[attr.span_start as usize..attr.span_end as usize];
+    |                                          ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_end` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:438:68
+    |
+438 |             let attr_text = &source[attr.span_start as usize..attr.span_end as usize];
+    |                                                                    ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateAttribute`
+   --> crates\verter_lsp\src\features\references.rs:443:34
+    |
+443 |             let val_start = attr.span_start as usize + val_offset;
+    |                                  ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `value`, `is_dynamic`, `span`
+
+error[E0609]: no field `span_start` on type `&AnalyzedBinding`
+   --> crates\verter_lsp\src\features\rename.rs:175:20
+    |
+175 |         if binding.span_start > 0 || binding.span_end > 0 {
+    |                    ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedBinding`
+   --> crates\verter_lsp\src\features\rename.rs:175:46
+    |
+175 |         if binding.span_start > 0 || binding.span_end > 0 {
+    |                                              ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedBinding`
+   --> crates\verter_lsp\src\features\rename.rs:176:65
+    |
+176 |             let abs_start = analysis_span_to_sfc_offset(binding.span_start, blocks);
+    |                                                                 ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_end` on type `&AnalyzedBinding`
+   --> crates\verter_lsp\src\features\rename.rs:177:63
+    |
+177 |             let abs_end = analysis_span_to_sfc_offset(binding.span_end, blocks);
+    |                                                               ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `kind`, `is_reactive`, `reactivity_kind`, `type_annotation` ... and 2 others
+
+error[E0609]: no field `span_start` on type `&AnalyzedImportBinding`
+   --> crates\verter_lsp\src\features\rename.rs:185:49
+    |
+185 |             if binding.name == word && (binding.span_start > 0 || binding.span_end > 0) {
+    |                                                 ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImportBinding`
+   --> crates\verter_lsp\src\features\rename.rs:185:75
+    |
+185 |             if binding.name == word && (binding.span_start > 0 || binding.span_end > 0) {
+    |                                                                           ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_start` on type `&AnalyzedImportBinding`
+   --> crates\verter_lsp\src\features\rename.rs:186:69
+    |
+186 |                 let abs_start = analysis_span_to_sfc_offset(binding.span_start, blocks);
+    |                                                                     ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_end` on type `&AnalyzedImportBinding`
+   --> crates\verter_lsp\src\features\rename.rs:187:67
+    |
+187 |                 let abs_end = analysis_span_to_sfc_offset(binding.span_end, blocks);
+    |                                                                   ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `is_type_only`, `vue_api`, `span`
+
+error[E0609]: no field `span_start` on type `&TemplateBindingOccurrence`
+   --> crates\verter_lsp\src\features\rename.rs:202:41
+    |
+202 |                     e_start == Some(occ.span_start)
+    |                                         ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_start` on type `&TemplateBindingOccurrence`
+   --> crates\verter_lsp\src\features\rename.rs:206:42
+    |
+206 |                         span_to_edit(occ.span_start, occ.span_end, new_name, line_index)
+    |                                          ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `span`, `usage_kind`
+
+error[E0609]: no field `span_end` on type `&TemplateBindingOccurrence`
+   --> crates\verter_lsp\src\features\rename.rs:206:58
+    |
+206 |                         span_to_edit(occ.span_start, occ.span_end, new_name, line_index)
+    |                                                          ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `name`, `span`, `usage_kind`
+
+error: could not compile `verter_lsp` (lib) due to 105 previous errors

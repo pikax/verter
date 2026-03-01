@@ -309,5 +309,5 @@ A: Early in development, correctness matters more than speed. Warning status (50
 ## Related Documentation
 
 - [Integration Tests](.github/INTEGRATION_TEST.md) - Testing against real-world projects
-- [Architecture](docs/architecture.md) - Overall Verter architecture
+- [Architecture](https://verterjs.dev/guide/architecture) - Overall Verter architecture
 - [Contributing](CONTRIBUTING.md) - Development guidelines

@@ -37,3 +37,10 @@ packages/benchmark/benchmark-results/
 
 # Playwright transient artifacts
 packages/playground/test-results/
+
+# Comparison script output
+scripts/compare-tsx-output/
+
+# VitePress
+docs/.vitepress/dist
+docs/.vitepress/cache

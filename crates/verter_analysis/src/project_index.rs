@@ -43,6 +43,9 @@ pub struct ProjectIndex {
     /// CSS class name → files that define it
     class_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
 
+    /// CSS ID selector → files that define it
+    id_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
+
     /// v-bind CSS expression → files that use it
     v_bind_css_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
 
@@ -192,6 +195,7 @@ impl ProjectIndex {
             component_graph: FxHashMap::with_capacity_and_hasher(file_count, Default::default()),
             component_reverse_index: FxHashMap::default(),
             class_index: FxHashMap::default(),
+            id_index: FxHashMap::default(),
             v_bind_css_index: FxHashMap::default(),
             custom_property_index: FxHashMap::default(),
         }
@@ -258,6 +262,12 @@ impl ProjectIndex {
             for class_name in &style.class_names {
                 self.class_index
                     .entry(class_name.clone())
+                    .or_default()
+                    .insert(Arc::clone(&path));
+            }
+            for id_name in &style.id_names {
+                self.id_index
+                    .entry(id_name.clone())
                     .or_default()
                     .insert(Arc::clone(&path));
             }
@@ -329,6 +339,14 @@ impl ProjectIndex {
                     files.remove(&arc_path);
                     if files.is_empty() {
                         self.class_index.remove(class_name);
+                    }
+                }
+            }
+            for id_name in &style.id_names {
+                if let Some(files) = self.id_index.get_mut(id_name) {
+                    files.remove(&arc_path);
+                    if files.is_empty() {
+                        self.id_index.remove(id_name);
                     }
                 }
             }
@@ -442,6 +460,16 @@ impl ProjectIndex {
             .get(name)
             .into_iter()
             .flat_map(|s| s.iter())
+    }
+
+    /// Get files that define a given CSS ID selector
+    pub fn files_defining_id(&self, name: &str) -> impl Iterator<Item = &Arc<Path>> {
+        self.id_index.get(name).into_iter().flat_map(|s| s.iter())
+    }
+
+    /// Get all CSS ID names in the project
+    pub fn all_id_names(&self) -> impl Iterator<Item = &String> {
+        self.id_index.keys()
     }
 
     /// Get files that use a given v-bind CSS expression
@@ -624,6 +652,7 @@ impl ProjectIndex {
         self.component_graph.clear();
         self.component_reverse_index.clear();
         self.class_index.clear();
+        self.id_index.clear();
         self.v_bind_css_index.clear();
         self.custom_property_index.clear();
     }

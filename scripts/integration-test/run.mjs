@@ -18,7 +18,7 @@
  *   --help            Show this help message
  */
 
-import { execSync, execFileSync } from 'node:child_process';
+import { execSync, execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -34,6 +34,148 @@ const INTEGRATION_DIR = path.join(ROOT, '.integration-tests');
 const REPOS_DIR = path.join(INTEGRATION_DIR, 'repos');
 const TARBALLS_DIR = path.join(INTEGRATION_DIR, 'tarballs');
 const LOGS_DIR = path.join(INTEGRATION_DIR, 'logs');
+
+// ── Type-Check Binary Detection ─────────────────────────────────────────────
+
+const IS_WIN = process.platform === 'win32';
+const EXE = IS_WIN ? '.exe' : '';
+
+const VERTER_TSC_RELEASE = path.join(ROOT, 'target', 'release', `verter-tsc${EXE}`);
+const VERTER_TSC_DEBUG = path.join(ROOT, 'target', 'debug', `verter-tsc${EXE}`);
+
+/**
+ * Detect the best available build of a binary (release preferred over debug).
+ * @returns {{ bin: string | null, type: 'release' | 'debug' | 'missing' }}
+ */
+function detectBinary(release, debug) {
+  const hasRelease = fs.existsSync(release);
+  const hasDebug = fs.existsSync(debug);
+  if (!hasRelease && !hasDebug) return { bin: null, type: 'missing' };
+  if (!hasRelease) return { bin: debug, type: 'debug' };
+  if (!hasDebug) return { bin: release, type: 'release' };
+  // Both exist — pick newer
+  const relMtime = fs.statSync(release).mtimeMs;
+  const dbgMtime = fs.statSync(debug).mtimeMs;
+  return relMtime >= dbgMtime
+    ? { bin: release, type: 'release' }
+    : { bin: debug, type: 'debug' };
+}
+
+const VERTER_TSC = detectBinary(VERTER_TSC_RELEASE, VERTER_TSC_DEBUG);
+
+/**
+ * Find vue-tsc for a project. Prefers project-local, falls back to npx.
+ * @returns {{ bin: string, args: string[] }}
+ */
+function findVueTsc(projectRoot) {
+  const binDir = path.join(projectRoot, 'node_modules', '.bin');
+  const cmd = path.join(binDir, IS_WIN ? 'vue-tsc.cmd' : 'vue-tsc');
+  if (fs.existsSync(cmd)) return { bin: cmd, args: [] };
+  const plain = path.join(binDir, 'vue-tsc');
+  if (fs.existsSync(plain)) return { bin: plain, args: [] };
+  // Fall back to npx
+  return { bin: IS_WIN ? 'npx.cmd' : 'npx', args: ['vue-tsc'] };
+}
+
+/**
+ * Run a type-check tool and measure wall-clock time.
+ * Both vue-tsc and verter-tsc use the same invocation: --noEmit --project <tsconfig>
+ * @returns {{ ms: number, exitCode: number, errorCount: number, timedOut: boolean }}
+ */
+function runTypeCheckTool(bin, args, cwd) {
+  const TIMEOUT = 5 * 60_000;
+  const start = performance.now();
+  const r = spawnSync(bin, args, {
+    cwd,
+    timeout: TIMEOUT,
+    encoding: 'utf-8',
+    shell: IS_WIN && (bin.endsWith('.cmd') || bin.endsWith('.bat')),
+    windowsHide: true,
+    env: { ...process.env, FORCE_COLOR: '0' },
+  });
+  const ms = performance.now() - start;
+
+  if (r.error?.message?.includes('ETIMEDOUT') || r.signal === 'SIGTERM') {
+    return { ms, exitCode: -1, errorCount: 0, timedOut: true };
+  }
+
+  const out = String(r.stdout ?? '') + String(r.stderr ?? '');
+  const errorCount = (out.match(/error TS\d+:/g) ?? []).length;
+  return { ms, exitCode: r.status ?? -1, errorCount, timedOut: false };
+}
+
+/**
+ * Run type-check benchmarks for a project: 2 passes each of vue-tsc and verter-tsc.
+ * Both tools run: --noEmit --project <tsconfig>
+ *
+ * @returns {{ vueTsc: { cold, warm }, verterTsc: { cold, warm } } | null}
+ */
+function runTypeChecks(project, repoDir) {
+  // Find the best tsconfig for type-checking.
+  // Some projects (e.g. element-plus) use project references at root —
+  // their root tsconfig has `files: []` + `references: [...]` which just
+  // validates the reference graph (not the actual source). We detect this
+  // and try common alternatives that contain the real include patterns.
+  const rootTsconfig = path.resolve(repoDir, 'tsconfig.json');
+  if (!fs.existsSync(rootTsconfig)) return null;
+
+  let tsconfig = rootTsconfig;
+  try {
+    const raw = JSON.parse(fs.readFileSync(rootTsconfig, 'utf-8'));
+    const hasFiles = Array.isArray(raw.files) && raw.files.length > 0;
+    const hasInclude = Array.isArray(raw.include) && raw.include.length > 0;
+    const hasRefs = Array.isArray(raw.references) && raw.references.length > 0;
+    // Project-references-only tsconfig — look for a better alternative
+    if (!hasFiles && !hasInclude && hasRefs) {
+      const alternatives = ['tsconfig.web.json', 'tsconfig.app.json', 'tsconfig.src.json'];
+      for (const alt of alternatives) {
+        const altPath = path.resolve(repoDir, alt);
+        if (fs.existsSync(altPath)) {
+          tsconfig = altPath;
+          log(project.name, `[type-check] using ${alt} (root tsconfig is references-only)`);
+          break;
+        }
+      }
+      if (tsconfig === rootTsconfig) {
+        log(project.name, `[type-check] root tsconfig is references-only, no alternative found — skipping`);
+        return null;
+      }
+    }
+  } catch { /* parse error — try with the root tsconfig anyway */ }
+
+  const results = {
+    vueTsc: { cold: null, warm: null },
+    verterTsc: { cold: null, warm: null },
+  };
+
+  // Both tools run the exact same command: --noEmit --project <absolute-tsconfig>
+  // This ensures a fair comparison — same input, same goal, different implementation.
+
+  const fmtTcMs = (r) => r.timedOut ? '>5min' : formatDuration(r.ms) + (r.exitCode !== 0 ? '(err)' : '');
+
+  // vue-tsc: 2 passes (cold, warm)
+  const vueTscInfo = findVueTsc(repoDir);
+  const vueTscArgs = [...vueTscInfo.args, '--noEmit', '--project', tsconfig];
+  log(project.name, `[type-check] vue-tsc cold...`);
+  results.vueTsc.cold = runTypeCheckTool(vueTscInfo.bin, vueTscArgs, repoDir);
+  log(project.name, `[type-check] vue-tsc cold: ${fmtTcMs(results.vueTsc.cold)}`);
+  log(project.name, `[type-check] vue-tsc warm...`);
+  results.vueTsc.warm = runTypeCheckTool(vueTscInfo.bin, vueTscArgs, repoDir);
+  log(project.name, `[type-check] vue-tsc warm: ${fmtTcMs(results.vueTsc.warm)}`);
+
+  // verter-tsc: 2 passes (cold, warm) — same --noEmit --project <tsconfig>
+  if (VERTER_TSC.bin) {
+    const verterArgs = ['--noEmit', '--project', tsconfig];
+    log(project.name, `[type-check] verter-tsc cold...`);
+    results.verterTsc.cold = runTypeCheckTool(VERTER_TSC.bin, verterArgs, repoDir);
+    log(project.name, `[type-check] verter-tsc cold: ${fmtTcMs(results.verterTsc.cold)}`);
+    log(project.name, `[type-check] verter-tsc warm...`);
+    results.verterTsc.warm = runTypeCheckTool(VERTER_TSC.bin, verterArgs, repoDir);
+    log(project.name, `[type-check] verter-tsc warm: ${fmtTcMs(results.verterTsc.warm)}`);
+  }
+
+  return results;
+}
 
 // ── CLI Parsing ──────────────────────────────────────────────────────────────
 
@@ -223,6 +365,13 @@ function buildVerter({ fast = false } = {}) {
     throw new Error('Failed to build unplugin');
   }
 
+  log('verter', 'Building nuxt module...');
+  const nuxtMod = run('pnpm --filter @verter/nuxt build', ROOT);
+  if (!nuxtMod.ok) {
+    console.error(nuxtMod.stderr || nuxtMod.stdout);
+    throw new Error('Failed to build nuxt module');
+  }
+
   // Pack tarballs
   fs.mkdirSync(TARBALLS_DIR, { recursive: true });
   // Remove old tarballs
@@ -238,9 +387,12 @@ function buildVerter({ fast = false } = {}) {
   log('verter', 'Packing unplugin...');
   run(`pnpm pack --pack-destination "${absTarget}"`, path.join(ROOT, 'packages/unplugin'));
 
+  log('verter', 'Packing nuxt...');
+  run(`pnpm pack --pack-destination "${absTarget}"`, path.join(ROOT, 'packages/nuxt'));
+
   const tarballs = fs.readdirSync(TARBALLS_DIR).filter((f) => f.endsWith('.tgz'));
-  if (tarballs.length < 2) {
-    throw new Error(`Expected 2 tarballs, found ${tarballs.length} in ${TARBALLS_DIR}`);
+  if (tarballs.length < 3) {
+    throw new Error(`Expected 3 tarballs, found ${tarballs.length} in ${TARBALLS_DIR}`);
   }
   log('verter', `Packed: ${tarballs.join(', ')}`);
 }
@@ -373,14 +525,21 @@ function installVerterTarballs(project, repoDir) {
   const tarballs = fs.readdirSync(TARBALLS_DIR).filter((f) => f.endsWith('.tgz'));
   const nativeTgz = tarballs.find((f) => f.includes('verter-native'));
   const unpluginTgz = tarballs.find((f) => f.includes('verter-unplugin'));
+  const nuxtTgz = tarballs.find((f) => f.includes('verter-nuxt'));
 
   if (!nativeTgz || !unpluginTgz) {
     throw new Error('Missing verter tarballs. Run without --skip-build first.');
   }
 
+  const isNuxt = project.bundler === 'nuxt';
+  if (isNuxt && !nuxtTgz) {
+    throw new Error('Missing @verter/nuxt tarball. Run without --skip-build first.');
+  }
+
   // Use forward slashes for cross-platform compat in shell commands
   const nativePath = path.join(TARBALLS_DIR, nativeTgz).replace(/\\/g, '/');
   const unpluginPath = path.join(TARBALLS_DIR, unpluginTgz).replace(/\\/g, '/');
+  const nuxtPath = nuxtTgz ? path.join(TARBALLS_DIR, nuxtTgz).replace(/\\/g, '/') : null;
 
   log(project.name, 'Installing Verter tarballs...');
 
@@ -389,6 +548,11 @@ function installVerterTarballs(project, repoDir) {
   // rather than trying to fetch the semver version from the registry.
   const relNative = path.relative(repoDir, path.join(TARBALLS_DIR, nativeTgz)).replace(/\\/g, '/');
   const relUnplugin = path.relative(repoDir, path.join(TARBALLS_DIR, unpluginTgz)).replace(/\\/g, '/');
+  const relNuxt = nuxtTgz ? path.relative(repoDir, path.join(TARBALLS_DIR, nuxtTgz)).replace(/\\/g, '/') : null;
+
+  // Build the list of tarballs to install
+  const installPaths = [nativePath, unpluginPath];
+  if (isNuxt && nuxtPath) installPaths.push(nuxtPath);
 
   if (project.packageManager === 'pnpm') {
     // Configure hoisting
@@ -402,7 +566,7 @@ function installVerterTarballs(project, repoDir) {
       fs.writeFileSync(npmrcPath, npmrc);
     }
 
-    run(`pnpm add -w "${nativePath}" "${unpluginPath}"`, repoDir);
+    run(`pnpm add -w ${installPaths.map((p) => `"${p}"`).join(' ')}`, repoDir);
 
     // Add pnpm overrides using file: protocol to the tarballs.
     // The $packageName syntax doesn't work with tarball-installed packages —
@@ -413,11 +577,12 @@ function installVerterTarballs(project, repoDir) {
     pkg.pnpm.overrides = pkg.pnpm.overrides || {};
     pkg.pnpm.overrides['@verter/native'] = `file:${relNative}`;
     pkg.pnpm.overrides['@verter/unplugin'] = `file:${relUnplugin}`;
+    if (isNuxt && relNuxt) pkg.pnpm.overrides['@verter/nuxt'] = `file:${relNuxt}`;
     fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
 
     run('pnpm install --no-frozen-lockfile', repoDir);
   } else {
-    run(`npm install --legacy-peer-deps "${nativePath}" "${unpluginPath}"`, repoDir);
+    run(`npm install --legacy-peer-deps ${installPaths.map((p) => `"${p}"`).join(' ')}`, repoDir);
 
     // Add npm overrides using file: protocol
     const pkgPath = path.join(repoDir, 'package.json');
@@ -425,6 +590,7 @@ function installVerterTarballs(project, repoDir) {
     pkg.overrides = pkg.overrides || {};
     pkg.overrides['@verter/native'] = `file:${relNative}`;
     pkg.overrides['@verter/unplugin'] = `file:${relUnplugin}`;
+    if (isNuxt && relNuxt) pkg.overrides['@verter/nuxt'] = `file:${relNuxt}`;
     fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
 
     run('npm install --legacy-peer-deps', repoDir);
@@ -440,10 +606,11 @@ function installVerterTarballs(project, repoDir) {
   const srcDists = {
     unplugin: path.join(ROOT, 'packages', 'unplugin', 'dist'),
     native: path.join(ROOT, 'packages', 'native', 'dist'),
+    nuxt: path.join(ROOT, 'packages', 'nuxt', 'dist'),
   };
   // Collect all @verter dist directories to overwrite
   const distsToOverwrite = [];
-  for (const pkg of ['unplugin', 'native']) {
+  for (const pkg of ['unplugin', 'native', 'nuxt']) {
     const topLevel = path.join(repoDir, 'node_modules', '@verter', pkg, 'dist');
     if (fs.existsSync(topLevel)) distsToOverwrite.push({ pkg, dist: topLevel });
   }
@@ -483,6 +650,7 @@ function installVerterTarballs(project, repoDir) {
   const srcRoots = {
     unplugin: path.join(ROOT, 'packages', 'unplugin'),
     native: path.join(ROOT, 'packages', 'native'),
+    nuxt: path.join(ROOT, 'packages', 'nuxt'),
   };
   const rootFiles = ['index.js', 'index.ts'];
   for (const { dist: destDist, pkg } of distsToOverwrite) {
@@ -527,6 +695,17 @@ function ensureVerterAccessible(project, repoDir) {
     // Copy dist + package.json but skip src and node_modules (pnpm's node_modules
     // contains symlinks to the global store that can't be meaningfully copied).
     copyRecursive(srcUnplugin, unpluginDir, ['src', 'node_modules']);
+  }
+
+  // For Nuxt projects, ensure @verter/nuxt is accessible
+  if (project.bundler === 'nuxt') {
+    const nuxtDir = path.join(repoDir, 'node_modules', '@verter', 'nuxt');
+    if (!fs.existsSync(path.join(nuxtDir, 'package.json'))) {
+      log(project.name, '  @verter/nuxt not properly hoisted, copying from source...');
+      const srcNuxt = path.join(ROOT, 'packages', 'nuxt');
+      fs.mkdirSync(path.join(repoDir, 'node_modules', '@verter'), { recursive: true });
+      copyRecursive(srcNuxt, nuxtDir, ['src', 'node_modules']);
+    }
   }
 
   // Ensure the 'unplugin' dependency is resolvable from @verter/unplugin.
@@ -805,29 +984,10 @@ function patchWorkspacePackageDeps(project, repoDir, modifiedFiles) {
 
 // ── Replace Nuxt Plugin ──────────────────────────────────────────────────────
 
-/** Nuxt module content that replaces the built-in vite:vue plugin with Verter. */
-const NUXT_OVERRIDE_MODULE = `\
-import { defineNuxtModule } from '@nuxt/kit'
-import verter from '@verter/unplugin/vite'
-
-export default defineNuxtModule({
-  meta: { name: 'verter-override' },
-  setup(_options, nuxt) {
-    // Use vite:configResolved (not vite:extendConfig) because Nuxt 4's
-    // @nuxt/vite-builder adds vite:vue AFTER vite:extendConfig but BEFORE
-    // vite:configResolved.
-    nuxt.hook('vite:configResolved', (config) => {
-      // Remove the built-in vite:vue plugin
-      config.plugins = (config.plugins || []).filter(
-        (p) => !(p && typeof p === 'object' && 'name' in p && p.name === 'vite:vue')
-      )
-      // Add Verter in its place
-      config.plugins.push(verter())
-    })
-  }
-})
-`;
-
+/**
+ * Replace Nuxt's built-in vite:vue plugin with @verter/nuxt.
+ * Injects `@verter/nuxt` into the modules array of each nuxt.config.* file.
+ */
 function replaceNuxtPlugin(project, repoDir) {
   // Find nuxt.config.* files
   const nuxtConfigs = findFiles(repoDir, (name) => name.startsWith('nuxt.config'));
@@ -842,20 +1002,9 @@ function replaceNuxtPlugin(project, repoDir) {
     }
 
     // Already injected?
-    if (content.includes('.verter-nuxt-override')) continue;
+    if (content.includes('@verter/nuxt')) continue;
 
-    // Place the override module next to each nuxt.config file so the
-    // relative path './.verter-nuxt-override' always resolves correctly.
-    const configDir = path.dirname(configPath);
-    const modulePath = path.join(configDir, '.verter-nuxt-override.mjs');
-    if (!fs.existsSync(modulePath)) {
-      fs.writeFileSync(modulePath, NUXT_OVERRIDE_MODULE);
-      const relModule = path.relative(repoDir, modulePath);
-      modifiedFiles.push(relModule);
-      log(project.name, `  Created ${relModule}`);
-    }
-
-    const moduleEntry = "'./.verter-nuxt-override'";
+    const moduleEntry = "'@verter/nuxt'";
     let modified = content;
 
     // Try to inject into existing modules array
@@ -890,26 +1039,22 @@ function replaceNuxtPlugin(project, repoDir) {
 
 function verifyReplacement(project, repoDir) {
   if (project.bundler === 'nuxt') {
-    // For Nuxt: check that at least one nuxt.config references the override
-    // and its companion .verter-nuxt-override.mjs exists alongside it.
+    // For Nuxt: check that at least one nuxt.config references @verter/nuxt
     const nuxtConfigs = findFiles(repoDir, (name) => name.startsWith('nuxt.config'));
     const found = nuxtConfigs.filter((f) => {
       try {
-        if (!fs.readFileSync(f, 'utf8').includes('.verter-nuxt-override')) return false;
-        // Also verify the module file exists next to this config
-        const moduleFile = path.join(path.dirname(f), '.verter-nuxt-override.mjs');
-        return fs.existsSync(moduleFile);
+        return fs.readFileSync(f, 'utf8').includes('@verter/nuxt');
       } catch {
         return false;
       }
     });
 
     if (found.length === 0) {
-      log(project.name, 'ERROR: No nuxt.config has .verter-nuxt-override injected!');
+      log(project.name, 'ERROR: No nuxt.config has @verter/nuxt injected!');
       return false;
     }
 
-    log(project.name, `Verified Nuxt override module in ${found.length} config(s):`);
+    log(project.name, `Verified @verter/nuxt in ${found.length} config(s):`);
     for (const f of found) {
       log(project.name, `  ${path.relative(repoDir, f)}`);
     }
@@ -973,6 +1118,7 @@ async function processProject(project, opts) {
     baseline: { build: null, test: null },
     verter: { build: null, test: null, e2e: null },
     replacement: { modified: [], verified: false },
+    typeCheck: null,
     error: null,
   };
 
@@ -1022,6 +1168,10 @@ async function processProject(project, opts) {
         );
       }
     }
+
+    // ── Type-check timing (vue-tsc vs verter-tsc, 2 passes each) ──
+    // Run BEFORE the Verter swap so both tools see the same unmodified project.
+    results.typeCheck = runTypeChecks(project, repoDir);
 
     // ── Verter swap ──
     installVerterTarballs(project, repoDir);
@@ -1217,6 +1367,77 @@ function printSummary(allResults) {
   console.log(`${passed} passed / ${warnings} warnings / ${failed} failed`);
   console.log('');
   console.log(`Logs: ${LOGS_DIR}`);
+
+  // ── Type-Check Timing ──
+  const tcResults = allResults.filter((r) => r.typeCheck != null);
+  if (tcResults.length > 0) {
+    console.log('');
+    console.log('='.repeat(100));
+    console.log('TYPE-CHECK TIMING (vue-tsc vs verter-tsc)');
+    console.log('Both tools run: --noEmit --project tsconfig.json');
+    if (VERTER_TSC.bin) {
+      console.log(`verter-tsc: ${VERTER_TSC.type} (${VERTER_TSC.bin})`);
+    } else {
+      console.log('verter-tsc: NOT FOUND — skipped');
+    }
+    console.log('='.repeat(100));
+
+    const tcCols = [
+      { name: 'Project', width: 22 },
+      { name: 'vue:cold', width: 10 },
+      { name: 'vue:warm', width: 10 },
+      { name: 'v-tsc:cold', width: 10 },
+      { name: 'v-tsc:warm', width: 10 },
+      { name: 'speedup', width: 8 },
+      { name: 'errs:vue', width: 9 },
+      { name: 'errs:v', width: 9 },
+    ];
+    const tcHeader = tcCols.map((c) => c.name.padEnd(c.width)).join(' | ');
+    console.log(tcHeader);
+    console.log(tcCols.map((c) => '-'.repeat(c.width)).join('-+-'));
+
+    for (const r of tcResults) {
+      const tc = r.typeCheck;
+      const fmtTc = (result) => {
+        if (!result) return '-';
+        if (result.timedOut) return '>5min';
+        const s = formatDuration(result.ms);
+        return result.exitCode !== 0 ? s + '(err)' : s;
+      };
+
+      // Speedup = vue-tsc warm / verter-tsc warm
+      // Show speedup when both tools complete (TS errors are expected and don't invalidate timing).
+      // Only suppress speedup when a tool crashes instantly (<2s with error) — that means it
+      // didn't actually type-check (e.g. Volar version incompatibility).
+      let speedup = '-';
+      const vueDone = tc.vueTsc.warm && !tc.vueTsc.warm.timedOut;
+      const vtscDone = tc.verterTsc.warm && !tc.verterTsc.warm.timedOut;
+      const vueActuallyRan = vueDone && (tc.vueTsc.warm.exitCode === 0 || tc.vueTsc.warm.ms > 2000);
+      const vtscActuallyRan = vtscDone && (tc.verterTsc.warm.exitCode === 0 || tc.verterTsc.warm.ms > 2000);
+      if (vueActuallyRan && vtscActuallyRan && tc.verterTsc.warm.ms > 0) {
+        speedup = (tc.vueTsc.warm.ms / tc.verterTsc.warm.ms).toFixed(1) + 'x';
+      }
+
+      // Error counts from warm pass (vue-tsc is baseline)
+      const vueErrs = tc.vueTsc.warm ? String(tc.vueTsc.warm.errorCount) : '-';
+      const vtscErrs = tc.verterTsc.warm ? String(tc.verterTsc.warm.errorCount) : '-';
+
+      const row = [
+        r.name.padEnd(22),
+        fmtTc(tc.vueTsc.cold).padEnd(10),
+        fmtTc(tc.vueTsc.warm).padEnd(10),
+        fmtTc(tc.verterTsc.cold).padEnd(10),
+        fmtTc(tc.verterTsc.warm).padEnd(10),
+        speedup.padEnd(8),
+        vueErrs.padEnd(9),
+        vtscErrs.padEnd(9),
+      ];
+      console.log(row.join(' | '));
+    }
+
+    console.log('-'.repeat(100));
+    console.log('vue-tsc is the baseline. errs = TS error count from warm pass.');
+  }
 
   return failed > 0 ? 1 : 0;
 }

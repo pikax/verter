@@ -139,6 +139,7 @@ fn bench_build_css_style_analysis(c: &mut Criterion) {
                     false,
                     false,
                     None,
+                    0,
                 ))
             });
         });

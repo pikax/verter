@@ -1,9 +1,13 @@
 use sha2::{Digest, Sha256};
+use verter_span::Span;
 
 /// Truncated SHA-256 hash (first 16 bytes). Used for content-based change detection.
 pub type Hash16 = [u8; 16];
 
 /// Compute a truncated SHA-256 hash (first 16 bytes).
+///
+/// Used for export signature fingerprinting (cross-file change detection).
+/// SHA-256 provides deterministic, collision-resistant hashes across builds.
 pub fn hash_16(data: &[u8]) -> Hash16 {
     let digest = Sha256::digest(data);
     let mut out = [0u8; 16];
@@ -33,6 +37,7 @@ bitflags::bitflags! {
         const HAS_PROVIDE             = 1 << 15;
         const HAS_INJECT              = 1 << 16;
         const HAS_EXTERNAL_TYPE_DEPS  = 1 << 17;
+        const HAS_INHERIT_ATTRS_FALSE = 1 << 18;
     }
 }
 
@@ -64,14 +69,27 @@ pub struct ScriptAnalysisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exported_functions: Vec<AnalyzedExportedFunction>,
 
+    /// Vue API function call sites (lifecycle hooks, watchers, provide/inject, etc.).
+    /// Tracks calls whose return values are typically discarded (e.g., `onMounted(cb)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vue_api_calls: Vec<VueApiCallSite>,
+
+    /// DOM query call sites (querySelector, getElementById, etc.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dom_query_calls: Vec<DomQueryCallSite>,
+
+    /// SFC-absolute byte offset of the first top-level `await` expression (if any).
+    /// Used by lint rules to detect lifecycle hooks/watchers called after await.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_await_offset: Option<u32>,
+
     /// TODO(type-provider): Enhanced type info populated by TSGO when connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_enhancements: Option<ScriptTypeEnhancements>,
 }
 
 /// A single import declaration extracted from a script block.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedImport {
     /// The import source specifier (e.g., "./types", "vue", "@/utils").
     pub source: String,
@@ -79,21 +97,58 @@ pub struct AnalyzedImport {
     pub is_type_only: bool,
     /// Individual bindings imported.
     pub bindings: Vec<AnalyzedImportBinding>,
-    /// Byte offset of import declaration start in the script content.
-    #[serde(default)]
-    pub span_start: u32,
-    /// Byte offset of import declaration end in the script content.
-    #[serde(default)]
-    pub span_end: u32,
+    /// SFC-absolute byte span of the import declaration.
+    pub span: Span,
     /// Canonical file ID resolved by the host (None during standalone analysis).
     /// Populated by verter_host after path resolution for cross-file go-to-definition.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_canonical_id: Option<String>,
 }
 
+impl serde::Serialize for AnalyzedImport {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let count = 5 + usize::from(self.resolved_canonical_id.is_some());
+        let mut s = serializer.serialize_struct("AnalyzedImport", count)?;
+        s.serialize_field("source", &self.source)?;
+        s.serialize_field("isTypeOnly", &self.is_type_only)?;
+        s.serialize_field("bindings", &self.bindings)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        if self.resolved_canonical_id.is_some() {
+            s.serialize_field("resolvedCanonicalId", &self.resolved_canonical_id)?;
+        }
+        s.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnalyzedImport {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            source: String,
+            is_type_only: bool,
+            bindings: Vec<AnalyzedImportBinding>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+            #[serde(default)]
+            resolved_canonical_id: Option<String>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            source: w.source,
+            is_type_only: w.is_type_only,
+            bindings: w.bindings,
+            span: Span::new(w.span_start, w.span_end),
+            resolved_canonical_id: w.resolved_canonical_id,
+        })
+    }
+}
+
 /// A single specifier within an import declaration (e.g., `Foo` in `import { Foo } from "bar"`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedImportBinding {
     /// Local binding name as used in the script.
     pub name: String,
@@ -101,12 +156,44 @@ pub struct AnalyzedImportBinding {
     pub is_type_only: bool,
     /// Vue API classification if the import source is 'vue'.
     pub vue_api: Option<VueApiClassification>,
-    /// Byte offset of specifier name start in the script content.
-    #[serde(default)]
-    pub span_start: u32,
-    /// Byte offset of specifier name end in the script content.
-    #[serde(default)]
-    pub span_end: u32,
+    /// SFC-absolute byte span of the specifier name.
+    pub span: Span,
+}
+
+impl serde::Serialize for AnalyzedImportBinding {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("AnalyzedImportBinding", 5)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("isTypeOnly", &self.is_type_only)?;
+        s.serialize_field("vueApi", &self.vue_api)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnalyzedImportBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            is_type_only: bool,
+            vue_api: Option<VueApiClassification>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            is_type_only: w.is_type_only,
+            vue_api: w.vue_api,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
 }
 
 /// Rich classification of Vue imports.
@@ -178,6 +265,220 @@ pub enum VueApiClassification {
     Other,
 }
 
+/// A Vue API function call site found in the script.
+/// Tracks calls like `onMounted(cb)`, `watch(source, cb)`, `provide(key, val)`, etc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VueApiCallSite {
+    /// Which Vue API was called.
+    pub api: VueApiClassification,
+    /// SFC-absolute byte span of the call expression.
+    pub span: Span,
+    /// First string argument value, if available (e.g., for `useTemplateRef('foo')`).
+    pub arg_value: Option<String>,
+    /// Whether the first function argument is an async function/arrow.
+    /// Used by `no-async-in-computed` rule.
+    pub is_async_callback: bool,
+}
+
+impl serde::Serialize for VueApiCallSite {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let count = 3 + usize::from(self.arg_value.is_some()) + usize::from(self.is_async_callback);
+        let mut s = serializer.serialize_struct("VueApiCallSite", count)?;
+        s.serialize_field("api", &self.api)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        if self.arg_value.is_some() {
+            s.serialize_field("argValue", &self.arg_value)?;
+        }
+        if self.is_async_callback {
+            s.serialize_field("isAsyncCallback", &self.is_async_callback)?;
+        }
+        s.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for VueApiCallSite {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            api: VueApiClassification,
+            span_start: u32,
+            span_end: u32,
+            #[serde(default)]
+            arg_value: Option<String>,
+            #[serde(default)]
+            is_async_callback: bool,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            api: w.api,
+            span: Span::new(w.span_start, w.span_end),
+            arg_value: w.arg_value,
+            is_async_callback: w.is_async_callback,
+        })
+    }
+}
+
+/// A DOM query call site found in the script.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomQueryCallSite {
+    /// Which DOM query API was called.
+    pub kind: DomQueryKind,
+    /// The raw string argument (selector text or ID).
+    pub selector_text: String,
+    /// Parsed selector structure (reuses the CSS selector parser).
+    pub parsed: Option<crate::style::StructuredSelector>,
+    /// SFC-absolute byte span of the call expression.
+    pub span: Span,
+    /// SFC-absolute byte span of just the string argument.
+    pub arg_span: Span,
+}
+
+impl serde::Serialize for DomQueryCallSite {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let count = 6 + usize::from(self.parsed.is_some());
+        let mut s = serializer.serialize_struct("DomQueryCallSite", count)?;
+        s.serialize_field("kind", &self.kind)?;
+        s.serialize_field("selectorText", &self.selector_text)?;
+        if self.parsed.is_some() {
+            s.serialize_field("parsed", &self.parsed)?;
+        }
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.serialize_field("argSpanStart", &self.arg_span.start)?;
+        s.serialize_field("argSpanEnd", &self.arg_span.end)?;
+        s.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DomQueryCallSite {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            kind: DomQueryKind,
+            selector_text: String,
+            #[serde(default)]
+            parsed: Option<crate::style::StructuredSelector>,
+            span_start: u32,
+            span_end: u32,
+            arg_span_start: u32,
+            arg_span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            kind: w.kind,
+            selector_text: w.selector_text,
+            parsed: w.parsed,
+            span: Span::new(w.span_start, w.span_end),
+            arg_span: Span::new(w.arg_span_start, w.arg_span_end),
+        })
+    }
+}
+
+/// Discriminant for DOM query API types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DomQueryKind {
+    QuerySelector,
+    QuerySelectorAll,
+    GetElementById,
+    GetElementsByClassName,
+}
+
+impl VueApiClassification {
+    /// Check if this API is a lifecycle hook.
+    pub const fn is_lifecycle(&self) -> bool {
+        matches!(
+            self,
+            Self::OnMounted
+                | Self::OnUnmounted
+                | Self::OnBeforeMount
+                | Self::OnBeforeUnmount
+                | Self::OnUpdated
+                | Self::OnBeforeUpdate
+                | Self::OnActivated
+                | Self::OnDeactivated
+                | Self::OnErrorCaptured
+                | Self::OnRenderTracked
+                | Self::OnRenderTriggered
+                | Self::OnServerPrefetch
+        )
+    }
+
+    /// Check if this API is a watcher.
+    pub const fn is_watcher(&self) -> bool {
+        matches!(
+            self,
+            Self::Watch | Self::WatchEffect | Self::WatchPostEffect | Self::WatchSyncEffect
+        )
+    }
+
+    /// Check if this API requires synchronous setup context.
+    pub const fn requires_sync_context(&self) -> bool {
+        self.is_lifecycle() || self.is_watcher() || matches!(self, Self::Provide | Self::Inject)
+    }
+
+    /// Get the Vue API function name as it appears in source code.
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::Ref => "ref",
+            Self::ShallowRef => "shallowRef",
+            Self::Reactive => "reactive",
+            Self::ShallowReactive => "shallowReactive",
+            Self::Computed => "computed",
+            Self::ToRef => "toRef",
+            Self::ToRefs => "toRefs",
+            Self::CustomRef => "customRef",
+            Self::TriggerRef => "triggerRef",
+            Self::Readonly => "readonly",
+            Self::ShallowReadonly => "shallowReadonly",
+            Self::OnMounted => "onMounted",
+            Self::OnUnmounted => "onUnmounted",
+            Self::OnBeforeMount => "onBeforeMount",
+            Self::OnBeforeUnmount => "onBeforeUnmount",
+            Self::OnUpdated => "onUpdated",
+            Self::OnBeforeUpdate => "onBeforeUpdate",
+            Self::OnActivated => "onActivated",
+            Self::OnDeactivated => "onDeactivated",
+            Self::OnErrorCaptured => "onErrorCaptured",
+            Self::OnRenderTracked => "onRenderTracked",
+            Self::OnRenderTriggered => "onRenderTriggered",
+            Self::OnServerPrefetch => "onServerPrefetch",
+            Self::Watch => "watch",
+            Self::WatchEffect => "watchEffect",
+            Self::WatchPostEffect => "watchPostEffect",
+            Self::WatchSyncEffect => "watchSyncEffect",
+            Self::Provide => "provide",
+            Self::Inject => "inject",
+            Self::UseSlots => "useSlots",
+            Self::UseAttrs => "useAttrs",
+            Self::UseTemplateRef => "useTemplateRef",
+            Self::UseId => "useId",
+            Self::GetCurrentInstance => "getCurrentInstance",
+            Self::NextTick => "nextTick",
+            Self::UseModel => "useModel",
+            Self::OnWatcherCleanup => "onWatcherCleanup",
+            Self::HasInjectionContext => "hasInjectionContext",
+            Self::DefineProps => "defineProps",
+            Self::DefineEmits => "defineEmits",
+            Self::DefineModel => "defineModel",
+            Self::DefineExpose => "defineExpose",
+            Self::DefineOptions => "defineOptions",
+            Self::DefineSlots => "defineSlots",
+            Self::WithDefaults => "withDefaults",
+            Self::DefineComponent => "defineComponent",
+            Self::DefineAsyncComponent => "defineAsyncComponent",
+            Self::H => "h",
+            Self::CreateApp => "createApp",
+            Self::CreateSSRApp => "createSSRApp",
+            Self::Other => "unknown",
+        }
+    }
+}
+
 /// Granular reactivity classification of a binding.
 /// Distinguishes ref-like (needs `.value`) from reactive-like (direct property access).
 #[derive(
@@ -201,8 +502,7 @@ pub enum ReactivityKind {
 }
 
 /// A top-level variable, function, or class binding declared in the script block.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedBinding {
     /// Binding name as declared in source.
     pub name: String,
@@ -211,19 +511,63 @@ pub struct AnalyzedBinding {
     /// Whether the binding holds reactive state (e.g., initialized via `ref()` or `reactive()`).
     pub is_reactive: bool,
     /// Granular reactivity classification (replaces `is_reactive` semantically).
-    #[serde(default)]
     pub reactivity_kind: ReactivityKind,
     /// TypeScript type annotation from the AST (e.g., `"Ref<number>"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
     /// What expression created this binding, if classifiable.
     pub initializer: Option<BindingInitializer>,
-    /// Byte offset of binding name start in the script content.
-    #[serde(default)]
-    pub span_start: u32,
-    /// Byte offset of binding name end in the script content.
-    #[serde(default)]
-    pub span_end: u32,
+    /// SFC-absolute byte span of the binding name.
+    pub span: Span,
+}
+
+impl serde::Serialize for AnalyzedBinding {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let count = 7 + usize::from(self.type_annotation.is_some());
+        let mut s = serializer.serialize_struct("AnalyzedBinding", count)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("kind", &self.kind)?;
+        s.serialize_field("isReactive", &self.is_reactive)?;
+        s.serialize_field("reactivityKind", &self.reactivity_kind)?;
+        if self.type_annotation.is_some() {
+            s.serialize_field("typeAnnotation", &self.type_annotation)?;
+        }
+        s.serialize_field("initializer", &self.initializer)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnalyzedBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            name: String,
+            kind: AnalyzedBindingKind,
+            is_reactive: bool,
+            #[serde(default)]
+            reactivity_kind: ReactivityKind,
+            #[serde(default)]
+            type_annotation: Option<String>,
+            initializer: Option<BindingInitializer>,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            name: w.name,
+            kind: w.kind,
+            is_reactive: w.is_reactive,
+            reactivity_kind: w.reactivity_kind,
+            type_annotation: w.type_annotation,
+            initializer: w.initializer,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
 }
 
 /// Tracks what function/expression created a binding.
@@ -269,8 +613,7 @@ pub enum AnalyzedBindingKind {
 }
 
 /// A Vue compiler macro call found in `<script setup>` (e.g., `defineProps`, `defineEmits`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedMacro {
     /// Which macro was called.
     pub kind: AnalyzedMacroKind,
@@ -280,12 +623,62 @@ pub struct AnalyzedMacro {
     pub type_references: Vec<String>,
     /// The binding name if `const X = defineProps<...>()`.
     pub binding_name: Option<String>,
-    /// Byte offset of macro call start in the script content.
-    #[serde(default)]
-    pub span_start: u32,
-    /// Byte offset of macro call end in the script content.
-    #[serde(default)]
-    pub span_end: u32,
+    /// For `defineModel('name')`: the model property name. `None` means default (`"modelValue"`).
+    pub model_name: Option<String>,
+    /// For `defineOptions({ inheritAttrs: false })`: whether `inheritAttrs` is set to `false`.
+    pub has_inherit_attrs_false: bool,
+    /// SFC-absolute byte span of the macro call.
+    pub span: Span,
+}
+
+impl serde::Serialize for AnalyzedMacro {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let count = 7 + usize::from(self.model_name.is_some());
+        let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
+        s.serialize_field("kind", &self.kind)?;
+        s.serialize_field("isTypeBased", &self.is_type_based)?;
+        s.serialize_field("typeReferences", &self.type_references)?;
+        s.serialize_field("bindingName", &self.binding_name)?;
+        if self.model_name.is_some() {
+            s.serialize_field("modelName", &self.model_name)?;
+        }
+        s.serialize_field("hasInheritAttrsFalse", &self.has_inherit_attrs_false)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            kind: AnalyzedMacroKind,
+            is_type_based: bool,
+            type_references: Vec<String>,
+            binding_name: Option<String>,
+            #[serde(default)]
+            model_name: Option<String>,
+            #[serde(default)]
+            has_inherit_attrs_false: bool,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            kind: w.kind,
+            is_type_based: w.is_type_based,
+            type_references: w.type_references,
+            binding_name: w.binding_name,
+            model_name: w.model_name,
+            has_inherit_attrs_false: w.has_inherit_attrs_false,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
 }
 
 /// Identifies which Vue compiler macro was called.

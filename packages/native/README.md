@@ -18,14 +18,12 @@ graph LR
     A["verter_core<br/><i>Rust crate</i>"] --> B["verter_napi<br/><i>NAPI-RS cdylib</i>"]
     B --> C[".node binary<br/><i>platform-specific</i>"]
     C --> D["@verter/native<br/><i>JS loader (index.js)</i>"]
-    D --> E["@verter/language-server"]
     D --> F["@verter/unplugin"]
 
     style A fill:#deb887,stroke:#8b6914
     style B fill:#deb887,stroke:#8b6914
     style C fill:#b0c4de,stroke:#4682b4
     style D fill:#98d898,stroke:#2e8b57
-    style E fill:#d8bfd8,stroke:#9370db
     style F fill:#d8bfd8,stroke:#9370db
 ```
 

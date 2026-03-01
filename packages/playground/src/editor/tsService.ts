@@ -125,15 +125,15 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   private currentMapper: SourceMapMapper | null = null;
   private currentTsxPath: string | null = null;
 
-  async init(verterTypesContent?: string): Promise<void> {
+  async init(options?: { verterTypesContent?: string; vueVersion?: string }): Promise<void> {
     if (this.initialized) return;
     if (this.initPromise) return this.initPromise;
 
-    this.initPromise = this._init(verterTypesContent);
+    this.initPromise = this._init(options);
     return this.initPromise;
   }
 
-  private async _init(verterTypesContent?: string): Promise<void> {
+  private async _init(options?: { verterTypesContent?: string; vueVersion?: string }): Promise<void> {
     this.worker = new Worker(new URL("./tsWorker.ts", import.meta.url), {
       type: "module",
     });
@@ -151,8 +151,13 @@ export class TypeScriptService implements TypeScriptServiceBridge {
       }
     };
 
-    await this.send("init", { verterTypesContent });
+    await this.send("init", options);
     this.initialized = true;
+  }
+
+  async updateVueTypes(vueVersion: string): Promise<void> {
+    if (!this.initialized) return;
+    await this.send("updateVueTypes", { vueVersion });
   }
 
   private send(type: string, payload?: unknown): Promise<unknown> {
@@ -182,10 +187,17 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     this.currentTsxPath = tsxPath;
 
     // Create mapper if source map is available
-    this.currentMapper =
-      sourceMapJson && sourceMapJson.length > 2
-        ? new SourceMapMapper(sourceMapJson, tsxCode, vueCode)
-        : null;
+    if (sourceMapJson && sourceMapJson.length > 2) {
+      this.currentMapper = new SourceMapMapper(sourceMapJson, tsxCode, vueCode);
+    } else {
+      this.currentMapper = null;
+      if (typeof console !== "undefined") {
+        console.debug(
+          "[verter] TSX source map unavailable — hover/completions disabled. " +
+          `sourceMap length: ${sourceMapJson?.length ?? 0}, tsx length: ${tsxCode.length}`,
+        );
+      }
+    }
 
     await this.send("updateFile", { path: tsxPath, content: tsxCode });
 
@@ -221,11 +233,8 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   async getHover(filename: string, vueOffset: number): Promise<string | null> {
     if (!this.initialized || !this.currentTsxPath) return null;
 
-    let tsxOffset = vueOffset;
-    if (this.currentMapper) {
-      const mapped = this.currentMapper.vueOffsetToTsxOffset(vueOffset);
-      if (mapped != null) tsxOffset = mapped;
-    }
+    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    if (tsxOffset === null) return null;
 
     const info = (await this.send("getHover", {
       path: this.currentTsxPath,
@@ -250,11 +259,8 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   ): Promise<Array<{ label: string; kind: number; detail?: string; insertText?: string }>> {
     if (!this.initialized || !this.currentTsxPath) return [];
 
-    let tsxOffset = vueOffset;
-    if (this.currentMapper) {
-      const mapped = this.currentMapper.vueOffsetToTsxOffset(vueOffset);
-      if (mapped != null) tsxOffset = mapped;
-    }
+    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    if (tsxOffset === null) return [];
 
     const entries = (await this.send("getCompletions", {
       path: this.currentTsxPath,
@@ -274,6 +280,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   async getDefinition(filename: string, vueOffset: number): Promise<MappedSpan[]> {
     if (!this.initialized || !this.currentTsxPath) return [];
     const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    if (tsxOffset === null) return [];
     const defs = (await this.send("getDefinition", {
       path: this.currentTsxPath,
       offset: tsxOffset,
@@ -294,6 +301,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   async getReferences(filename: string, vueOffset: number): Promise<MappedReference[]> {
     if (!this.initialized || !this.currentTsxPath) return [];
     const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    if (tsxOffset === null) return [];
     const refs = (await this.send("getReferences", {
       path: this.currentTsxPath,
       offset: tsxOffset,
@@ -317,6 +325,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   async getDocumentHighlights(filename: string, vueOffset: number): Promise<MappedSpan[]> {
     if (!this.initialized || !this.currentTsxPath) return [];
     const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    if (tsxOffset === null) return [];
     const highlights = (await this.send("getDocumentHighlights", {
       path: this.currentTsxPath,
       offset: tsxOffset,
@@ -344,6 +353,14 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     }
 
     const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    if (tsxOffset === null) {
+      return {
+        canRename: false,
+        rejectReason: "Source map mapping unavailable",
+        triggerSpan: null,
+        locations: [],
+      };
+    }
     const response = (await this.send("getRenameLocations", {
       path: this.currentTsxPath,
       offset: tsxOffset,
@@ -380,10 +397,9 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     };
   }
 
-  private mapVueOffsetToTsxOffset(vueOffset: number): number {
-    if (!this.currentMapper) return vueOffset;
-    const mapped = this.currentMapper.vueOffsetToTsxOffset(vueOffset);
-    return mapped ?? vueOffset;
+  private mapVueOffsetToTsxOffset(vueOffset: number): number | null {
+    if (!this.currentMapper) return null;
+    return this.currentMapper.vueOffsetToTsxOffset(vueOffset);
   }
 
   private mapTsxSpanToVueSpan(span: TsSpanLike): MappedSpan | null {

@@ -464,7 +464,7 @@ export function startServer(options: LsConnectionOption = {}) {
   // connection.onRequest("$/getCompiledCode", async (params) => {
   // @ts-expect-error TODO fix this with proper types
   patchedConnection.onRequest(RequestType.GetCompiledCode, async (params) => {
-    const doc = documentManager.getDocument(params);
+    const doc = documentManager.getDocument(params.uri);
 
     if (!doc || !isVueDocument(doc)) {
       return null;

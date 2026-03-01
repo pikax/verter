@@ -406,6 +406,7 @@ fn single_static_element() {
         prop_flag: PropFlag::empty(),
         children_flag: ChildrenFlag::empty(),
         children_mode: ChildrenMode::TextOnlyStatic,
+        is_fully_static: false,
     };
 
     let text = TextNode {
@@ -488,6 +489,7 @@ fn inline_mode_uses_arrow_function() {
         prop_flag: PropFlag::empty(),
         children_flag: ChildrenFlag::empty(),
         children_mode: ChildrenMode::Empty,
+        is_fully_static: false,
     };
 
     gen.enter_template(&root, source, &mut out);
@@ -556,6 +558,7 @@ fn element_with_interpolation() {
         prop_flag: PropFlag::empty(),
         children_flag: ChildrenFlag::empty().add(ChildrenFlags::HasInterpolation),
         children_mode: ChildrenMode::TextOnlyDynamic,
+        is_fully_static: false,
     };
 
     let interp = InterpolationNode {

@@ -12,14 +12,18 @@ use oxc_ast::ast::{Expression, ObjectPropertyKind};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 
-use crate::ast::types::{ElementNode, ElementNodeConditionKind, TagType};
+use crate::ast::types::{ElementNode, TagType};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedProp};
+use crate::tsx::{event_to_jsx_name, get_directive_name};
 use crate::types::NodeProp;
 
 /// Process all props on an element, converting to JSX syntax.
+///
+/// `condition_guard` is the accumulated condition text from v-if scopes
+/// (parent + own), used for type narrowing guards in arrow function props.
 pub fn process_element_props<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
@@ -27,8 +31,9 @@ pub fn process_element_props<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
+    condition_guard: Option<&str>,
 ) {
-    let v_if_guard = resolve_v_if_guard_expr(el, oxc_el, source, resolver);
+    let v_if_guard = condition_guard;
 
     for (i, prop) in el.props.iter().enumerate() {
         // Find corresponding OXC data for this prop
@@ -46,21 +51,9 @@ pub fn process_element_props<'alloc>(
             continue;
         }
 
-        // Keep raw v-model for now, but still prefix its argument/value bindings
-        // so TSX type expressions stay aligned with v5 binding behavior.
+        // v-model expansion: convert to modelValue/onUpdate:modelValue prop pair
         if is_builtin_directive(prop, source, "model") {
-            if let Some(oxc_p) = oxc_prop {
-                if let Some(ref exp) = oxc_p.exp {
-                    if let Some(ref bindings) = exp.bindings {
-                        resolver.collect_binding_patches(bindings, out);
-                    }
-                }
-                if let Some(ref arg) = oxc_p.arg {
-                    if let Some(ref bindings) = arg.bindings {
-                        resolver.collect_binding_patches(bindings, out);
-                    }
-                }
-            }
+            process_v_model(prop, oxc_prop, el, source, out, resolver);
             continue;
         }
 
@@ -87,18 +80,10 @@ pub fn process_element_props<'alloc>(
         }
 
         match dir_name {
-            "bind" => process_v_bind(prop, oxc_prop, source, out, alloc, resolver),
-            "on" => process_v_on(
-                prop,
-                oxc_prop,
-                source,
-                out,
-                alloc,
-                resolver,
-                v_if_guard.as_deref(),
-            ),
-            "html" => process_v_html(prop, source, out),
-            "text" => process_v_text(prop, source, out),
+            "bind" => process_v_bind(prop, oxc_prop, source, out, alloc, resolver, v_if_guard),
+            "on" => process_v_on(prop, oxc_prop, source, out, alloc, resolver, v_if_guard),
+            "html" => process_v_html(prop, oxc_prop, source, out, resolver),
+            "text" => process_v_text(prop, oxc_prop, source, out, resolver),
             _ => {
                 // Unknown directive — remove it (TSX can't represent custom directives)
                 remove_prop(prop, source, out);
@@ -120,6 +105,7 @@ fn process_v_bind<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
+    v_if_guard: Option<&str>,
 ) {
     let has_arg = prop.arg_start.is_some();
     let raw_name = &source[prop.start as usize..prop.name_end as usize];
@@ -170,7 +156,10 @@ fn process_v_bind<'alloc>(
                 .and_then(|s| s.strip_suffix(']'))
                 .unwrap_or(arg_name)
                 .trim();
-            let arg_resolved = resolve_prefixed_dynamic_arg(arg_expr, oxc_prop, resolver);
+            let arg_expr_start =
+                arg_start + (arg_expr.as_ptr() as usize - arg_name.as_ptr() as usize) as u32;
+            let arg_resolved =
+                resolve_prefixed_dynamic_arg(arg_expr, arg_expr_start, oxc_prop, resolver);
             let prop_end = get_prop_end(prop);
             out.overwrite(
                 prop.start,
@@ -186,11 +175,32 @@ fn process_v_bind<'alloc>(
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
         let value_expr = &source[vs as usize..ve as usize];
         let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
-        out.overwrite(
-            prop.start,
-            prop_end,
-            &format!("{}={{{}}}", arg_name, resolved),
-        );
+
+        // Inject type narrowing guard into function-typed props (Part C Step 8).
+        let guarded = if let Some(guard) = v_if_guard {
+            inject_function_guard(&resolved, guard, oxc_prop)
+        } else {
+            None
+        };
+        let final_expr = guarded.as_deref().unwrap_or(&resolved);
+
+        // When the expression is unchanged, split the overwrite to preserve
+        // the original expression span for source mapping (TSGO hover).
+        let trimmed_expr = value_expr.trim();
+        if final_expr == trimmed_expr {
+            let leading_ws = value_expr.len() - value_expr.trim_start().len();
+            let trailing_ws = value_expr.len() - value_expr.trim_end().len();
+            let tvs = vs + leading_ws as u32;
+            let tve = ve - trailing_ws as u32;
+            out.overwrite(prop.start, tvs, &format!("{}={{", arg_name));
+            out.overwrite(tve, prop_end, "}");
+        } else {
+            out.overwrite(
+                prop.start,
+                prop_end,
+                &format!("{}={{{}}}", arg_name, final_expr),
+            );
+        }
     } else {
         // `:foo` shorthand → `foo={ctx.foo}`; `:foo-bar` uses camelCase lookup.
         let resolved = resolver.resolve_simple_expr(&kebab_to_camel_case(arg_name.trim()));
@@ -234,6 +244,36 @@ fn process_v_on<'alloc>(
     let arg_end = prop.arg_end.unwrap();
     let event_name = &source[arg_start as usize..arg_end as usize];
 
+    // Dynamic event name: @[eventName]="handler" → {...{[`on${eventName}`]: handler}}
+    if prop.is_dynamic == Some(true) {
+        let raw_arg = event_name
+            .trim()
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(event_name)
+            .trim();
+        let raw_arg_start =
+            arg_start + (raw_arg.as_ptr() as usize - event_name.as_ptr() as usize) as u32;
+        let resolved_arg = resolve_prefixed_dynamic_arg(raw_arg, raw_arg_start, oxc_prop, resolver);
+        let prop_end = get_prop_end(prop);
+
+        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+            let value_expr = &source[vs as usize..ve as usize];
+            let resolved_value = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+            out.overwrite(
+                prop.start,
+                prop_end,
+                &format!(
+                    "{{...{{[`on${{{}}}` as any]: {}}}}}",
+                    resolved_arg, resolved_value
+                ),
+            );
+        } else {
+            out.overwrite(prop.start, prop_end, "");
+        }
+        return;
+    }
+
     // Convert event name to JSX: click → onClick, update:modelValue → onUpdate:modelValue
     let jsx_event_name = event_to_jsx_name(event_name);
 
@@ -254,42 +294,91 @@ fn process_v_on<'alloc>(
         // Build prop end position (including modifiers and quotes)
         let prop_end = get_prop_end(prop);
 
+        // Check if binding resolution changed the expression text.
+        // When unchanged (common for TSX inline mode), we split the overwrite
+        // to preserve the original expression span, keeping source map tokens
+        // for TSGO hover.
+        let trimmed_expr = value_expr.trim();
+        let expr_unchanged = resolved_expr == trimmed_expr;
+
+        // Calculate trimmed expression boundaries within the source.
+        // Leading/trailing whitespace must be included in the overwrite prefix/suffix
+        // to avoid emitting raw whitespace between the JSX prop name and expression.
+        let leading_ws = value_expr.len() - value_expr.trim_start().len();
+        let trailing_ws = value_expr.len() - value_expr.trim_end().len();
+        let trimmed_vs = vs + leading_ws as u32;
+        let trimmed_ve = ve - trailing_ws as u32;
+
         if is_fn_expr || is_object_expr {
             // Explicit function/object expressions are already valid handlers.
-            out.overwrite(
-                prop.start,
-                prop_end,
-                &format!("{}={{{}}}", jsx_event_name, resolved_expr),
-            );
+            if expr_unchanged {
+                out.overwrite(prop.start, trimmed_vs, &format!("{}={{", jsx_event_name));
+                out.overwrite(trimmed_ve, prop_end, "}");
+            } else {
+                out.overwrite(
+                    prop.start,
+                    prop_end,
+                    &format!("{}={{{}}}", jsx_event_name, resolved_expr),
+                );
+            }
         } else if has_event_param {
             // $event can only exist inside a callback parameter scope.
-            out.overwrite(
-                prop.start,
-                prop_end,
-                &format!(
-                    "{}={{{}}}",
-                    jsx_event_name,
-                    build_event_callback_body("$event", resolved_expr, v_if_guard)
-                ),
-            );
+            let guard_prefix = v_if_guard
+                .map(|guard| format!("if (!({})) {{ return undefined; }} ", guard))
+                .unwrap_or_default();
+            if expr_unchanged {
+                out.overwrite(
+                    prop.start,
+                    trimmed_vs,
+                    &format!("{}={{($event) => {{{}", jsx_event_name, guard_prefix),
+                );
+                out.overwrite(trimmed_ve, prop_end, "}}");
+            } else {
+                out.overwrite(
+                    prop.start,
+                    prop_end,
+                    &format!(
+                        "{}={{{}}}",
+                        jsx_event_name,
+                        build_event_callback_body("$event", resolved_expr, v_if_guard)
+                    ),
+                );
+            }
         } else if is_simple_ident || is_member_expr {
             // Simple handler: @click="handler" → onClick={handler}
-            out.overwrite(
-                prop.start,
-                prop_end,
-                &format!("{}={{{}}}", jsx_event_name, resolved_expr),
-            );
+            if expr_unchanged {
+                out.overwrite(prop.start, trimmed_vs, &format!("{}={{", jsx_event_name));
+                out.overwrite(trimmed_ve, prop_end, "}");
+            } else {
+                out.overwrite(
+                    prop.start,
+                    prop_end,
+                    &format!("{}={{{}}}", jsx_event_name, resolved_expr),
+                );
+            }
         } else {
             // Inline expression: @click="count++" → onClick={() => count++}
-            out.overwrite(
-                prop.start,
-                prop_end,
-                &format!(
-                    "{}={{{}}}",
-                    jsx_event_name,
-                    build_event_callback_body("", resolved_expr, v_if_guard)
-                ),
-            );
+            let guard_prefix = v_if_guard
+                .map(|guard| format!("if (!({})) {{ return undefined; }} ", guard))
+                .unwrap_or_default();
+            if expr_unchanged {
+                out.overwrite(
+                    prop.start,
+                    trimmed_vs,
+                    &format!("{}={{() => {{{}", jsx_event_name, guard_prefix),
+                );
+                out.overwrite(trimmed_ve, prop_end, "}}");
+            } else {
+                out.overwrite(
+                    prop.start,
+                    prop_end,
+                    &format!(
+                        "{}={{{}}}",
+                        jsx_event_name,
+                        build_event_callback_body("", resolved_expr, v_if_guard)
+                    ),
+                );
+            }
         }
     } else {
         // Event with no value — just remove
@@ -310,72 +399,140 @@ fn build_event_callback_body(
     format!("({}) => {{{}{}}}", params, guard_prefix, expression)
 }
 
-fn resolve_v_if_guard_expr<'alloc>(
-    el: &ElementNode,
-    oxc_el: Option<&OxcParsedElement<'alloc>>,
+/// Process `v-model` directive → expand to prop + update event pair.
+///
+/// - `v-model="count"` → `modelValue={count} onUpdate:modelValue={($event) => (count = $event)}`
+/// - `v-model:title="val"` → `title={val} onUpdate:title={($event) => (val = $event)}`
+/// - Modifiers are emitted as a modifiers prop (e.g., `modelModifiers={{ trim: true }}`)
+fn process_v_model<'alloc>(
+    prop: &NodeProp,
+    oxc_prop: Option<&OxcParsedProp<'alloc>>,
+    _el: &ElementNode,
     source: &'alloc str,
+    out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
-) -> Option<String> {
-    let condition = el.v_condition.as_ref()?;
-    if !matches!(
-        condition.kind,
-        ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf
-    ) {
-        return None;
-    }
-
-    let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end) else {
-        return None;
+) {
+    let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) else {
+        // v-model with no value — remove
+        let prop_end = get_prop_end(prop);
+        out.overwrite(prop.start, prop_end, "");
+        return;
     };
+
     let raw_expr = &source[vs as usize..ve as usize];
+    let resolved = resolve_prefixed_expr(raw_expr, vs, oxc_prop, resolver);
+    let prop_end = get_prop_end(prop);
 
-    if let Some(oxc_el) = oxc_el {
-        if let Some(ref cond) = oxc_el.condition {
-            return Some(build_prefixed_expr(raw_expr, vs, cond, resolver, &[]));
+    // Determine prop name: default "modelValue" or named v-model:xxx
+    let is_dynamic_arg = prop.is_dynamic == Some(true);
+    let (value_prop, update_event, modifier_prop) = if let (Some(arg_s), Some(arg_e)) =
+        (prop.arg_start, prop.arg_end)
+    {
+        let arg = &source[arg_s as usize..arg_e as usize];
+        if is_dynamic_arg {
+            // Dynamic arg: v-model:[expr]="val" → spread syntax
+            let raw_arg = arg
+                .trim()
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(arg)
+                .trim();
+            let raw_arg_start = arg_s + (raw_arg.as_ptr() as usize - arg.as_ptr() as usize) as u32;
+            let resolved_arg =
+                resolve_prefixed_dynamic_arg(raw_arg, raw_arg_start, oxc_prop, resolver);
+            (
+                format!("[{}]", resolved_arg),
+                format!("[`onUpdate:${{{}}}`]", resolved_arg),
+                format!("[`${{{}}}Modifiers`]", resolved_arg),
+            )
+        } else {
+            let camel_arg = kebab_to_camel_case(arg);
+            (
+                camel_arg.clone(),
+                format!("onUpdate:{}", camel_arg),
+                format!("{}Modifiers", camel_arg),
+            )
         }
+    } else {
+        (
+            "modelValue".to_string(),
+            "onUpdate:modelValue".to_string(),
+            "modelModifiers".to_string(),
+        )
+    };
+
+    // Build the replacement: prop={expr} event={handler} [modifiers={...}]
+    let mut replacement = if is_dynamic_arg {
+        // Dynamic: use spread syntax for computed prop names
+        format!(
+            "{{...{{{}:{}, \"{}\":($event: any) => (({}) = $event)}}}}",
+            value_prop, resolved, update_event, resolved
+        )
+    } else {
+        format!(
+            "{}={{{}}} \"{}\"={{($event: any) => (({}) = $event)}}",
+            value_prop, resolved, update_event, resolved
+        )
+    };
+
+    // Emit modifiers prop if present
+    if !prop.modifiers.is_empty() {
+        replacement.push_str(&format!(
+            " {}={{{{ {} }}}}",
+            modifier_prop,
+            prop.modifiers
+                .iter()
+                .map(|m| {
+                    let name = &source[m.start as usize..m.end as usize];
+                    format!("{}: true", name)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
-    Some(resolver.resolve_simple_expr(raw_expr))
+    out.overwrite(prop.start, prop_end, &replacement);
 }
 
-/// Process `v-html="expr"` → `dangerouslySetInnerHTML={{__html: expr}}`.
-fn process_v_html(prop: &NodeProp, source: &str, out: &mut CodeGenOutput<'_>) {
+/// Process `v-html="expr"` → `innerHTML={expr}`.
+fn process_v_html<'alloc>(
+    prop: &NodeProp,
+    oxc_prop: Option<&OxcParsedProp<'alloc>>,
+    source: &'alloc str,
+    out: &mut CodeGenOutput<'alloc>,
+    resolver: &BindingResolver<'alloc>,
+) {
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
         let expr = &source[vs as usize..ve as usize];
+        let resolved = resolve_prefixed_expr(expr, vs, oxc_prop, resolver);
         let prop_end = get_prop_end(prop);
-        out.overwrite(prop.start, prop_end, &format!("innerHTML={{{}}}", expr));
+        out.overwrite(prop.start, prop_end, &format!("innerHTML={{{}}}", resolved));
     }
 }
 
-/// Process `v-text="expr"` → `textContent={{expr}}`.
-fn process_v_text(prop: &NodeProp, source: &str, out: &mut CodeGenOutput<'_>) {
+/// Process `v-text="expr"` → `textContent={expr}`.
+fn process_v_text<'alloc>(
+    prop: &NodeProp,
+    oxc_prop: Option<&OxcParsedProp<'alloc>>,
+    source: &'alloc str,
+    out: &mut CodeGenOutput<'alloc>,
+    resolver: &BindingResolver<'alloc>,
+) {
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
         let expr = &source[vs as usize..ve as usize];
+        let resolved = resolve_prefixed_expr(expr, vs, oxc_prop, resolver);
         let prop_end = get_prop_end(prop);
-        out.overwrite(prop.start, prop_end, &format!("textContent={{{}}}", expr));
+        out.overwrite(
+            prop.start,
+            prop_end,
+            &format!("textContent={{{}}}", resolved),
+        );
     }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
 
-/// Get the directive name from a NodeProp (e.g., "bind", "on", "if", "for").
-fn get_directive_name<'a>(prop: &NodeProp, source: &'a str) -> &'a str {
-    let name = &source[prop.start as usize..prop.name_end as usize];
-
-    // Handle shorthand: ':' for v-bind, '@' for v-on, '#' for v-slot
-    if name.starts_with(':') || name.starts_with('.') {
-        return "bind";
-    }
-    if name.starts_with('@') {
-        return "on";
-    }
-    if name.starts_with('#') {
-        return "slot";
-    }
-
-    // Full directive name: v-bind, v-on, v-if, etc.
-    name.strip_prefix("v-").unwrap_or(name)
-}
+// get_directive_name is imported from crate::tsx (tsx/mod.rs)
 
 /// Check if a prop is a structural directive (v-if, v-else-if, v-else, v-for, v-slot).
 fn is_structural_directive(prop: &NodeProp, source: &str) -> bool {
@@ -419,28 +576,7 @@ pub(crate) fn get_prop_end(prop: &NodeProp) -> u32 {
     }
 }
 
-/// Convert a Vue event name to JSX event prop name.
-///
-/// - `click` → `onClick`
-/// - `update:modelValue` → `onUpdate:modelValue`
-/// - `custom-event` → `onCustom-event` (v5 parity)
-fn event_to_jsx_name(event_name: &str) -> String {
-    // Special case: update: prefix (for v-model)
-    if let Some(rest) = event_name.strip_prefix("update:") {
-        return format!("onUpdate:{}", rest);
-    }
-
-    let mut result = String::with_capacity(event_name.len() + 2);
-    result.push_str("on");
-    let mut chars = event_name.chars();
-    if let Some(first) = chars.next() {
-        for upper in first.to_uppercase() {
-            result.push(upper);
-        }
-        result.extend(chars);
-    }
-    result
-}
+// event_to_jsx_name is imported from crate::tsx (tsx/mod.rs)
 
 fn rewrite_v_on_object_literal_expr(expr: &str) -> String {
     let trimmed = expr.trim();
@@ -536,6 +672,84 @@ fn parse_static_event_key(raw_key: &str) -> Option<&str> {
     None
 }
 
+/// Inject a type narrowing guard into a function-typed v-bind expression.
+///
+/// Detects function types via OXC AST and injects appropriate guards:
+/// - Arrow expression `() => expr` → `() => !(guard)?undefined:expr`
+/// - Arrow block `() => { stmts }` → `() => {if(!(guard))return; stmts}`
+/// - Function expression `function() { stmts }` → `function() {if(!(guard))return; stmts}`
+/// - Non-function: returns None (no guard needed)
+fn inject_function_guard(
+    resolved: &str,
+    guard: &str,
+    oxc_prop: Option<&OxcParsedProp<'_>>,
+) -> Option<String> {
+    let oxc_p = oxc_prop?;
+    let exp = oxc_p.exp.as_ref()?;
+    let expression = exp.expression.as_ref()?;
+
+    match expression {
+        Expression::ArrowFunctionExpression(arrow) => {
+            // Find `=>` in the resolved string
+            let arrow_pos = resolved.find("=>")?;
+            let after_arrow = arrow_pos + 2;
+
+            if arrow.expression {
+                // Arrow expression body: inject ternary guard before body
+                // () => expr → () => !(guard)?undefined:expr
+                let body_start = resolved[after_arrow..]
+                    .find(|c: char| !c.is_whitespace())
+                    .map(|i| after_arrow + i)
+                    .unwrap_or(after_arrow);
+                let mut result = String::with_capacity(resolved.len() + guard.len() + 30);
+                result.push_str(&resolved[..body_start]);
+                result.push_str(&crate::tsx::condition::build_ternary_guard(guard));
+                result.push_str(&resolved[body_start..]);
+                Some(result)
+            } else {
+                // Arrow block body: inject block guard after opening {
+                // () => { stmts } → () => {if(!(guard))return; stmts}
+                let brace_offset = resolved[after_arrow..].find('{')?;
+                let brace_pos = after_arrow + brace_offset;
+                let mut result = String::with_capacity(resolved.len() + guard.len() + 30);
+                result.push_str(&resolved[..=brace_pos]);
+                result.push_str(&crate::tsx::condition::build_block_guard(guard));
+                result.push_str(&resolved[brace_pos + 1..]);
+                Some(result)
+            }
+        }
+        Expression::FunctionExpression(_) => {
+            // Function expression: inject block guard after opening { of body
+            // function() { stmts } → function() {if(!(guard))return; stmts}
+            // Find the closing `)` of parameters, then the next `{`
+            let mut depth = 0i32;
+            let mut paren_close = None;
+            for (i, ch) in resolved.char_indices() {
+                if ch == '(' {
+                    depth += 1;
+                }
+                if ch == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        paren_close = Some(i);
+                        // Don't break — we want the FIRST balanced close
+                        break;
+                    }
+                }
+            }
+            let paren_close = paren_close?;
+            let brace_offset = resolved[paren_close..].find('{')?;
+            let brace_pos = paren_close + brace_offset;
+            let mut result = String::with_capacity(resolved.len() + guard.len() + 30);
+            result.push_str(&resolved[..=brace_pos]);
+            result.push_str(&crate::tsx::condition::build_block_guard(guard));
+            result.push_str(&resolved[brace_pos + 1..]);
+            Some(result)
+        }
+        _ => None, // Non-function: no guard needed
+    }
+}
+
 fn resolve_prefixed_expr(
     raw_expr: &str,
     expr_start: u32,
@@ -552,18 +766,13 @@ fn resolve_prefixed_expr(
 
 fn resolve_prefixed_dynamic_arg(
     raw_arg: &str,
+    raw_arg_start: u32,
     oxc_prop: Option<&OxcParsedProp<'_>>,
     resolver: &BindingResolver<'_>,
 ) -> String {
     if let Some(oxc_p) = oxc_prop {
         if let Some(ref arg) = oxc_p.arg {
-            if let Some(ref bindings) = arg.bindings {
-                // Dynamic args are simple in practice for TSX parity cases (`[msg]`),
-                // so resolve via simple expression and avoid positional patches.
-                if bindings.bindings.len() == 1 {
-                    return resolver.resolve_simple_expr(raw_arg);
-                }
-            }
+            return build_prefixed_expr(raw_arg, raw_arg_start, arg, resolver, &[]);
         }
     }
     resolver.resolve_simple_expr(raw_arg)
@@ -608,7 +817,7 @@ mod tests {
 
     #[test]
     fn event_to_jsx_kebab() {
-        assert_eq!(event_to_jsx_name("custom-event"), "onCustom-event");
+        assert_eq!(event_to_jsx_name("custom-event"), "onCustomEvent");
     }
 
     #[test]
@@ -616,6 +825,11 @@ mod tests {
         assert_eq!(event_to_jsx_name("input"), "onInput");
         assert_eq!(event_to_jsx_name("change"), "onChange");
         assert_eq!(event_to_jsx_name("mousedown"), "onMousedown");
+    }
+
+    #[test]
+    fn event_to_jsx_multi_segment_kebab() {
+        assert_eq!(event_to_jsx_name("my-custom-event"), "onMyCustomEvent");
     }
 
     #[test]

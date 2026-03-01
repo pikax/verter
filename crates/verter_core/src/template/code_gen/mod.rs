@@ -23,6 +23,7 @@
 
 pub mod binding;
 pub mod shared;
+pub mod ssr;
 pub mod types;
 pub mod vapor;
 pub mod vapor2;
@@ -38,7 +39,7 @@ use crate::template::oxc::types::{OxcParsedAst, OxcParsedElement, OxcParsedExpre
 use crate::types::NodeId;
 
 use self::binding::{BindingResolver, BindingType};
-use self::types::CodeGenOutput;
+use self::types::{CodeGenOutput, TemplateImports};
 
 /// Output mode for template code generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,8 @@ pub enum CodeGenMode {
     /// Vapor2 — stateless vapor codegen using NodeId-based variable naming.
     #[allow(dead_code)]
     Vapor2,
+    /// SSR mode — string-concatenation output (`_push()`, `_ssrRenderAttrs()`, etc.).
+    Ssr,
 }
 
 /// Options for template code generation.
@@ -71,6 +74,18 @@ pub struct TemplateCodeGenOptions {
     /// Props known to be const across all call sites (from cross-file analysis).
     /// Passed through to the `BindingResolver` to override reactivity level.
     pub const_props: Option<rustc_hash::FxHashSet<String>>,
+    /// Whether the SFC has `<style scoped>`. When true and in SSR mode, the
+    /// template codegen emits `_scopeId` parameter and appends `${_scopeId}`
+    /// to element tags and component render calls.
+    #[allow(dead_code)]
+    pub has_scoped_style: bool,
+    /// Whether to hoist fully-static subtrees into `_createStaticVNode()` calls.
+    /// Resolved from `CodegenOptions.hoist_static` (defaults to `true`).
+    pub hoist_static: bool,
+    /// Scope ID for scoped styles (e.g., `"data-v-a1b2c3d4"`).
+    /// Empty string if no scoped style. Used to inject scope attributes
+    /// into static HTML strings for `_createStaticVNode()`.
+    pub scope_id: String,
 }
 
 impl Default for TemplateCodeGenOptions {
@@ -83,8 +98,25 @@ impl Default for TemplateCodeGenOptions {
             force_js: false,
             self_name: String::new(),
             const_props: None,
+            has_scoped_style: false,
+            hoist_static: true,
+            scope_id: String::new(),
         }
     }
+}
+
+/// Action returned by `enter_element` to control child traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkAction {
+    /// Continue visiting children, then call `leave_element`.
+    Continue,
+    /// Skip children but still call `leave_element` (stack balance).
+    ///
+    /// Used by VDOM codegen for fully-static subtrees: the enter phase
+    /// detects `is_fully_static` and returns `SkipChildren`, deferring
+    /// the actual `_createStaticVNode()` emission to the parent's
+    /// `build_child_records` consolidation.
+    SkipChildren,
 }
 
 /// Trait for VDOM and Vapor template code generation backends.
@@ -109,6 +141,10 @@ pub trait TemplateCodeGen<'alloc> {
     );
 
     /// Called when entering an element node (before children are visited).
+    ///
+    /// Returns [`WalkAction::Continue`] to visit children normally, or
+    /// [`WalkAction::SkipChildren`] to skip them (e.g., for static hoisting).
+    /// In both cases, `leave_element` is still called.
     fn enter_element(
         &mut self,
         id: NodeId,
@@ -116,7 +152,7 @@ pub trait TemplateCodeGen<'alloc> {
         oxc: Option<&OxcParsedElement<'alloc>>,
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
-    );
+    ) -> WalkAction;
 
     /// Called when leaving an element node (after all children visited).
     fn leave_element(
@@ -162,9 +198,8 @@ pub trait TemplateCodeGen<'alloc> {
 /// Accumulates all operations into `CodeGenOutput`, then batch-applies
 /// to the `CodeTransform` in a single pass.
 ///
-/// Returns the deduplicated list of runtime helper imports (e.g.
-/// `["_createElementVNode", "_toDisplayString"]`) so the caller or a
-/// downstream merger can emit the `import { ... } from "vue"` statement.
+/// Returns the categorized runtime helper imports so the caller can emit
+/// `import { ... } from "vue"` and optionally `import { ... } from "vue/server-renderer"`.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn generate_template<'alloc>(
     ast: &TemplateAst,
@@ -174,7 +209,7 @@ pub fn generate_template<'alloc>(
     alloc: &'alloc Allocator,
     bindings: FxHashMap<&'alloc str, BindingType>,
     options: &TemplateCodeGenOptions,
-) -> Vec<&'static str> {
+) -> TemplateImports {
     // Convert owned const_props (FxHashSet<String>) to arena-allocated (&'alloc str)
     // for the BindingResolver's lifetime.
     let const_props_alloc: Option<rustc_hash::FxHashSet<&'alloc str>> = options
@@ -188,7 +223,7 @@ pub fn generate_template<'alloc>(
             r.set_vapor(true);
             r
         }
-        CodeGenMode::Vdom => {
+        CodeGenMode::Vdom | CodeGenMode::Ssr => {
             BindingResolver::new_with_const_props(bindings, options.is_inline, const_props_alloc)
         }
     };
@@ -205,6 +240,10 @@ pub fn generate_template<'alloc>(
         }
         CodeGenMode::Vapor2 => {
             let mut gen = vapor2::Vapor2CodeGen::new(ast, resolver, source, options);
+            walker::walk_template(ast, oxc_ast, source, &mut gen, &mut out);
+        }
+        CodeGenMode::Ssr => {
+            let mut gen = ssr::SsrCodeGen::new(ast, oxc_ast, resolver, options);
             walker::walk_template(ast, oxc_ast, source, &mut gen, &mut out);
         }
     }

@@ -38,7 +38,7 @@ pnpm --filter @verter/core build
 # Watch mode
 pnpm watch
 
-# Watch language-server + vscode extension
+# Build LSP binary, then watch language-shared + vscode extension + typescript-plugin
 pnpm dev-extension
 ```
 
@@ -82,11 +82,15 @@ src/
 ### Package Structure
 
 ```
+crates/
+├── verter_lsp/            # Rust LSP server binary (stdio)
+├── verter_core/           # Core template compiler (Rust)
+└── ...
+
 packages/
 ├── @verter/core           # SFC → TSX transformation
 ├── @verter/types          # TypeScript utilities
-├── @verter/language-server # LSP server
-├── @verter/language-shared # Shared protocol
+├── @verter/language-shared # Shared protocol types
 ├── @verter/typescript-plugin # TS plugin
 ├── @verter/oxc-bindings   # OXC parser helper
 └── verter-vscode          # VS Code extension
@@ -96,12 +100,11 @@ packages/
 
 ```
 verter-vscode
-├── @verter/language-server
-│   ├── @verter/core
-│   │   └── @verter/types
-│   └── @verter/language-shared
+├── verter-lsp (Rust LSP binary, stdio)
+├── @verter/language-shared
 └── @verter/typescript-plugin
     └── @verter/core
+        └── @verter/types
 ```
 
 ### Core Transformation Pipeline
@@ -200,16 +203,9 @@ test(macros): add tests for withDefaults
 ### VS Code Extension
 
 1. Open monorepo in VS Code
-2. Run "Launch Extension" debug configuration
-3. New window opens with extension loaded
-4. Set breakpoints in language server code
-
-### Language Server
-
-```bash
-# Start server with inspector
-node --inspect=6009 packages/language-server/dist/server.js
-```
+2. Run `pnpm run build:lsp` to build the Rust LSP binary
+3. Run "Launch Client" debug configuration (F5)
+4. New window opens with extension loaded — the extension spawns the `verter-lsp` binary over stdio
 
 ### TypeScript Plugin
 

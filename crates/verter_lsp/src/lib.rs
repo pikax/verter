@@ -5,7 +5,9 @@ pub mod css;
 pub mod documents;
 pub mod features;
 pub mod server;
+pub mod statistics;
 pub mod tsgo;
+pub mod utils;
 
 #[cfg(test)]
 mod integration_tests;

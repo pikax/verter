@@ -1008,7 +1008,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for Vapor2CodeGen<'ast, 'alloc> {
         _oxc: Option<&OxcParsedElement<'alloc>>,
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
-    ) {
+    ) -> super::WalkAction {
         helpers::debug_assert_element_bounds(
             source,
             el.tag_open.start,
@@ -1094,6 +1094,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for Vapor2CodeGen<'ast, 'alloc> {
         if !is_scope_container {
             self.depth += 1;
         }
+        super::WalkAction::Continue
     }
 
     fn leave_element(

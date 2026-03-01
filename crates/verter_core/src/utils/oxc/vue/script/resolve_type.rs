@@ -178,6 +178,10 @@ pub struct ResolvedProp {
     pub optional: bool,
     /// Inferred runtime types for this property
     pub types: Vec<RuntimeType>,
+    /// Span of the type annotation (excluding the `: ` prefix) in the source.
+    /// Set for property signatures with explicit type annotations; `None` for
+    /// method signatures and companion-script props.
+    pub type_span: Option<Span>,
 }
 
 /// A resolved emit event from defineEmits type parameter.
@@ -1038,12 +1042,18 @@ fn resolve_property_signature(
         end: prop.span.end + base_offset,
     };
 
+    let type_span = prop.type_annotation.as_ref().map(|ann| Span {
+        start: ann.type_annotation.span().start + base_offset,
+        end: ann.type_annotation.span().end + base_offset,
+    });
+
     Some(ResolvedProp {
         span,
         key,
         key_name: get_property_key_name(&prop.key),
         optional,
         types,
+        type_span,
     })
 }
 
@@ -1064,6 +1074,7 @@ fn resolve_method_signature(method: &TSMethodSignature, base_offset: u32) -> Opt
         key_name: get_property_key_name(&method.key),
         optional,
         types: vec![RuntimeType::Function],
+        type_span: None,
     })
 }
 
@@ -1156,8 +1167,20 @@ pub fn infer_runtime_type(node: &TSType) -> Vec<RuntimeType> {
         // Type reference: SomeType or SomeType<T>
         TSType::TSTypeReference(type_ref) => infer_type_reference(type_ref),
 
-        // Conditional type: T extends U ? X : Y
-        TSType::TSConditionalType(_) => vec![RuntimeType::Unknown],
+        // Conditional type: T extends U ? X : Y — union both branches
+        TSType::TSConditionalType(cond) => {
+            let mut types = infer_runtime_type(&cond.true_type);
+            for t in infer_runtime_type(&cond.false_type) {
+                if !types.contains(&t) {
+                    types.push(t);
+                }
+            }
+            if types.is_empty() {
+                vec![RuntimeType::Unknown]
+            } else {
+                types
+            }
+        }
 
         // Mapped type: { [K in keyof T]: T[K] }
         TSType::TSMappedType(_) => vec![RuntimeType::Object],
@@ -1296,12 +1319,15 @@ fn extract_heritage_type_names(extends: &[TSInterfaceHeritage]) -> Vec<String> {
 }
 
 /// Get the name from a type reference's type name.
+///
+/// For qualified names like `Namespace.Props`, returns the full path
+/// (`"Namespace.Props"`) by recursively walking the left side.
 fn get_type_reference_name(type_name: &TSTypeName) -> String {
     match type_name {
         TSTypeName::IdentifierReference(id) => id.name.to_string(),
         TSTypeName::QualifiedName(qualified) => {
-            // For qualified names like Foo.Bar, just use the last part for now
-            qualified.right.name.to_string()
+            let left = get_type_reference_name(&qualified.left);
+            format!("{}.{}", left, qualified.right.name)
         }
         TSTypeName::ThisExpression(_) => "this".to_string(),
     }
@@ -1392,6 +1418,7 @@ fn infer_props_from_object_literal(
             key_name: None,
             types: runtime_type,
             optional: false,
+            type_span: None,
         });
     }
 
@@ -1469,7 +1496,7 @@ pub fn resolve_external_type(
     result
 }
 
-/// Hash the resolved type shape for cache comparison.
+/// Hash the resolved type shape for cache comparison (SHA-256, truncated to 16 bytes).
 ///
 /// Produces a stable hash from prop names + runtime types + optional flags + emits.
 /// Two different source texts that resolve to the same prop shape produce the same hash.
@@ -2212,6 +2239,7 @@ type Test = Local;"#;
             key_name: Some("baseField".to_string()),
             optional: false,
             types: vec![RuntimeType::String],
+            type_span: None,
         });
         ctx.companion_types
             .insert("Base".to_string(), base_resolved);

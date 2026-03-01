@@ -11,6 +11,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::cursor::ScriptLanguage;
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::utils::oxc::vue::{
@@ -20,6 +21,22 @@ use crate::utils::oxc::vue::{
 
 use super::macros::{process_companion_script, process_macro_item, MacroState};
 use super::{ScriptCodeGenOptions, ScriptContext};
+
+/// Determine OXC SourceType from a script block's `lang` attribute.
+/// - `lang="tsx"` / `lang="jsx"` → TSX (JSX + TS superset)
+/// - `lang="ts"` or no lang → TypeScript (angle-bracket casts like `<string>0` are valid)
+/// - `lang="js"` → JavaScript
+///
+/// Default is TypeScript (not TSX) because Vue's `<script lang="ts">` uses angle-bracket
+/// type assertions which conflict with JSX parsing.
+pub(super) fn source_type_from_lang(lang: Option<&ScriptLanguage>) -> SourceType {
+    match lang {
+        Some(ScriptLanguage::TSX) | Some(ScriptLanguage::JSX) => SourceType::tsx(),
+        Some(ScriptLanguage::JavaScript) => SourceType::mjs(),
+        // TypeScript, Unknown, or None → TS (not TSX, to support angle-bracket casts)
+        _ => SourceType::ts(),
+    }
+}
 
 // ======================== process_script_setup ========================
 
@@ -71,8 +88,7 @@ pub fn process_script_setup<'alloc>(
 
     // Parse setup script with OXC, passing companion types for cross-block resolution
     let oxc_alloc = oxc_allocator::Allocator::default();
-    // Parse as TSX — OXC's TS parser is a superset of JS, so this works for all langs
-    let source_type = SourceType::tsx();
+    let source_type = source_type_from_lang(setup.lang.as_ref());
     let parser_ret = Parser::new(&oxc_alloc, content_str, source_type).parse();
 
     // Merge external types (from host's cross-file resolution) into companion types
@@ -246,15 +262,25 @@ pub fn process_script_setup<'alloc>(
     // string-level insertion (rfind) that breaks on non-object-literal props
     // sections (e.g., IIFE from withDefaults with runtime variable).
     if !macro_state.model_names.is_empty() {
-        // Build model props object: { name: {}, nameModifiers: {} }
+        // Build model props object: { name: { type: T, default: v }, nameModifiers: {} }
         let mut model_props_obj = String::from("{\n");
-        for (i, name) in macro_state.model_names.iter().enumerate() {
+        for (i, (name, options)) in macro_state.model_names.iter().enumerate() {
             if i > 0 {
                 model_props_obj.push_str(",\n");
             }
             model_props_obj.push_str("    ");
             model_props_obj.push_str(name);
-            model_props_obj.push_str(": {},\n    ");
+            // Forward defineModel options (type, default, etc.) if provided
+            match options {
+                Some(opts) => {
+                    model_props_obj.push_str(": ");
+                    model_props_obj.push_str(opts);
+                }
+                None => {
+                    model_props_obj.push_str(": {}");
+                }
+            }
+            model_props_obj.push_str(",\n    ");
             if name == "modelValue" {
                 model_props_obj.push_str("modelModifiers: {}");
             } else {
@@ -283,7 +309,7 @@ pub fn process_script_setup<'alloc>(
         let model_emits: Vec<String> = macro_state
             .model_names
             .iter()
-            .map(|name| format!("\"update:{}\"", name))
+            .map(|(name, _)| format!("\"update:{}\"", name))
             .collect();
         let model_emits_arr = format!("[{}]", model_emits.join(", "));
 
@@ -319,6 +345,7 @@ pub fn process_script_setup<'alloc>(
         macro_state.props_section.as_deref(),
         macro_state.emits_section.as_deref(),
         macro_state.options_section.as_deref(),
+        options.ssr,
     );
 
     // Overwrite open tag with wrapper
@@ -343,6 +370,7 @@ pub fn process_script_setup<'alloc>(
             None
         },
         options.is_vapor,
+        options.ssr,
     );
 
     // Handle close tag
@@ -383,7 +411,7 @@ pub fn process_script_only<'alloc>(
 
     // Parse with OXC to find default export
     let oxc_alloc = oxc_allocator::Allocator::default();
-    let source_type = SourceType::tsx();
+    let source_type = source_type_from_lang(script.lang.as_ref());
     let parser_ret = Parser::new(&oxc_alloc, content_str, source_type).parse();
     let parse_result = parse_script(
         &parser_ret.program,
@@ -391,6 +419,13 @@ pub fn process_script_only<'alloc>(
         content_start,
         content_str,
     );
+
+    // Extract Options API bindings (data, props, computed, methods, inject)
+    // so the template codegen can use the correct accessor prefix ($data., $props., _ctx.).
+    for (span, bt) in &parse_result.bindings {
+        let name = &content_str[span.start as usize..span.end as usize];
+        ctx.bindings.insert(name, *bt);
+    }
 
     // Find default export and replace it.
     // Regular <script> content is passed through as-is to the bundler
@@ -420,6 +455,9 @@ pub fn process_script_only<'alloc>(
     }
     if options.is_vapor {
         close_text.push_str("__sfc__.__vapor = true;\n");
+    }
+    if options.ssr {
+        close_text.push_str("__sfc__.__ssrInlineRender = true;\n");
     }
     if options.has_scoped_style && !options.scope_id.is_empty() {
         close_text.push_str("__sfc__.__scopeId = \"");
@@ -453,6 +491,9 @@ fn emit_minimal_component(
     if options.is_vapor {
         s.push_str("__sfc__.__vapor = true;\n");
     }
+    if options.ssr {
+        s.push_str("__sfc__.__ssrInlineRender = true;\n");
+    }
     if options.has_scoped_style && !options.scope_id.is_empty() {
         s.push_str("__sfc__.__scopeId = \"");
         s.push_str(options.scope_id);
@@ -480,6 +521,7 @@ fn emit_minimal_component(
 ///   emits: ['click'],              // from defineEmits
 ///   setup(__props, { expose: __expose, emit: __emit }) {
 /// ```
+#[allow(clippy::too_many_arguments)]
 fn build_setup_wrapper_start(
     component_name: &str,
     is_async: bool,
@@ -488,6 +530,7 @@ fn build_setup_wrapper_start(
     props_section: Option<&str>,
     emits_section: Option<&str>,
     options_section: Option<&str>,
+    ssr: bool,
 ) -> String {
     let mut s = String::with_capacity(256);
     s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
@@ -503,6 +546,10 @@ fn build_setup_wrapper_start(
         s.push_str("  __name: '");
         s.push_str(component_name);
         s.push_str("',\n");
+    }
+
+    if ssr {
+        s.push_str("  __ssrInlineRender: true,\n");
     }
 
     // Props section
@@ -559,6 +606,7 @@ fn build_setup_wrapper_end(
     returned: Option<&str>,
     scope_id: Option<&str>,
     is_vapor: bool,
+    ssr: bool,
 ) -> String {
     let mut s = String::with_capacity(128);
     if let Some(ret) = returned {
@@ -572,6 +620,9 @@ fn build_setup_wrapper_end(
     s.push_str("\n}});\n");
     if is_vapor {
         s.push_str("__sfc__.__vapor = true;\n");
+    }
+    if ssr {
+        s.push_str("__sfc__.__ssrInlineRender = true;\n");
     }
     if let Some(id) = scope_id {
         s.push_str("__sfc__.__scopeId = \"");

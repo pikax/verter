@@ -318,10 +318,17 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
             Expression::ClassExpression(class) => {
                 if let Some(id) = &class.id {
-                    // SAFETY: The lifetime is tied to the OXC AST allocator which outlives our usage
-                    self.ctx.add_ignored(unsafe {
-                        std::mem::transmute::<&str, &'a str>(id.name.as_str())
-                    });
+                    // SAFETY: `id.name` is `Atom<'a>` — its string data lives in the OXC arena
+                    // allocator with lifetime `'a`. `Atom::as_str()` returns `&str` with the
+                    // borrow lifetime (OXC API limitation), but the data genuinely has lifetime
+                    // `'a` since the allocator and AST outlive our BindingVisitor.
+                    let name_str = id.name.as_str();
+                    debug_assert!(
+                        !name_str.is_empty(),
+                        "class expression id should be non-empty"
+                    );
+                    self.ctx
+                        .add_ignored(unsafe { std::mem::transmute::<&str, &'a str>(name_str) });
                 }
                 for element in &class.body.body {
                     match element {
@@ -577,8 +584,11 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn visit_function(&mut self, func: &Function<'a>, span: OxcSpan) {
         let mut param_bytes: ParamBytes<'a> = SmallVec::new();
         if let Some(id) = &func.id {
-            // SAFETY: The lifetime is tied to the OXC AST allocator which outlives our usage
-            param_bytes.push(unsafe { std::mem::transmute::<&str, &'a str>(id.name.as_str()) });
+            // SAFETY: `id.name` is `Atom<'a>` whose string data lives in the OXC arena
+            // allocator with lifetime `'a`. See ClassExpression transmute for full rationale.
+            let name_str = id.name.as_str();
+            debug_assert!(!name_str.is_empty(), "function id should be non-empty");
+            param_bytes.push(unsafe { std::mem::transmute::<&str, &'a str>(name_str) });
         }
 
         for param in &func.params.items {
@@ -636,8 +646,14 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     ) {
         match pattern {
             BindingPattern::BindingIdentifier(ident) => {
-                // SAFETY: The lifetime is tied to the AST which outlives our usage
-                bytes.push(unsafe { std::mem::transmute::<&str, &'a str>(ident.name.as_str()) });
+                // SAFETY: `ident.name` is `Atom<'a>` whose string data lives in the OXC arena
+                // allocator with lifetime `'a`. See ClassExpression transmute for full rationale.
+                let name_str = ident.name.as_str();
+                debug_assert!(
+                    !name_str.is_empty(),
+                    "binding identifier should be non-empty"
+                );
+                bytes.push(unsafe { std::mem::transmute::<&str, &'a str>(name_str) });
             }
             BindingPattern::ObjectPattern(obj) => {
                 for prop in &obj.properties {
@@ -729,6 +745,19 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         let end = span.end as usize;
         // SAFETY: Spans from OXC parser are guaranteed to be valid byte offsets
         // within the source string, and source is valid UTF-8
+        debug_assert!(
+            end <= self.source_bytes.len(),
+            "OXC literal span {}..{} exceeds source length {}",
+            start,
+            end,
+            self.source_bytes.len(),
+        );
+        debug_assert!(
+            std::str::from_utf8(&self.source_bytes[start..end]).is_ok(),
+            "OXC literal span {}..{} is not valid UTF-8",
+            start,
+            end,
+        );
         let content = unsafe {
             let bytes = self.source_bytes.get_unchecked(start..end);
             std::str::from_utf8_unchecked(bytes)

@@ -380,3 +380,110 @@ fn vapor_helper_name_roundtrip() {
     assert_eq!(VaporHelper::CreateComponent.name(), CREATE_COMPONENT);
     assert_eq!(VaporHelper::ToDisplayString.name(), VAPOR_TO_DISPLAY_STRING);
 }
+
+// ==================== escape_template_literal_into ====================
+
+/// @ai-generated — No escaping needed
+#[test]
+fn escape_template_literal_no_escape() {
+    let mut buf = String::new();
+    escape_template_literal_into(&mut buf, "<div class=\"foo\">text</div>");
+    assert_eq!(buf, "<div class=\"foo\">text</div>");
+}
+
+/// @ai-generated — Backtick gets escaped
+#[test]
+fn escape_template_literal_backtick() {
+    let mut buf = String::new();
+    escape_template_literal_into(&mut buf, "a`b");
+    assert_eq!(buf, "a\\`b");
+}
+
+/// @ai-generated — Backslash gets escaped
+#[test]
+fn escape_template_literal_backslash() {
+    let mut buf = String::new();
+    escape_template_literal_into(&mut buf, "a\\b");
+    assert_eq!(buf, "a\\\\b");
+}
+
+/// @ai-generated — ${ gets escaped
+#[test]
+fn escape_template_literal_dollar_brace() {
+    let mut buf = String::new();
+    escape_template_literal_into(&mut buf, "a${b}");
+    assert_eq!(buf, "a\\${b}");
+}
+
+/// @ai-generated — $ without { is NOT escaped
+#[test]
+fn escape_template_literal_dollar_no_brace() {
+    let mut buf = String::new();
+    escape_template_literal_into(&mut buf, "a$b");
+    assert_eq!(buf, "a$b");
+}
+
+/// @ai-generated — Empty string
+#[test]
+fn escape_template_literal_empty() {
+    let mut buf = String::new();
+    escape_template_literal_into(&mut buf, "");
+    assert_eq!(buf, "");
+}
+
+// ==================== build_static_html_with_scope ====================
+
+/// @ai-generated — No scope ID injection
+#[test]
+fn build_static_html_no_scope() {
+    let source = "<div>hello</div>";
+    let mut buf = String::new();
+    build_static_html_with_scope(source, 0, source.len() as u32, "data-v-abc", &[], &mut buf);
+    assert_eq!(buf, "<div>hello</div>");
+}
+
+/// @ai-generated — Single injection point
+#[test]
+fn build_static_html_single_injection() {
+    let source = "<div>hello</div>";
+    // Inject before '>' at position 4
+    let mut buf = String::new();
+    build_static_html_with_scope(source, 0, source.len() as u32, "data-v-abc", &[4], &mut buf);
+    assert_eq!(buf, "<div data-v-abc>hello</div>");
+}
+
+/// @ai-generated — Multiple injection points
+#[test]
+fn build_static_html_multiple_injections() {
+    let source = "<div><span>text</span></div>";
+    // '<div>' ends at 5, inject at 4 (before >)
+    // '<span>' starts at 5, ends at 11, inject at 10 (before >)
+    let mut buf = String::new();
+    build_static_html_with_scope(
+        source,
+        0,
+        source.len() as u32,
+        "data-v-abc",
+        &[4, 10],
+        &mut buf,
+    );
+    assert_eq!(buf, "<div data-v-abc><span data-v-abc>text</span></div>");
+}
+
+// ==================== CreateStaticVNode helper ====================
+
+/// @ai-generated — VdomHelper::CreateStaticVNode name
+#[test]
+fn vdom_helper_create_static_vnode_name() {
+    assert_eq!(VdomHelper::CreateStaticVNode.name(), CREATE_STATIC_VNODE);
+    assert_eq!(VdomHelper::CreateStaticVNode.name(), "_createStaticVNode");
+}
+
+/// @ai-generated — VdomHelperFlags includes CreateStaticVNode
+#[test]
+fn vdom_helper_flags_create_static_vnode() {
+    let flags = VdomHelperFlags::empty().add(VdomHelper::CreateStaticVNode);
+    assert!(flags.has(VdomHelper::CreateStaticVNode));
+    let imports = flags.to_imports();
+    assert!(imports.contains(&"_createStaticVNode"));
+}

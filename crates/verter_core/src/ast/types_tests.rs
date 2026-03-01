@@ -574,6 +574,7 @@ mod element_node_tests {
             prop_flag: PropFlag::empty(),
             children_flag: ChildrenFlag::empty(),
             children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
         }
     }
 

@@ -114,6 +114,15 @@ fn classify_variable_declaration<'a>(
 }
 
 /// Classify the initializer of a `const` declaration.
+///
+/// Mirrors Vue's `walkDeclaration` + `canNeverBeRef` logic:
+/// - Literal primitives → `LiteralConst`
+/// - Call expressions → depends on callee (ref/computed/reactive/use*)
+/// - Expressions that structurally can never be a ref (arrays, objects,
+///   functions, classes, unary, binary, update, tagged template) → `SetupConst`
+/// - Everything else (ternary, identifiers, member access, await, yield,
+///   assignment, sequence, etc.) → `SetupMaybeRef` because the result
+///   might be a ref at runtime
 fn classify_const_init<'a>(init: &Expression<'a>) -> BindingType {
     match init {
         Expression::StringLiteral(_)
@@ -126,8 +135,52 @@ fn classify_const_init<'a>(init: &Expression<'a>) -> BindingType {
 
         Expression::CallExpression(call) => classify_call_expression(call),
 
-        _ => BindingType::SetupConst,
+        // Expressions that can never be a ref → SetupConst
+        // (matches Vue's canNeverBeRef())
+        Expression::UnaryExpression(_)
+        | Expression::BinaryExpression(_)
+        | Expression::ArrayExpression(_)
+        | Expression::ObjectExpression(_)
+        | Expression::FunctionExpression(_)
+        | Expression::ArrowFunctionExpression(_)
+        | Expression::UpdateExpression(_)
+        | Expression::ClassExpression(_)
+        | Expression::TaggedTemplateExpression(_) => BindingType::SetupConst,
+
+        // For SequenceExpression, check last expression
+        Expression::SequenceExpression(seq) => {
+            if let Some(last) = seq.expressions.last() {
+                if can_never_be_ref(last) {
+                    BindingType::SetupConst
+                } else {
+                    BindingType::SetupMaybeRef
+                }
+            } else {
+                BindingType::SetupMaybeRef
+            }
+        }
+
+        // Everything else (ternary, identifiers, member access, await,
+        // yield, assignment, etc.) might evaluate to a ref
+        _ => BindingType::SetupMaybeRef,
     }
+}
+
+/// Check if an expression structurally can never produce a ref value.
+/// Mirrors Vue's `canNeverBeRef()` from `@vue/compiler-sfc`.
+fn can_never_be_ref<'a>(expr: &Expression<'a>) -> bool {
+    matches!(
+        expr,
+        Expression::UnaryExpression(_)
+            | Expression::BinaryExpression(_)
+            | Expression::ArrayExpression(_)
+            | Expression::ObjectExpression(_)
+            | Expression::FunctionExpression(_)
+            | Expression::ArrowFunctionExpression(_)
+            | Expression::UpdateExpression(_)
+            | Expression::ClassExpression(_)
+            | Expression::TaggedTemplateExpression(_)
+    )
 }
 
 /// Classify a call expression in a const initializer.

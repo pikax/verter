@@ -36,7 +36,10 @@ pub struct MacroObjectArg<'a> {
     pub properties: Vec<MacroProperty<'a>>,
 }
 
-/// A property in a macro object argument
+/// A property in a macro object argument.
+///
+/// For `defineProps` object syntax, the AST-extracted fields provide all type
+/// information needed for codegen — no string parsing of prop values is needed.
 #[derive(Debug)]
 pub struct MacroProperty<'a> {
     /// The property name
@@ -47,6 +50,23 @@ pub struct MacroProperty<'a> {
     pub value_span: Option<Span>,
     /// Whether this property uses method shorthand (e.g., `foo() { ... }`)
     pub is_method: bool,
+    /// Whether the prop has `required: true` in object form.
+    /// Extracted from the OXC AST (not string parsing).
+    pub required: bool,
+    /// Whether the prop has a `default:` key in object form.
+    /// Extracted from the OXC AST (not string parsing).
+    pub has_default: bool,
+    /// Runtime constructor types extracted from the AST.
+    /// - `title: String` → `[RuntimeType::String]`
+    /// - `value: [String, Number]` → `[RuntimeType::String, RuntimeType::Number]`
+    /// - `{ type: Number }` → `[RuntimeType::Number]`
+    /// - `{ type: [String, Number] }` → `[RuntimeType::String, RuntimeType::Number]`
+    pub runtime_types: Vec<RuntimeType>,
+    /// Span of the TypeScript type annotation from `as PropType<T>`, if present.
+    /// Points to `T` inside `PropType<T>`.
+    /// - `Array as PropType<string[]>` → span of `string[]`
+    /// - `{ type: Object as PropType<{name: string}> }` → span of `{name: string}`
+    pub prop_type_annotation: Option<Span>,
 }
 
 /// Array argument info: defineEmits(['change', 'update'])

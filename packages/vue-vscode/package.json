@@ -24,27 +24,38 @@
     "build": "tsc -b",
     "watch": "pnpm build --watch",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "package": "vsce package"
+    "package": "vsce package",
+    "package:win32-x64": "vsce package --target win32-x64",
+    "package:linux-x64": "vsce package --target linux-x64",
+    "package:linux-arm64": "vsce package --target linux-arm64",
+    "package:darwin-x64": "vsce package --target darwin-x64",
+    "package:darwin-arm64": "vsce package --target darwin-arm64"
   },
   "dependencies": {
     "@types/lodash": "^4.17.23",
     "@types/vscode": "^1.109.0",
-    "@verter/language-server": "workspace:^",
     "@verter/language-shared": "workspace:^",
-    "@verter/oxc-bindings": "workspace:^",
     "@verter/typescript-plugin": "workspace:^",
     "brace-expansion": "^4.0.1",
     "lodash": "^4.17.23",
     "minimatch": "^10.1.2",
+    "source-map": "^0.7.6",
+    "vscode-css-languageservice": "^6.3.9",
     "vscode-jsonrpc": "^8.2.1",
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver-protocol": "^3.17.5",
+    "vscode-languageserver-textdocument": "^1.0.12",
     "vscode-languageserver-types": "^3.17.5"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.7.1",
     "typescript": "^5.9.3",
     "vite": "^7.3.1"
+  },
+  "configurationDefaults": {
+    "emmet.includeLanguages": {
+      "vue": "html"
+    }
   },
   "contributes": {
     "configuration": {
@@ -55,6 +66,11 @@
           "type": "boolean",
           "default": true,
           "description": "Enable/Disable Verter"
+        },
+        "verter.lspBinaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the verter-lsp binary. Leave empty to auto-detect (bundled binary or PATH)."
         },
         "verter.statistics.enabled": {
           "type": "boolean",
@@ -80,8 +96,196 @@
           "type": "number",
           "default": 2000,
           "description": "Maximum number of events persisted to disk."
+        },
+        "verter.analysis.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the Verter Analysis sidebar (virtual files, component tree, analysis, source map sync)."
+        },
+        "verter.decorations.vueApiCalls": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline annotations for Vue API calls (lifecycle hooks, watchers, reactivity, provide/inject)."
+        },
+        "verter.decorations.bindingColors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show faint color decorations on bindings based on their reactivity type (ref, computed, reactive, prop, etc.)."
+        },
+        "verter.decorations.bindingColorsScope": {
+          "type": "string",
+          "enum": [
+            "template",
+            "all"
+          ],
+          "default": "template",
+          "enumDescriptions": [
+            "Color bindings only in <template> (where they are consumed far from declarations)",
+            "Color bindings in both <template> and <script>"
+          ],
+          "description": "Where to apply binding color decorations."
+        },
+        "verter.decorations.bindingColorsStyle": {
+          "type": "string",
+          "enum": [
+            "background",
+            "underline"
+          ],
+          "default": "background",
+          "enumDescriptions": [
+            "Faint background tint behind binding text",
+            "Subtle colored dotted underline beneath binding text"
+          ],
+          "description": "Visual style for binding color decorations."
+        },
+        "verter.decorations.propConstness": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show faint background decorations on component props based on their constness (const = optimizable, dynamic = needs tracking)."
+        },
+        "verter.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the Verter language server."
+        },
+        "verter.server.logLevel": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "default": "info",
+          "description": "Log level for the Verter language server process. Changing this setting restarts the server."
         }
       }
+    },
+    "colors": [
+      {
+        "id": "verter.binding.ref",
+        "description": "Background highlight for ref() bindings (needs .value)",
+        "defaults": {
+          "dark": "#4285f415",
+          "light": "#1a73e812",
+          "highContrast": "#4285f430",
+          "highContrastLight": "#1a73e820"
+        }
+      },
+      {
+        "id": "verter.binding.computed",
+        "description": "Background highlight for computed() bindings",
+        "defaults": {
+          "dark": "#a142f415",
+          "light": "#7b1fa212",
+          "highContrast": "#a142f430",
+          "highContrastLight": "#7b1fa220"
+        }
+      },
+      {
+        "id": "verter.binding.reactive",
+        "description": "Background highlight for reactive() bindings",
+        "defaults": {
+          "dark": "#00bcd415",
+          "light": "#00897b12",
+          "highContrast": "#00bcd430",
+          "highContrastLight": "#00897b20"
+        }
+      },
+      {
+        "id": "verter.binding.prop",
+        "description": "Background highlight for defineProps bindings",
+        "defaults": {
+          "dark": "#ff980015",
+          "light": "#e6510012",
+          "highContrast": "#ff980030",
+          "highContrastLight": "#e6510020"
+        }
+      },
+      {
+        "id": "verter.binding.composable",
+        "description": "Background highlight for composable return values (MaybeRef)",
+        "defaults": {
+          "dark": "#e91e6315",
+          "light": "#c2185b12",
+          "highContrast": "#e91e6330",
+          "highContrastLight": "#c2185b20"
+        }
+      },
+      {
+        "id": "verter.binding.mutable",
+        "description": "Background highlight for mutable (let) bindings",
+        "defaults": {
+          "dark": "#ffc10715",
+          "light": "#f5960012",
+          "highContrast": "#ffc10730",
+          "highContrastLight": "#f5960020"
+        }
+      },
+      {
+        "id": "verter.binding.function",
+        "description": "Background highlight for function bindings",
+        "defaults": {
+          "dark": "#4caf5015",
+          "light": "#2e7d3212",
+          "highContrast": "#4caf5030",
+          "highContrastLight": "#2e7d3220"
+        }
+      },
+      {
+        "id": "verter.propConstness.const",
+        "description": "Background highlight for const (optimizable) component props",
+        "defaults": {
+          "dark": "#66bb6a18",
+          "light": "#43a04715",
+          "highContrast": "#66bb6a30",
+          "highContrastLight": "#43a04725"
+        }
+      },
+      {
+        "id": "verter.propConstness.dynamic",
+        "description": "Background highlight for dynamic (reactive) component props",
+        "defaults": {
+          "dark": "#42a5f518",
+          "light": "#1976d215",
+          "highContrast": "#42a5f530",
+          "highContrastLight": "#1976d225"
+        }
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "verter-analysis",
+          "title": "Verter Analysis",
+          "icon": "$(beaker)"
+        }
+      ]
+    },
+    "views": {
+      "verter-analysis": [
+        {
+          "id": "verterVirtualFiles",
+          "name": "Virtual Files & Source Map",
+          "when": "verter.analysisEnabled && verter.hasActiveVueFile"
+        },
+        {
+          "id": "verterComponentTree",
+          "name": "Component Tree",
+          "when": "verter.analysisEnabled && verter.hasActiveVueFile"
+        },
+        {
+          "id": "verterAnalysis",
+          "name": "Analysis",
+          "when": "verter.analysisEnabled"
+        }
+      ]
     },
     "typescriptServerPlugins": [
       {
@@ -216,12 +420,75 @@
       {
         "command": "verter.showStatistics",
         "title": "Verter: Show Processing Statistics"
+      },
+      {
+        "command": "verter.openVirtualFile",
+        "title": "Verter: Open in Editor",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "verter.showSourceMapForFile",
+        "title": "Verter: Show Source Map",
+        "icon": "$(map)"
+      },
+      {
+        "command": "verter.refreshVirtualFiles",
+        "title": "Verter: Refresh Virtual Files",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "verter.refreshAnalysis",
+        "title": "Verter: Refresh Analysis",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "verter.showSourceMapVisualization",
+        "title": "Verter: Show Source Map Visualization",
+        "icon": "$(split-horizontal)"
+      },
+      {
+        "command": "verter.goToComponent",
+        "title": "Verter: Go to Component Definition",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "verter.goToParentFile",
+        "title": "Verter: Go to Parent File",
+        "icon": "$(file-code)"
       }
-    ]
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "verter.openVirtualFile",
+          "when": "view == verterVirtualFiles && viewItem == virtual-file",
+          "group": "inline"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "verter.showSourceMapVisualization",
+          "when": "view == verterVirtualFiles",
+          "group": "navigation"
+        },
+        {
+          "command": "verter.refreshVirtualFiles",
+          "when": "view == verterVirtualFiles",
+          "group": "navigation"
+        },
+        {
+          "command": "verter.refreshAnalysis",
+          "when": "view == verterAnalysis",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "activationEvents": [
     "onCommand:verter.restartLanguageServer",
     "onCommand:verter.showStatistics",
+    "onView:verterVirtualFiles",
+    "onView:verterAnalysis",
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
     "onLanguage:typescript",

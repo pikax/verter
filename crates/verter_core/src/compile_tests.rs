@@ -13,6 +13,20 @@ fn compile_sfc(source: &str) -> VerterCompileResult {
     compile(source, &options, &verter_opts, &alloc)
 }
 
+fn compile_sfc_no_hoist(source: &str) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        hoist_static: Some(false),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
 fn compile_sfc_vapor(source: &str) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
@@ -301,6 +315,33 @@ const x = 1
     if let Some(ref t) = result.template {
         assert!(t.duration_ms >= 0.0);
     }
+}
+
+/// Compile with hoist_static=false and assert template output is syntactically valid JS.
+fn compile_and_validate_template_no_hoist(source: &str) -> String {
+    let result = compile_sfc_no_hoist(source);
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(!tpl.code.trim().is_empty(), "template code is empty");
+    let alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::mjs();
+    let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Template JS parse error: {:?}\n--- generated code ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tpl.code
+    );
+    tpl.code.clone()
 }
 
 /// Compile and assert template output is syntactically valid JS.
@@ -3868,6 +3909,35 @@ const modelValue = defineModel()
     );
 }
 
+// @ai-generated - TDD test: defineModel with options forwards type/default to prop definition
+#[test]
+fn define_model_with_options_forwards_to_prop() {
+    let result = compile_sfc(
+        r#"<script setup>
+const visible = defineModel('visible', { type: Boolean, default: false })
+</script>
+<template><div v-if="visible">shown</div></template>"#,
+    );
+    let script = result.script.as_ref().expect("script block");
+    // defineModel options should be forwarded to the prop definition
+    assert!(
+        script.code.contains("type: Boolean"),
+        "defineModel options should forward `type: Boolean` to prop definition.\nGot:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("default: false"),
+        "defineModel options should forward `default: false` to prop definition.\nGot:\n{}",
+        script.code
+    );
+    // Should NOT output an empty prop object for models with options
+    assert!(
+        !script.code.contains("visible: {},"),
+        "Model with options should not have empty prop object.\nGot:\n{}",
+        script.code
+    );
+}
+
 // @ai-generated - TDD test: named defineModel declares correct prop and emit
 #[test]
 fn define_model_named_declares_prop_and_emit() {
@@ -6211,7 +6281,7 @@ defineProps<{ class?: string }>()
 /// causes Vue to misinterpret it as a slots object and render nothing.
 #[test]
 fn single_element_child_wrapped_in_array() {
-    let code = compile_and_validate_template(
+    let code = compile_and_validate_template_no_hoist(
         r#"<template>
   <ul>
     <li><button>Create User</button></li>
@@ -6231,7 +6301,7 @@ fn single_element_child_wrapped_in_array() {
 /// @ai-generated - Multiple <li><button>...</button></li> all must have array-wrapped children.
 #[test]
 fn single_element_children_in_list() {
-    let code = compile_and_validate_template(
+    let code = compile_and_validate_template_no_hoist(
         r#"<template>
   <ul>
     <li><button>Create User</button></li>
@@ -6254,7 +6324,7 @@ fn single_element_children_in_list() {
 /// @ai-generated - Single element child in <td><span>...</span></td> must be array-wrapped.
 #[test]
 fn single_element_child_in_td() {
-    let code = compile_and_validate_template(
+    let code = compile_and_validate_template_no_hoist(
         r#"<template>
   <table><tbody><tr>
     <td><span class="badge">Done</span></td>
@@ -6329,7 +6399,7 @@ fn compile_tsx(source: &str) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
-        include_tsx: true,
+        target: CompileTarget::BUNDLER | CompileTarget::TSX,
         ..Default::default()
     };
     let verter_opts = VerterCompileOptions {
@@ -6343,7 +6413,7 @@ fn compile_tsx_with_force_js(source: &str, force_js: bool) -> VerterCompileResul
     let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
-        include_tsx: true,
+        target: CompileTarget::BUNDLER | CompileTarget::TSX,
         ..Default::default()
     };
     let verter_opts = VerterCompileOptions {
@@ -6371,7 +6441,7 @@ const msg = 'hello'
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(!tsx.code.is_empty(), "TSX code should not be empty");
     assert!(
-        tsx.code.contains("function __verter_tsx_App"),
+        tsx.code.contains("function ___VERTER___TemplateBindingFN"),
         "Should contain component wrapper function, got: {}",
         tsx.code
     );
@@ -6407,7 +6477,7 @@ const count = ref(0)
     // Imports should be hoisted above the wrapper function
     let fn_pos = tsx
         .code
-        .find("function __verter_tsx_App")
+        .find("function ___VERTER___TemplateBindingFN")
         .expect("wrapper function");
     let ref_pos = tsx
         .code
@@ -7253,8 +7323,8 @@ fn tsx_binding_v5_process_parity_matrix() {
         ),
         (
             r#"<template><Comp v-model:[`${msg}ss`]="msg" /></template>"#,
-            &[r#"v-model:[`${_ctx.msg}ss`]="_ctx.msg""#],
-            &[],
+            &[r#"[`${_ctx.msg}ss`]:_ctx.msg"#],
+            &[r#"v-model:"#],
         ),
         (
             r#"<template>{{ { test } }}</template>"#,
@@ -7365,8 +7435,8 @@ fn tsx_prop_v5_process_parity_matrix() {
         ),
         (
             r#"<template><div @test-camel-case="test" /></template>"#,
-            &[r#"<div onTest-camel-case={_ctx.test} />"#],
-            &[],
+            &[r#"<div onTestCamelCase={_ctx.test} />"#],
+            &[r#"onTest-camel-case"#],
         ),
         (
             r#"<template><div aria-label="test" data-test="value" /></template>"#,
@@ -7701,10 +7771,11 @@ defineOptions({ name: 'App', inheritAttrs: false })
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
+    // With macro boxing, defineOptions arguments are extracted into a boxed constant.
+    // The original arguments should appear in the boxing expression.
     assert!(
-        tsx.code
-            .contains("defineOptions({ name: 'App', inheritAttrs: false })"),
-        "defineOptions call should be preserved in TSX output, got:\n{}",
+        tsx.code.contains("{ name: 'App', inheritAttrs: false }"),
+        "defineOptions arguments should be preserved in TSX output (boxed or raw), got:\n{}",
         tsx.code
     );
 }
@@ -7914,7 +7985,7 @@ const test = () => {}
 }
 
 #[test]
-fn tsx_event_hyphenated_name_preserves_v5_tail_segments() {
+fn tsx_event_hyphenated_name_camelcases_segments() {
     let result = compile_tsx(
         r#"<script setup lang="ts">
 const test = () => {}
@@ -7926,9 +7997,15 @@ const test = () => {}
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("onTest-camel-case={test}")
-            || tsx.code.contains("onTest-camel-case={_ctx.test}"),
-        "Hyphenated event name should preserve tail segments as v5 does, got:\n{}",
+        tsx.code.contains("onTestCamelCase={test}")
+            || tsx.code.contains("onTestCamelCase={_ctx.test}"),
+        "Kebab event name should be PascalCased for JSX, got:\n{}",
+        tsx.code
+    );
+    // Negative: hyphenated form should NOT appear
+    assert!(
+        !tsx.code.contains("onTest-camel-case"),
+        "Hyphenated event name should not appear in JSX output, got:\n{}",
         tsx.code
     );
 }
@@ -8093,9 +8170,11 @@ const msg: string | number = Math.random() > 0.5 ? 'x' : 0
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
+    // msg is classified as SetupMaybeRef (ternary init) so gets .value in inline mode
     assert!(
-        normalized
-            .contains("onClick={()=>{if(!(typeofmsg==='string')){returnundefined;}msg.toLowerCase()}}"),
+        normalized.contains(
+            "onClick={()=>{if(!((typeofmsg.value==='string'))){returnundefined;}msg.value.toLowerCase()}}"
+        ),
         "v-if event handlers should include the guard inside callback for narrowing, got:\n{}",
         tsx.code
     );
@@ -8229,7 +8308,8 @@ fn tsx_template_tag_replacement_wraps_content_in_fragment() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("function __verter_tsx_App()"),
+        tsx.code
+            .contains("function ___VERTER___TemplateBindingFN()"),
         "Template should be emitted inside component function wrapper, got:\n{}",
         tsx.code
     );
@@ -8363,10 +8443,8 @@ fn tsx_v_for_with_v_if_combination_contains_condition_and_map() {
         tsx.code
     );
     assert!(
-        tsx.code.contains("item.active ? (")
-            || tsx.code.contains("_ctx.item.active ? (")
-            || tsx.code.contains("item.active?("),
-        "v-if condition should be emitted for v-for + v-if branch, got:\n{}",
+        tsx.code.contains("item.active ?") || tsx.code.contains("_ctx.item.active ?"),
+        "v-if condition should be emitted as ternary for v-for + v-if, got:\n{}",
         tsx.code
     );
 }
@@ -8379,8 +8457,8 @@ fn tsx_parent_v_if_with_child_v_for_contains_outer_condition() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("show ? (") || tsx.code.contains("_ctx.show ? ("),
-        "Parent v-if should emit conditional branch, got:\n{}",
+        tsx.code.contains("if(show)") || tsx.code.contains("if(_ctx.show)"),
+        "Parent v-if should emit IIFE if-block, got:\n{}",
         tsx.code
     );
     assert!(
@@ -8489,8 +8567,13 @@ fn tsx_component_with_v_if_and_v_for_preserves_component_tags() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("test ? (<Comp") || tsx.code.contains("_ctx.test ? (<Comp"),
-        "Component with v-if should keep Comp tag in conditional branch, got:\n{}",
+        tsx.code.contains("if(test)") || tsx.code.contains("if(_ctx.test)"),
+        "Component with v-if should keep Comp tag in IIFE if-block, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<Comp"),
+        "Component tag should be preserved, got:\n{}",
         tsx.code
     );
     assert!(
@@ -9100,5 +9183,1318 @@ fn builtin_component_in_imports_list() {
         tpl.imports.contains(&"_Suspense"),
         "template.imports should contain _Suspense, got: {:?}",
         tpl.imports
+    );
+}
+
+#[test]
+fn tsx_template_inside_return_statement() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+const message = ref('Hello from Verter!')
+
+function increment() {
+  count.value++
+}
+</script>
+
+<template>
+  <div class="app">
+    <h1>{{ message }}</h1>
+    <button @click="increment">Count: {{ count }}</button>
+  </div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // The template JSX must be INSIDE the TemplateBindingFN function body.
+    // It is emitted as an expression statement (not returned), so that
+    // ReturnType<typeof TemplateBindingFN> resolves to the binding object.
+    let fn_open = tsx
+        .code
+        .find("___VERTER___TemplateBindingFN")
+        .expect("TemplateBindingFN");
+    let fn_brace = tsx.code[fn_open..].find('{').expect("opening brace") + fn_open;
+    // Find the matching closing brace
+    let mut depth = 0i32;
+    let mut fn_close = None;
+    for (i, ch) in tsx.code[fn_brace..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    fn_close = Some(fn_brace + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let fn_end = fn_close.expect("closing brace of TemplateBindingFN");
+    let fn_body = &tsx.code[fn_brace..fn_end + 1];
+
+    // The template content must be inside the function body
+    assert!(
+        fn_body.contains("<div class=\"app\">"),
+        "Template <div> should be inside TemplateBindingFN body, but body is:\n{}\n\nFull TSX:\n{}",
+        fn_body,
+        tsx.code
+    );
+    assert!(
+        fn_body.contains("message.value"),
+        "Template interpolation should be inside TemplateBindingFN body, but body is:\n{}",
+        fn_body,
+    );
+
+    // The binding return must also be inside the function
+    assert!(
+        fn_body.contains("shallowUnwrapRef"),
+        "shallowUnwrapRef return should be inside TemplateBindingFN body, got:\n{}",
+        fn_body,
+    );
+
+    // The empty placeholder <></> should NOT remain
+    assert!(
+        !tsx.code.contains("<></>"),
+        "Empty fragment placeholder <></> should be replaced with template content.\nTSX:\n{}",
+        tsx.code
+    );
+}
+
+// ── TSX source map round-trip integration tests ───────────────────
+
+fn compile_tsx_with_source_map(source: &str) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        target: CompileTarget::BUNDLER | CompileTarget::TSX,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        source_map: true,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+fn compile_tsx_with_template_data(source: &str) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        source_map: true,
+        extract_template_data: true,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+/// Verify that every source map token in the TSX output maps back to valid
+/// positions in the original Vue SFC source (no out-of-bounds lines/cols).
+fn verify_sourcemap_tokens_in_bounds(source: &str, tsx: &VerterTsxBlock) {
+    let sm =
+        oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).expect("valid source map JSON");
+
+    let vue_lines: Vec<&str> = source.lines().collect();
+    let tsx_lines: Vec<&str> = tsx.code.lines().collect();
+
+    for token in sm.get_tokens() {
+        // Only check tokens that reference a source file
+        if token.get_source_id().is_none() {
+            continue;
+        }
+
+        let src_line = token.get_src_line() as usize;
+        let src_col = token.get_src_col() as usize;
+        let dst_line = token.get_dst_line() as usize;
+        let dst_col = token.get_dst_col() as usize;
+
+        // Source position must be in bounds of Vue SFC
+        assert!(
+            src_line < vue_lines.len(),
+            "Source map token points to Vue line {} but SFC only has {} lines.\n\
+             TSX gen position: {}:{}\nTSX code:\n{}",
+            src_line,
+            vue_lines.len(),
+            dst_line,
+            dst_col,
+            tsx.code
+        );
+
+        // Generated position must be in bounds of TSX output
+        assert!(
+            dst_line < tsx_lines.len(),
+            "Source map token points to TSX line {} but TSX only has {} lines.\n\
+             Vue src position: {}:{}\nTSX code:\n{}",
+            dst_line,
+            tsx_lines.len(),
+            src_line,
+            src_col,
+            tsx.code
+        );
+    }
+}
+
+/// @ai-generated — TSX source map: interpolation `{{ msg }}` maps back to Vue source
+#[test]
+fn tsx_sourcemap_interpolation() {
+    let source = r#"<script setup>
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+/// @ai-generated — TSX source map: v-if directive expression maps back
+#[test]
+fn tsx_sourcemap_v_if_directive() {
+    let source = r#"<script setup>
+const show = true
+</script>
+
+<template>
+  <div v-if="show">visible</div>
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+/// @ai-generated — TSX source map: v-for directive maps back
+#[test]
+fn tsx_sourcemap_v_for_directive() {
+    let source = r#"<script setup>
+const items = [1, 2, 3]
+</script>
+
+<template>
+  <div v-for="item in items" :key="item">{{ item }}</div>
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+/// @ai-generated — TSX source map: @click event handler maps back
+#[test]
+fn tsx_sourcemap_event_handler() {
+    let source = r#"<script setup>
+function handler() {}
+</script>
+
+<template>
+  <button @click="handler">click</button>
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+/// @ai-generated — TSX source map: bound prop maps back
+#[test]
+fn tsx_sourcemap_bound_prop() {
+    let source = r#"<script setup>
+const value = 42
+</script>
+
+<template>
+  <input :value="value" />
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+/// @ai-generated — TSX source map: component tag maps back
+#[test]
+fn tsx_sourcemap_component_tag() {
+    let source = r#"<script setup>
+import MyComponent from './MyComponent.vue'
+</script>
+
+<template>
+  <MyComponent />
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+/// @ai-generated — TSX source map: slot with destructured params maps back
+#[test]
+fn tsx_sourcemap_slot_destructured() {
+    let source = r#"<script setup>
+import MyComponent from './MyComponent.vue'
+</script>
+
+<template>
+  <MyComponent>
+    <template #default="{ data }">{{ data }}</template>
+  </MyComponent>
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+/// @ai-generated — TSX source map: multi-byte characters (CJK, emoji) in script and template
+#[test]
+fn tsx_sourcemap_multibyte_characters() {
+    let source = r#"<script setup>
+// 你好世界
+const msg = '你好'
+</script>
+
+<template>
+  <div>{{ msg }} 🎉</div>
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+/// @ai-generated — TSX source map: SFC with style block after template (exposes bleeding bug)
+///
+/// This is the key regression test for Bug 1. The template CodeTransform operates
+/// on the full SFC input, so its source map contains tokens for ALL regions including
+/// the style block after `</template>`. If combine_tsx_source_maps doesn't filter
+/// post-template tokens, style block tokens bleed into the combined map with incorrect
+/// generated line positions.
+#[test]
+fn tsx_sourcemap_style_after_template_no_bleeding() {
+    let source = r#"<script setup>
+const msg = 'hello'
+</script>
+
+<template>
+  <div class="app">{{ msg }}</div>
+</template>
+
+<style scoped>
+.app {
+  color: red;
+  font-size: 16px;
+}
+</style>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Basic bounds check
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+
+    // TSX output should NOT contain any style content
+    assert!(
+        !tsx.code.contains("color: red"),
+        "Style content should not appear in TSX output:\n{}",
+        tsx.code
+    );
+
+    // Critical check: no source map token should reference a source position within
+    // the style block (lines 8-13 in the Vue SFC). If style tokens bleed through
+    // combine_tsx_source_maps, they'll appear as tokens with src_line in the style range.
+    let style_start_line = source[..source.find("<style").unwrap()]
+        .matches('\n')
+        .count() as u32;
+    let style_end_line = source[..source.find("</style>").unwrap() + "</style>".len()]
+        .matches('\n')
+        .count() as u32;
+
+    let sm =
+        oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).expect("valid source map JSON");
+
+    let mut style_tokens = Vec::new();
+    for token in sm.get_tokens() {
+        if token.get_source_id().is_none() {
+            continue;
+        }
+        let src_line = token.get_src_line();
+        if src_line >= style_start_line && src_line <= style_end_line {
+            style_tokens.push((
+                token.get_src_line(),
+                token.get_src_col(),
+                token.get_dst_line(),
+                token.get_dst_col(),
+            ));
+        }
+    }
+
+    assert!(
+        style_tokens.is_empty(),
+        "Source map contains {} tokens referencing style block (Vue lines {}-{}): {:?}\n\
+         These tokens bleed from the template CodeTransform's source map.\nTSX code:\n{}",
+        style_tokens.len(),
+        style_start_line,
+        style_end_line,
+        style_tokens,
+        tsx.code
+    );
+}
+
+/// @ai-generated — TSX source map: SFC with multiple style blocks
+#[test]
+fn tsx_sourcemap_multiple_style_blocks() {
+    let source = r#"<script setup>
+const x = 1
+</script>
+
+<template>
+  <div>{{ x }}</div>
+</template>
+
+<style>
+.a { color: red; }
+</style>
+
+<style scoped>
+.b { color: blue; }
+</style>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+
+    // No token should reference source positions in the style blocks
+    let first_style_line = source[..source.find("<style").unwrap()]
+        .matches('\n')
+        .count() as u32;
+    let sm =
+        oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).expect("valid source map JSON");
+    for token in sm.get_tokens() {
+        if token.get_source_id().is_some() {
+            assert!(
+                token.get_src_line() < first_style_line,
+                "Source map token references style block (src line {}, first style line {}).\n\
+                 Style tokens must not bleed into the combined TSX source map.",
+                token.get_src_line(),
+                first_style_line,
+            );
+        }
+    }
+}
+
+/// @ai-generated — TSX source map: template-only SFC
+#[test]
+fn tsx_sourcemap_template_only() {
+    let source = r#"<template>
+  <div>hello</div>
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+/// @ai-generated — TSX source map: script-only SFC
+#[test]
+fn tsx_sourcemap_script_only() {
+    let source = r#"<script setup>
+const x = 1
+const y = 2
+</script>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+}
+
+// ── Source map position mapping regression tests ──────────────────
+
+/// Helper: find `needle` in `haystack` and return its 0-indexed (line, col).
+/// Panics if `needle` is not found.
+fn find_line_col(haystack: &str, needle: &str) -> (u32, u32) {
+    let offset = haystack
+        .find(needle)
+        .unwrap_or_else(|| panic!("'{}' not found in text", needle));
+    let line = haystack[..offset].matches('\n').count() as u32;
+    let col = (offset - haystack[..offset].rfind('\n').map(|p| p + 1).unwrap_or(0)) as u32;
+    (line, col)
+}
+
+fn find_line_col_at(haystack: &str, offset: usize) -> (u32, u32) {
+    let line = haystack[..offset].matches('\n').count() as u32;
+    let col = (offset - haystack[..offset].rfind('\n').map(|p| p + 1).unwrap_or(0)) as u32;
+    (line, col)
+}
+
+/// @ai-generated — TSX source map: compound v-if with operators in tail maps correctly.
+///
+/// Regression test: when a v-if expression has bindings resolved by OXC, the
+/// "tail" text after the last binding (e.g., ` && 1 ===2`) was emitted unmapped.
+/// This test verifies that ALL positions in the template expression — including
+/// non-binding positions like `===` — can be mapped back to the correct Vue SFC
+/// positions via the source map.
+#[test]
+fn tsx_sourcemap_v_if_expression_tail_maps_correctly() {
+    let source = r#"<script lang="ts" setup>
+let isLoggedIn = false;
+let hasPermission = false;
+
+function onclick() {
+  isLoggedIn = true
+}
+
+if ( 1 === 2 ) {
+
+}
+
+</script>
+
+<template>
+  <div v-if="isLoggedIn && hasPermission && 1 ===2">Full  {{isLoggedIn}}</div>
+  <div v-else-if="isLoggedIn && !hasPermission">Limited Access</div>
+  <div v-else>No Access</div>
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+
+    let sm =
+        oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).expect("valid source map JSON");
+    let lookup = sm.generate_lookup_table();
+
+    // Helper: assert that a TSX position maps to the expected Vue (line, col)
+    let assert_tsx_maps_to_vue = |tsx_line: u32,
+                                  tsx_col: u32,
+                                  expected_vue_line: u32,
+                                  expected_vue_col: u32,
+                                  label: &str| {
+        let token = sm.lookup_token(&lookup, tsx_line, tsx_col);
+        assert!(
+            token.is_some(),
+            "[{label}] No source map token at TSX {tsx_line}:{tsx_col}\nTSX:\n{}",
+            tsx.code
+        );
+        let token = token.unwrap();
+        assert!(
+                token.get_source_id().is_some(),
+                "[{label}] Token at TSX {tsx_line}:{tsx_col} has no source mapping (unmapped)\nTSX:\n{}",
+                tsx.code
+            );
+
+        // Compute the mapped-back Vue position using the same interpolation as tsx_to_vue
+        let vue_line = token.get_src_line();
+        let mut vue_col = token.get_src_col();
+        if token.get_dst_line() == tsx_line && tsx_col > token.get_dst_col() {
+            vue_col += tsx_col - token.get_dst_col();
+        }
+
+        assert_eq!(
+                vue_line, expected_vue_line,
+                "[{label}] TSX {tsx_line}:{tsx_col} mapped to Vue line {vue_line}, expected {expected_vue_line}\nTSX:\n{}",
+                tsx.code
+            );
+        assert_eq!(
+                vue_col, expected_vue_col,
+                "[{label}] TSX {tsx_line}:{tsx_col} mapped to Vue col {vue_col}, expected {expected_vue_col}\nTSX:\n{}",
+                tsx.code
+            );
+    };
+
+    // ── Script body positions (should map to original Vue positions) ──
+
+    // `let isLoggedIn` in script: Vue line 1, col 0
+    let (vue_let_line, vue_let_col) = find_line_col(source, "let isLoggedIn");
+    let (tsx_let_line, tsx_let_col) = find_line_col(&tsx.code, "let isLoggedIn");
+    assert_tsx_maps_to_vue(
+        tsx_let_line,
+        tsx_let_col,
+        vue_let_line,
+        vue_let_col,
+        "let isLoggedIn in script",
+    );
+
+    // `===` in script's `if (1 === 2)`: should map to Vue line 8
+    // Find === that's in the script (first occurrence), not the template
+    let (vue_script_eq_line, vue_script_eq_col) = find_line_col(source, "1 === 2");
+    let vue_script_eq_col = vue_script_eq_col + 2; // point at ===, not 1
+    let (tsx_script_eq_line, tsx_script_eq_col) = find_line_col(&tsx.code, "1 === 2");
+    let tsx_script_eq_col = tsx_script_eq_col + 2; // point at ===
+    assert_tsx_maps_to_vue(
+        tsx_script_eq_line,
+        tsx_script_eq_col,
+        vue_script_eq_line,
+        vue_script_eq_col,
+        "=== in script if-statement",
+    );
+
+    // ── Template expression positions ──
+
+    // Find the template v-if expression in TSX output.
+    // In TSX it becomes: if(isLoggedIn && hasPermission && 1 ===2)
+    let tsx_v_if = tsx
+        .code
+        .find("if(isLoggedIn && hasPermission && 1 ===2)")
+        .expect("TSX should contain v-if condition expression");
+
+    // `isLoggedIn` in v-if expression: should map to Vue line 15, within the v-if attribute
+    // Find the exact column of "isLoggedIn" inside v-if attribute value
+    let vif_attr_start = source.find(r#"v-if="isLoggedIn"#).unwrap() + 6; // skip v-if="
+    let (vue_vif_islogged_line, vue_vif_islogged_col) = find_line_col_at(source, vif_attr_start);
+
+    let tsx_vif_islogged_offset = tsx.code[tsx_v_if..].find("isLoggedIn").unwrap() + tsx_v_if;
+    let (tsx_vif_islogged_line, tsx_vif_islogged_col) =
+        find_line_col_at(&tsx.code, tsx_vif_islogged_offset);
+    assert_tsx_maps_to_vue(
+        tsx_vif_islogged_line,
+        tsx_vif_islogged_col,
+        vue_vif_islogged_line,
+        vue_vif_islogged_col,
+        "isLoggedIn in template v-if",
+    );
+
+    // `hasPermission` in v-if: should map to same Vue line
+    let tsx_vif_hasperm_offset = tsx.code[tsx_v_if..].find("hasPermission").unwrap() + tsx_v_if;
+    let (tsx_vif_hasperm_line, tsx_vif_hasperm_col) =
+        find_line_col_at(&tsx.code, tsx_vif_hasperm_offset);
+
+    let vue_vif_hasperm_offset =
+        source[vif_attr_start..].find("hasPermission").unwrap() + vif_attr_start;
+    let (vue_vif_hasperm_line, vue_vif_hasperm_col) =
+        find_line_col_at(source, vue_vif_hasperm_offset);
+    assert_tsx_maps_to_vue(
+        tsx_vif_hasperm_line,
+        tsx_vif_hasperm_col,
+        vue_vif_hasperm_line,
+        vue_vif_hasperm_col,
+        "hasPermission in template v-if",
+    );
+
+    // `===` in v-if tail (the KEY regression test):
+    // The tail " && 1 ===2" after the last binding was previously unmapped.
+    // The `===` must map back to its Vue position within the v-if attribute.
+    let tsx_vif_eq_offset = tsx.code[tsx_v_if..].find("1 ===2").unwrap() + tsx_v_if + 2; // +2 to point at ===
+    let (tsx_vif_eq_line, tsx_vif_eq_col) = find_line_col_at(&tsx.code, tsx_vif_eq_offset);
+
+    let vue_vif_eq_offset = source[vif_attr_start..].find("1 ===2").unwrap() + vif_attr_start + 2;
+    let (vue_vif_eq_line, vue_vif_eq_col) = find_line_col_at(source, vue_vif_eq_offset);
+    assert_tsx_maps_to_vue(
+        tsx_vif_eq_line,
+        tsx_vif_eq_col,
+        vue_vif_eq_line,
+        vue_vif_eq_col,
+        "=== in template v-if tail",
+    );
+
+    // `isLoggedIn` in {{isLoggedIn}} interpolation
+    let interp_search = r#"{"Full"}"#;
+    let tsx_interp_area = tsx.code.find(interp_search).unwrap();
+    let tsx_interp_islogged =
+        tsx.code[tsx_interp_area..].find("isLoggedIn").unwrap() + tsx_interp_area;
+    let (tsx_interp_line, tsx_interp_col) = find_line_col_at(&tsx.code, tsx_interp_islogged);
+
+    let vue_interp_islogged = source.find("{{isLoggedIn}}").unwrap() + 2; // skip {{
+    let (vue_interp_line, vue_interp_col) = find_line_col_at(source, vue_interp_islogged);
+    assert_tsx_maps_to_vue(
+        tsx_interp_line,
+        tsx_interp_col,
+        vue_interp_line,
+        vue_interp_col,
+        "isLoggedIn in {{interpolation}}",
+    );
+}
+
+/// @ai-generated — TSX source map: v-else-if expression maps correctly.
+#[test]
+fn tsx_sourcemap_v_else_if_expression_maps_correctly() {
+    let source = r#"<script lang="ts" setup>
+let isLoggedIn = false;
+let hasPermission = false;
+</script>
+
+<template>
+  <div v-if="isLoggedIn && hasPermission">Full Access</div>
+  <div v-else-if="isLoggedIn && !hasPermission">Limited Access</div>
+  <div v-else>No Access</div>
+</template>
+"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    verify_sourcemap_tokens_in_bounds(source, tsx);
+
+    let sm =
+        oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).expect("valid source map JSON");
+    let lookup = sm.generate_lookup_table();
+
+    // Find `isLoggedIn` in the v-else-if expression in TSX
+    let elseif_start = tsx.code.find("else if(isLoggedIn").unwrap();
+    let tsx_elseif_islogged = tsx.code[elseif_start..].find("isLoggedIn").unwrap() + elseif_start;
+    let (tsx_line, tsx_col) = find_line_col_at(&tsx.code, tsx_elseif_islogged);
+
+    // Find `isLoggedIn` in v-else-if attribute in Vue source
+    let vue_elseif_attr = source.find(r#"v-else-if="isLoggedIn"#).unwrap() + 11; // skip v-else-if="
+    let (vue_line, vue_col) = find_line_col_at(source, vue_elseif_attr);
+
+    let token = sm
+        .lookup_token(&lookup, tsx_line, tsx_col)
+        .expect("source map token for v-else-if isLoggedIn");
+    assert!(
+        token.get_source_id().is_some(),
+        "v-else-if isLoggedIn should have source mapping"
+    );
+
+    let mut mapped_col = token.get_src_col();
+    if token.get_dst_line() == tsx_line && tsx_col > token.get_dst_col() {
+        mapped_col += tsx_col - token.get_dst_col();
+    }
+    assert_eq!(
+        token.get_src_line(),
+        vue_line,
+        "v-else-if isLoggedIn: wrong Vue line"
+    );
+    assert_eq!(mapped_col, vue_col, "v-else-if isLoggedIn: wrong Vue col");
+}
+
+// ── Binding occurrence position tests ─────────────────────────────
+
+/// @ai-generated — Binding occurrences have correct span offsets
+///
+/// Verifies that each RawBindingOccurrence's span.start..span.end maps to the
+/// correct binding name in the original source. This catches position bugs in
+/// template data extraction.
+#[test]
+fn binding_occurrence_spans_match_source() {
+    let source = r#"<script setup>
+const msg = 'hello'
+const count = 0
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+  <span>{{ count }}</span>
+</template>
+"#;
+    let result = compile_tsx_with_template_data(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tpl_data = result.template_data.as_ref().expect("template data");
+    assert!(
+        !tpl_data.binding_occurrences.is_empty(),
+        "Expected binding occurrences but got none"
+    );
+
+    for occ in &tpl_data.binding_occurrences {
+        let start = occ.span.start as usize;
+        let end = occ.span.end as usize;
+        assert!(
+            end <= source.len(),
+            "Binding '{}' span {}..{} exceeds source length {}",
+            occ.name,
+            start,
+            end,
+            source.len()
+        );
+        let slice = &source[start..end];
+        assert_eq!(
+            slice, occ.name,
+            "Binding occurrence span {}..{} contains '{}' but expected '{}'",
+            start, end, slice, occ.name
+        );
+    }
+}
+
+/// @ai-generated — Binding occurrences with v-if and v-for expressions
+#[test]
+fn binding_occurrence_spans_directives() {
+    let source = r#"<script setup>
+const show = true
+const items = [1, 2]
+</script>
+
+<template>
+  <div v-if="show">
+    <span v-for="item in items" :key="item">{{ item }}</span>
+  </div>
+</template>
+"#;
+    let result = compile_tsx_with_template_data(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tpl_data = result.template_data.as_ref().expect("template data");
+    for occ in &tpl_data.binding_occurrences {
+        let start = occ.span.start as usize;
+        let end = occ.span.end as usize;
+        if end > source.len() {
+            panic!(
+                "Binding '{}' span {}..{} exceeds source length {}",
+                occ.name,
+                start,
+                end,
+                source.len()
+            );
+        }
+        let slice = &source[start..end];
+        assert_eq!(
+            slice, occ.name,
+            "Binding '{}' span {}..{} contains '{}' instead",
+            occ.name, start, end, slice
+        );
+    }
+}
+
+/// @ai-generated — E2E: v-if with defineProps and whitespace between elements
+/// Verifies both __props declaration and valid IIFE chain in full TSX output
+#[test]
+fn tsx_v_if_with_define_props_and_whitespace() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const props = defineProps<{ render: 'svg' | 'img' }>()
+</script>
+<template>
+  <img v-if="render === 'svg'" class="icon" />
+  <span v-else>fallback</span>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Bug 2 fix: __props must be declared so TSGO can resolve it
+    assert!(
+        tsx.code.contains("const __props = "),
+        "__props alias must be declared in TSX output, got:\n{}",
+        tsx.code
+    );
+
+    // Bug 1 fix: the v-if/v-else chain must be a single valid IIFE, not split by whitespace
+    assert!(
+        tsx.code.contains("else{"),
+        "v-if/v-else must be in a single IIFE chain, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: Vue directives must not leak into TSX
+    assert!(
+        !tsx.code.contains("v-if"),
+        "v-if attribute must be removed from TSX, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("v-else"),
+        "v-else attribute must be removed from TSX, got:\n{}",
+        tsx.code
+    );
+
+    // Verify the template IIFE region is valid JSX by extracting and parsing it.
+    // (Full TSX validation is not possible here because the return object uses
+    // `as unknown as typeof x` casts that OXC's parser rejects.)
+    let iife_start = tsx.code.find("{()=>{if(").expect("IIFE should exist");
+    let iife_end = tsx.code[iife_start..].find("}}}").expect("IIFE close") + iife_start + 3;
+    let iife_region = &tsx.code[iife_start..iife_end];
+    // Wrap in a JSX expression context for parsing
+    let wrapper = format!("const x = <>{}</>", iife_region);
+    let alloc = oxc_allocator::Allocator::new();
+    let source_type = oxc_span::SourceType::tsx();
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapper, source_type).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "IIFE region has syntax errors: {:?}\n--- IIFE ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        iife_region
+    );
+}
+
+#[test]
+fn tsx_custom_types_module_in_output() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        types_module_name: Some("@my/types".to_string()),
+        target: CompileTarget::BUNDLER | CompileTarget::TSX,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions::default();
+    let source = r#"<script setup>const x = 1</script><template><div/></template>"#;
+    let result = compile(source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.expect("tsx block");
+    assert!(
+        tsx.code.contains(r#"from "@my/types""#),
+        "custom types module should be used, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains(r#"from "@verter/types""#),
+        "default types module should NOT appear"
+    );
+}
+
+#[test]
+fn tsx_default_types_module_is_verter_types() {
+    let result = compile_tsx(r#"<script setup>const x = 1</script><template><div/></template>"#);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(r#"from "@verter/types""#),
+        "default should use @verter/types, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains(r#"from "$verter/types$""#),
+        "should NOT use $verter/types$"
+    );
+}
+
+#[test]
+fn tsx_options_api_has_type_constructs_at_compile_level() {
+    let result = compile_tsx(
+        r#"<script lang="ts">
+export default { props: ['msg'] }
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Helper imports present
+    assert!(
+        tsx.code.contains(r#"from "@verter/types""#),
+        "Options API should have types imports, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains(r#"from "vue""#),
+        "Options API should have vue imports"
+    );
+    // Type constructs present (appended after source map)
+    assert!(
+        tsx.code.contains("___VERTER___TemplateBinding"),
+        "Options API should have TemplateBinding type construct"
+    );
+    assert!(
+        tsx.code.contains("___VERTER___FullContextFN"),
+        "Options API should have FullContext"
+    );
+    // OXC validation
+    let alloc = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Options API TSX must be valid JS: {:?}\n---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tsx.code
+    );
+}
+
+// ── Error recovery: malformed templates must not panic ─────────────
+// @ai-generated — Verifies that broken templates produce diagnostics, not panics.
+
+#[test]
+fn error_recovery_orphan_close_tag_does_not_panic() {
+    // `</component` inside template — orphan close tag
+    let result = compile_sfc("<template></component</template>");
+    assert!(
+        !result.errors.is_empty(),
+        "should report diagnostics for orphan close tag"
+    );
+}
+
+#[test]
+fn error_recovery_unclosed_element_does_not_panic() {
+    let result = compile_sfc("<template><div></template>");
+    assert!(
+        !result.errors.is_empty(),
+        "should report diagnostics for unclosed element"
+    );
+}
+
+#[test]
+fn error_recovery_incomplete_tag_does_not_panic() {
+    let result = compile_sfc("<template><</template>");
+    // Should not panic — incomplete `<` treated as text
+    let _ = result;
+}
+
+#[test]
+fn error_recovery_bare_close_tag_no_angle() {
+    // `</component` without closing `>` — tokenizer must handle gracefully
+    let result = compile_sfc("<template></component");
+    // Must not panic
+    let _ = result;
+}
+
+// ==================== Static subtree hoisting ====================
+
+/// Compile with hoist_static=true (default) and validate JS output.
+fn compile_and_validate_hoisted(source: &str) -> String {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        hoist_static: Some(true),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(source, &options, &verter_opts, &alloc);
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(!tpl.code.trim().is_empty(), "template code is empty");
+    // Parse with OXC to ensure valid JS
+    let parse_alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::mjs();
+    let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
+    let parsed = oxc_parser::Parser::new(&parse_alloc, &wrapped, source_type).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Template JS parse error: {:?}\n--- generated code ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tpl.code
+    );
+    tpl.code.clone()
+}
+
+/// Compile with hoist_static=false and validate JS output.
+fn compile_and_validate_no_hoist(source: &str) -> String {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        hoist_static: Some(false),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(source, &options, &verter_opts, &alloc);
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(!tpl.code.trim().is_empty(), "template code is empty");
+    // Parse with OXC to ensure valid JS
+    let parse_alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::mjs();
+    let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
+    let parsed = oxc_parser::Parser::new(&parse_alloc, &wrapped, source_type).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Template JS parse error (no-hoist): {:?}\n--- generated code ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tpl.code
+    );
+    tpl.code.clone()
+}
+
+/// @ai-generated — Single static element emits _createStaticVNode
+#[test]
+fn static_hoist_single_static_element() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><div class="card"><h3>Title</h3><p>text</p></div></div></template>"#,
+    );
+    assert!(
+        code.contains("_createStaticVNode"),
+        "should emit _createStaticVNode\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_createElementVNode(\"h3\""),
+        "should NOT emit individual _createElementVNode for static children\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Nested static elements emit _createStaticVNode
+#[test]
+fn static_hoist_nested_static() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><section><div><span>deep</span></div></section></div></template>"#,
+    );
+    assert!(
+        code.contains("_createStaticVNode"),
+        "deeply nested static subtree should use _createStaticVNode\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Dynamic element is NOT hoisted
+#[test]
+fn static_hoist_dynamic_element_not_hoisted() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><div :class="cls">dynamic</div></div></template>"#,
+    );
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "dynamic element should NOT be hoisted\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createElementVNode"),
+        "dynamic element should use _createElementVNode\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Element with event is NOT hoisted
+#[test]
+fn static_hoist_event_not_hoisted() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><button @click="fn">click</button></div></template>"#,
+    );
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "element with event should NOT be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Element with interpolation is NOT hoisted
+#[test]
+fn static_hoist_interpolation_not_hoisted() {
+    let code =
+        compile_and_validate_hoisted(r#"<template><div><div>{{ msg }}</div></div></template>"#);
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "element with interpolation should NOT be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Element with v-if is NOT hoisted
+#[test]
+fn static_hoist_v_if_not_hoisted() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><div v-if="show">hello</div></div></template>"#,
+    );
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "element with v-if should NOT be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Element with ref is NOT hoisted
+#[test]
+fn static_hoist_ref_not_hoisted() {
+    let code =
+        compile_and_validate_hoisted(r#"<template><div><div ref="el">text</div></div></template>"#);
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "element with ref should NOT be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Component is NOT hoisted
+#[test]
+fn static_hoist_component_not_hoisted() {
+    let code = compile_and_validate_hoisted(r#"<template><div><MyComp /></div></template>"#);
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "component should NOT be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Static with dynamic sibling: both present
+#[test]
+fn static_hoist_mixed_static_and_dynamic() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><span>static</span><span :class="x">dynamic</span></div></template>"#,
+    );
+    assert!(
+        code.contains("_createStaticVNode"),
+        "static sibling should be hoisted\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createElementVNode"),
+        "dynamic sibling should use _createElementVNode\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Consecutive static siblings merge into one _createStaticVNode
+#[test]
+fn static_hoist_consecutive_siblings_merge() {
+    let code =
+        compile_and_validate_hoisted(r#"<template><div><p>a</p><p>b</p><p>c</p></div></template>"#);
+    assert!(
+        code.contains("_createStaticVNode"),
+        "consecutive static elements should be merged\n--- code ---\n{}",
+        code
+    );
+    // The merged node should have count=3
+    assert!(
+        code.contains(", 3)"),
+        "merged static nodes should have count=3\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — hoist_static=false disables the optimization
+#[test]
+fn static_hoist_disabled() {
+    let code = compile_and_validate_no_hoist(
+        r#"<template><div><div class="card"><h3>Title</h3></div></div></template>"#,
+    );
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "hoist_static=false should disable optimization\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createElementVNode"),
+        "should use _createElementVNode when hoisting disabled\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Scoped style injects data-v attribute into static HTML
+#[test]
+fn static_hoist_scoped_style() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><p class="foo">text</p></div></template>
+<style scoped>.foo { color: red; }</style>"#,
+    );
+    assert!(
+        code.contains("_createStaticVNode"),
+        "should use _createStaticVNode with scoped style\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("data-v-"),
+        "static HTML should contain scope ID\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — HTML with double quotes produces valid JS (OXC parse check)
+#[test]
+fn static_hoist_html_quotes_valid_js() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><div class="foo" id="bar">text</div></div></template>"#,
+    );
+    assert!(
+        code.contains("_createStaticVNode"),
+        "should hoist static element with attributes\n--- code ---\n{}",
+        code
+    );
+    // The OXC parse in compile_and_validate_hoisted already validates JS syntax
+}
+
+/// @ai-generated — Static parent with one dynamic child is NOT static
+#[test]
+fn static_hoist_parent_with_dynamic_child() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><div class="wrapper"><span :title="t">x</span></div></div></template>"#,
+    );
+    // The wrapper div has a dynamic child, so it's not fully static
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "parent with dynamic child should NOT be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Static element with class (no dynamic binding) is static
+#[test]
+fn static_hoist_static_class() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><div class="foo">text</div></div></template>"#,
+    );
+    assert!(
+        code.contains("_createStaticVNode"),
+        "element with static class should be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Deep nesting (3+ levels) all static
+#[test]
+fn static_hoist_deep_nesting() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><div><div><div><span>deep</span></div></div></div></div></template>"#,
+    );
+    assert!(
+        code.contains("_createStaticVNode"),
+        "deeply nested static should be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Self-closing static element
+#[test]
+fn static_hoist_self_closing() {
+    let code = compile_and_validate_hoisted(r#"<template><div><br/><hr/></div></template>"#);
+    assert!(
+        code.contains("_createStaticVNode"),
+        "self-closing static elements should be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Template literal escaping: backtick in attribute
+#[test]
+fn static_hoist_backtick_in_html() {
+    let code = compile_and_validate_hoisted(
+        "<template><div><div title=\"a`b\">text</div></div></template>",
+    );
+    assert!(
+        code.contains("_createStaticVNode"),
+        "should hoist\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("\\`"),
+        "backtick should be escaped in template literal\n--- code ---\n{}",
+        code
     );
 }

@@ -20,7 +20,6 @@ graph LR
 
     subgraph "Consumers"
         E["@verter/unplugin"] --> A
-        F["@verter/language-server"] --> A
     end
 ```
 

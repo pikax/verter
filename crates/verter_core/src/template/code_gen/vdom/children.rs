@@ -3,11 +3,120 @@
 //! Extracted from `element.rs`: text-concat separator logic, array-mode
 //! separators, and `_createTextVNode()` wrapping for text runs.
 
-use crate::ast::types::ChildrenMode;
+use crate::ast::types::{AstNodeKind, ChildrenMode, TemplateAst};
+use crate::types::NodeId;
 
-use super::super::shared::helpers::VdomHelper;
+use super::super::shared::helpers::{self, VdomHelper};
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput, ConditionChainRole};
 use super::super::TemplateCodeGenOptions;
+
+/// Emit a condition prefix (e.g., `(__props.leftArrow) ? `) as a single
+/// `InsertedMapped` chunk with `content_offset` for accurate source mapping.
+///
+/// The `content_offset` places the source map token at the start of the
+/// original identifier within the condition prefix, skipping the opening
+/// paren and any binding prefix (e.g., `(__props.`). This way, hovering on
+/// the identifier in the Vue source maps correctly to the identifier in the
+/// generated ternary condition.
+///
+/// Example: condition prefix `(__props.leftArrow) ? ` with `binding_prefix_len=8`:
+///   - `content_offset = 1 + 8 = 9` (skip `(` + `__props.`)
+///   - Source map token at byte 9 maps to `expr_start` (position of `leftArrow` in Vue source)
+pub(super) fn emit_condition_prefix_mapped(
+    out: &mut CodeGenOutput<'_>,
+    insert_pos: u32,
+    expr_start: u32,
+    cond: &str,
+    binding_prefix_len: usize,
+) {
+    // Skip `(` + binding prefix to place the source map token at the identifier.
+    let content_offset = (1 + binding_prefix_len) as u32;
+    out.prepend_alloc_mapped_with_offset(insert_pos, expr_start, content_offset, cond);
+}
+
+/// Emit a `_createStaticVNode(...)` overwrite for a StaticVNode child record.
+///
+/// Replaces the source range [start, end) with:
+/// `` _createStaticVNode(`<escaped html>`, N) ``
+///
+/// When scoped style is active, injects the scope ID attribute into each
+/// element's open tag using AST-computed positions (no string scanning).
+pub(super) fn emit_static_vnode<'alloc>(
+    record: &ChildRecord,
+    source: &'alloc str,
+    out: &mut CodeGenOutput<'alloc>,
+    options: &TemplateCodeGenOptions,
+    ast: &TemplateAst,
+    children: &[NodeId],
+) {
+    let count = match record.kind {
+        ChildKind::StaticVNode { count } => count,
+        _ => return,
+    };
+
+    // Collect scope ID injection offsets from AST element positions
+    let scope_id = &options.scope_id;
+    let has_scope = !scope_id.is_empty();
+    let mut injection_offsets: Vec<u32> = Vec::new();
+
+    if has_scope {
+        // Walk the children IDs that fall within this record's range
+        // and DFS each one to collect all element tag positions.
+        for &child_id in children {
+            let node = &ast.nodes[child_id.0];
+            if let AstNodeKind::Element(el) = &node.kind {
+                let el_end = el
+                    .tag_close
+                    .as_ref()
+                    .map(|tc| tc.end)
+                    .unwrap_or(el.tag_open.end);
+                if el.tag_open.start >= record.start && el_end <= record.end {
+                    // DFS this element and all descendants to collect injection offsets
+                    ast.dfs(child_id, |_id, dfs_node| {
+                        if let AstNodeKind::Element(dfs_el) = &dfs_node.kind {
+                            // Injection point: just before the closing > or />
+                            let offset = if dfs_el.is_self_closing {
+                                dfs_el.tag_open.end - 2 // before />
+                            } else {
+                                dfs_el.tag_open.end - 1 // before >
+                            };
+                            injection_offsets.push(offset);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    // Build the replacement string
+    let mut buf = String::with_capacity(
+        (record.end - record.start) as usize + injection_offsets.len() * (scope_id.len() + 1) + 40,
+    );
+    buf.push_str("_createStaticVNode(");
+    buf.push('`');
+    if has_scope {
+        helpers::build_static_html_with_scope(
+            source,
+            record.start,
+            record.end,
+            scope_id,
+            &injection_offsets,
+            &mut buf,
+        );
+    } else {
+        helpers::escape_template_literal_into(
+            &mut buf,
+            &source[record.start as usize..record.end as usize],
+        );
+    }
+    buf.push('`');
+    buf.push_str(", ");
+    helpers::push_u32(&mut buf, count);
+    buf.push(')');
+
+    out.overwrite(record.start, record.end, &buf);
+    out.add_vdom_import(VdomHelper::CreateStaticVNode);
+}
 
 /// Determine the text-concat separator between two adjacent children.
 ///
@@ -37,6 +146,9 @@ pub(super) fn add_children_separators<'alloc>(
     children_mode: ChildrenMode,
     out: &mut CodeGenOutput<'alloc>,
     options: &TemplateCodeGenOptions,
+    source: &'alloc str,
+    ast: &TemplateAst,
+    ast_children: &[NodeId],
 ) {
     if children.is_empty() {
         return;
@@ -56,7 +168,7 @@ pub(super) fn add_children_separators<'alloc>(
             }
         }
         ChildrenMode::Mixed | ChildrenMode::MultiElement | ChildrenMode::SingleElement => {
-            wrap_array_text_runs(children, out, options);
+            wrap_array_text_runs(children, out, options, source, ast, ast_children);
         }
         _ => {}
     }
@@ -70,11 +182,14 @@ pub(super) fn add_children_separators_array<'alloc>(
     children: &[ChildRecord],
     out: &mut CodeGenOutput<'alloc>,
     options: &TemplateCodeGenOptions,
+    source: &'alloc str,
+    ast: &TemplateAst,
+    ast_children: &[NodeId],
 ) {
     if children.is_empty() {
         return;
     }
-    wrap_array_text_runs(children, out, options);
+    wrap_array_text_runs(children, out, options, source, ast, ast_children);
 }
 
 /// Wrap text runs in array children with `_createTextVNode()` calls.
@@ -98,6 +213,9 @@ pub(super) fn wrap_array_text_runs<'alloc>(
     children: &[ChildRecord],
     out: &mut CodeGenOutput<'alloc>,
     options: &TemplateCodeGenOptions,
+    source: &'alloc str,
+    ast: &TemplateAst,
+    ast_children: &[NodeId],
 ) {
     let mut i = 0;
     let mut is_first_item = true;
@@ -175,6 +293,15 @@ pub(super) fn wrap_array_text_runs<'alloc>(
 
             prev_item_end = last.end;
             is_first_item = false;
+        } else if matches!(children[i].kind, ChildKind::StaticVNode { .. }) {
+            // Static VNode -- standalone array item with overwrite.
+            if !is_first_item {
+                out.prepend_static(prev_item_end, ", ");
+            }
+            emit_static_vnode(&children[i], source, out, options, ast, ast_children);
+            prev_item_end = children[i].end;
+            i += 1;
+            is_first_item = false;
         } else {
             // Element or Comment -- standalone array item.
             // v-else-if / v-else children are connected to their v-if via
@@ -185,25 +312,43 @@ pub(super) fn wrap_array_text_runs<'alloc>(
             let has_prefix = children[i].condition_prefix.is_some();
 
             if needs_comma && has_prefix {
-                // Combined comma + condition prefix as a single prepend at
-                // child.start. This ensures correct ordering: `, (expr) ? `.
-                // Safe because v-if and v-for can't coexist on the same element,
-                // so there's no conflicting v-for prefix at child.start.
-                let mut sep =
-                    String::with_capacity(4 + children[i].condition_prefix.as_ref().unwrap().len());
-                sep.push_str(", ");
-                sep.push_str(children[i].condition_prefix.as_ref().unwrap());
-                out.prepend_alloc(children[i].start, &sep);
+                let cond = children[i].condition_prefix.as_ref().unwrap();
+                if let Some(expr_start) = children[i].condition_expr_start {
+                    // Split: unmapped comma + source-mapped condition prefix.
+                    out.prepend_static(children[i].start, ", ");
+                    emit_condition_prefix_mapped(
+                        out,
+                        children[i].start,
+                        expr_start,
+                        cond,
+                        children[i].condition_binding_prefix_len,
+                    );
+                } else {
+                    // Fallback: combined unmapped (no source position available).
+                    let mut sep = String::with_capacity(4 + cond.len());
+                    sep.push_str(", ");
+                    sep.push_str(cond);
+                    out.prepend_alloc(children[i].start, &sep);
+                }
             } else if needs_comma {
                 // Plain comma at prev_item_end to avoid conflicts with v-for
                 // prefixes that are prepended at child.start by enter_element.
                 out.prepend_static(prev_item_end, ", ");
             } else if has_prefix {
-                // Just condition prefix, no comma (e.g., first child with v-if).
-                out.prepend_alloc(
-                    children[i].start,
-                    children[i].condition_prefix.as_ref().unwrap(),
-                );
+                let cond = children[i].condition_prefix.as_ref().unwrap();
+                if let Some(expr_start) = children[i].condition_expr_start {
+                    // Source-mapped condition prefix.
+                    emit_condition_prefix_mapped(
+                        out,
+                        children[i].start,
+                        expr_start,
+                        cond,
+                        children[i].condition_binding_prefix_len,
+                    );
+                } else {
+                    // Just condition prefix, no comma (e.g., first child with v-if).
+                    out.prepend_alloc(children[i].start, cond);
+                }
             }
 
             // Always update prev_item_end (even for continuations, since

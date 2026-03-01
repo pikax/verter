@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+verter_span = { path = "../verter_span" }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_ast = { workspace = true }
@@ -14,7 +15,7 @@ sha2 = { workspace = true }
 bitflags = "2"
 rustc-hash = { workspace = true }
 serde = { workspace = true }
-lightningcss = { workspace = true }
+
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

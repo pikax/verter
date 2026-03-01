@@ -22,6 +22,14 @@ impl TypeProviderError {
     }
 }
 
+/// Result of a completion request from the type provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionResult {
+    pub items: Vec<Completion>,
+    /// Whether the completion list is incomplete (more items available as the user types).
+    pub is_incomplete: bool,
+}
+
 /// A completion item from the type provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Completion {
@@ -146,6 +154,25 @@ pub struct SemanticToken {
     pub length: u32,
     pub token_type: u32,
     pub token_modifiers: u32,
+}
+
+/// An inlay hint from the type provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlayHint {
+    /// Byte offset in the generated file.
+    pub position: u32,
+    /// The label to display.
+    pub label: String,
+    /// Hint kind: Type or Parameter.
+    pub kind: Option<InlayHintKind>,
+    pub padding_left: Option<bool>,
+    pub padding_right: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum InlayHintKind {
+    Type,
+    Parameter,
 }
 
 /// A document highlight from the type provider.

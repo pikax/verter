@@ -37,12 +37,76 @@ impl PositionMapper {
     pub fn tsx_to_vue(&self, line: u32, column: u32) -> Option<MappedPosition> {
         let lookup_table = self.map.generate_lookup_table();
         let token = self.map.lookup_token(&lookup_table, line, column)?;
-        // Only return mappings that reference a source file
-        token.get_source_id()?;
-        Some(MappedPosition {
-            line: token.get_src_line(),
-            column: token.get_src_col(),
-        })
+
+        // If the token has a source mapping, use it directly.
+        if token.get_source_id().is_some() {
+            let mut result = MappedPosition {
+                line: token.get_src_line(),
+                column: token.get_src_col(),
+            };
+            // Adjust column offset: if the query is past the token start on the same
+            // generated line, add the difference. This provides character-level precision
+            // within Original chunks (where source and generated content are identical).
+            if token.get_dst_line() == line && column > token.get_dst_col() {
+                result.column += column - token.get_dst_col();
+            }
+            return Some(result);
+        }
+
+        // Fallback: the token at this position has no source (e.g., synthetic `)` after
+        // a binding name in a template expression). Scan backwards through tokens on the
+        // same generated line to find the nearest preceding mapped token, then interpolate
+        // the column offset — but ONLY if there's no intervening unmapped token between
+        // them (which would indicate the query is inside synthetic text like `_ctx.`).
+        let token_line = token.get_dst_line();
+        let mut best: Option<MappedPosition> = None;
+        let mut best_dst_col: u32 = 0;
+
+        for t in self.map.get_tokens() {
+            if t.get_dst_line() != token_line {
+                continue;
+            }
+            if t.get_source_id().is_none() {
+                continue;
+            }
+            let dst_col = t.get_dst_col();
+            if dst_col > column {
+                continue; // past the query position
+            }
+            if best.is_none() || dst_col > best_dst_col {
+                best_dst_col = dst_col;
+                best = Some(MappedPosition {
+                    line: t.get_src_line(),
+                    column: t.get_src_col(),
+                });
+            }
+        }
+
+        // Guard: if there's an unmapped token strictly between the best mapped token and
+        // the query column, the query is inside synthetic text — return None.
+        if best.is_some() {
+            for t in self.map.get_tokens() {
+                if t.get_dst_line() != token_line {
+                    continue;
+                }
+                if t.get_source_id().is_some() {
+                    continue;
+                }
+                let dst_col = t.get_dst_col();
+                if dst_col > best_dst_col && dst_col < column {
+                    return None;
+                }
+            }
+        }
+
+        // Interpolate: add the column distance from the best token to the query
+        if let Some(ref mut pos) = best {
+            if column > best_dst_col {
+                pos.column += column - best_dst_col;
+            }
+        }
+
+        best
     }
 
     /// Map an original Vue source position to the generated TSX position.
@@ -179,13 +243,13 @@ mod tests {
         );
         let mapper = PositionMapper::from_json(&json).unwrap();
 
-        // Position between tokens (gen col 5) should snap to nearest token at or before
+        // Position between tokens (gen col 5) — finds token at gen(0,0)->src(0,0),
+        // then adjusts column by the offset: 0 + (5 - 0) = 5
         let pos = mapper.tsx_to_vue(0, 5);
         assert!(pos.is_some());
         let pos = pos.unwrap();
-        // lookup_token finds the closest token at or before the position
         assert_eq!(pos.line, 0);
-        assert!(pos.column <= 5);
+        assert_eq!(pos.column, 5);
     }
 
     // ========================================================================
@@ -310,7 +374,393 @@ mod tests {
 
         let vue_pos = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.column).unwrap();
         assert_eq!(vue_pos.line, 10);
-        // Column may snap to token start (0) since lookup_token returns the nearest token
-        assert!(vue_pos.column <= 3);
+        // Column adjustment: token at gen(0,0)->src(10,0), query gen(0,3) -> src(10, 0 + 3) = 3
+        assert_eq!(vue_pos.column, 3);
+    }
+
+    // ========================================================================
+    // TDD: Prepended text source map accuracy (e.g., _ctx. / $setup. prefixes)
+    // ========================================================================
+
+    /// Helper: build a source map with both mapped and unmapped tokens.
+    /// Mapped tokens: (dst_line, dst_col, src_line, src_col)
+    /// Unmapped tokens: (dst_line, dst_col) — emitted with source_id=None
+    fn build_source_map_with_unmapped(
+        source_name: &str,
+        source_content: &str,
+        mapped: &[(u32, u32, u32, u32)],
+        unmapped: &[(u32, u32)],
+    ) -> String {
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        let source_id = builder.set_source_and_content(source_name, source_content);
+
+        // Collect all tokens and sort by (line, col)
+        let mut all_tokens: Vec<(u32, u32, Option<(u32, u32)>)> = Vec::new();
+        for &(dl, dc, sl, sc) in mapped {
+            all_tokens.push((dl, dc, Some((sl, sc))));
+        }
+        for &(dl, dc) in unmapped {
+            all_tokens.push((dl, dc, None));
+        }
+        all_tokens.sort_by_key(|(l, c, _)| (*l, *c));
+
+        for (dl, dc, src) in all_tokens {
+            match src {
+                Some((sl, sc)) => {
+                    builder.add_token(dl, dc, sl, sc, Some(source_id), None);
+                }
+                None => {
+                    builder.add_token(dl, dc, 0, 0, None, None);
+                }
+            }
+        }
+
+        builder.into_sourcemap().to_json_string()
+    }
+
+    /// Simulates: Vue source "  count" at line 1, col 3
+    /// TSX output: "  _ctx.count" — "_ctx." prepended at the position of "count"
+    /// Source map tokens:
+    ///   gen(0,0) -> src(1,0)  — mapped (the "  " spaces, Original chunk)
+    ///   gen(0,2) -> unmapped  — the "_ctx." prefix (Inserted chunk)
+    ///   gen(0,7) -> src(1,2)  — mapped (the "count" content, Original chunk)
+    #[test]
+    fn test_prepended_text_forward_mapping_start_middle_end() {
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            // Full source content (Vue file)
+            "<template>\n   count\n</template>",
+            &[
+                (0, 0, 1, 0), // gen(0,0) -> src(1,0): spaces before count
+                (0, 7, 1, 3), // gen(0,7) -> src(1,3): "count" starts (after "_ctx.")
+            ],
+            &[
+                (0, 2), // unmapped: "_ctx." inserted at gen col 2
+            ],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Forward: start of "count" in Vue (line 1, col 3) -> TSX (line 0, col 7)
+        let tsx_pos = mapper.vue_to_tsx(1, 3).unwrap();
+        assert_eq!(tsx_pos, MappedPosition { line: 0, column: 7 });
+
+        // Forward: middle of "count" (the 'u', col 5) -> TSX col 9
+        let tsx_pos = mapper.vue_to_tsx(1, 5).unwrap();
+        assert_eq!(tsx_pos, MappedPosition { line: 0, column: 9 });
+
+        // Forward: end of "count" (the 't', col 7) -> TSX col 11
+        let tsx_pos = mapper.vue_to_tsx(1, 7).unwrap();
+        assert_eq!(
+            tsx_pos,
+            MappedPosition {
+                line: 0,
+                column: 11
+            }
+        );
+    }
+
+    #[test]
+    fn test_prepended_text_reverse_mapping_start_middle_end() {
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            "<template>\n   count\n</template>",
+            &[
+                (0, 0, 1, 0), // spaces
+                (0, 7, 1, 3), // "count"
+            ],
+            &[
+                (0, 2), // "_ctx." unmapped
+            ],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Reverse: TSX col 7 ('c' of count) -> Vue (1, 3)
+        let vue_pos = mapper.tsx_to_vue(0, 7).unwrap();
+        assert_eq!(vue_pos, MappedPosition { line: 1, column: 3 });
+
+        // Reverse: TSX col 9 ('u' of count) -> Vue (1, 5) — with column adjustment
+        let vue_pos = mapper.tsx_to_vue(0, 9).unwrap();
+        assert_eq!(vue_pos, MappedPosition { line: 1, column: 5 });
+
+        // Reverse: TSX col 11 ('t' of count) -> Vue (1, 7)
+        let vue_pos = mapper.tsx_to_vue(0, 11).unwrap();
+        assert_eq!(vue_pos, MappedPosition { line: 1, column: 7 });
+    }
+
+    #[test]
+    fn test_prepended_text_inside_prefix_returns_none() {
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            "<template>\n   count\n</template>",
+            &[(0, 0, 1, 0), (0, 7, 1, 3)],
+            &[
+                (0, 2), // "_ctx." unmapped at gen col 2
+            ],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Inside "_ctx." prefix (gen cols 2-6): should return None (unmapped)
+        let pos = mapper.tsx_to_vue(0, 3);
+        assert!(
+            pos.is_none(),
+            "Hovering inside prepended '_ctx.' should return None, got: {:?}",
+            pos
+        );
+
+        let pos = mapper.tsx_to_vue(0, 5);
+        assert!(
+            pos.is_none(),
+            "Hovering at '_ctx.' dot should return None, got: {:?}",
+            pos
+        );
+    }
+
+    #[test]
+    fn test_prepended_text_roundtrip_character_level() {
+        // Simulate $setup.count: gen "$setup.count" with "$setup." prepended
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            "<script setup>\nconst count = 0\n</script>\n<template>{{ count }}</template>",
+            &[
+                (0, 7, 3, 14), // gen(0,7) -> src(3,14): "count" in template
+            ],
+            &[
+                (0, 0), // "$setup." unmapped
+            ],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Roundtrip every character of "count" (5 chars)
+        for i in 0..5u32 {
+            let vue_col = 14 + i;
+            let tsx_pos = mapper.vue_to_tsx(3, vue_col);
+            assert!(
+                tsx_pos.is_some(),
+                "vue_to_tsx should succeed for 'count'[{i}] at col {vue_col}"
+            );
+            let tsx_pos = tsx_pos.unwrap();
+            assert_eq!(tsx_pos.line, 0);
+            assert_eq!(
+                tsx_pos.column,
+                7 + i,
+                "Character {i} of 'count' should map to TSX col {}",
+                7 + i
+            );
+
+            // Reverse: TSX -> Vue
+            let vue_pos = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.column);
+            assert!(
+                vue_pos.is_some(),
+                "tsx_to_vue should succeed for TSX col {}",
+                tsx_pos.column
+            );
+            let vue_pos = vue_pos.unwrap();
+            assert_eq!(vue_pos.line, 3);
+            assert_eq!(
+                vue_pos.column, vue_col,
+                "Roundtrip for 'count'[{i}]: expected Vue col {vue_col}, got {}",
+                vue_pos.column
+            );
+        }
+    }
+
+    #[test]
+    fn test_prepended_text_multiple_bindings_on_same_line() {
+        // Simulates: "{{ a }} {{ b }}" -> "$setup.a $setup.b"
+        // Vue line 2: "{{ a }} {{ b }}"  (a at col 3, b at col 11)
+        // TSX line 0: "$setup.a $setup.b"
+        //              0123456789...
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            "<template>\n<div>{{ a }} {{ b }}</div>\n</template>",
+            &[
+                (0, 7, 1, 9),   // gen(0,7) -> src(1,9): "a"
+                (0, 9, 1, 11),  // gen(0,9) -> src(1,11): " " between interpolations
+                (0, 16, 1, 18), // gen(0,16) -> src(1,18): "b"
+            ],
+            &[
+                (0, 0), // "$setup." for a
+                (0, 8), // unmapped space/separator (end of a region)
+                (0, 9), // "$setup." for b
+            ],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Forward: "a" at Vue (1,9) -> TSX (0,7)
+        let pos = mapper.vue_to_tsx(1, 9).unwrap();
+        assert_eq!(pos, MappedPosition { line: 0, column: 7 });
+
+        // Forward: "b" at Vue (1,18) -> TSX (0,16)
+        let pos = mapper.vue_to_tsx(1, 18).unwrap();
+        assert_eq!(
+            pos,
+            MappedPosition {
+                line: 0,
+                column: 16
+            }
+        );
+
+        // Reverse: TSX col 7 -> Vue (1,9) for "a"
+        let pos = mapper.tsx_to_vue(0, 7).unwrap();
+        assert_eq!(pos, MappedPosition { line: 1, column: 9 });
+
+        // Reverse: TSX col 16 -> Vue (1,18) for "b"
+        let pos = mapper.tsx_to_vue(0, 16).unwrap();
+        assert_eq!(
+            pos,
+            MappedPosition {
+                line: 1,
+                column: 18
+            }
+        );
+    }
+
+    // ========================================================================
+    // TDD: UTF-16 position mapping (multi-byte characters)
+    // ========================================================================
+
+    /// Simulates a source where emoji (4 bytes UTF-8, 2 UTF-16 code units) appears
+    /// before a binding. Source map columns are in UTF-16.
+    ///
+    /// Vue source line: "😀{{ msg }}" — emoji at col 0-1 (UTF-16), "msg" at col 5
+    /// TSX output: "$setup.msg" — "msg" at gen col 7
+    #[test]
+    fn test_utf16_emoji_before_binding_forward() {
+        // Source: "😀{{ msg }}" — emoji is 2 UTF-16 units
+        // In UTF-16 columns: 😀=0..1, {{=2..3, space=4, msg=5..7
+        // TSX: "$setup.msg" — $setup.=0..6, msg=7..9
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            "😀{{ msg }}",
+            &[
+                (0, 7, 0, 5), // gen(0,7) -> src(0,5): "msg" start (UTF-16 col 5)
+            ],
+            &[
+                (0, 0), // "$setup." prefix unmapped
+            ],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Forward: "msg"[0] at Vue col 5 -> TSX col 7
+        let pos = mapper.vue_to_tsx(0, 5).unwrap();
+        assert_eq!(pos, MappedPosition { line: 0, column: 7 });
+
+        // Forward: "msg"[1] at Vue col 6 -> TSX col 8
+        let pos = mapper.vue_to_tsx(0, 6).unwrap();
+        assert_eq!(pos, MappedPosition { line: 0, column: 8 });
+
+        // Forward: "msg"[2] at Vue col 7 -> TSX col 9
+        let pos = mapper.vue_to_tsx(0, 7).unwrap();
+        assert_eq!(pos, MappedPosition { line: 0, column: 9 });
+    }
+
+    #[test]
+    fn test_utf16_emoji_before_binding_reverse() {
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            "😀{{ msg }}",
+            &[
+                (0, 7, 0, 5), // gen(0,7) -> src(0,5): "msg"
+            ],
+            &[
+                (0, 0), // "$setup." prefix
+            ],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Reverse: TSX col 7 -> Vue col 5 (exact match)
+        let pos = mapper.tsx_to_vue(0, 7).unwrap();
+        assert_eq!(pos, MappedPosition { line: 0, column: 5 });
+
+        // Reverse: TSX col 8 -> Vue col 6 (column adjustment)
+        let pos = mapper.tsx_to_vue(0, 8).unwrap();
+        assert_eq!(pos, MappedPosition { line: 0, column: 6 });
+
+        // Reverse: TSX col 9 -> Vue col 7
+        let pos = mapper.tsx_to_vue(0, 9).unwrap();
+        assert_eq!(pos, MappedPosition { line: 0, column: 7 });
+    }
+
+    /// Simulates a binding name containing a non-ASCII character (café).
+    /// 'é' is 2 bytes in UTF-8 but 1 UTF-16 code unit.
+    ///
+    /// Vue source: "{{ café }}" — c=col3, a=col4, f=col5, é=col6
+    /// TSX: "_ctx.café" — _ctx.=0..4, c=col5, a=col6, f=col7, é=col8
+    #[test]
+    fn test_utf16_non_ascii_identifier_roundtrip() {
+        // café: 4 UTF-16 units (c=1, a=1, f=1, é=1)
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            "{{ café }}",
+            &[
+                (0, 5, 0, 3), // gen(0,5) -> src(0,3): "café" starts
+            ],
+            &[
+                (0, 0), // "_ctx." prefix
+            ],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Roundtrip each character: c(0), a(1), f(2), é(3)
+        for i in 0..4u32 {
+            let vue_col = 3 + i;
+            let tsx_pos = mapper.vue_to_tsx(0, vue_col).unwrap();
+            assert_eq!(
+                tsx_pos.column,
+                5 + i,
+                "café[{i}] forward: expected TSX col {}",
+                5 + i
+            );
+
+            let vue_roundtrip = mapper.tsx_to_vue(0, tsx_pos.column).unwrap();
+            assert_eq!(
+                vue_roundtrip.column, vue_col,
+                "café[{i}] roundtrip: expected Vue col {vue_col}"
+            );
+        }
+    }
+
+    /// Surrogate pair (emoji 😀 = 4 bytes UTF-8, 2 UTF-16 units) inside an identifier.
+    /// Variable name "a😀b": a=1 unit, 😀=2 units, b=1 unit = 4 UTF-16 units.
+    #[test]
+    fn test_utf16_surrogate_pair_in_identifier() {
+        // Source: "a😀b" (4 UTF-16 units), TSX: "_ctx.a😀b"
+        // Source cols: a=3, 😀=4-5, b=6
+        // TSX cols: _ctx.=0..4, a=5, 😀=6-7, b=8
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            "{{ a😀b }}",
+            &[
+                (0, 5, 0, 3), // gen(0,5) -> src(0,3): "a😀b" starts
+            ],
+            &[
+                (0, 0), // "_ctx." prefix
+            ],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // 'a' at Vue col 3 -> TSX col 5
+        let pos = mapper.vue_to_tsx(0, 3).unwrap();
+        assert_eq!(pos.column, 5);
+        let back = mapper.tsx_to_vue(0, 5).unwrap();
+        assert_eq!(back.column, 3);
+
+        // 😀 first unit at Vue col 4 -> TSX col 6
+        let pos = mapper.vue_to_tsx(0, 4).unwrap();
+        assert_eq!(pos.column, 6);
+        let back = mapper.tsx_to_vue(0, 6).unwrap();
+        assert_eq!(back.column, 4);
+
+        // 😀 second unit at Vue col 5 -> TSX col 7
+        let pos = mapper.vue_to_tsx(0, 5).unwrap();
+        assert_eq!(pos.column, 7);
+        let back = mapper.tsx_to_vue(0, 7).unwrap();
+        assert_eq!(back.column, 5);
+
+        // 'b' at Vue col 6 -> TSX col 8
+        let pos = mapper.vue_to_tsx(0, 6).unwrap();
+        assert_eq!(pos.column, 8);
+        let back = mapper.tsx_to_vue(0, 8).unwrap();
+        assert_eq!(back.column, 6);
     }
 }

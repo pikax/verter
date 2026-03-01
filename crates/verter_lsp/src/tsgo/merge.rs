@@ -8,9 +8,12 @@ use tower_lsp_server::lsp_types::*;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
+#[cfg(test)]
+use crate::tsgo::protocol::Completion;
 use crate::tsgo::protocol::{
-    self, Completion, CompletionKind, HoverInfo, RenameLocation, TypeCodeAction, TypeDiagnostic,
-    TypeDiagnosticSeverity, TypeDocumentHighlight, TypeDocumentHighlightKind, TypeLocation,
+    self, CompletionKind, CompletionResult, HoverInfo, InlayHint, InlayHintKind, RenameLocation,
+    TypeCodeAction, TypeDiagnostic, TypeDiagnosticSeverity, TypeDocumentHighlight,
+    TypeDocumentHighlightKind, TypeLocation,
 };
 
 /// Map an LSP `Position` (in the Vue file) to a byte offset in the generated TSX.
@@ -31,6 +34,32 @@ pub fn vue_position_to_tsx_offset(
         line: tsx_pos.line,
         character: tsx_pos.column,
     })
+}
+
+/// Map a Vue position to a TSX byte offset, with round-trip validation.
+///
+/// After mapping Vue→TSX, verifies the TSX offset maps back to the same Vue line.
+/// Returns `None` if the round-trip fails (indicating the TSX offset is in a synthetic
+/// region like generated JSX for HTML elements, where TSGO queries would crash).
+pub fn vue_position_to_tsx_offset_validated(
+    position: &Position,
+    vue_line_index: &LineIndex,
+    mapper: &PositionMapper,
+    tsx_line_index: &LineIndex,
+) -> Option<u32> {
+    let tsx_offset = vue_position_to_tsx_offset(position, vue_line_index, mapper, tsx_line_index)?;
+
+    // Round-trip: TSX offset → TSX position → Vue position
+    let tsx_pos = tsx_line_index.offset_to_position(tsx_offset)?;
+    let vue_roundtrip = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.character)?;
+
+    // The round-trip Vue position should be on the same line as the original.
+    // If not, the TSX offset is in a synthetic region with no valid source correlation.
+    if vue_roundtrip.line == position.line {
+        Some(tsx_offset)
+    } else {
+        None
+    }
 }
 
 /// Map a TSX byte offset range back to an LSP `Range` in the Vue source.
@@ -84,12 +113,18 @@ pub fn merge_hover(
 ) -> Option<Hover> {
     match (verter_hover, type_hover) {
         (Some(verter), Some(type_info)) => {
-            // Prepend type signature to verter content
+            // TSGO provides the richer type signature — strip verter's leading code block
+            // to avoid duplicate fenced blocks in the merged hover.
             let verter_text = extract_hover_text(&verter);
-            let merged = format!(
-                "```typescript\n{}\n```\n---\n{}",
-                type_info.contents, verter_text
-            );
+            let context = strip_leading_code_block(&verter_text);
+            let merged = if context.trim().is_empty() {
+                format!("```typescript\n{}\n```", type_info.contents)
+            } else {
+                format!(
+                    "```typescript\n{}\n```\n---\n{}",
+                    type_info.contents, context
+                )
+            };
             Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
@@ -126,6 +161,20 @@ fn extract_hover_text(hover: &Hover) -> String {
     }
 }
 
+/// Strip the leading fenced code block from hover text.
+///
+/// If `text` starts with ` ```...lang\n...\n``` `, removes that block and returns
+/// the remainder. This prevents duplicate code fences when merging TSGO + verter hover.
+fn strip_leading_code_block(text: &str) -> &str {
+    if let Some(rest) = text.strip_prefix("```") {
+        if let Some(end) = rest.find("\n```") {
+            let after = &rest[end + 4..];
+            return after.trim_start_matches('\n');
+        }
+    }
+    text
+}
+
 // ── Completion merge ───────────────────────────────────────────────
 
 /// Internal verter helper prefix that should be filtered from completions.
@@ -139,16 +188,17 @@ const VERTER_INTERNAL_PREFIX: &str = "___VERTER___";
 /// - Deduplicate by label (verter items take priority for sort ordering)
 pub fn merge_completions(
     verter_items: Vec<CompletionItem>,
-    type_items: Vec<Completion>,
+    type_result: CompletionResult,
     mapper: &PositionMapper,
     tsx_line_index: &LineIndex,
     vue_line_index: &LineIndex,
-) -> Vec<CompletionItem> {
+) -> (Vec<CompletionItem>, bool) {
+    let is_incomplete = type_result.is_incomplete;
     let mut result = verter_items;
-    let verter_labels: std::collections::HashSet<String> =
+    let mut seen_labels: std::collections::HashSet<String> =
         result.iter().map(|i| i.label.clone()).collect();
 
-    for item in type_items {
+    for item in type_result.items {
         // Filter internal verter identifiers
         if item.label.starts_with(VERTER_INTERNAL_PREFIX) {
             continue;
@@ -157,8 +207,8 @@ pub fn merge_completions(
         if item.label.starts_with("$V_") {
             continue;
         }
-        // Skip if verter already provides this completion
-        if verter_labels.contains(&item.label) {
+        // Skip if already seen (from verter or a previous TSGO item)
+        if !seen_labels.insert(item.label.clone()) {
             continue;
         }
 
@@ -192,7 +242,7 @@ pub fn merge_completions(
         });
     }
 
-    result
+    (result, is_incomplete)
 }
 
 fn convert_completion_kind(kind: CompletionKind) -> CompletionItemKind {
@@ -231,8 +281,9 @@ pub fn merge_diagnostics(
     vue_line_index: &LineIndex,
 ) -> Vec<Diagnostic> {
     let mut result = verter_diags;
+    let mut dropped = 0u32;
 
-    for diag in type_diags {
+    for diag in &type_diags {
         let range =
             tsx_range_to_vue_range(diag.start, diag.end, tsx_line_index, mapper, vue_line_index);
 
@@ -240,12 +291,27 @@ pub fn merge_diagnostics(
             result.push(Diagnostic {
                 range,
                 severity: Some(convert_severity(diag.severity)),
-                code: diag.code.map(NumberOrString::String),
+                code: diag.code.clone().map(NumberOrString::String),
                 source: Some("ts".to_string()),
-                message: diag.message,
+                message: diag.message.clone(),
                 ..Default::default()
             });
+        } else {
+            dropped += 1;
+            tracing::debug!(
+                "merge_diagnostics: dropped TSGO diagnostic (unmapped range) — {:?} at offsets {}..{}",
+                diag.message,
+                diag.start,
+                diag.end,
+            );
         }
+    }
+
+    if dropped > 0 {
+        tracing::debug!(
+            "merge_diagnostics: {dropped}/{} TSGO diagnostics dropped (unmapped ranges)",
+            type_diags.len()
+        );
     }
 
     result
@@ -271,13 +337,18 @@ fn convert_severity(sev: TypeDiagnosticSeverity) -> DiagnosticSeverity {
 pub fn merge_definitions(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
-    _tsx_line_index: &LineIndex,
-    _mapper: &PositionMapper,
-    _vue_line_index: &LineIndex,
+    tsx_line_index: &LineIndex,
+    mapper: &PositionMapper,
+    vue_line_index: &LineIndex,
 ) -> Option<GotoDefinitionResponse> {
-    // If verter provides a definition, prefer it for in-file targets
-    if verter_def.is_some() && type_defs.is_empty() {
-        return verter_def;
+    // If verter provides a definition, prefer it when:
+    // - TSGO returned nothing, or
+    // - verter resolved cross-file (TSGO often returns *.vue shim declarations)
+    if let Some(ref vd) = verter_def {
+        let is_cross_file = matches!(vd, GotoDefinitionResponse::Scalar(loc) if loc.uri.as_str() != crate::features::definition::SAME_FILE_URI);
+        if type_defs.is_empty() || is_cross_file {
+            return verter_def;
+        }
     }
 
     // If TypeProvider provides definitions, convert them
@@ -293,12 +364,20 @@ pub fn merge_definitions(
                     loc.path.clone()
                 };
                 let uri = path_to_uri(&file_path)?;
-                // TODO: map TSX offsets back to Vue positions for .vue targets
-                // For now, use the raw offsets (works for .ts targets)
-                Some(Location {
-                    uri,
-                    range: Range::default(), // placeholder until offset mapping
-                })
+                // Map TSX byte offsets back to Vue positions for .vue targets
+                let range = if loc.path.ends_with(".vue.tsx") {
+                    tsx_range_to_vue_range(
+                        loc.start,
+                        loc.end,
+                        tsx_line_index,
+                        mapper,
+                        vue_line_index,
+                    )
+                    .unwrap_or_default()
+                } else {
+                    Range::default()
+                };
+                Some(Location { uri, range })
             })
             .collect();
 
@@ -317,6 +396,14 @@ pub fn merge_definitions(
 }
 
 /// Convert a file path to a `file://` URI.
+///
+/// Handles both Windows (`C:/Users/...`) and Unix (`/home/user/...`) paths.
+/// Also available as `file_path_to_uri` for use outside this module.
+pub fn file_path_to_uri(path: &str) -> Option<Uri> {
+    path_to_uri(path)
+}
+
+/// Convert a file path to a `file://` URI (internal).
 fn path_to_uri(path: &str) -> Option<Uri> {
     // Normalize path separators
     let normalized = path.replace('\\', "/");
@@ -660,6 +747,62 @@ pub fn merge_semantic_tokens(
     result
 }
 
+// ── Inlay hints merge ─────────────────────────────────────────────
+
+/// Map TypeProvider inlay hints from TSX positions back to Vue positions.
+///
+/// Each hint position (byte offset in TSX) is mapped through the sourcemap
+/// back to the Vue source. Hints that fall in generated code (no mapping)
+/// are filtered out.
+pub fn merge_inlay_hints(
+    type_hints: Vec<InlayHint>,
+    tsx_line_index: &LineIndex,
+    mapper: &PositionMapper,
+    vue_line_index: &LineIndex,
+) -> Vec<tower_lsp_server::lsp_types::InlayHint> {
+    let mut result = Vec::with_capacity(type_hints.len());
+
+    for hint in type_hints {
+        // Convert TSX byte offset → TSX line/col
+        let Some(tsx_pos) = tsx_line_index.offset_to_position(hint.position) else {
+            continue;
+        };
+
+        // Map TSX line/col → Vue line/col via sourcemap
+        let Some(vue_mapped) = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.character) else {
+            continue;
+        };
+
+        let vue_pos = Position {
+            line: vue_mapped.line,
+            character: vue_mapped.column,
+        };
+
+        // Validate the Vue position is within bounds
+        if vue_line_index.position_to_offset(&vue_pos).is_none() {
+            continue;
+        }
+
+        let kind = hint.kind.map(|k| match k {
+            InlayHintKind::Type => tower_lsp_server::lsp_types::InlayHintKind::TYPE,
+            InlayHintKind::Parameter => tower_lsp_server::lsp_types::InlayHintKind::PARAMETER,
+        });
+
+        result.push(tower_lsp_server::lsp_types::InlayHint {
+            position: vue_pos,
+            label: tower_lsp_server::lsp_types::InlayHintLabel::String(hint.label),
+            kind,
+            text_edits: None,
+            tooltip: None,
+            padding_left: hint.padding_left,
+            padding_right: hint.padding_right,
+            data: None,
+        });
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,8 +824,8 @@ mod tests {
         let json = builder.into_sourcemap().to_json_string();
 
         let mapper = PositionMapper::from_json(&json).unwrap();
-        let vue_li = LineIndex::new(vue_source);
-        let tsx_li = LineIndex::new(tsx_source);
+        let vue_li = LineIndex::new_utf16(vue_source);
+        let tsx_li = LineIndex::new_utf16(tsx_source);
 
         (mapper, vue_li, tsx_li)
     }
@@ -816,10 +959,15 @@ mod tests {
     fn merge_completions_combines_both() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![make_verter_completion("msg")];
-        let types = vec![make_type_completion("count"), make_type_completion("name")];
+        let type_result = CompletionResult {
+            items: vec![make_type_completion("count"), make_type_completion("name")],
+            is_incomplete: false,
+        };
 
-        let result = merge_completions(verter, types, &mapper, &tsx_li, &vue_li);
+        let (result, is_incomplete) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
         assert_eq!(result.len(), 3);
+        assert!(!is_incomplete);
         let labels: Vec<&str> = result.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"msg"));
         assert!(labels.contains(&"count"));
@@ -831,9 +979,12 @@ mod tests {
     fn merge_completions_deduplicates() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![make_verter_completion("msg")];
-        let types = vec![make_type_completion("msg")]; // duplicate
+        let type_result = CompletionResult {
+            items: vec![make_type_completion("msg")], // duplicate
+            is_incomplete: false,
+        };
 
-        let result = merge_completions(verter, types, &mapper, &tsx_li, &vue_li);
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -843,14 +994,36 @@ mod tests {
     fn merge_completions_filters_verter_internal() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![];
-        let types = vec![
-            make_type_completion("msg"),
-            make_type_completion("___VERTER___hidden"),
-        ];
+        let type_result = CompletionResult {
+            items: vec![
+                make_type_completion("msg"),
+                make_type_completion("___VERTER___hidden"),
+            ],
+            is_incomplete: false,
+        };
 
-        let result = merge_completions(verter, types, &mapper, &tsx_li, &vue_li);
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
+    }
+
+    /// @ai-generated — is_incomplete flag is propagated from TypeProvider result
+    #[test]
+    fn merge_completions_propagates_is_incomplete() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let verter = vec![make_verter_completion("msg")];
+        let type_result = CompletionResult {
+            items: vec![make_type_completion("count")],
+            is_incomplete: true,
+        };
+
+        let (result, is_incomplete) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+        assert_eq!(result.len(), 2);
+        assert!(
+            is_incomplete,
+            "is_incomplete should be propagated from TSGO"
+        );
     }
 
     /// @ai-generated — $V_ prefixed type helpers are filtered
@@ -858,14 +1031,62 @@ mod tests {
     fn merge_completions_filters_dollar_v_prefix() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
         let verter = vec![];
-        let types = vec![
-            make_type_completion("msg"),
-            make_type_completion("$V_EmitsToProps"),
-        ];
+        let type_result = CompletionResult {
+            items: vec![
+                make_type_completion("msg"),
+                make_type_completion("$V_EmitsToProps"),
+            ],
+            is_incomplete: false,
+        };
 
-        let result = merge_completions(verter, types, &mapper, &tsx_li, &vue_li);
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
+    }
+
+    /// @ai-generated — TSGO-internal duplicates are deduplicated
+    #[test]
+    fn merge_completions_deduplicates_tsgo_internal() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let verter = vec![make_verter_completion("msg")];
+        let type_result = CompletionResult {
+            items: vec![
+                make_type_completion("onMounted"), // local binding
+                make_type_completion("onMounted"), // auto-import suggestion (same label)
+            ],
+            is_incomplete: false,
+        };
+
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+        let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
+        assert_eq!(
+            on_mounted_count, 1,
+            "TSGO-internal duplicates should be deduplicated"
+        );
+        assert_eq!(result.len(), 2); // msg + onMounted
+    }
+
+    /// @ai-generated — Labels present in both verter and TSGO are deduplicated (verter wins)
+    #[test]
+    fn merge_completions_deduplicates_across_all_sources() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let verter = vec![make_verter_completion("onMounted")];
+        let type_result = CompletionResult {
+            items: vec![
+                make_type_completion("onMounted"), // TSGO local
+                make_type_completion("onMounted"), // TSGO auto-import
+                make_type_completion("ref"),       // unique
+            ],
+            is_incomplete: false,
+        };
+
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+        let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
+        assert_eq!(
+            on_mounted_count, 1,
+            "onMounted should appear exactly once (from verter)"
+        );
+        assert_eq!(result.len(), 2); // onMounted + ref
     }
 
     // ── Diagnostics merge tests ────────────────────────────────────
@@ -1175,5 +1396,187 @@ mod tests {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
         let result = merge_rename_locations(None, vec![], "newName", &tsx_li, &mapper, &vue_li);
         assert!(result.is_none());
+    }
+
+    // ── Definition merge tests (Bug 2) ───────────────────────────────
+
+    /// @ai-generated — merge_definitions maps .vue.tsx offsets to correct Vue positions
+    ///
+    /// This tests Bug 2: merge_definitions was returning Range::default() (0,0)-(0,0)
+    /// for all .vue.tsx targets instead of mapping TSX byte offsets back to Vue positions.
+    #[test]
+    fn merge_definitions_maps_vue_tsx_to_vue_positions() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        // Simulate TSGO returning a definition in App.vue.tsx
+        // TSX offset 6..9 = "msg" (in "const msg = ...")
+        // This should map back to Vue line 5, col 6..9
+        let type_defs = vec![TypeLocation {
+            path: "/home/user/App.vue.tsx".to_string(),
+            start: 6,
+            end: 9,
+        }];
+
+        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li);
+        assert!(result.is_some(), "Expected definition response");
+
+        match result.unwrap() {
+            GotoDefinitionResponse::Scalar(loc) => {
+                // URI should point to .vue (not .vue.tsx)
+                assert!(
+                    loc.uri.as_str().ends_with("App.vue"),
+                    "URI should be .vue, got: {}",
+                    loc.uri.as_str()
+                );
+                // Range should NOT be (0,0)-(0,0) — that's the bug
+                assert_ne!(
+                    loc.range,
+                    Range::default(),
+                    "Definition range should not be (0,0)-(0,0) — \
+                     TSX offsets must be mapped to Vue positions"
+                );
+                // The start should be on Vue line 5 (where "const msg = ..." is)
+                assert_eq!(
+                    loc.range.start.line, 5,
+                    "Expected Vue line 5 for 'msg', got line {}",
+                    loc.range.start.line
+                );
+            }
+            GotoDefinitionResponse::Array(locs) => {
+                assert_eq!(locs.len(), 1);
+                assert_ne!(
+                    locs[0].range,
+                    Range::default(),
+                    "Definition range should not be (0,0)-(0,0)"
+                );
+            }
+            _ => panic!("Unexpected definition response type"),
+        }
+    }
+
+    /// @ai-generated — merge_definitions passes through non-.vue targets unchanged
+    #[test]
+    fn merge_definitions_non_vue_targets_unchanged() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let type_defs = vec![TypeLocation {
+            path: "/home/user/utils.ts".to_string(),
+            start: 0,
+            end: 10,
+        }];
+
+        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li);
+        assert!(result.is_some());
+    }
+
+    /// @ai-generated — merge_definitions prefers verter when type_defs is empty
+    #[test]
+    fn merge_definitions_verter_preferred_when_no_type_defs() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let verter_def = Some(GotoDefinitionResponse::Scalar(Location {
+            uri: "file:///test.vue".parse().unwrap(),
+            range: Range {
+                start: Position {
+                    line: 5,
+                    character: 6,
+                },
+                end: Position {
+                    line: 5,
+                    character: 9,
+                },
+            },
+        }));
+
+        let result = merge_definitions(verter_def, vec![], &tsx_li, &mapper, &vue_li);
+        assert!(result.is_some());
+        match result.unwrap() {
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert_eq!(loc.range.start.line, 5);
+                assert_eq!(loc.range.start.character, 6);
+            }
+            _ => panic!("Expected scalar definition"),
+        }
+    }
+
+    // ── Hover merge tests ──────────────────────────────────────────
+
+    /// @ai-generated — strip_leading_code_block removes leading fenced block
+    #[test]
+    fn strip_leading_code_block_removes_fence() {
+        let text = "```typescript\nconst count: number\n```\n*(reactive)*";
+        assert_eq!(strip_leading_code_block(text), "*(reactive)*");
+    }
+
+    /// @ai-generated — strip_leading_code_block returns full text when no fence
+    #[test]
+    fn strip_leading_code_block_no_fence() {
+        let text = "*(reactive)*\nInitialized via `ref()`";
+        assert_eq!(strip_leading_code_block(text), text);
+    }
+
+    /// @ai-generated — merge_hover deduplicates code fences
+    #[test]
+    fn merge_hover_no_duplicate_fences() {
+        let (mapper, _, tsx_li) = make_mapper_and_indexes();
+        let vue_li = LineIndex::new_utf16("");
+
+        let verter = Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "```typescript\nconst count\n```\n\n*(reactive)*".to_string(),
+            }),
+            range: None,
+        });
+        let tsgo = Some(HoverInfo {
+            range_start: None,
+            range_end: None,
+            contents: "const count: Ref<number>".to_string(),
+        });
+
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li);
+        assert!(result.is_some());
+
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+
+        // Should have exactly one code fence from TSGO, plus verter context
+        assert!(text.contains("const count: Ref<number>"));
+        assert!(text.contains("*(reactive)*"));
+        // Count code fence openings — should be exactly 1
+        assert_eq!(text.matches("```typescript").count(), 1, "text: {text}");
+    }
+
+    /// @ai-generated — merge_hover with verter-only code block and TSGO replaces it cleanly
+    #[test]
+    fn merge_hover_verter_only_code_block() {
+        let (mapper, _, tsx_li) = make_mapper_and_indexes();
+        let vue_li = LineIndex::new_utf16("");
+
+        let verter = Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "```typescript\nconst x\n```".to_string(),
+            }),
+            range: None,
+        });
+        let tsgo = Some(HoverInfo {
+            range_start: None,
+            range_end: None,
+            contents: "const x: string".to_string(),
+        });
+
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li);
+        assert!(result.is_some());
+
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+
+        // Only TSGO type block, no "---" separator since verter had nothing extra
+        assert_eq!(text, "```typescript\nconst x: string\n```");
     }
 }

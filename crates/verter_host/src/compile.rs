@@ -90,6 +90,17 @@ pub(crate) fn assemble_main_module(
             }
             let _ = writeln!(out, " }} from \"{}\"", runtime);
         }
+        // SSR helpers are imported from "vue/server-renderer"
+        if !template.ssr_imports.is_empty() {
+            let _ = write!(out, "import {{ ");
+            for (i, name) in template.ssr_imports.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format_import_specifier(name));
+            }
+            let _ = writeln!(out, " }} from \"vue/server-renderer\"");
+        }
     }
 
     if let Some(script) = &compiled.script {
@@ -123,7 +134,9 @@ pub(crate) fn assemble_main_module(
         if !template.code.ends_with('\n') {
             out.push('\n');
         }
-        if template.code.contains("function render(") {
+        if template.code.contains("function ssrRender(") {
+            out.push_str("_sfc_main.ssrRender = ssrRender\n");
+        } else if template.code.contains("function render(") {
             out.push_str("_sfc_main.render = render\n");
         }
     }
@@ -501,6 +514,7 @@ mod tests {
                 code: "function render(_ctx, _cache, $props, $setup) {\n  return $setup.n\n}".to_string(),
                 source_map: String::new(),
                 imports: vec!["_openBlock", "_createElementBlock"],
+                ssr_imports: vec![],
                 duration_ms: 0.0,
                 attrs: vec![],
             }),
@@ -511,6 +525,7 @@ mod tests {
             parse_duration_ms: 0.0,
             total_duration_ms: 0.0,
             tsx: None,
+            tsc: None,
             template_data: None,
         }
     }
@@ -568,6 +583,7 @@ mod tests {
             parse_duration_ms: 0.0,
             total_duration_ms: 0.0,
             tsx: None,
+            tsc: None,
             template_data: None,
         };
         let profile = CompileProfile::default();
@@ -592,6 +608,7 @@ mod tests {
             parse_duration_ms: 0.0,
             total_duration_ms: 0.0,
             tsx: None,
+            tsc: None,
             template_data: None,
         };
         let profile = CompileProfile::default();
@@ -661,6 +678,7 @@ mod tests {
             parse_duration_ms: 0.0,
             total_duration_ms: 0.0,
             tsx: None,
+            tsc: None,
             template_data: None,
         };
         let meta = FileMeta {

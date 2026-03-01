@@ -281,14 +281,19 @@ mod tests {
         )
         .unwrap();
 
+        // Class names should be content-hashed (format: {name}_{8-hex-chars})
         assert!(
-            result.code.contains("btn_a4f2eed6_"),
-            "Got: {}",
+            result.code.contains("btn_")
+                && !result.code.contains(".btn{")
+                && !result.code.contains(".btn "),
+            "btn should be hashed. Got: {}",
             result.code
         );
         assert!(
-            result.code.contains("card_a4f2eed6_"),
-            "Got: {}",
+            result.code.contains("card_")
+                && !result.code.contains(".card{")
+                && !result.code.contains(".card "),
+            "card should be hashed. Got: {}",
             result.code
         );
         assert_eq!(result.module_classes.len(), 2);
@@ -340,14 +345,14 @@ mod tests {
             "Should have scope attr. Got: {}",
             result.code
         );
-        // Hashed class names should be present
+        // Hashed class names should be present (content-hash format: {name}_{8-hex-chars})
         assert!(
-            result.code.contains("btn_a4f2eed6_"),
+            result.code.contains("btn_") && !result.code.contains(".btn["),
             "Should have hashed btn. Got: {}",
             result.code
         );
         assert!(
-            result.code.contains("card_a4f2eed6_"),
+            result.code.contains("card_") && !result.code.contains(".card["),
             "Should have hashed card. Got: {}",
             result.code
         );
@@ -730,14 +735,15 @@ mod tests {
                 "{}: must have 2 module classes",
                 label
             );
+            // Content-hash format: {name}_{8-hex-chars}
             assert!(
-                result.code.contains("btn_a4f2eed6_"),
+                result.code.contains("btn_") && !result.code.contains(".btn{"),
                 "{}: btn must be hashed. Got: {}",
                 label,
                 result.code
             );
             assert!(
-                result.code.contains("card_a4f2eed6_"),
+                result.code.contains("card_") && !result.code.contains(".card{"),
                 "{}: card must be hashed. Got: {}",
                 label,
                 result.code

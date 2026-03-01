@@ -8,7 +8,8 @@ use oxc_allocator::Allocator;
 use crate::code_transform::CodeTransform;
 
 use super::shared::helpers::{
-    BuiltinComponentFlags, VaporHelper, VaporHelperFlags, VdomHelper, VdomHelperFlags,
+    BuiltinComponentFlags, SsrHelper, SsrHelperFlags, VaporHelper, VaporHelperFlags, VdomHelper,
+    VdomHelperFlags,
 };
 
 // ======================== CodeGenOutput ========================
@@ -28,14 +29,29 @@ pub struct CodeGenOutput<'alloc> {
     /// Used for binding prefixes (`_ctx.`, `$setup.`), suffixes (`.value`), separators.
     pub prepends: Vec<(u32, &'alloc str)>,
 
+    /// Insert content before a position with source map mapping:
+    /// (insertion_pos, source_pos, content_offset, content).
+    /// Creates `InsertedMapped` chunks that emit source map tokens at `source_pos`.
+    /// `content_offset` shifts the token within the content (characters before it
+    /// are unmapped). Used for relocated directive expressions (v-if conditions,
+    /// v-for iterables) where binding prefixes precede the original identifier.
+    pub mapped_prepends: Vec<(u32, u32, u32, &'alloc str)>,
+
     /// VDOM runtime helper imports (bitflags, O(1) dedup).
     vdom_imports: VdomHelperFlags,
 
     /// Vapor runtime helper imports (bitflags, O(1) dedup).
     vapor_imports: VaporHelperFlags,
 
+    /// SSR runtime helper imports from `vue/server-renderer` (bitflags, O(1) dedup).
+    ssr_imports: SsrHelperFlags,
+
     /// Vue built-in component imports (Suspense, Teleport, etc.).
     builtin_imports: BuiltinComponentFlags,
+
+    /// Deferred move operations: (start, end, target).
+    /// Applied via `ct.move_slice()` after overwrites and prepends.
+    moves: Vec<(u32, u32, u32)>,
 
     /// Allocator reference for bump-allocating generated strings.
     alloc: &'alloc Allocator,
@@ -47,9 +63,12 @@ impl<'alloc> CodeGenOutput<'alloc> {
         Self {
             overwrites: Vec::with_capacity(16),
             prepends: Vec::with_capacity(16),
+            mapped_prepends: Vec::new(),
             vdom_imports: VdomHelperFlags::empty(),
             vapor_imports: VaporHelperFlags::empty(),
+            ssr_imports: SsrHelperFlags::empty(),
             builtin_imports: BuiltinComponentFlags::empty(),
+            moves: Vec::new(),
             alloc,
         }
     }
@@ -81,6 +100,38 @@ impl<'alloc> CodeGenOutput<'alloc> {
         self.prepends.push((pos, allocated));
     }
 
+    /// Push a source-mapped prepend-left with bump-allocated content.
+    /// The generated chunk maps back to `source_pos` in the source map.
+    /// The source map token is placed at the start of the content (offset 0).
+    #[inline]
+    pub fn prepend_alloc_mapped(&mut self, pos: u32, source_pos: u32, content: &str) {
+        let allocated = self.alloc.alloc_str(content);
+        self.mapped_prepends.push((pos, source_pos, 0, allocated));
+    }
+
+    /// Push a source-mapped prepend-left with a content offset.
+    /// Characters before `content_offset` are unmapped; the source map token is
+    /// placed at `content_offset`, pointing to `source_pos`. Used when binding
+    /// prefixes (e.g., `(__props.`) precede the original identifier.
+    #[inline]
+    pub fn prepend_alloc_mapped_with_offset(
+        &mut self,
+        pos: u32,
+        source_pos: u32,
+        content_offset: u32,
+        content: &str,
+    ) {
+        let allocated = self.alloc.alloc_str(content);
+        self.mapped_prepends
+            .push((pos, source_pos, content_offset, allocated));
+    }
+
+    /// Push a move operation: move source range [start, end) to target position.
+    #[inline]
+    pub fn move_slice(&mut self, start: u32, end: u32, target: u32) {
+        self.moves.push((start, end, target));
+    }
+
     /// Allocate a string in the bump allocator.
     #[inline]
     pub fn alloc_str(&self, s: &str) -> &'alloc str {
@@ -105,6 +156,12 @@ impl<'alloc> CodeGenOutput<'alloc> {
         self.builtin_imports = self.builtin_imports.add(flag);
     }
 
+    /// Record an SSR runtime helper import (from `vue/server-renderer`).
+    #[inline]
+    pub fn add_ssr_import(&mut self, h: SsrHelper) {
+        self.ssr_imports = self.ssr_imports.add(h);
+    }
+
     /// Read-only access to VDOM import flags.
     #[cfg(test)]
     #[inline]
@@ -122,11 +179,10 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// Sort and apply all accumulated operations to a CodeTransform.
     /// Called once after the entire tree walk.
     ///
-    /// Returns the deduplicated list of runtime helper imports collected
-    /// during codegen. The caller (or a downstream merger) uses this to
-    /// generate the `import { ... } from "vue"` statement.
+    /// Returns the categorized runtime helper imports collected during codegen.
+    /// Vue helpers go to `vue`, SSR helpers go to `ssr` (from `vue/server-renderer`).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn apply_to(mut self, ct: &mut CodeTransform<'alloc>) -> Vec<&'static str> {
+    pub fn apply_to(mut self, ct: &mut CodeTransform<'alloc>) -> TemplateImports {
         // Sort by start ascending, then by end descending (so that for equal
         // starts, the wider range comes first and the narrower is filtered out).
         self.overwrites
@@ -153,17 +209,39 @@ impl<'alloc> CodeGenOutput<'alloc> {
 
         ct.batch_overwrite(&self.overwrites);
 
-        // Sort prepends by position (required by batch_prepend_left_static).
-        // Must use stable sort to preserve insertion order for same-position
-        // prepends. Scope-close suffixes (e.g., ` : _createCommentVNode(...)`)
-        // are pushed before sibling comma separators during tree walking, and
-        // both land at the element's end position. Unstable sort can reorder
-        // them, producing invalid JS like `, : _createCommentVNode(...)`.
-        self.prepends.sort_by_key(|(pos, _)| *pos);
-        ct.batch_prepend_left_static(&self.prepends);
+        if self.mapped_prepends.is_empty() {
+            // Fast path: no mapped prepends, use the simpler batch method.
+            // Must use stable sort to preserve insertion order for same-position
+            // prepends. Scope-close suffixes (e.g., ` : _createCommentVNode(...)`)
+            // are pushed before sibling comma separators during tree walking, and
+            // both land at the element's end position. Unstable sort can reorder
+            // them, producing invalid JS like `, : _createCommentVNode(...)`.
+            self.prepends.sort_by_key(|(pos, _)| *pos);
+            ct.batch_prepend_left_static(&self.prepends);
+        } else {
+            // Merge regular prepends (unmapped) and mapped prepends into a
+            // unified vec for batch_prepend_left_with_source_map.
+            type PrependItem<'b> = (u32, Option<(u32, u32)>, &'b str);
+            let mut all_prepends: Vec<PrependItem<'_>> =
+                Vec::with_capacity(self.prepends.len() + self.mapped_prepends.len());
+            for &(pos, content) in &self.prepends {
+                all_prepends.push((pos, None, content));
+            }
+            for &(pos, src_pos, content_offset, content) in &self.mapped_prepends {
+                all_prepends.push((pos, Some((src_pos, content_offset)), content));
+            }
+            // Stable sort to preserve insertion order for same-position prepends.
+            all_prepends.sort_by_key(|(pos, _, _)| *pos);
+            ct.batch_prepend_left_with_source_map(&all_prepends);
+        }
+
+        // Apply deferred move operations (e.g., slot reordering)
+        for &(start, end, target) in &self.moves {
+            ct.move_slice(start, end, target);
+        }
 
         // Return whichever mode's imports are non-empty (only one is ever active)
-        let mut imports = if !self.vdom_imports.is_empty() {
+        let mut vue = if !self.vdom_imports.is_empty() {
             self.vdom_imports.to_imports()
         } else {
             self.vapor_imports.to_imports()
@@ -171,10 +249,33 @@ impl<'alloc> CodeGenOutput<'alloc> {
 
         // Append built-in component imports (Suspense, Teleport, etc.)
         if !self.builtin_imports.is_empty() {
-            imports.extend(self.builtin_imports.to_imports());
+            vue.extend(self.builtin_imports.to_imports());
         }
 
-        imports
+        let ssr = self.ssr_imports.to_imports();
+
+        TemplateImports { vue, ssr }
+    }
+}
+
+// ======================== TemplateImports ========================
+
+/// Categorized runtime helper imports from template codegen.
+///
+/// Separates Vue helpers (from `"vue"`) and SSR helpers (from `"vue/server-renderer"`)
+/// so the caller can emit two distinct import lines for SSR builds.
+pub struct TemplateImports {
+    /// Helpers imported from `"vue"` (e.g., `_mergeProps`, `_resolveComponent`).
+    pub vue: Vec<&'static str>,
+    /// Helpers imported from `"vue/server-renderer"` (e.g., `_ssrRenderAttrs`).
+    pub ssr: Vec<&'static str>,
+}
+
+impl TemplateImports {
+    /// Returns true if there are no imports at all.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.vue.is_empty() && self.ssr.is_empty()
     }
 }
 
@@ -197,6 +298,15 @@ pub struct ChildRecord {
     /// and v-else (which has no prefix — the `: ` comes from the previous
     /// branch's scope close).
     pub condition_prefix: Option<String>,
+    /// Byte offset of the v-if/v-else-if expression value in source.
+    /// Used to emit source-mapped condition prefixes so the LSP can map
+    /// the ternary condition back to the directive expression.
+    pub condition_expr_start: Option<u32>,
+    /// Length of the binding prefix (e.g., `__props.` = 9, `_ctx.` = 5) within
+    /// the resolved expression inside `condition_prefix`. Used to split the
+    /// condition prefix into unmapped prefix + mapped identifier + unmapped suffix
+    /// for accurate per-identifier source mapping.
+    pub condition_binding_prefix_len: usize,
 }
 
 /// Role of an element in a v-if/v-else-if/v-else chain.
@@ -223,6 +333,13 @@ pub enum ChildKind {
     WhitespaceNewline,
     /// All-whitespace without a newline (deferred to parent for context-dependent resolution).
     WhitespaceSpace,
+    /// Fully-static element(s) emitted as `_createStaticVNode()`.
+    /// After consolidation, a single `StaticVNode` record may span multiple
+    /// consecutive static siblings, emitting them as one HTML string.
+    StaticVNode {
+        /// Number of root-level elements in this static group.
+        count: u32,
+    },
 }
 
 // ======================== ScopeClose ========================
@@ -463,6 +580,9 @@ pub struct VaporElementState<'a> {
     pub child_effects: Vec<VaporEffect<'a>>,
     /// Statements (non-effect, like event handlers).
     pub child_statements: Vec<&'a str>,
+    /// Named slot closure entries built from `<template v-slot>` children.
+    /// Each string is a complete slot entry (e.g., `header: () => { ... }`).
+    pub named_slots: Vec<String>,
 }
 
 impl Default for VaporElementState<'_> {
@@ -483,6 +603,7 @@ impl VaporElementState<'_> {
             child_text_creations: Vec::new(),
             child_effects: Vec::new(),
             child_statements: Vec::new(),
+            named_slots: Vec::new(),
         }
     }
 
@@ -498,6 +619,7 @@ impl VaporElementState<'_> {
         self.child_text_creations.clear();
         self.child_effects.clear();
         self.child_statements.clear();
+        self.named_slots.clear();
     }
 
     /// Ensure a node ref is allocated for this element.
@@ -683,9 +805,10 @@ mod tests {
 
         let mut ct = crate::code_transform::CodeTransform::new("hello", &alloc);
         let imports = out.apply_to(&mut ct);
-        assert_eq!(imports.len(), 2);
-        assert!(imports.contains(&"_createCommentVNode"));
-        assert!(imports.contains(&"_toDisplayString"));
+        assert_eq!(imports.vue.len(), 2);
+        assert!(imports.vue.contains(&"_createCommentVNode"));
+        assert!(imports.vue.contains(&"_toDisplayString"));
+        assert!(imports.ssr.is_empty());
     }
 
     #[test]
@@ -697,9 +820,10 @@ mod tests {
 
         let mut ct = crate::code_transform::CodeTransform::new("hello", &alloc);
         let imports = out.apply_to(&mut ct);
-        assert_eq!(imports.len(), 2);
-        assert!(imports.contains(&"_template"));
-        assert!(imports.contains(&"_renderEffect"));
+        assert_eq!(imports.vue.len(), 2);
+        assert!(imports.vue.contains(&"_template"));
+        assert!(imports.vue.contains(&"_renderEffect"));
+        assert!(imports.ssr.is_empty());
     }
 
     #[test]
@@ -880,5 +1004,64 @@ mod tests {
         let r2 = state.ensure_text_ref(&mut counters);
         assert_eq!(r2, 0);
         assert_eq!(counters.x, 1);
+    }
+
+    // ==================== Mapped Prepends ====================
+
+    /// @ai-generated — prepend_alloc_mapped pushes to mapped_prepends vec
+    #[test]
+    fn prepend_alloc_mapped_pushes_to_vec() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        out.prepend_alloc_mapped(10, 20, "(show) ? ");
+        assert_eq!(out.mapped_prepends.len(), 1);
+        assert_eq!(out.mapped_prepends[0].0, 10); // insertion pos
+        assert_eq!(out.mapped_prepends[0].1, 20); // source pos
+        assert_eq!(out.mapped_prepends[0].2, 0); // content_offset
+        assert_eq!(out.mapped_prepends[0].3, "(show) ? ");
+    }
+
+    /// @ai-generated — apply_to merges mapped and regular prepends correctly
+    #[test]
+    fn apply_to_merges_mapped_and_regular_prepends() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        // Regular prepend at position 5
+        out.prepend_static(5, "_ctx.");
+        // Mapped prepend at position 3
+        out.prepend_alloc_mapped(3, 100, "(show) ? ");
+
+        let source = "ABCDEFGHIJ";
+        let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
+        out.apply_to(&mut ct);
+        let result = ct.build_string();
+        // Position 3: "(show) ? " inserted, position 5: "_ctx." inserted
+        assert_eq!(result, "ABC(show) ? DE_ctx.FGHIJ");
+    }
+
+    /// @ai-generated — apply_to with mapped prepends produces source-mapped tokens
+    #[test]
+    fn apply_to_mapped_prepend_produces_source_map_token() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        // Insert "(show) ? " at position 5, mapped to source position 20
+        out.prepend_alloc_mapped(5, 20, "(show) ? ");
+
+        let source = "0123456789ABCDEFGHIJKLMNOP";
+        let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
+        out.apply_to(&mut ct);
+
+        let map =
+            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"));
+        let tokens: Vec<_> = map.get_tokens().collect();
+
+        // Find token mapping to source col 20
+        let mapped = tokens
+            .iter()
+            .find(|t| t.get_src_col() == 20 && t.get_source_id().is_some());
+        assert!(
+            mapped.is_some(),
+            "should have source-mapped token at src col 20"
+        );
     }
 }

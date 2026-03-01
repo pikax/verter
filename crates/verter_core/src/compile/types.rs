@@ -2,6 +2,82 @@
 //!
 //! Contains all option structs, result types, and enums used by [`super::compile()`].
 
+bitflags::bitflags! {
+    /// Controls which compilation steps run in the pipeline.
+    ///
+    /// Each consumer (bundler, LSP, MCP, TSC) needs a different subset of
+    /// compilation outputs. Using `CompileTarget` lets the pipeline skip
+    /// expensive steps whose output would be discarded.
+    ///
+    /// Use the preset constants for common configurations:
+    /// - [`BUNDLER`](Self::BUNDLER) — style + script + template codegen (runtime output)
+    /// - [`IDE`](Self::IDE) — TSX only (LSP type checking)
+    /// - [`ANALYSIS`](Self::ANALYSIS) — script + template data (MCP static analysis)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct CompileTarget: u8 {
+        /// Run style codegen (v-bind scan, scoped CSS, CSS modules).
+        const STYLE         = 0b0000_0001;
+        /// Run script codegen (macros, bindings, imports, CodeTransform).
+        const SCRIPT        = 0b0000_0010;
+        /// Run template VDOM/Vapor/SSR codegen (render function output).
+        const TEMPLATE      = 0b0000_0100;
+        /// Run TSX codegen (valid JSX for LSP/TSGO type checking).
+        const TSX           = 0b0000_1000;
+        /// Run TSC codegen (minimal TypeScript declarations).
+        const TSC           = 0b0001_0000;
+        /// Extract raw template data for cross-file analysis.
+        const TEMPLATE_DATA = 0b0010_0000;
+
+        /// Bundler preset: style + script + template VDOM codegen.
+        const BUNDLER  = Self::STYLE.bits() | Self::SCRIPT.bits() | Self::TEMPLATE.bits();
+        /// IDE/LSP preset: TSX only (independent of style/script/template).
+        const IDE      = Self::TSX.bits();
+        /// MCP analysis preset: script (for bindings) + template data extraction.
+        const ANALYSIS = Self::SCRIPT.bits() | Self::TEMPLATE_DATA.bits();
+    }
+}
+
+impl Default for CompileTarget {
+    fn default() -> Self {
+        Self::BUNDLER
+    }
+}
+
+impl CompileTarget {
+    /// Whether style codegen should run.
+    pub fn needs_style(self) -> bool {
+        self.intersects(Self::STYLE)
+    }
+
+    /// Whether script codegen should run.
+    ///
+    /// True when SCRIPT, TEMPLATE, or TEMPLATE_DATA is set, since template
+    /// codegen and template data extraction both consume script bindings.
+    pub fn needs_script(self) -> bool {
+        self.intersects(Self::SCRIPT | Self::TEMPLATE | Self::TEMPLATE_DATA)
+    }
+
+    /// Whether VDOM/Vapor/SSR template codegen should run.
+    pub fn needs_template_codegen(self) -> bool {
+        self.intersects(Self::TEMPLATE)
+    }
+
+    /// Whether TSX codegen should run.
+    pub fn needs_tsx(self) -> bool {
+        self.intersects(Self::TSX)
+    }
+
+    /// Whether TSC codegen should run.
+    pub fn needs_tsc(self) -> bool {
+        self.intersects(Self::TSC)
+    }
+
+    /// Whether raw template data extraction should run.
+    pub fn needs_template_data(self) -> bool {
+        self.intersects(Self::TEMPLATE_DATA)
+    }
+}
+
 /// Whitespace handling strategy for template compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhitespaceStrategy {
@@ -25,9 +101,9 @@ pub struct CodegenOptions {
     pub is_production: bool,
     /// Custom component ID (overrides auto-generation from filename).
     pub component_id: Option<String>,
-    /// When true, include the TSX codegen plugin in the pipeline.
-    /// When false, the pipeline still runs (producing compiled CSS) but skips TSX generation.
-    pub include_tsx: bool,
+    /// Controls which compilation steps run.
+    /// See [`CompileTarget`] for available flags and presets.
+    pub target: CompileTarget,
     /// When true, skip source map generation and base64 encoding.
     /// Returns empty strings for `source_map` and `code_with_source_map`.
     pub skip_source_map: bool,
@@ -43,6 +119,8 @@ pub struct CodegenOptions {
     pub comments: Option<bool>,
     /// Runtime module name to import helpers from. Default: `"vue"`.
     pub runtime_module_name: Option<String>,
+    /// Types module name for TSX helper imports. Default: `"$verter/types"`.
+    pub types_module_name: Option<String>,
     /// Hoist static VNodes/props to constants outside the render function.
     /// `None` = `true`.
     pub hoist_static: Option<bool>,
@@ -59,6 +137,11 @@ pub struct CodegenOptions {
     /// Add `_ctx.`/`$setup.` prefix to template identifiers.
     /// `None` = `true`.
     pub prefix_identifiers: Option<bool>,
+    /// Embed `declare module "@verter/types"` in TSX output so that
+    /// `import ... from "@verter/types"` resolves without the real package.
+    /// When `false` (default), the ambient module block is omitted, relying
+    /// on `@verter/types` being installed in `node_modules`.
+    pub embed_ambient_types: bool,
 }
 
 impl CodegenOptions {
@@ -165,6 +248,11 @@ pub struct VerterCompileOptions {
     pub force_js: bool,
     /// When true, generate a source map for the template output.
     pub source_map: bool,
+    /// When true, compile for server-side rendering.
+    /// Emits string-concatenation code (`_push()`, `_ssrRenderAttrs()`, etc.)
+    /// instead of VDOM render functions. Also sets `__ssrInlineRender: true`
+    /// on the component and attaches the render function as `ssrRender`.
+    pub ssr: bool,
     /// Pre-resolved external types for cross-file type resolution.
     ///
     /// Keyed by type name (e.g., `"BadgeProps"`), value is the resolved type elements.
@@ -174,8 +262,9 @@ pub struct VerterCompileOptions {
     /// The host is responsible for resolving these from its file store before compilation.
     pub external_types:
         Option<rustc_hash::FxHashMap<String, crate::utils::oxc::vue::ResolvedElements>>,
-    /// When true, extract raw template data for cross-file analysis.
-    /// Produces `RawTemplateData` in the compile result alongside the rendered code.
+    /// Deprecated: use `CodegenOptions::target` with `CompileTarget::TEMPLATE_DATA`.
+    /// Kept for backward-compatibility with direct `compile()` callers.
+    /// When true, ORs `CompileTarget::TEMPLATE_DATA` into the active target.
     pub extract_template_data: bool,
     /// Props known to be const across all call sites (from cross-file analysis).
     /// These are treated as `Static` for reactivity purposes while keeping
@@ -196,9 +285,12 @@ pub struct VerterCompileResult {
     pub errors: Vec<CompileDiagnostic>,
     pub parse_duration_ms: f64,
     pub total_duration_ms: f64,
-    /// Combined TSX output for IDE type checking. Present when `include_tsx` is true.
+    /// Combined TSX output for IDE type checking. Present when `CompileTarget::TSX` is set.
     /// Contains both script types and template JSX in a single `.tsx` file.
     pub tsx: Option<VerterTsxBlock>,
+    /// TSC declaration output for type checking (vue-tsc replacement).
+    /// Present when `CompileTarget::TSC` is set.
+    pub tsc: Option<VerterTsxBlock>,
     /// Raw template data for cross-file analysis. Present when `extract_template_data` is true.
     pub template_data: Option<super::template_data::RawTemplateData>,
 }
@@ -212,11 +304,15 @@ pub struct VerterScriptBlock {
     pub attrs: Vec<(String, String)>,
 }
 
-/// Generated output for the `<template>` block (VDOM or Vapor render function).
+/// Generated output for the `<template>` block (VDOM, Vapor, or SSR render function).
 pub struct VerterTemplateBlock {
     pub code: String,
     pub source_map: String,
+    /// Runtime helper imports from `"vue"`.
     pub imports: Vec<&'static str>,
+    /// SSR runtime helper imports from `"vue/server-renderer"`.
+    /// Empty for non-SSR builds.
+    pub ssr_imports: Vec<&'static str>,
     pub duration_ms: f64,
     pub attrs: Vec<(String, String)>,
 }

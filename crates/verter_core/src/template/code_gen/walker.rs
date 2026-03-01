@@ -8,7 +8,7 @@ use crate::template::oxc::types::{OxcNodeData, OxcParsedAst};
 use crate::types::NodeId;
 
 use super::types::CodeGenOutput;
-use super::TemplateCodeGen;
+use super::{TemplateCodeGen, WalkAction};
 
 /// DFS phase for element nodes.
 enum Phase {
@@ -60,15 +60,17 @@ pub fn walk_template<'alloc>(
                     OxcNodeData::Element(e) => Some(e.as_ref()),
                     _ => None,
                 };
-                gen.enter_element(id, el, oxc_el, source, out);
+                let action = gen.enter_element(id, el, oxc_el, source, out);
 
-                // Push Leave phase for this element
+                // Always push Leave phase (stack balance for scope_closes etc.)
                 stack.push((id, Phase::Leave));
 
-                // Push children in reverse order for DFS
-                if let Some(content) = &el.content {
-                    for &child_id in content.children.iter().rev() {
-                        stack.push((child_id, Phase::Enter));
+                // Only push children if the backend wants them visited
+                if action == WalkAction::Continue {
+                    if let Some(content) = &el.content {
+                        for &child_id in content.children.iter().rev() {
+                            stack.push((child_id, Phase::Enter));
+                        }
                     }
                 }
             }
@@ -117,7 +119,7 @@ mod tests {
     use crate::utils::oxc::Dynamism;
 
     use super::super::types::CodeGenOutput;
-    use super::super::TemplateCodeGen;
+    use super::super::{TemplateCodeGen, WalkAction};
 
     /// Test codegen that records visit order as strings.
     struct RecordingCodeGen {
@@ -156,8 +158,9 @@ mod tests {
             _oxc: Option<&crate::template::oxc::types::OxcParsedElement<'alloc>>,
             _source: &'alloc str,
             _out: &mut CodeGenOutput<'alloc>,
-        ) {
+        ) -> WalkAction {
             self.visits.push(format!("enter_element({})", id.0));
+            WalkAction::Continue
         }
 
         fn leave_element(

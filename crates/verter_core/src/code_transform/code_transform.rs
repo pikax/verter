@@ -207,7 +207,7 @@ impl<'a> CodeTransform<'a> {
     fn chunk_position(chunk: &Chunk) -> Option<u32> {
         match chunk {
             Chunk::Original { start, .. } | Chunk::Overwritten { start, .. } => Some(*start),
-            Chunk::Inserted { .. } | Chunk::Moved { .. } => None,
+            Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => None,
         }
     }
 
@@ -284,7 +284,7 @@ impl<'a> CodeTransform<'a> {
                         return SplitResult::PastTarget { chunk_index: i };
                     }
                 }
-                Chunk::Inserted { .. } | Chunk::Moved { .. } => {}
+                Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => {}
             }
         }
         SplitResult::End
@@ -296,7 +296,10 @@ impl<'a> CodeTransform<'a> {
     fn skip_pure_insertions(&self, from: usize) -> usize {
         let mut pos = from;
         for j in from..self.chunks.len() {
-            if matches!(&self.chunks[j], Chunk::Inserted { .. }) {
+            if matches!(
+                &self.chunks[j],
+                Chunk::Inserted { .. } | Chunk::InsertedMapped { .. }
+            ) {
                 pos = j + 1;
             } else {
                 break;
@@ -405,7 +408,7 @@ impl<'a> CodeTransform<'a> {
                         return false;
                     }
                 }
-                Chunk::Inserted { .. } | Chunk::Moved { .. } => {}
+                Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => {}
             }
         }
         false
@@ -519,8 +522,8 @@ impl<'a> CodeTransform<'a> {
                         handled = true;
                     }
                 }
-                // Moved and Inserted chunks don't participate in overwrite resolution
-                Chunk::Moved { .. } | Chunk::Inserted { .. } => {
+                // Moved, Inserted, and InsertedMapped chunks don't participate in overwrite resolution
+                Chunk::Moved { .. } | Chunk::Inserted { .. } | Chunk::InsertedMapped { .. } => {
                     continue;
                 }
             }
@@ -718,7 +721,7 @@ impl<'a> CodeTransform<'a> {
                     current_pos = oe;
                     i += 1;
                 }
-                Chunk::Moved { .. } | Chunk::Inserted { .. } => {
+                Chunk::Moved { .. } | Chunk::Inserted { .. } | Chunk::InsertedMapped { .. } => {
                     if (past_start || current_pos >= start) && current_pos < end {
                         indices_to_move.push(i);
                     }
@@ -764,6 +767,11 @@ impl<'a> CodeTransform<'a> {
                     chunks_to_move.push(Chunk::moved(start, end, content));
                 }
                 Chunk::Inserted { content } => {
+                    chunks_to_move.push(Chunk::inserted(content));
+                }
+                Chunk::InsertedMapped { content, .. } => {
+                    // When moved, InsertedMapped loses its source mapping
+                    // (the mapping was relative to the original insertion site)
                     chunks_to_move.push(Chunk::inserted(content));
                 }
             }
@@ -901,7 +909,7 @@ impl<'a> CodeTransform<'a> {
                     }
                     result.push(chunk);
                 }
-                Chunk::Inserted { .. } | Chunk::Moved { .. } => {
+                Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => {
                     result.push(chunk);
                 }
             }
@@ -917,6 +925,106 @@ impl<'a> CodeTransform<'a> {
         self.scratch = std::mem::replace(&mut self.chunks, result);
         self.cursor_hint = 0;
         self
+    }
+
+    /// Apply multiple prepend_left operations with optional source map positions.
+    ///
+    /// Like `batch_prepend_left_static`, but each item has an optional source mapping.
+    /// When `Some((source_pos, content_offset))`, creates an `InsertedMapped` chunk
+    /// that emits a source map token at `source_pos`, offset within the content by
+    /// `content_offset` bytes. When `None`, creates a regular `Inserted` chunk (unmapped).
+    ///
+    /// `items` must be sorted by insertion position (ascending).
+    ///
+    /// Tuple: `(insertion_pos, source_mapping, content)`
+    #[allow(clippy::type_complexity)]
+    pub fn batch_prepend_left_with_source_map(
+        &mut self,
+        items: &[(u32, Option<(u32, u32)>, &'a str)],
+    ) -> &mut Self {
+        if items.is_empty() {
+            return self;
+        }
+
+        // Track output delta for all insertions
+        for &(_, _, content) in items {
+            self.output_delta += content.len() as i64;
+        }
+
+        let mut result = std::mem::take(&mut self.scratch);
+        result.clear();
+        let needed = self.chunks.len() + items.len() * 2;
+        if result.capacity() < needed {
+            result.reserve(needed - result.capacity());
+        }
+        let mut item_idx = 0;
+
+        for &chunk in &self.chunks {
+            match chunk {
+                Chunk::Original { start: cs, end: ce } => {
+                    // Emit items that fall before this chunk
+                    while item_idx < items.len() && items[item_idx].0 < cs {
+                        let (_, source_info, content) = items[item_idx];
+                        result.push(Self::make_insert_chunk(content, source_info));
+                        item_idx += 1;
+                    }
+
+                    // Items at cs or inside (cs, ce) — split and insert
+                    if item_idx < items.len() && items[item_idx].0 >= cs && items[item_idx].0 < ce {
+                        let mut prev = cs;
+                        while item_idx < items.len() && items[item_idx].0 < ce {
+                            let pos = items[item_idx].0;
+                            if pos > prev {
+                                result.push(Chunk::from_source(prev, pos));
+                            }
+                            while item_idx < items.len() && items[item_idx].0 == pos {
+                                let (_, source_info, content) = items[item_idx];
+                                result.push(Self::make_insert_chunk(content, source_info));
+                                item_idx += 1;
+                            }
+                            prev = pos;
+                        }
+                        if prev < ce {
+                            result.push(Chunk::from_source(prev, ce));
+                        }
+                        continue;
+                    }
+
+                    result.push(chunk);
+                }
+                Chunk::Overwritten { start: cp, .. } => {
+                    while item_idx < items.len() && items[item_idx].0 <= cp {
+                        let (_, source_info, content) = items[item_idx];
+                        result.push(Self::make_insert_chunk(content, source_info));
+                        item_idx += 1;
+                    }
+                    result.push(chunk);
+                }
+                Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => {
+                    result.push(chunk);
+                }
+            }
+        }
+
+        // Remaining items go at the end
+        while item_idx < items.len() {
+            let (_, source_info, content) = items[item_idx];
+            result.push(Self::make_insert_chunk(content, source_info));
+            item_idx += 1;
+        }
+
+        self.scratch = std::mem::replace(&mut self.chunks, result);
+        self.cursor_hint = 0;
+        self
+    }
+
+    /// Helper to create either an InsertedMapped or Inserted chunk.
+    #[inline]
+    fn make_insert_chunk(content: &'a str, source_info: Option<(u32, u32)>) -> Chunk<'a> {
+        match source_info {
+            Some((sp, offset)) => Chunk::inserted_mapped_with_offset(content, sp, offset),
+            None => Chunk::inserted(content),
+        }
     }
 
     /// Apply multiple overwrite operations in a single O(n+m) pass.
@@ -1017,7 +1125,10 @@ impl<'a> CodeTransform<'a> {
                         result.push(chunk);
                     }
                 }
-                Chunk::Inserted { .. } | Chunk::Overwritten { .. } | Chunk::Moved { .. } => {
+                Chunk::Inserted { .. }
+                | Chunk::Overwritten { .. }
+                | Chunk::Moved { .. }
+                | Chunk::InsertedMapped { .. } => {
                     result.push(chunk);
                 }
             }
@@ -1049,7 +1160,8 @@ impl<'a> CodeTransform<'a> {
                 }
                 Chunk::Inserted { content }
                 | Chunk::Overwritten { content, .. }
-                | Chunk::Moved { content, .. } => {
+                | Chunk::Moved { content, .. }
+                | Chunk::InsertedMapped { content, .. } => {
                     out.push_str(content);
                 }
             }
@@ -1070,7 +1182,8 @@ impl<'a> CodeTransform<'a> {
                 }
                 Chunk::Inserted { content }
                 | Chunk::Overwritten { content, .. }
-                | Chunk::Moved { content, .. } => {
+                | Chunk::Moved { content, .. }
+                | Chunk::InsertedMapped { content, .. } => {
                     w.write_str(content)?;
                 }
             }

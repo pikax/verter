@@ -667,66 +667,101 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         tag_name: &str,
         node_ref: u32,
         source: &'alloc str,
-        state: VaporElementState<'alloc>,
+        mut state: VaporElementState<'alloc>,
         oxc_el: Option<&OxcParsedElement<'alloc>>,
         out: &mut CodeGenOutput<'alloc>,
     ) -> VaporRootElement<'alloc> {
-        use super::shared::helpers::push_u32;
+        use super::shared::helpers::{is_builtin_component, push_u32, to_pascal_case};
 
-        // Resolve the component — sanitize tag name for use as a JS variable
-        // (replace hyphens and dots with underscores)
-        let comp_var = {
-            let mut s = String::with_capacity(32);
-            s.push_str("_component_");
-            for c in tag_name.chars() {
-                match c {
-                    '-' | '.' => s.push('_'),
-                    _ => s.push(c),
-                }
-            }
-            s
-        };
-
-        // Check bindings first
-        let resolve_line = if let Some(_binding) = self.resolver.get(tag_name) {
+        // Resolve the component reference.
+        // Priority: 1) direct binding, 2) PascalCase binding, 3) built-in, 4) _resolveComponent
+        let (resolve_line, comp_ref) = if self.resolver.get(tag_name).is_some() {
             // Direct binding — no _resolveComponent needed
-            None
-        } else {
-            // Need _resolveComponent
-            let mut line = String::with_capacity(64);
-            line.push_str("const ");
-            line.push_str(&comp_var);
-            line.push_str(" = _resolveComponent(\"");
-            line.push_str(tag_name);
-            line.push_str("\")");
-            out.add_vapor_import(VaporHelper::ResolveComponent);
-            Some(out.alloc_str(&line))
-        };
-
-        // Create component line
-        let comp_ref = if resolve_line.is_some() {
-            comp_var.as_str()
-        } else {
             let prefix = self.resolver.resolve_prefix(tag_name);
             let suffix = self.resolver.resolve_suffix(tag_name);
             let mut s = String::with_capacity(32);
             s.push_str(prefix);
             s.push_str(tag_name);
             s.push_str(suffix);
-            out.alloc_str(&s)
+            (None, out.alloc_str(&s))
+        } else {
+            let pascal = to_pascal_case(tag_name);
+            if self.resolver.get(&pascal).is_some() {
+                // PascalCase binding match (for kebab-case tags)
+                let prefix = self.resolver.resolve_prefix(&pascal);
+                let suffix = self.resolver.resolve_suffix(&pascal);
+                let mut s = String::with_capacity(32);
+                s.push_str(prefix);
+                s.push_str(&pascal);
+                s.push_str(suffix);
+                (None, out.alloc_str(&s))
+            } else if let Some((flag, helper_name)) =
+                is_builtin_component(tag_name).or_else(|| is_builtin_component(&pascal))
+            {
+                // Vue built-in component (Transition, KeepAlive, Teleport, Suspense)
+                out.add_builtin_component(flag);
+                (None, out.alloc_str(helper_name))
+            } else {
+                // Need _resolveComponent
+                let comp_var = {
+                    let mut s = String::with_capacity(32);
+                    s.push_str("_component_");
+                    for c in tag_name.chars() {
+                        match c {
+                            '-' | '.' => s.push('_'),
+                            _ => s.push(c),
+                        }
+                    }
+                    s
+                };
+                let mut line = String::with_capacity(64);
+                line.push_str("const ");
+                line.push_str(&comp_var);
+                line.push_str(" = _resolveComponent(\"");
+                line.push_str(tag_name);
+                line.push_str("\")");
+                out.add_vapor_import(VaporHelper::ResolveComponent);
+                let resolve = out.alloc_str(&line);
+                let comp_ref = out.alloc_str(&comp_var);
+                (Some(resolve), comp_ref)
+            }
         };
 
         // Build component props object
         let props_str = self.build_component_props(el, source, oxc_el, out);
 
         // Build slot closures from children
-        let has_children = !state.html.is_empty()
+        let named_slots = std::mem::take(&mut state.named_slots);
+        let has_default_content = !state.html.is_empty()
             || !state.child_nav.is_empty()
             || !state.child_effects.is_empty()
             || !state.child_statements.is_empty()
             || !state.child_text_creations.is_empty();
 
-        let slots_str = if has_children {
+        let slots_str = if !named_slots.is_empty() {
+            // Has named slots (and possibly an implicit default slot)
+            let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
+            let mut result = String::with_capacity(256);
+            result.push_str("{ ");
+            for (i, entry) in named_slots.iter().enumerate() {
+                if i > 0 {
+                    result.push_str(", ");
+                }
+                result.push_str(entry);
+            }
+            if has_default_content {
+                // Implicit default slot from non-template children
+                let body = self.build_closure_body(state, has_dynamic_text, "    ", out);
+                if !named_slots.is_empty() {
+                    result.push_str(", ");
+                }
+                result.push_str("default: () => {\n");
+                result.push_str(&body);
+                result.push_str("    }");
+            }
+            result.push_str(", _: 2 }");
+            Some(result)
+        } else if has_default_content {
             Some(self.build_default_slot_closure(state, el, out))
         } else {
             None
@@ -815,17 +850,6 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             let name = &source[prop.start as usize..prop.name_end as usize];
 
             if prop.is_directive {
-                // Skip structural directives
-                if name == "v-if"
-                    || name == "v-else-if"
-                    || name == "v-else"
-                    || name == "v-for"
-                    || name == "v-slot"
-                    || name == "v-once"
-                {
-                    continue;
-                }
-
                 // Event listeners: @click or v-on:click → onClick
                 if name.starts_with('@') || name == "v-on" {
                     let event_name = if let Some(after_at) = name.strip_prefix('@') {
@@ -1177,7 +1201,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         _oxc: Option<&OxcParsedElement<'alloc>>,
         source: &'alloc str,
         _out: &mut CodeGenOutput<'alloc>,
-    ) {
+    ) -> super::WalkAction {
         helpers::debug_assert_element_bounds(
             source,
             el.tag_open.start,
@@ -1187,13 +1211,17 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         // Take a recycled state from the pool (retains capacity) or create new
         let mut state = self.state_pool.pop().unwrap_or_default();
 
-        // Components and slot outlets don't build HTML templates
-        if el.tag_type != TagType::Component && el.tag_type != TagType::SlotOutlet {
+        // Components, slot outlets, and template slot wrappers don't build HTML templates
+        if el.tag_type != TagType::Component
+            && el.tag_type != TagType::SlotOutlet
+            && !(el.tag_type == TagType::Template && el.v_slot.is_some())
+        {
             element::build_open_tag(el, source, &mut state);
         }
 
         self.element_stack.push(state);
         self.depth += 1;
+        super::WalkAction::Continue
     }
 
     fn leave_element(
@@ -1242,6 +1270,56 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                 self.root_elements.push(root);
             } else {
                 self.merge_non_root_into_parent(id, root, out);
+            }
+            return;
+        }
+
+        // === Template slot wrappers (<template v-slot:name="params">) ===
+        if el.tag_type == TagType::Template && el.v_slot.is_some() {
+            let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
+            let body = self.build_closure_body(state, has_dynamic_text, "    ", out);
+
+            // Extract slot name from v-slot directive
+            let slot_name = if let Some(ref v_slot) = el.v_slot {
+                if let (Some(as_), Some(ae)) = (v_slot.arg_start, v_slot.arg_end) {
+                    &source[as_ as usize..ae as usize]
+                } else {
+                    "default"
+                }
+            } else {
+                "default"
+            };
+
+            // Extract scoped slot params (e.g., "{ item }" from v-slot="{ item }")
+            let slot_params = el
+                .v_slot
+                .as_ref()
+                .and_then(|v| match (v.value_start, v.value_end) {
+                    (Some(vs), Some(ve)) => {
+                        let params = &source[vs as usize..ve as usize];
+                        if params.trim().is_empty() {
+                            None
+                        } else {
+                            Some(params)
+                        }
+                    }
+                    _ => None,
+                });
+
+            // Build the slot entry string: `name: (params) => { ... }`
+            let mut entry = String::with_capacity(128);
+            push_prop_key(&mut entry, slot_name);
+            entry.push_str(": (");
+            if let Some(params) = slot_params {
+                entry.push_str(params);
+            }
+            entry.push_str(") => {\n");
+            entry.push_str(&body);
+            entry.push_str("    }");
+
+            // Push to parent's named_slots
+            if let Some(parent) = self.element_stack.last_mut() {
+                parent.named_slots.push(entry);
             }
             return;
         }

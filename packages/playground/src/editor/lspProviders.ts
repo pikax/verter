@@ -11,6 +11,8 @@ import {
   isOffsetInTemplateBlock,
   type TemplateCompletion,
 } from "./templateIde";
+import { getCodeActions, getDocumentSymbols, type HostDocumentSymbol } from "../core/compiler";
+import { computeCodeLenses } from "./decorations";
 
 // ── TypeScript service integration interface ──
 
@@ -363,6 +365,116 @@ export function registerLspProviders(
       }),
     );
   }
+
+  // Code action provider (quick fixes from Verter lint rules)
+  disposables.push(
+    monaco.languages.registerCodeActionProvider("vue", {
+      provideCodeActions(model, range) {
+        const file = store.activeFile;
+        if (!file) return { actions: [], dispose() {} };
+        const offset = model.getOffsetAt(range.getStartPosition());
+        const actions = getCodeActions(file.filename, offset);
+        if (actions.length === 0) return { actions: [], dispose() {} };
+
+        const monacoActions: monaco.languages.CodeAction[] = actions.map((action) => ({
+          title: action.title,
+          kind: action.kind === "quickfix" ? "quickfix" : action.kind === "refactor" ? "refactor" : "source",
+          isPreferred: action.isPreferred,
+          diagnostics: action.diagnosticRule
+            ? [
+                {
+                  severity: monaco.MarkerSeverity.Warning,
+                  message: action.diagnosticRule,
+                  startLineNumber: range.startLineNumber,
+                  startColumn: range.startColumn,
+                  endLineNumber: range.endLineNumber,
+                  endColumn: range.endColumn,
+                },
+              ]
+            : undefined,
+          edit: {
+            edits: action.edits.map((edit) => {
+              const editStart = model.getPositionAt(edit.spanStart);
+              const editEnd = model.getPositionAt(edit.spanEnd);
+              return {
+                resource: model.uri,
+                textEdit: {
+                  range: new monaco.Range(
+                    editStart.lineNumber,
+                    editStart.column,
+                    editEnd.lineNumber,
+                    editEnd.column,
+                  ),
+                  text: edit.newText,
+                },
+                versionId: model.getVersionId(),
+              };
+            }),
+          },
+        }));
+
+        return { actions: monacoActions, dispose() {} };
+      },
+    }),
+  );
+
+  // Document symbol provider (outline / Ctrl+Shift+O)
+  disposables.push(
+    monaco.languages.registerDocumentSymbolProvider("vue", {
+      displayName: "Verter",
+      provideDocumentSymbols(model) {
+        const file = store.activeFile;
+        if (!file) return [];
+        const symbols = getDocumentSymbols(file.filename);
+        if (symbols.length === 0) return [];
+
+        function mapSymbol(sym: HostDocumentSymbol): monaco.languages.DocumentSymbol {
+          const start = model.getPositionAt(sym.spanStart);
+          const end = model.getPositionAt(sym.spanEnd);
+          const selStart = model.getPositionAt(sym.selectionStart);
+          const selEnd = model.getPositionAt(sym.selectionEnd);
+          return {
+            name: sym.name,
+            detail: sym.detail ?? "",
+            kind: sym.kind as monaco.languages.SymbolKind,
+            tags: [],
+            range: new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column),
+            selectionRange: new monaco.Range(
+              selStart.lineNumber,
+              selStart.column,
+              selEnd.lineNumber,
+              selEnd.column,
+            ),
+            children: sym.children.map(mapSymbol),
+          };
+        }
+
+        return symbols.map(mapSymbol);
+      },
+    }),
+  );
+
+  // CodeLens provider (block summaries)
+  disposables.push(
+    monaco.languages.registerCodeLensProvider("vue", {
+      provideCodeLenses(model) {
+        const file = store.activeFile;
+        const analysis = file?.compiled.analysis;
+        if (!file || !analysis) return { lenses: [], dispose() {} };
+
+        const lenses = computeCodeLenses(file.code, analysis);
+        const monacoLenses: monaco.languages.CodeLens[] = lenses.map((lens) => ({
+          range: new monaco.Range(lens.line, 1, lens.line, 1),
+          command: {
+            id: "",
+            title: lens.title,
+          },
+        }));
+
+        return { lenses: monacoLenses, dispose() {} };
+      },
+    }),
+  );
 
   return disposables;
 }

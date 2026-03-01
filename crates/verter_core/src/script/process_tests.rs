@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn build_wrapper_start_basic() {
-    let result = build_setup_wrapper_start("Test", false, false, false, None, None, None);
+    let result = build_setup_wrapper_start("Test", false, false, false, None, None, None, false);
     assert!(result.contains("__name: 'Test'"));
     assert!(result.contains("setup(__props) {"));
     assert!(!result.contains("async"));
@@ -10,13 +10,13 @@ fn build_wrapper_start_basic() {
 
 #[test]
 fn build_wrapper_start_async() {
-    let result = build_setup_wrapper_start("Test", true, false, false, None, None, None);
+    let result = build_setup_wrapper_start("Test", true, false, false, None, None, None, false);
     assert!(result.contains("async setup(__props"));
 }
 
 #[test]
 fn build_wrapper_start_no_name() {
-    let result = build_setup_wrapper_start("", false, false, false, None, None, None);
+    let result = build_setup_wrapper_start("", false, false, false, None, None, None, false);
     assert!(!result.contains("__name"));
 }
 
@@ -30,27 +30,36 @@ fn build_wrapper_start_with_props() {
         Some("{ title: String }"),
         None,
         None,
+        false,
     );
     assert!(result.contains("props: { title: String }"));
 }
 
 #[test]
 fn build_wrapper_start_with_emits() {
-    let result =
-        build_setup_wrapper_start("Test", false, false, true, None, Some("['click']"), None);
+    let result = build_setup_wrapper_start(
+        "Test",
+        false,
+        false,
+        true,
+        None,
+        Some("['click']"),
+        None,
+        false,
+    );
     assert!(result.contains("emits: ['click']"));
     assert!(result.contains("emit: __emit"));
 }
 
 #[test]
 fn build_wrapper_start_with_expose() {
-    let result = build_setup_wrapper_start("Test", false, true, false, None, None, None);
+    let result = build_setup_wrapper_start("Test", false, true, false, None, None, None, false);
     assert!(result.contains("expose: __expose"));
 }
 
 #[test]
 fn build_wrapper_start_with_expose_and_emit() {
-    let result = build_setup_wrapper_start("Test", false, true, true, None, None, None);
+    let result = build_setup_wrapper_start("Test", false, true, true, None, None, None, false);
     assert!(result.contains("expose: __expose, emit: __emit"));
 }
 
@@ -64,6 +73,7 @@ fn build_wrapper_start_with_options() {
         None,
         None,
         Some("inheritAttrs: false"),
+        false,
     );
     assert!(result.contains("inheritAttrs: false"));
     // Options should come before __name
@@ -74,7 +84,7 @@ fn build_wrapper_start_with_options() {
 
 #[test]
 fn build_wrapper_end_with_return() {
-    let result = build_setup_wrapper_end(Some("{ msg, count }"), None, false);
+    let result = build_setup_wrapper_end(Some("{ msg, count }"), None, false, false);
     assert!(result.contains("const __returned__ = { msg, count }"));
     assert!(result.contains("__isScriptSetup"));
     assert!(result.contains("return __returned__"));
@@ -84,14 +94,14 @@ fn build_wrapper_end_with_return() {
 
 #[test]
 fn build_wrapper_end_no_return() {
-    let result = build_setup_wrapper_end(None, None, false);
+    let result = build_setup_wrapper_end(None, None, false, false);
     assert!(!result.contains("return"));
     assert!(result.contains("}});"));
 }
 
 #[test]
 fn build_wrapper_end_with_scope_id() {
-    let result = build_setup_wrapper_end(None, Some("data-v-abc"), false);
+    let result = build_setup_wrapper_end(None, Some("data-v-abc"), false, false);
     assert!(result.contains("__sfc__.__scopeId = \"data-v-abc\""));
 }
 
@@ -184,7 +194,7 @@ fn build_returned_setup_import_empty_template_vars_excludes_all() {
 
 #[test]
 fn build_wrapper_end_vapor_adds_vapor_flag() {
-    let result = build_setup_wrapper_end(Some("{ msg }"), None, true);
+    let result = build_setup_wrapper_end(Some("{ msg }"), None, true, false);
     assert!(
         result.contains("__sfc__.__vapor = true"),
         "Vapor mode should set __vapor flag, got:\n{}",
@@ -194,7 +204,7 @@ fn build_wrapper_end_vapor_adds_vapor_flag() {
 
 #[test]
 fn build_wrapper_end_non_vapor_no_vapor_flag() {
-    let result = build_setup_wrapper_end(Some("{ msg }"), None, false);
+    let result = build_setup_wrapper_end(Some("{ msg }"), None, false, false);
     assert!(
         !result.contains("__vapor"),
         "Non-vapor mode should not set __vapor flag, got:\n{}",
@@ -204,7 +214,7 @@ fn build_wrapper_end_non_vapor_no_vapor_flag() {
 
 #[test]
 fn build_wrapper_end_vapor_with_scope_id_has_both() {
-    let result = build_setup_wrapper_end(None, Some("data-v-abc"), true);
+    let result = build_setup_wrapper_end(None, Some("data-v-abc"), true, false);
     assert!(result.contains("__sfc__.__vapor = true"));
     assert!(result.contains("__sfc__.__scopeId = \"data-v-abc\""));
 }

@@ -204,6 +204,10 @@ pub fn generate_var_name(scope_id: &str, expr: &str) -> String {
 }
 
 /// Transform `:deep(.inner)` or `::v-deep(.inner)` → `[__v_deep__] .inner`.
+///
+/// Handles comma-separated selectors inside `:deep()`:
+/// `:deep(.a, .b)` → `[__v_deep__] .a, [__v_deep__] .b`
+///
 /// Returns (replacement_string, new_position) or None if malformed.
 fn transform_deep(css: &str, start: usize) -> Option<(String, usize)> {
     let bytes = css.as_bytes();
@@ -236,10 +240,47 @@ fn transform_deep(css: &str, start: usize) -> Option<(String, usize)> {
 
     let inner = css[inner_start..inner_end].trim();
 
-    // :deep(.inner) → [__v_deep__] .inner
-    let replacement = format!("{} {}", DEEP_MARKER, inner);
+    // WS 5.3: empty :deep() — pass through unchanged
+    if inner.is_empty() {
+        return None;
+    }
+
+    // WS 5.1: Split by top-level commas inside :deep()
+    let parts = split_by_top_level_commas(inner);
+    let replacement = if parts.len() > 1 {
+        // :deep(.a, .b) → [__v_deep__] .a, [__v_deep__] .b
+        parts
+            .iter()
+            .map(|part| format!("{} {}", DEEP_MARKER, part.trim()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        format!("{} {}", DEEP_MARKER, inner)
+    };
 
     Some((replacement, full_end))
+}
+
+/// Split a string by top-level commas, respecting parentheses nesting.
+fn split_by_top_level_commas(s: &str) -> Vec<&str> {
+    let bytes = s.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0u32;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
 }
 
 /// Transform `:slotted(.inner)` or `::v-slotted(.inner)` → `.inner[__v_slotted__]`.
@@ -461,5 +502,40 @@ mod tests {
         let result = prepass(":deep { color: red; }", "a4f2eed6");
         assert!(result.css.contains(":deep"));
         assert!(!result.css.contains("__v_deep__"));
+    }
+
+    #[test]
+    fn test_deep_with_comma_separated_selectors() {
+        // WS 5.1: :deep(.a, .b) should expand each selector separately
+        let result = prepass(":deep(.a, .b) { color: red; }", "a4f2eed6");
+        assert_eq!(
+            result.css,
+            "[__v_deep__] .a, [__v_deep__] .b { color: red; }"
+        );
+    }
+
+    #[test]
+    fn test_deep_with_comma_and_nested_parens() {
+        // Comma inside :not() should NOT split
+        let result = prepass(":deep(:not(.a), .b) { color: red; }", "a4f2eed6");
+        assert_eq!(
+            result.css,
+            "[__v_deep__] :not(.a), [__v_deep__] .b { color: red; }"
+        );
+    }
+
+    #[test]
+    fn test_deep_empty_parens_passthrough() {
+        // WS 5.3: :deep() with empty parens should pass through unchanged
+        let result = prepass(":deep() { color: red; }", "a4f2eed6");
+        assert!(
+            result.css.contains(":deep()"),
+            "empty :deep() should pass through: {}",
+            result.css
+        );
+        assert!(
+            !result.css.contains("__v_deep__"),
+            "empty :deep() should not produce deep marker"
+        );
     }
 }

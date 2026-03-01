@@ -198,6 +198,50 @@ impl<'a> CodeTransform<'a> {
                         &mut generated_column,
                     );
                 }
+                Chunk::InsertedMapped {
+                    content,
+                    source_start,
+                    content_offset,
+                } => {
+                    if content.is_empty() {
+                        continue;
+                    }
+                    // Inserted content mapped to a specific source position.
+                    // `content_offset` shifts the source map token within the content:
+                    // characters before `content_offset` are unmapped (e.g., `(__props.`),
+                    // then the token is emitted at `content_offset` pointing to `source_start`.
+                    let offset = (*content_offset as usize).min(content.len());
+                    if offset > 0 {
+                        // Unmapped prefix (e.g., the `(` and binding prefix)
+                        let prefix = &content[..offset];
+                        builder.add_token(generated_line, generated_column, 0, 0, None, None);
+                        Self::advance_generated_position(
+                            prefix,
+                            &mut generated_line,
+                            &mut generated_column,
+                        );
+                    }
+                    // Mapped token at content_offset → source_start
+                    let rest = &content[offset..];
+                    if !rest.is_empty() {
+                        if let Some(source_id) = source_id {
+                            let (sl, sc) = resolver.offset_to_line_and_col(*source_start as usize);
+                            builder.add_token(
+                                generated_line,
+                                generated_column,
+                                (sl - 1) as u32,
+                                (sc - 1) as u32,
+                                Some(source_id),
+                                None,
+                            );
+                        }
+                        Self::advance_generated_position(
+                            rest,
+                            &mut generated_line,
+                            &mut generated_column,
+                        );
+                    }
+                }
             }
         }
 
@@ -954,5 +998,299 @@ mod tests {
             2,
             "abc should be at generated col 2 after moved 中文 (2 UTF-16 units), not 6 (bytes)"
         );
+    }
+
+    // ========================================================================
+    // InsertedMapped tests — source-mapped insertions
+    // ========================================================================
+
+    /// @ai-generated — InsertedMapped produces a source map token at the given source position
+    #[test]
+    fn test_inserted_mapped_produces_source_map_token() {
+        let allocator = Allocator::default();
+        // Source: "abc def ghi"
+        //          012345678901
+        // Use batch_prepend_left_with_source_map to insert "(def) ? " before "ghi"
+        // mapped to source position 4 (where "def" starts).
+        let source = "abc def ghi";
+        let mut ct = CodeTransform::new(source, &allocator);
+        ct.batch_prepend_left_with_source_map(&[(8, Some((4, 0)), "(def) ? ")]);
+
+        // Output: "abc def (def) ? ghi"
+        assert_eq!(ct.build_string(), "abc def (def) ? ghi");
+
+        let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+        let tokens: Vec<_> = map.get_tokens().collect();
+
+        // Find the InsertedMapped token — it should map to src(0, 4)
+        let mapped_token = tokens
+            .iter()
+            .find(|t| t.get_src_col() == 4 && t.get_source_id().is_some());
+        assert!(
+            mapped_token.is_some(),
+            "InsertedMapped should produce a token at src col 4. Tokens: {:?}",
+            tokens
+                .iter()
+                .map(|t| (
+                    t.get_dst_line(),
+                    t.get_dst_col(),
+                    t.get_src_line(),
+                    t.get_src_col(),
+                    t.get_source_id()
+                ))
+                .collect::<Vec<_>>()
+        );
+        // The token should be at generated col 8 (after "abc def ")
+        let mapped_token = mapped_token.unwrap();
+        assert_eq!(mapped_token.get_dst_col(), 8);
+        assert_eq!(mapped_token.get_src_line(), 0);
+    }
+
+    /// @ai-generated — None source_pos produces unmapped token (like regular Inserted)
+    #[test]
+    fn test_inserted_mapped_none_produces_unmapped_token() {
+        let allocator = Allocator::default();
+        let source = "abcdef";
+        let mut ct = CodeTransform::new(source, &allocator);
+        ct.batch_prepend_left_with_source_map(&[(3, None, "XY")]);
+
+        assert_eq!(ct.build_string(), "abcXYdef");
+
+        let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+        let tokens: Vec<_> = map.get_tokens().collect();
+
+        // The XY insertion should be unmapped (source_id = None)
+        let xy_token = tokens.iter().find(|t| t.get_dst_col() == 3);
+        assert!(xy_token.is_some(), "should have token at gen col 3");
+        assert!(
+            xy_token.unwrap().get_source_id().is_none(),
+            "None source_pos should produce unmapped token"
+        );
+    }
+
+    /// @ai-generated — InsertedMapped with multiline content advances generated position correctly
+    #[test]
+    fn test_inserted_mapped_multiline_content() {
+        let allocator = Allocator::default();
+        let source = "abcdef";
+        let mut ct = CodeTransform::new(source, &allocator);
+        ct.batch_prepend_left_with_source_map(&[(3, Some((0, 0)), "X\nY")]);
+
+        // Output: "abcX\nYdef"
+        assert_eq!(ct.build_string(), "abcX\nYdef");
+
+        let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+        let tokens: Vec<_> = map.get_tokens().collect();
+
+        // "def" at src(0,3) should be on generated line 1 after the newline
+        let def_token = tokens
+            .iter()
+            .find(|t| t.get_src_col() == 3 && t.get_source_id().is_some())
+            .expect("should have token for 'def'");
+        assert_eq!(def_token.get_dst_line(), 1, "def should be on line 1");
+        assert_eq!(
+            def_token.get_dst_col(),
+            1,
+            "def should be at col 1 after 'Y'"
+        );
+    }
+
+    /// @ai-generated — Mixed mapped and unmapped prepends at the same position
+    #[test]
+    fn test_inserted_mapped_mixed_with_regular() {
+        let allocator = Allocator::default();
+        let source = "abcdef";
+        let mut ct = CodeTransform::new(source, &allocator);
+        // Two prepends at position 3: one unmapped, one mapped to source pos 0
+        ct.batch_prepend_left_with_source_map(&[(3, None, ", "), (3, Some((0, 0)), "(show) ? ")]);
+
+        assert_eq!(ct.build_string(), "abc, (show) ? def");
+
+        let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+        let tokens: Vec<_> = map.get_tokens().collect();
+
+        // The unmapped ", " should have no source_id
+        let comma_token = tokens.iter().find(|t| t.get_dst_col() == 3);
+        assert!(comma_token.is_some());
+        assert!(comma_token.unwrap().get_source_id().is_none());
+
+        // The mapped "(show) ? " should map to src(0, 0)
+        let mapped_token = tokens
+            .iter()
+            .find(|t| t.get_dst_col() == 5 && t.get_source_id().is_some());
+        assert!(
+            mapped_token.is_some(),
+            "mapped prepend should produce source-mapped token"
+        );
+        assert_eq!(mapped_token.unwrap().get_src_col(), 0);
+    }
+
+    // ── content_offset tests ────────────────────────────────────
+
+    /// @ai-generated — content_offset shifts the source map token within InsertedMapped content
+    #[test]
+    fn test_content_offset_shifts_token_within_content() {
+        let allocator = Allocator::default();
+        // Source: "abc show def"
+        //          01234567890
+        // Insert "(__props.show) ? " before "def" (position 9), mapped to source 4 (where "show" is)
+        // content_offset = 9 (length of "(__props." = 9)
+        let source = "abc show def";
+        let mut ct = CodeTransform::new(source, &allocator);
+        ct.batch_prepend_left_with_source_map(&[(9, Some((4, 9)), "(__props.show) ? ")]);
+
+        assert_eq!(ct.build_string(), "abc show (__props.show) ? def");
+
+        let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+        let tokens: Vec<_> = map.get_tokens().collect();
+
+        // The unmapped prefix "(__props." should have NO source_id
+        let prefix_token = tokens
+            .iter()
+            .find(|t| t.get_dst_col() == 9 && t.get_source_id().is_none());
+        assert!(
+            prefix_token.is_some(),
+            "Unmapped prefix '(__props.' should produce unmapped token. Tokens: {:?}",
+            tokens
+                .iter()
+                .map(|t| (
+                    t.get_dst_col(),
+                    t.get_src_col(),
+                    t.get_source_id().is_some()
+                ))
+                .collect::<Vec<_>>()
+        );
+
+        // The mapped token should be at dst_col 18 (9 + 9) pointing to src_col 4
+        let mapped_token = tokens
+            .iter()
+            .find(|t| t.get_dst_col() == 18 && t.get_source_id().is_some());
+        assert!(
+            mapped_token.is_some(),
+            "Mapped token should be at dst_col 18 (after prefix). Tokens: {:?}",
+            tokens
+                .iter()
+                .map(|t| (
+                    t.get_dst_col(),
+                    t.get_src_col(),
+                    t.get_source_id().is_some()
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            mapped_token.unwrap().get_src_col(),
+            4,
+            "Mapped token should point to src_col 4 (position of 'show')"
+        );
+    }
+
+    /// @ai-generated — content_offset = 0 behaves like original InsertedMapped (token at start)
+    #[test]
+    fn test_content_offset_zero_is_original_behavior() {
+        let allocator = Allocator::default();
+        let source = "abcdef";
+        let mut ct = CodeTransform::new(source, &allocator);
+        ct.batch_prepend_left_with_source_map(&[(3, Some((0, 0)), "(show) ? ")]);
+
+        assert_eq!(ct.build_string(), "abc(show) ? def");
+
+        let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+        let tokens: Vec<_> = map.get_tokens().collect();
+
+        // With content_offset = 0, token should be at dst_col 3 (start of content)
+        let mapped = tokens
+            .iter()
+            .find(|t| t.get_dst_col() == 3 && t.get_source_id().is_some());
+        assert!(
+            mapped.is_some(),
+            "With offset 0, token should be at content start. Tokens: {:?}",
+            tokens
+                .iter()
+                .map(|t| (
+                    t.get_dst_col(),
+                    t.get_src_col(),
+                    t.get_source_id().is_some()
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(mapped.unwrap().get_src_col(), 0);
+
+        // Negative: there should be NO unmapped token at dst_col 3
+        // (since offset is 0, the very first token should be mapped)
+        let unmapped_at_start = tokens
+            .iter()
+            .find(|t| t.get_dst_col() == 3 && t.get_source_id().is_none());
+        assert!(
+            unmapped_at_start.is_none(),
+            "With offset 0, there should be no unmapped prefix token at content start"
+        );
+    }
+
+    /// @ai-generated — content_offset with binding prefix: hover on identifier maps correctly
+    #[test]
+    fn test_content_offset_binding_prefix_hover_maps_to_identifier() {
+        let allocator = Allocator::default();
+        // Simulates: v-if="leftArrow" → condition prefix "(__props.leftArrow) ? "
+        // Source: `<div v-if="leftArrow">` where "leftArrow" starts at byte 11
+        // content_offset = 10 (length of "(__props." = 1 + 8 = 9... wait:
+        //   "(" = 1, "__props." = 8, total = 9)
+        let source = "<div v-if=\"leftArrow\">content</div>";
+        let mut ct = CodeTransform::new(source, &allocator);
+        // Insert condition prefix before "<div" (pos 0), mapped to source 11 (where "leftArrow" starts)
+        // content_offset = 9: skip "(__props."
+        ct.batch_prepend_left_with_source_map(&[(0, Some((11, 9)), "(__props.leftArrow) ? ")]);
+
+        let output = ct.build_string();
+        assert!(
+            output.starts_with("(__props.leftArrow) ? <div"),
+            "got: {}",
+            output
+        );
+
+        let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+        let tokens: Vec<_> = map.get_tokens().collect();
+
+        // The mapped token should be at dst_col 9 (after "(__props.") pointing to src_col 11
+        let mapped = tokens
+            .iter()
+            .find(|t| t.get_dst_col() == 9 && t.get_source_id().is_some() && t.get_src_col() == 11);
+        assert!(
+            mapped.is_some(),
+            "Mapped token at 'leftArrow' should point to src col 11. Tokens: {:?}",
+            tokens
+                .iter()
+                .map(|t| (
+                    t.get_dst_col(),
+                    t.get_src_col(),
+                    t.get_source_id().is_some()
+                ))
+                .collect::<Vec<_>>()
+        );
+
+        // Negative: no mapped token should exist at dst_col 0 or 1
+        // (the "(" and "__props." are unmapped)
+        let mapped_at_prefix = tokens
+            .iter()
+            .find(|t| t.get_dst_col() < 9 && t.get_source_id().is_some());
+        assert!(
+            mapped_at_prefix.is_none(),
+            "No mapped token should exist in the unmapped prefix region (dst_col < 9)"
+        );
+    }
+
+    /// @ai-generated — content_offset clamped to content length (safety)
+    #[test]
+    fn test_content_offset_clamped_if_exceeds_length() {
+        let allocator = Allocator::default();
+        let source = "abcdef";
+        let mut ct = CodeTransform::new(source, &allocator);
+        // content_offset = 100, but content is only 3 bytes
+        ct.batch_prepend_left_with_source_map(&[(3, Some((0, 100)), "XYZ")]);
+
+        assert_eq!(ct.build_string(), "abcXYZdef");
+
+        // Should not panic; the entire content becomes unmapped prefix
+        let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+        let _tokens: Vec<_> = map.get_tokens().collect();
     }
 }

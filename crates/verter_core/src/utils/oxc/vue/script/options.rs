@@ -3,7 +3,6 @@
 //! This module handles parsing of `<script>` blocks (without setup attribute),
 //! detecting export default and extracting component options.
 
-#![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 
@@ -18,6 +17,7 @@ use super::types::{
     ScriptItem,
 };
 use crate::common::Span;
+use crate::template::code_gen::binding::BindingType;
 
 /// Context for options script parsing
 pub struct OptionsContext {
@@ -335,6 +335,204 @@ fn process_setup_value<'a>(
         _ => None,
     }
 }
+
+// ======================== Options API binding extraction ========================
+
+/// Extract binding types from Options API default export.
+///
+/// Walks the `export default { ... }` or `export default defineComponent({ ... })`
+/// object and extracts property names from `data()`, `props`, `computed`, `methods`,
+/// and `inject`, returning them with their corresponding `BindingType`.
+///
+/// Spans are OXC-relative (0-based within the parsed content string).
+pub fn extract_options_bindings<'a>(program: &Program<'a>) -> Vec<(Span, BindingType)> {
+    let mut bindings = Vec::new();
+    for stmt in &program.body {
+        if let Statement::ExportDefaultDeclaration(export) = stmt {
+            if let Some(expr) = export.declaration.as_expression() {
+                extract_from_default_expression(expr, &mut bindings);
+            }
+        }
+    }
+    bindings
+}
+
+fn extract_from_default_expression(expr: &Expression<'_>, bindings: &mut Vec<(Span, BindingType)>) {
+    // Only extract bindings from plain object exports: `export default { ... }`.
+    // Vue's compiler does NOT perform binding analysis for `defineComponent({ ... })`
+    // wrapped exports — those use `_ctx.` uniformly.
+    if let Expression::ObjectExpression(obj) = expr {
+        extract_from_options_object(obj, bindings);
+    }
+}
+
+fn extract_from_options_object(
+    obj: &ObjectExpression<'_>,
+    bindings: &mut Vec<(Span, BindingType)>,
+) {
+    for prop in &obj.properties {
+        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+            let key_name = match &p.key {
+                PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+                PropertyKey::StringLiteral(s) => Some(s.value.as_str()),
+                _ => None,
+            };
+
+            match key_name {
+                Some("data") => {
+                    extract_data_return_keys(&p.value, bindings);
+                }
+                Some("props") => {
+                    extract_props_keys(&p.value, bindings);
+                }
+                Some("computed") => {
+                    extract_object_property_keys(&p.value, BindingType::Options, bindings);
+                }
+                Some("methods") => {
+                    extract_object_property_keys(&p.value, BindingType::Options, bindings);
+                }
+                Some("inject") => {
+                    extract_inject_keys(&p.value, bindings);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Extract keys from the object returned by `data()`.
+fn extract_data_return_keys(value: &Expression<'_>, bindings: &mut Vec<(Span, BindingType)>) {
+    match value {
+        // data() { return { ... } } or data: function() { return { ... } }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                extract_return_object_keys(&body.statements, BindingType::Data, bindings);
+            }
+        }
+        // data: () => ({ ... })
+        Expression::ArrowFunctionExpression(arrow) => {
+            if arrow.expression {
+                // Expression body: the first statement is the expression
+                for stmt in &arrow.body.statements {
+                    if let Statement::ExpressionStatement(es) = stmt {
+                        // Unwrap parenthesized: (({...}))
+                        let inner = unwrap_parens(&es.expression);
+                        if let Expression::ObjectExpression(obj) = inner {
+                            extract_ident_keys_from_object(obj, BindingType::Data, bindings);
+                        }
+                    }
+                }
+            } else {
+                extract_return_object_keys(&arrow.body.statements, BindingType::Data, bindings);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk statements looking for `return { ... }` and extract object keys.
+fn extract_return_object_keys(
+    stmts: &[Statement<'_>],
+    bt: BindingType,
+    bindings: &mut Vec<(Span, BindingType)>,
+) {
+    for stmt in stmts {
+        if let Statement::ReturnStatement(ret) = stmt {
+            if let Some(expr) = &ret.argument {
+                let inner = unwrap_parens(expr);
+                if let Expression::ObjectExpression(obj) = inner {
+                    extract_ident_keys_from_object(obj, bt, bindings);
+                }
+            }
+        }
+    }
+}
+
+/// Extract property names from an object expression. Only extracts StaticIdentifier
+/// keys (not computed or string literal keys, which are rare for data/computed/methods).
+fn extract_ident_keys_from_object(
+    obj: &ObjectExpression<'_>,
+    bt: BindingType,
+    bindings: &mut Vec<(Span, BindingType)>,
+) {
+    for prop in &obj.properties {
+        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+            if let PropertyKey::StaticIdentifier(id) = &p.key {
+                bindings.push((Span::from(id.span), bt));
+            }
+        }
+    }
+}
+
+/// Extract props keys from `props: [...]` or `props: { ... }`.
+fn extract_props_keys(value: &Expression<'_>, bindings: &mut Vec<(Span, BindingType)>) {
+    match value {
+        // props: ['foo', 'bar']
+        Expression::ArrayExpression(arr) => {
+            for elem in &arr.elements {
+                if let ArrayExpressionElement::StringLiteral(s) = elem {
+                    // String literal span includes quotes — adjust to content only
+                    let span = Span {
+                        start: s.span.start + 1,
+                        end: s.span.end - 1,
+                    };
+                    if span.end > span.start {
+                        bindings.push((span, BindingType::Props));
+                    }
+                }
+            }
+        }
+        // props: { foo: String, bar: { type: Number } }
+        Expression::ObjectExpression(obj) => {
+            extract_ident_keys_from_object(obj, BindingType::Props, bindings);
+        }
+        _ => {}
+    }
+}
+
+/// Extract keys from object expression (for computed/methods).
+fn extract_object_property_keys(
+    value: &Expression<'_>,
+    bt: BindingType,
+    bindings: &mut Vec<(Span, BindingType)>,
+) {
+    if let Expression::ObjectExpression(obj) = value {
+        extract_ident_keys_from_object(obj, bt, bindings);
+    }
+}
+
+/// Extract inject keys from `inject: [...]` or `inject: { ... }`.
+fn extract_inject_keys(value: &Expression<'_>, bindings: &mut Vec<(Span, BindingType)>) {
+    match value {
+        Expression::ArrayExpression(arr) => {
+            for elem in &arr.elements {
+                if let ArrayExpressionElement::StringLiteral(s) = elem {
+                    let span = Span {
+                        start: s.span.start + 1,
+                        end: s.span.end - 1,
+                    };
+                    if span.end > span.start {
+                        bindings.push((span, BindingType::Options));
+                    }
+                }
+            }
+        }
+        Expression::ObjectExpression(obj) => {
+            extract_ident_keys_from_object(obj, BindingType::Options, bindings);
+        }
+        _ => {}
+    }
+}
+
+/// Unwrap parenthesized expressions: `((expr))` → `expr`.
+fn unwrap_parens<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expr {
+        Expression::ParenthesizedExpression(p) => unwrap_parens(&p.expression),
+        _ => expr,
+    }
+}
+
+// ======================== Statement helpers ========================
 
 /// Collect declarations from a binding pattern
 fn collect_declarations_from_pattern<'a>(

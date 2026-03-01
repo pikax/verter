@@ -28,6 +28,7 @@ mod imports;
 mod macros;
 pub mod project_index;
 pub mod scope;
+pub mod selector_match;
 pub mod style;
 pub mod template;
 pub mod types;
@@ -48,14 +49,18 @@ pub use project_index::{
     InjectValidation, InjectValidationEntry, ProjectIndex, ProjectStats, ProvideInjectSummary,
 };
 pub use scope::AnalysisScope;
+pub use selector_match::{match_selector, MatchResult};
 pub use style::{
-    build_css_style_analysis, build_preprocessor_style_analysis, SpecialPseudoInput,
-    SpecialPseudoKind, StyleAnalysisFlags, StyleAnalysisLang, StyleBlockAnalysis, VBindInput,
+    build_css_style_analysis, build_preprocessor_style_analysis, compute_structured_specificity,
+    parse_selector, AnalyzedSelector, AttributeOperator, AttributeSelector, CompoundSelector,
+    SelectorCombinator, SelectorPseudoClass, SpecialPseudoInput, SpecialPseudoKind,
+    StructuredSelector, StyleAnalysisFlags, StyleAnalysisLang, StyleBlockAnalysis, VBindInput,
     VueStyleInput,
 };
 pub use template::{
-    AnalyzedEmitDefinition, AnalyzedMacroUsage, AnalyzedPropDefinition, BindingUsageKind,
-    CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace, IfChain, MacroKind,
+    extract_dynamic_class_names, extract_dynamic_class_names_rich, AnalyzedEmitDefinition,
+    AnalyzedMacroUsage, AnalyzedPropDefinition, BindingUsageKind, CommentDirective,
+    CommentDirectiveKind, DefinedSlot, DynamicClassName, ElementNamespace, IfChain, MacroKind,
     PropValueConstness, TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence,
     TemplateComponentUsage, TemplateDirective, TemplateElement, TemplateEventHandler,
     TemplatePropUsage, TemplateRef, TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding,
@@ -65,7 +70,8 @@ pub use types::hash_16;
 pub use types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedExportedFunction, AnalyzedImport,
     AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, BindingInitializer, ComposableInfo,
-    ComposableReturn, ComposableReturnField, ExportSignature, FunctionParam, Hash16,
-    ImportSourceInfo, LiteralKind, MacroTypeDep, ReactivityKind, ResolvedTypeInfo,
-    ReturnReactivity, ScriptAnalysisSnapshot, ScriptTypeEnhancements, VueApiClassification,
+    ComposableReturn, ComposableReturnField, DomQueryCallSite, DomQueryKind, ExportSignature,
+    FunctionParam, Hash16, ImportSourceInfo, LiteralKind, MacroTypeDep, ReactivityKind,
+    ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot, ScriptTypeEnhancements,
+    VueApiClassification,
 };

@@ -1,0 +1,15 @@
+[package]
+name = "verter_diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vue SFC diagnostic engine for Verter — detection rules produce diagnostics, no fixes"
+
+[dependencies]
+verter_span = { path = "../verter_span" }
+verter_analysis = { path = "../verter_analysis" }
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]

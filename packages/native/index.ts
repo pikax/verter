@@ -90,6 +90,42 @@ export declare function processStyle(
 ): ProcessStyleResult;
 
 // =============================================================================
+// Batch Compilation (Rayon parallel)
+// =============================================================================
+
+export interface BatchFile {
+  filename: string;
+  source: string;
+}
+
+export interface BatchOptions {
+  /** Number of Rayon threads (0 or undefined = all logical CPUs) */
+  threads?: number;
+}
+
+export interface BatchResult {
+  filename: string;
+  /** Combined script + template code */
+  code: string;
+  /** First error message if compilation failed */
+  error?: string;
+  durationMs: number;
+}
+
+/**
+ * Compile a batch of Vue SFC files in parallel using Rayon.
+ *
+ * Each file is compiled independently with its own allocator — no shared
+ * mutable state. No caching, no analysis — compile-only for maximum throughput.
+ *
+ * Equivalent to Vize's `compileSfcBatch` for fair benchmark comparison.
+ */
+export declare function compileBatch(
+  files: BatchFile[],
+  options?: BatchOptions,
+): BatchResult[];
+
+// =============================================================================
 // VerterHost (in-memory virtual file host)
 //
 // Shared types re-exported from host-types.ts. Native-specific overrides
@@ -100,18 +136,29 @@ export declare function processStyle(
 export type {
   HostConfig,
   HostCompileProfile,
+  HostTsxResponse,
   HostVirtualNodeKind,
   HostSliceChanges,
   HostDiagnostic,
   HostDiagnosticsSnapshot,
   HostExternalSourceRequest,
   HostScriptImportInfo,
+  HostPreprocessorRequest,
+  HostBlockOverrideEntry,
+  HostBlockOverrideRequest,
   HostUpdateResult,
   HostResolvedId,
   HostVirtualMeta,
   HostVirtualFileResponse,
   HostVirtualQuery,
   HostRemoveResult,
+  HostTextEdit,
+  HostCodeAction,
+  HostLintRuleMetadata,
+  HostLintDiagnostic,
+  HostDocumentSymbol,
+  HostElementMatch,
+  HostSelectorMatchResult,
 } from "./host-types";
 
 import type { HostCompileProfile } from "./host-types";
@@ -142,11 +189,31 @@ export interface HostStyleOverrideRequest {
   overrides: HostStyleOverrideEntry[];
 }
 
+export interface NativeBlockOverrideEntry {
+  /** Block type: "template", "script", "style", or "custom". */
+  blockType: "template" | "script" | "style" | "custom";
+  /** Block index (0 for template/script, 0..N for styles/custom blocks). */
+  index: number;
+  /** Preprocessed code. Accepts a string or a Buffer (UTF-8 bytes). */
+  code: string | Buffer;
+  /** Source map from the preprocessor, if available. */
+  sourceMap?: string;
+}
+
+export interface NativeBlockOverrideRequest {
+  canonicalId: string;
+  compileProfile?: HostCompileProfile;
+  overrides: NativeBlockOverrideEntry[];
+}
+
 export declare class VerterHost {
   constructor(config?: import("./host-types").HostConfig);
   resolve(rawId: string): import("./host-types").HostResolvedId | null;
   upsert(request: HostUpsertRequest): import("./host-types").HostUpdateResult;
+  /** @deprecated Use `applyBlockOverrides` instead — unified API for all block types. */
   applyStyleOverrides(request: HostStyleOverrideRequest): import("./host-types").HostUpdateResult;
+  applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
+  getTsx(canonicalId: string, profile?: import("./host-types").HostCompileProfile): import("./host-types").HostTsxResponse | null;
   getVirtualFile(query: import("./host-types").HostVirtualQuery): import("./host-types").HostVirtualFileResponse;
   listVirtualFiles(canonicalId: string): import("./host-types").HostVirtualNodeKind[];
   remove(canonicalOrAlias: string): import("./host-types").HostRemoveResult | null;
@@ -160,6 +227,27 @@ export declare class VerterHost {
    * smart invalidation (cross-file change tracking).
    */
   setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void;
+  /**
+   * Runs lint rules against a file's analysis data and returns diagnostics.
+   * @param config - Optional JSON string with lint config. Pass undefined for defaults.
+   */
+  lint(canonicalOrAlias: string, config?: string): import("./host-types").HostLintDiagnostic[];
+  /**
+   * Returns code actions (quick fixes) available at a given UTF-16 offset.
+   */
+  getCodeActions(canonicalOrAlias: string, offset: number): import("./host-types").HostCodeAction[];
+  /**
+   * Returns metadata for all registered lint rules.
+   */
+  getLintRuleMetadata(): import("./host-types").HostLintRuleMetadata[];
+  /**
+   * Returns document symbols for a file (outline / Ctrl+Shift+O).
+   */
+  getDocumentSymbols(canonicalOrAlias: string): import("./host-types").HostDocumentSymbol[];
+  /**
+   * Matches CSS selectors against template elements, returning a match matrix.
+   */
+  matchCssSelectors(canonicalOrAlias: string): import("./host-types").HostSelectorMatchResult[];
 }
 
 export {};

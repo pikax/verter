@@ -4,22 +4,32 @@ pub mod sfc_scanner;
 
 use std::sync::Arc;
 
+use parking_lot::RwLock;
+
 use dashmap::DashMap;
 use tower_lsp_server::lsp_types::*;
 use verter_host::{
-    CompileProfile, FileKind, HostUpdateResult, TsxResponse, UpsertRequest, VerterHost,
+    CompileProfile, FileKind, HostUpdateResult, StyleOverrideEntry, StyleOverrideRequest,
+    TsxResponse, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
+
+use crate::server::{TsxBlock, VirtualFileEntry, VirtualFilesResponse};
 
 use line_index::LineIndex;
 use position_map::PositionMapper;
 
 /// Manages open documents and their relationship to verter_host.
 pub struct DocumentRegistry {
-    host: VerterHost,
+    pub(crate) host: VerterHost,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
     /// Default compile profile for TSX generation (LSP mode).
-    tsx_profile: CompileProfile,
+    /// Wrapped in `RwLock` so `set_embed_ambient_types()` can update it
+    /// after `initialized()` determines whether `@verter/types` is installed.
+    tsx_profile: RwLock<CompileProfile>,
+    /// Negotiated position encoding from the client (LSP 3.17).
+    /// Set once during `initialize()`, before any documents are opened.
+    encoding: RwLock<PositionEncodingKind>,
 }
 
 /// Tracked state for an open document.
@@ -36,6 +46,10 @@ pub struct DocumentState {
     pub position_mapper: Option<PositionMapper>,
     /// Language ID (e.g., "vue", "typescript").
     pub language_id: String,
+    /// For virtual files (`verter-virtual://`): the source .vue file URI.
+    /// When set, this document is a virtual file and feature requests should
+    /// be routed through the source file's TSX for TSGO queries.
+    pub virtual_source_uri: Option<String>,
 }
 
 impl DocumentRegistry {
@@ -43,17 +57,52 @@ impl DocumentRegistry {
         Self {
             host,
             documents: DashMap::new(),
-            tsx_profile: CompileProfile {
+            tsx_profile: RwLock::new(CompileProfile {
                 source_map: true,
-                enable_types: true,
+                target: verter_host::CompileTarget::IDE | verter_host::CompileTarget::TEMPLATE_DATA,
                 ..CompileProfile::default()
-            },
+            }),
+            encoding: RwLock::new(PositionEncodingKind::UTF16),
         }
+    }
+
+    /// Set the negotiated position encoding. Called once during `initialize()`,
+    /// before any documents are opened.
+    pub fn set_encoding(&self, encoding: PositionEncodingKind) {
+        *self.encoding.write() = encoding;
+    }
+
+    /// Enable embedding ambient `declare module "@verter/types"` in generated TSX.
+    /// Called when `@verter/types` is not installed in the workspace.
+    pub fn set_embed_ambient_types(&self, embed: bool) {
+        self.tsx_profile.write().embed_ambient_types = embed;
+    }
+
+    /// Get the negotiated encoding.
+    pub fn encoding(&self) -> PositionEncodingKind {
+        self.encoding.read().clone()
     }
 
     /// Handle a document being opened in the editor.
     pub fn did_open(&self, params: &TextDocumentItem) -> HostUpdateResult {
         let uri_str = params.uri.as_str().to_string();
+
+        // Handle virtual files (verter-virtual:// scheme) — lightweight state only
+        if let Some(source_uri) = parse_virtual_uri(&uri_str) {
+            let source: Arc<str> = Arc::from(params.text.as_str());
+            let state = DocumentState {
+                canonical_id: uri_str.clone(),
+                version: params.version,
+                line_index: LineIndex::new(&source, self.encoding()),
+                source,
+                position_mapper: None,
+                language_id: params.language_id.clone(),
+                virtual_source_uri: Some(source_uri),
+            };
+            self.documents.insert(uri_str.clone(), state);
+            return HostUpdateResult::no_change(uri_str);
+        }
+
         let canonical_id = uri_to_canonical_id(&params.uri);
         let source: Arc<str> = Arc::from(params.text.as_str());
 
@@ -72,32 +121,33 @@ impl DocumentRegistry {
         });
 
         // Trigger compilation to populate TSX cache (upsert only parses).
-        // get_virtual_file() compiles lazily and caches TSX + source map.
+        // ensure_compiled() compiles lazily and caches TSX + source map.
         if file_kind == FileKind::VueSfc {
-            let _ = self.host.get_virtual_file(verter_host::VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(canonical_id.clone()),
-                node_kind: Some(verter_host::VirtualNodeKind::Main),
-                compile_profile: self.tsx_profile.clone(),
-            });
+            let _ = self
+                .host
+                .ensure_compiled(&canonical_id, &self.tsx_profile.read());
         }
 
-        // Build position mapper from TSX source map
-        let position_mapper = match &result {
-            Ok(update) if update.changed => self
-                .host
-                .get_tsx(&canonical_id, &self.tsx_profile)
-                .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok()),
-            _ => None,
+        // Build position mapper from TSX source map.
+        // Always build on did_open — even if the host reports `changed: false`
+        // (e.g., because scan_workspace already loaded the same content), we still
+        // need the mapper for hover/definition/diagnostics.
+        let position_mapper = if file_kind == FileKind::VueSfc {
+            self.host
+                .get_tsx(&canonical_id, &self.tsx_profile.read())
+                .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
+        } else {
+            None
         };
 
         let state = DocumentState {
             canonical_id,
             version: params.version,
-            line_index: LineIndex::new(&source),
+            line_index: LineIndex::new(&source, self.encoding()),
             source,
             position_mapper,
             language_id: params.language_id.clone(),
+            virtual_source_uri: None,
         };
 
         self.documents.insert(uri_str.clone(), state);
@@ -111,6 +161,18 @@ impl DocumentRegistry {
     /// Handle a document being changed.
     pub fn did_change(&self, uri: &Uri, version: i32, text: &str) -> HostUpdateResult {
         let uri_str = uri.as_str().to_string();
+
+        // Virtual files: just update text + line index, skip host upsert
+        if let Some(mut entry) = self.documents.get_mut(&uri_str) {
+            if entry.virtual_source_uri.is_some() {
+                let source: Arc<str> = Arc::from(text);
+                entry.version = version;
+                entry.line_index = LineIndex::new(&source, self.encoding());
+                entry.source = source;
+                return HostUpdateResult::no_change(entry.canonical_id.clone());
+            }
+        }
+
         let canonical_id = uri_to_canonical_id(uri);
         let source: Arc<str> = Arc::from(text);
 
@@ -136,20 +198,27 @@ impl DocumentRegistry {
 
         // Trigger re-compilation for Vue SFCs
         if file_kind == FileKind::VueSfc {
-            let _ = self.host.get_virtual_file(verter_host::VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(canonical_id.clone()),
-                node_kind: Some(verter_host::VirtualNodeKind::Main),
-                compile_profile: self.tsx_profile.clone(),
-            });
+            let _ = self
+                .host
+                .ensure_compiled(&canonical_id, &self.tsx_profile.read());
         }
 
-        // Rebuild position mapper
+        // Rebuild position mapper.
+        // When compilation fails (e.g., temporarily invalid SFC during typing),
+        // preserve the old mapper so position-dependent features keep working.
         let position_mapper = match &result {
-            Ok(update) if update.changed => self
-                .host
-                .get_tsx(&canonical_id, &self.tsx_profile)
-                .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok()),
+            Ok(update) if update.changed => {
+                let new_mapper = self
+                    .host
+                    .get_tsx(&canonical_id, &self.tsx_profile.read())
+                    .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok());
+                // Keep old mapper if new compilation failed (Bug 3 fix)
+                new_mapper.or_else(|| {
+                    self.documents
+                        .get(&uri_str)
+                        .and_then(|d| d.position_mapper.clone())
+                })
+            }
             _ => self
                 .documents
                 .get(&uri_str)
@@ -158,7 +227,7 @@ impl DocumentRegistry {
 
         if let Some(mut entry) = self.documents.get_mut(&uri_str) {
             entry.version = version;
-            entry.line_index = LineIndex::new(&source);
+            entry.line_index = LineIndex::new(&source, self.encoding());
             entry.source = source;
             entry.position_mapper = position_mapper;
         }
@@ -167,6 +236,57 @@ impl DocumentRegistry {
             tracing::error!("upsert failed for {}: {:?}", uri_str, e);
             HostUpdateResult::no_change(canonical_id)
         })
+    }
+
+    /// Handle incremental document changes.
+    ///
+    /// Applies each content change event to the stored source text:
+    /// - If a change has a `range`, it replaces that range in the source.
+    /// - If a change has no `range`, it replaces the entire document (full sync fallback).
+    ///
+    /// After applying all changes, delegates to `did_change` with the final text.
+    pub fn did_change_incremental(
+        &self,
+        uri: &Uri,
+        version: i32,
+        changes: Vec<TextDocumentContentChangeEvent>,
+    ) -> HostUpdateResult {
+        let uri_str = uri.as_str().to_string();
+
+        // Get current source text
+        let mut text = match self.documents.get(&uri_str) {
+            Some(doc) => doc.source.to_string(),
+            None => {
+                // No document tracked — use last change's full text as fallback
+                if let Some(change) = changes.last() {
+                    return self.did_change(uri, version, &change.text);
+                }
+                return HostUpdateResult::no_change(uri_to_canonical_id(uri));
+            }
+        };
+
+        // Apply each change in order
+        for change in &changes {
+            if let Some(range) = change.range {
+                // Incremental change: apply to specific range
+                let line_index = LineIndex::new(&text, self.encoding());
+                let start_offset =
+                    line_index.position_to_offset(&range.start).unwrap_or(0) as usize;
+                let end_offset = line_index
+                    .position_to_offset(&range.end)
+                    .unwrap_or(text.len() as u32) as usize;
+
+                let start_offset = start_offset.min(text.len());
+                let end_offset = end_offset.min(text.len());
+
+                text.replace_range(start_offset..end_offset, &change.text);
+            } else {
+                // Full replacement (no range = full document)
+                text = change.text.clone();
+            }
+        }
+
+        self.did_change(uri, version, &text)
     }
 
     /// Handle a document being closed.
@@ -194,7 +314,7 @@ impl DocumentRegistry {
     /// Get the TSX output for a document.
     pub fn get_tsx(&self, uri: &Uri) -> Option<TsxResponse> {
         let canonical_id = self.get_canonical_id(uri)?;
-        self.host.get_tsx(&canonical_id, &self.tsx_profile)
+        self.host.get_tsx(&canonical_id, &self.tsx_profile.read())
     }
 
     /// Get the analysis snapshot for a document.
@@ -206,7 +326,113 @@ impl DocumentRegistry {
     /// Get the diagnostics for a document.
     pub fn get_diagnostics(&self, uri: &Uri) -> Option<verter_host::DiagnosticsSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
-        self.host.get_diagnostics(&canonical_id, &self.tsx_profile)
+        self.host
+            .get_diagnostics(&canonical_id, &self.tsx_profile.read())
+    }
+
+    /// Get all virtual files for a document, including TSX output.
+    pub fn get_virtual_files(&self, uri: &Uri) -> Option<VirtualFilesResponse> {
+        let canonical_id = self.get_canonical_id(uri)?;
+
+        // Get TSX
+        let tsx = self
+            .host
+            .get_tsx(&canonical_id, &self.tsx_profile.read())
+            .map(|t| TsxBlock {
+                code: t.code.to_string(),
+                source_map: t.source_map.map(|m| m.to_string()),
+            });
+
+        // Get all virtual node kinds
+        let node_kinds = self.host.list_virtual_nodes(&canonical_id);
+
+        // Fetch each virtual file
+        let mut virtual_files = Vec::with_capacity(node_kinds.len());
+        for kind in &node_kinds {
+            let kind_str = match kind {
+                VirtualNodeKind::Main => "main".to_string(),
+                VirtualNodeKind::Script => "script".to_string(),
+                VirtualNodeKind::Template => "template".to_string(),
+                VirtualNodeKind::Style { index } => format!("style:{index}"),
+                VirtualNodeKind::Custom { index } => format!("custom:{index}"),
+            };
+
+            let vf = self.host.get_virtual_file(VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(canonical_id.clone()),
+                node_kind: Some(kind.clone()),
+                compile_profile: self.tsx_profile.read().clone(),
+            });
+
+            match vf {
+                Ok(response) => {
+                    virtual_files.push(VirtualFileEntry {
+                        kind: kind_str,
+                        code: response.code.to_string(),
+                        lang: response.lang.unwrap_or_else(|| "js".to_string()),
+                        source_map: response.source_map.map(|m| m.to_string()),
+                        stale: response.stale,
+                    });
+                }
+                Err(_) => {
+                    // Skip virtual files that fail to compile
+                    virtual_files.push(VirtualFileEntry {
+                        kind: kind_str,
+                        code: String::new(),
+                        lang: "js".to_string(),
+                        source_map: None,
+                        stale: true,
+                    });
+                }
+            }
+        }
+
+        Some(VirtualFilesResponse { tsx, virtual_files })
+    }
+
+    /// Get the analysis snapshot as a JSON value.
+    ///
+    /// When the negotiated encoding is not UTF-8, all `spanStart`/`spanEnd` byte
+    /// offsets in the analysis are converted to the negotiated encoding (UTF-16 or UTF-32).
+    pub fn get_analysis_json(&self, uri: &Uri) -> Option<serde_json::Value> {
+        let canonical_id = self.get_canonical_id(uri)?;
+        let analysis = self.host.get_analysis(&canonical_id)?;
+        let mut json = serde_json::to_value(&analysis).ok()?;
+        let encoding = self.encoding();
+        if encoding != PositionEncodingKind::UTF8 {
+            // UTF-8 byte offsets are native — no conversion needed.
+            // For UTF-16 or UTF-32, convert all span offsets.
+            let source = self.documents.get(uri.as_str())?.source.clone();
+            convert_analysis_spans_json(&mut json, &source, &encoding);
+        }
+        Some(json)
+    }
+
+    /// Get the virtual source URI for a document (if it's a virtual file).
+    pub fn get_virtual_source_uri(&self, uri: &Uri) -> Option<String> {
+        self.documents.get(uri.as_str())?.virtual_source_uri.clone()
+    }
+
+    /// Apply preprocessor-compiled style overrides for a document.
+    ///
+    /// Returns `true` if the overrides were applied successfully.
+    pub fn apply_style_overrides(
+        &self,
+        canonical_id: &str,
+        overrides: Vec<StyleOverrideEntry>,
+    ) -> bool {
+        let req = StyleOverrideRequest {
+            canonical_id: canonical_id.to_string(),
+            compile_profile: self.tsx_profile.read().clone(),
+            overrides,
+        };
+        match self.host.apply_style_overrides(req) {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("apply_style_overrides failed: {e:?}");
+                false
+            }
+        }
     }
 
     /// Get the underlying verter_host reference.
@@ -215,13 +441,83 @@ impl DocumentRegistry {
     }
 }
 
+// ── Analysis span conversion ─────────────────────────────────────────
+
+/// Recursively walk a JSON value and convert all `spanStart`/`spanEnd` fields
+/// from UTF-8 byte offsets to the negotiated encoding.
+fn convert_analysis_spans_json(
+    value: &mut serde_json::Value,
+    source: &str,
+    encoding: &PositionEncodingKind,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                if (key == "spanStart" || key == "spanEnd") && val.is_u64() {
+                    let byte_offset = val.as_u64().unwrap() as u32;
+                    let converted = convert_byte_offset(source, byte_offset, encoding);
+                    *val = serde_json::Value::Number(serde_json::Number::from(converted));
+                } else {
+                    convert_analysis_spans_json(val, source, encoding);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                convert_analysis_spans_json(item, source, encoding);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Convert a UTF-8 byte offset to the target encoding's offset.
+fn convert_byte_offset(source: &str, byte_offset: u32, encoding: &PositionEncodingKind) -> u32 {
+    if *encoding == PositionEncodingKind::UTF16 {
+        byte_offset_to_utf16(source, byte_offset)
+    } else if *encoding == PositionEncodingKind::UTF32 {
+        byte_offset_to_utf32(source, byte_offset)
+    } else {
+        byte_offset // UTF-8 passthrough
+    }
+}
+
+/// Convert a UTF-8 byte offset to a UTF-16 code unit offset.
+fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> u32 {
+    let clamped = clamp_to_char_boundary(source, byte_offset as usize);
+    source[..clamped].encode_utf16().count() as u32
+}
+
+/// Convert a UTF-8 byte offset to a UTF-32 (Unicode code point) offset.
+fn byte_offset_to_utf32(source: &str, byte_offset: u32) -> u32 {
+    let clamped = clamp_to_char_boundary(source, byte_offset as usize);
+    source[..clamped].chars().count() as u32
+}
+
+/// Clamp an offset to the nearest valid char boundary (at or before the offset).
+fn clamp_to_char_boundary(source: &str, offset: usize) -> usize {
+    let clamped = offset.min(source.len());
+    // Walk backwards to find a valid char boundary
+    let mut pos = clamped;
+    while pos > 0 && !source.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
 /// Convert an LSP document URI to a canonical file path ID.
 ///
 /// Extracts the path component from `file://` URIs.
 /// On Windows, strips the leading `/` from paths like `/C:/Users/...`.
-fn uri_to_canonical_id(uri: &Uri) -> String {
-    let s = uri.as_str();
+pub fn uri_to_canonical_id(uri: &Uri) -> String {
+    uri_to_canonical_id_from_str(uri.as_str())
+}
 
+/// Convert a `file://` URI string to a canonical filesystem path.
+///
+/// Handles percent-encoded characters (e.g., `%3A` → `:` on Windows),
+/// normalises separators to `/`, and restores the leading `/` on Unix.
+pub fn uri_to_canonical_id_from_str(s: &str) -> String {
     // Handle file:// URIs by extracting the path
     if let Some(rest) = s.strip_prefix("file:///") {
         let decoded = percent_decode(rest);
@@ -245,22 +541,25 @@ fn uri_to_canonical_id(uri: &Uri) -> String {
 }
 
 /// Minimal percent-decoding for URI paths (handles %20 for spaces, etc.).
+///
+/// Collects decoded bytes and converts the final result via UTF-8 to properly
+/// handle multi-byte sequences like `%C3%A9` → "é".
 fn percent_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
+    let mut decoded = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
-                result.push((hi << 4 | lo) as char);
+                decoded.push(hi << 4 | lo);
                 i += 3;
                 continue;
             }
         }
-        result.push(bytes[i] as char);
+        decoded.push(bytes[i]);
         i += 1;
     }
-    result
+    String::from_utf8(decoded).unwrap_or_else(|_| s.to_string())
 }
 
 fn hex_digit(b: u8) -> Option<u8> {
@@ -270,6 +569,19 @@ fn hex_digit(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// Parse a `verter-virtual://` URI and extract the source .vue file URI.
+///
+/// URI format: `verter-virtual:///kind.lang?sourceUri=<encoded-source-uri>`
+/// Returns the decoded source URI if the input is a virtual file URI.
+fn parse_virtual_uri(uri: &str) -> Option<String> {
+    if !uri.starts_with("verter-virtual://") {
+        return None;
+    }
+    let query_start = uri.find("?sourceUri=")?;
+    let encoded = &uri[query_start + "?sourceUri=".len()..];
+    Some(percent_decode(encoded))
 }
 
 #[cfg(test)]
@@ -302,5 +614,51 @@ mod tests {
         let uri: Uri = "untitled:Untitled-1".parse().unwrap();
         let id = uri_to_canonical_id(&uri);
         assert_eq!(id, "untitled:Untitled-1");
+    }
+
+    /// @ai-generated — Windows drive letter with percent-encoded colon (%3A)
+    /// VS Code sometimes sends `file:///d%3A/path` instead of `file:///d:/path`.
+    #[test]
+    fn test_uri_to_canonical_id_windows_encoded_drive() {
+        let id = uri_to_canonical_id_from_str("file:///d%3A/dev/personal/verter/examples");
+        assert_eq!(id, "d:/dev/personal/verter/examples");
+    }
+
+    /// @ai-generated — Windows path with lowercase drive and normal colon
+    #[test]
+    fn test_uri_to_canonical_id_windows_lowercase_drive() {
+        let id = uri_to_canonical_id_from_str("file:///d:/dev/personal/verter");
+        assert_eq!(id, "d:/dev/personal/verter");
+    }
+
+    /// @ai-generated — Verify the from_str variant matches the Uri variant
+    #[test]
+    fn test_uri_to_canonical_id_from_str_matches_uri() {
+        let uri: Uri = "file:///C:/Users/dev/project/App.vue".parse().unwrap();
+        assert_eq!(
+            uri_to_canonical_id(&uri),
+            uri_to_canonical_id_from_str("file:///C:/Users/dev/project/App.vue")
+        );
+    }
+
+    #[test]
+    fn test_parse_virtual_uri_tsx() {
+        let uri = "verter-virtual:///tsx.tsx?sourceUri=file%3A%2F%2F%2Fhome%2Fuser%2FApp.vue";
+        let source = parse_virtual_uri(uri);
+        assert_eq!(source, Some("file:///home/user/App.vue".to_string()));
+    }
+
+    #[test]
+    fn test_parse_virtual_uri_non_virtual() {
+        let uri = "file:///home/user/App.vue";
+        assert_eq!(parse_virtual_uri(uri), None);
+    }
+
+    #[test]
+    fn test_parse_virtual_uri_windows() {
+        let uri =
+            "verter-virtual:///tsx.tsx?sourceUri=file%3A%2F%2F%2FC%3A%2FUsers%2Fdev%2FApp.vue";
+        let source = parse_virtual_uri(uri);
+        assert_eq!(source, Some("file:///C:/Users/dev/App.vue".to_string()));
     }
 }

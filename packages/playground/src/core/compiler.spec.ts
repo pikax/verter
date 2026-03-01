@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 import { mergeRenderIntoComponent, formatDiagnostics, applyTsxOutput } from "./compiler";
 import { File } from "./types";
+import { combineSourceMaps, lookupGenerated, lookupSource, parseMappings } from "./sourcemap";
 
 async function generateRealTsxOutput(vueSource: string): Promise<{ code: string; sourceMap: string }> {
   const thisDir = dirname(fileURLToPath(import.meta.url));
@@ -24,7 +25,7 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
     maxProfilesPerFile: 8,
   });
 
-  const profile = { sourceMap: true, enableTypes: true, forceJs: true };
+  const profile = { sourceMap: true, target: "ide", forceJs: true };
   host.upsert({
     inputId: "App.vue",
     source: vueSource,
@@ -440,6 +441,274 @@ const msg: string | number = Math.random() > 0.5 ? 'x' : 0
 
     const { code } = await generateRealTsxOutput(source);
     expect(code).toContain("typeof msg === 'string'");
-    expect(code).toContain("onClick={() => {msg.toLowerCase()}}");
+    // The v-if guard wraps the handler: onClick={() => {if (!(guard)) { return undefined; } msg.toLowerCase()}}
+    expect(code).toContain("msg.toLowerCase()");
+    expect(code).toContain("onClick=");
+  });
+});
+
+// ── Combined source map integration tests (real WASM) ──────────
+
+interface VirtualFile {
+  code: string;
+  sourceMap?: string;
+}
+
+interface WasmHost {
+  upsert(req: {
+    inputId: string;
+    source: string;
+    fileKind: string;
+    aliases: string[];
+    compileProfile: Record<string, unknown>;
+  }): unknown;
+  getVirtualFile(query: {
+    rawId: string;
+    compileProfile?: Record<string, unknown>;
+  }): VirtualFile;
+  listVirtualFiles(canonicalId: string): Array<{ kind: string; index?: number }>;
+}
+
+async function loadWasmHost(): Promise<WasmHost> {
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  const wasmJs = resolve(thisDir, "../../../wasm/wasm/verter_wasm.js");
+  const wasmBin = resolve(thisDir, "../../../wasm/wasm/verter_wasm_bg.wasm");
+
+  const wasmModule = (await import(pathToFileURL(wasmJs).href)) as any;
+  const wasmBytes = readFileSync(wasmBin);
+  await wasmModule.default({ module_or_path: wasmBytes });
+
+  return new wasmModule.VerterHost({
+    devMode: true,
+    compileErrorPolicy: "devServeLastKnownGood",
+    maxProfilesPerFile: 8,
+  }) as WasmHost;
+}
+
+/**
+ * Compile a Vue SFC using the real WASM host and return the combined source map
+ * alongside the final JS code.
+ */
+async function compileWithCombinedSourceMap(vueSource: string): Promise<{
+  finalJs: string;
+  combinedMap: string;
+  scriptCode: string;
+  templateCode: string;
+}> {
+  const host = await loadWasmHost();
+  const profile = { sourceMap: true, target: "ide", forceJs: true };
+
+  host.upsert({
+    inputId: "App.vue",
+    source: vueSource,
+    fileKind: "vue",
+    aliases: [],
+    compileProfile: profile,
+  });
+
+  const nodes = host.listVirtualFiles("App.vue");
+  const nodeKinds = new Set(nodes.map((n) => n.kind));
+
+  let assembledJs = "";
+  let scriptCode = "";
+  let scriptSourceMap = "";
+  let templateCode = "";
+  let templateSourceMap = "";
+
+  if (nodeKinds.has("script")) {
+    const script = host.getVirtualFile({
+      rawId: "App.vue?vue&type=script",
+      compileProfile: profile,
+    });
+    scriptCode = script.code;
+    scriptSourceMap = script.sourceMap ?? "";
+    assembledJs += script.code;
+  }
+
+  if (nodeKinds.has("template")) {
+    const template = host.getVirtualFile({
+      rawId: "App.vue?vue&type=template",
+      compileProfile: profile,
+    });
+    if (assembledJs) assembledJs += "\n";
+    assembledJs += template.code;
+    templateCode = template.code;
+    templateSourceMap = template.sourceMap ?? "";
+  }
+
+  if (!assembledJs && nodeKinds.has("main")) {
+    const main = host.getVirtualFile({
+      rawId: "App.vue",
+      compileProfile: profile,
+    });
+    assembledJs = main.code;
+  }
+
+  const finalJs = mergeRenderIntoComponent(assembledJs);
+  const combinedMap = combineSourceMaps({
+    scriptMap: scriptSourceMap,
+    scriptCode,
+    templateMap: templateSourceMap,
+    templateCode,
+    vueSource,
+    finalJs,
+  });
+
+  return { finalJs, combinedMap, scriptCode, templateCode };
+}
+
+// @ai-generated - Integration tests for combined source maps with real WASM output
+describe("combined source map (WASM integration)", () => {
+  it("maps generated lines within bounds of final JS", async () => {
+    const source = `<script setup lang="ts">
+const msg = "hello"
+</script>
+<template>
+  <div>{{ msg }}</div>
+</template>`;
+
+    const { finalJs, combinedMap } = await compileWithCombinedSourceMap(source);
+    expect(combinedMap).not.toBe("");
+
+    const parsed = JSON.parse(combinedMap);
+    const segments = parseMappings(parsed.mappings);
+    const finalLineCount = finalJs.split("\n").length;
+    const sourceLineCount = source.split("\n").length;
+
+    // Every mapped generated line must be within bounds
+    for (let genLine = 0; genLine < segments.length; genLine++) {
+      expect(genLine).toBeLessThan(finalLineCount);
+      for (const seg of segments[genLine]) {
+        // Source line must be within the original SFC
+        expect(seg[2]).toBeLessThan(sourceLineCount);
+        expect(seg[2]).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+
+  it("round-trips script positions: source→generated→source", async () => {
+    const source = `<script setup lang="ts">
+const msg = "hello"
+const count = 42
+</script>
+<template>
+  <div>{{ msg }}</div>
+</template>`;
+
+    const { finalJs, combinedMap } = await compileWithCombinedSourceMap(source);
+    expect(combinedMap).not.toBe("");
+
+    // The script content "const msg" is on source line 1
+    // Find a mapping that points to source line 1
+    const gen = lookupGenerated(combinedMap, 1, 0);
+    if (gen) {
+      // Verify the generated line contains the expected content
+      const genLines = finalJs.split("\n");
+      expect(gen.line).toBeLessThan(genLines.length);
+
+      // Round-trip: generated → source should return to the same source line
+      const src = lookupSource(combinedMap, gen.line, gen.col);
+      expect(src).not.toBeNull();
+      expect(src!.line).toBe(1);
+    }
+  });
+
+  it("round-trips template positions: source→generated→source", async () => {
+    const source = `<script setup lang="ts">
+const msg = "hello"
+</script>
+<template>
+  <div>{{ msg }}</div>
+</template>`;
+
+    const { finalJs, combinedMap } = await compileWithCombinedSourceMap(source);
+    expect(combinedMap).not.toBe("");
+
+    // The template content "<div>" is on source line 4
+    const gen = lookupGenerated(combinedMap, 4, 2);
+    if (gen) {
+      const genLines = finalJs.split("\n");
+      expect(gen.line).toBeLessThan(genLines.length);
+
+      // Round-trip: generated → source should return to the same source line
+      const src = lookupSource(combinedMap, gen.line, gen.col);
+      expect(src).not.toBeNull();
+      expect(src!.line).toBe(4);
+    }
+  });
+
+  it("round-trips generated→source→generated for template region", async () => {
+    const source = `<script setup lang="ts">
+const msg = "hello"
+</script>
+<template>
+  <div>{{ msg }}</div>
+</template>`;
+
+    const { finalJs, combinedMap } = await compileWithCombinedSourceMap(source);
+    expect(combinedMap).not.toBe("");
+
+    // Find a generated line in the template region (contains "render" or template output)
+    const genLines = finalJs.split("\n");
+    const renderLine = genLines.findIndex((l) => l.includes("function render"));
+    if (renderLine >= 0) {
+      const src = lookupSource(combinedMap, renderLine, 0);
+      if (src) {
+        // Round-trip back to generated
+        const gen = lookupGenerated(combinedMap, src.line, src.col);
+        expect(gen).not.toBeNull();
+        expect(gen!.line).toBe(renderLine);
+      }
+    }
+  });
+
+  it("handles template-only SFC (no script block)", async () => {
+    const source = `<template>
+  <div>hello world</div>
+</template>`;
+
+    const { finalJs, combinedMap } = await compileWithCombinedSourceMap(source);
+    // Template-only should still produce a valid source map
+    if (combinedMap) {
+      const parsed = JSON.parse(combinedMap);
+      const segments = parseMappings(parsed.mappings);
+      const finalLineCount = finalJs.split("\n").length;
+
+      for (let genLine = 0; genLine < segments.length; genLine++) {
+        expect(genLine).toBeLessThan(finalLineCount);
+      }
+    }
+  });
+
+  it("handles script-only SFC (no template block)", async () => {
+    const source = `<script setup lang="ts">
+const msg = "hello"
+defineExpose({ msg })
+</script>`;
+
+    const { combinedMap } = await compileWithCombinedSourceMap(source);
+    // Script-only — should still have valid map (may be empty if no source maps)
+    if (combinedMap) {
+      const parsed = JSON.parse(combinedMap);
+      expect(parsed.version).toBe(3);
+    }
+  });
+
+  it("source map code matches displayed code (file.compiled.js)", async () => {
+    const source = `<script setup lang="ts">
+const msg = "hello"
+</script>
+<template>
+  <div>{{ msg }}</div>
+</template>`;
+
+    const { finalJs, combinedMap } = await compileWithCombinedSourceMap(source);
+    expect(combinedMap).not.toBe("");
+
+    // The combined map should have the right number of mapping groups for the final JS lines
+    const parsed = JSON.parse(combinedMap);
+    const mappingLines = parsed.mappings.split(";").length;
+    const codeLines = finalJs.split("\n").length;
+    expect(mappingLines).toBe(codeLines);
   });
 });

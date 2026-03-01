@@ -12,6 +12,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashMap;
 
+use super::process::source_type_from_lang;
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
@@ -64,8 +65,9 @@ pub(super) struct MacroState {
     pub has_expose: bool,
     /// Whether `defineEmits` was used (needs `__emit` in setup params).
     pub has_emit: bool,
-    /// Model names from `defineModel()` calls — each needs a prop and emit declaration.
-    pub model_names: Vec<String>,
+    /// Model entries from `defineModel()` calls — each needs a prop and emit declaration.
+    /// Tuple of (model_name, optional_options_source).
+    pub model_names: Vec<(String, Option<String>)>,
 }
 
 impl MacroState {
@@ -263,7 +265,10 @@ pub(super) fn process_macro_item<'a>(
         }
 
         ScriptMacro::DefineModel {
-            span, name_span, ..
+            span,
+            name_span,
+            options_span,
+            ..
         } => {
             let abs_start = content_start + span.start;
             let abs_end = content_start + span.end;
@@ -277,8 +282,14 @@ pub(super) fn process_macro_item<'a>(
                 })
                 .unwrap_or("modelValue");
 
-            // Track this model name for prop/emit declaration generation
-            state.model_names.push(model_name.to_string());
+            // Extract options object source (e.g., `{ type: Boolean, default: false }`)
+            let options_src =
+                options_span.map(|os| content_str[os.start as usize..os.end as usize].to_string());
+
+            // Track this model name + options for prop/emit declaration generation
+            state
+                .model_names
+                .push((model_name.to_string(), options_src));
 
             // Replace with _useModel(__props, 'name')
             let replacement = format!("_useModel(__props, '{}')", model_name);
@@ -437,7 +448,7 @@ pub(super) fn process_companion_script(
 
     // Parse with OXC to find the default export
     let oxc_alloc = oxc_allocator::Allocator::default();
-    let source_type = SourceType::tsx();
+    let source_type = source_type_from_lang(script.lang.as_ref());
     let parser_ret = Parser::new(&oxc_alloc, content_str, source_type).parse();
     let parse_result = parse_script(
         &parser_ret.program,
@@ -546,15 +557,76 @@ pub(super) fn extract_object_prop_names<'a>(
 }
 
 /// Find the position of the matching closing brace for text starting with `{`.
+///
+/// Handles strings (single/double/template literal) and comments so that
+/// braces inside `'{}' ` or `/* {} */` don't affect the depth counter.
 pub(super) fn find_matching_brace(s: &str) -> usize {
     if !s.starts_with('{') {
         return 0;
     }
+    let bytes = s.as_bytes();
+    let len = bytes.len();
     let mut depth = 0i32;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
+    let mut i = 0;
+
+    while i < len {
+        let b = bytes[i];
+        match b {
+            b'\'' | b'"' => {
+                // Skip string literal
+                let quote = b;
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\\' {
+                        i += 2; // skip escaped char
+                        continue;
+                    }
+                    if bytes[i] == quote {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'`' => {
+                // Skip template literal (including nested ${...})
+                i += 1;
+                let mut tmpl_depth = 0u32;
+                while i < len {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'`' && tmpl_depth == 0 {
+                        break;
+                    }
+                    if bytes[i] == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                        tmpl_depth += 1;
+                        i += 1; // skip the '{', loop will advance past it
+                    } else if bytes[i] == b'}' && tmpl_depth > 0 {
+                        tmpl_depth -= 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < len && bytes[i + 1] == b'/' => {
+                // Skip line comment
+                i += 2;
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                // Skip block comment
+                i += 2;
+                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                if i + 1 < len {
+                    i += 1; // skip the '/'
+                }
+            }
+            b'{' => depth += 1,
+            b'}' => {
                 depth -= 1;
                 if depth == 0 {
                     return i + 1;
@@ -562,6 +634,7 @@ pub(super) fn find_matching_brace(s: &str) -> usize {
             }
             _ => {}
         }
+        i += 1;
     }
     0
 }
@@ -632,5 +705,44 @@ mod tests {
             "Expected foo\\'bar, got: {:?}",
             bindings.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn find_matching_brace_basic() {
+        assert_eq!(find_matching_brace("{ a: 1 }"), 8);
+        assert_eq!(find_matching_brace("{}"), 2);
+    }
+
+    #[test]
+    fn find_matching_brace_nested() {
+        assert_eq!(find_matching_brace("{ a: { b: 1 } }"), 15);
+    }
+
+    #[test]
+    fn find_matching_brace_string_with_braces() {
+        // Braces inside strings should not affect depth
+        assert_eq!(find_matching_brace("{ msg: '{}' }"), 13);
+        assert_eq!(find_matching_brace("{ msg: \"{}\" }"), 13);
+    }
+
+    #[test]
+    fn find_matching_brace_template_literal() {
+        assert_eq!(find_matching_brace("{ msg: `${}` }"), 14);
+    }
+
+    #[test]
+    fn find_matching_brace_comment_with_braces() {
+        assert_eq!(find_matching_brace("{ /* } */ a: 1 }"), 16);
+        assert_eq!(find_matching_brace("{ // }\na: 1 }"), 13);
+    }
+
+    #[test]
+    fn find_matching_brace_not_starting_with_brace() {
+        assert_eq!(find_matching_brace("hello"), 0);
+    }
+
+    #[test]
+    fn find_matching_brace_unbalanced() {
+        assert_eq!(find_matching_brace("{ a: 1"), 0);
     }
 }

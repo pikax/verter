@@ -26,6 +26,12 @@ pub struct RenderTreeEdge {
     pub prop_constness: Vec<(String, PropValueConstness)>,
     /// Whether `v-bind="obj"` spread was used (marks all props Unknown).
     pub has_spread: bool,
+    /// Static class names passed via `class="foo bar"` on the component.
+    pub static_classes: Vec<String>,
+    /// Whether `:class="..."` (dynamic class binding) is used on the component.
+    pub has_dynamic_class: bool,
+    /// Class names extracted from `:class` object syntax (conditional classes).
+    pub dynamic_classes: Vec<String>,
 }
 
 /// Result of cross-file optimization analysis.
@@ -122,6 +128,9 @@ impl VerterHost {
                         component_name: component.name.clone(),
                         prop_constness,
                         has_spread: component.has_spread,
+                        static_classes: component.static_classes.clone(),
+                        has_dynamic_class: component.has_dynamic_class,
+                        dynamic_classes: component.dynamic_classes.clone(),
                     });
             }
         }

@@ -8,6 +8,13 @@ import {
   FileSystemWatcher,
   WorkspaceFolder,
   OutputChannel,
+  LogOutputChannel,
+  languages,
+  type TextDocument,
+  Diagnostic as VDiagnostic,
+  Range as VRange,
+  Position as VPosition,
+  DiagnosticSeverity,
 } from "vscode";
 import {
   LanguageClient,
@@ -18,29 +25,35 @@ import {
 } from "vscode-languageclient/node";
 
 import { join, normalize } from "path";
+import { existsSync } from "fs";
 
 import type { PatchClient } from "@verter/language-shared";
 import { patchClient, NotificationType, RequestType } from "@verter/language-shared";
 import type { StatisticsSnapshot, StatisticsSummary } from "@verter/language-shared";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
-
-import { resolveAndDownloadBinding } from "@verter/oxc-bindings";
+import { VirtualFileContentProvider } from "./VirtualFileManager";
+import { UnifiedVirtualFilesProvider } from "./UnifiedVirtualFilesProvider";
+import type { UnifiedVirtualFileItem } from "./UnifiedVirtualFilesProvider";
+import { ComponentTreeProvider } from "./ComponentTreeProvider";
+import { AnalysisTreeProvider } from "./AnalysisTreeProvider";
+import { VueApiDecorationProvider } from "./VueApiDecorationProvider";
+import { BindingColorDecorationProvider } from "./BindingColorDecorationProvider";
+import { PropConstnessDecorationProvider } from "./PropConstnessDecorationProvider";
+import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
+import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
+import { CssService } from "./css/cssService";
 
 type GetClient = () => PatchClient<LanguageClient>;
 
 let getClient: GetClient | undefined;
 
-console.log("hello tghere");
-
 export async function activate(context: ExtensionContext) {
-  console.log("activate", __dirname, __filename, context.extensionPath);
+  const log = window.createOutputChannel("Verter", { log: true });
+  context.subscriptions.push(log);
+  log.info("Verter extension activating");
 
-  await resolveAndDownloadBinding(context.extensionPath);
-  const server = activateVueLanguageServer(context);
+  const server = activateVueLanguageServer(context, log);
   getClient = server.getClient;
-
-  server.getClient().sendNotification;
-  server.getClient().onNotification;
 
   if (workspace.textDocuments.some((doc) => doc.languageId === "vue")) {
     commands.executeCommand(
@@ -59,43 +72,58 @@ export function deactivate(): Thenable<void> | undefined {
   return stop;
 }
 
-export function activateVueLanguageServer(context: ExtensionContext) {
-  console.log("activateVueLanguageServer");
-  const runtimeConfig = workspace.getConfiguration("verter.language-server");
+/**
+ * Find the verter-lsp binary.
+ *
+ * Search order:
+ * 1. `verter.lspBinaryPath` setting (user-configured)
+ * 2. `<extensionPath>/bin/verter-lsp[.exe]` (bundled in VSIX)
+ * 3. `<workspaceRoot>/target/debug/verter-lsp[.exe]` (development mode — `pnpm run build:lsp`)
+ * 4. `verter-lsp` on PATH
+ */
+function findLspBinary(extensionPath: string, log: LogOutputChannel): string {
+  const ext = process.platform === "win32" ? ".exe" : "";
 
+  // 1. User-configured path
+  const configuredPath = workspace.getConfiguration("verter").get<string>("lspBinaryPath");
+  if (configuredPath && existsSync(configuredPath)) {
+    log.info(`LSP binary: ${configuredPath} (user-configured)`);
+    return configuredPath;
+  }
+
+  // 2. Bundled binary
+  const bundledPath = join(extensionPath, "bin", `verter-lsp${ext}`);
+  if (existsSync(bundledPath)) {
+    log.info(`LSP binary: ${bundledPath} (bundled)`);
+    return bundledPath;
+  }
+
+  // 3. Development mode — cargo build output relative to extension path
+  //    extensionPath is packages/vue-vscode, so monorepo root is ../../
+  const monorepoRoot = join(extensionPath, "..", "..");
+  for (const profile of ["debug", "release"]) {
+    const cargoPath = join(monorepoRoot, "target", profile, `verter-lsp${ext}`);
+    if (existsSync(cargoPath)) {
+      log.info(`LSP binary: ${cargoPath} (dev ${profile})`);
+      return cargoPath;
+    }
+  }
+
+  // 4. Fall back to PATH
+  log.info(`LSP binary: verter-lsp${ext} (PATH fallback)`);
+  return `verter-lsp${ext}`;
+}
+
+export function activateVueLanguageServer(context: ExtensionContext, log: LogOutputChannel) {
   const { workspaceFolders } = workspace;
   const rootPath = Array.isArray(workspaceFolders) ? workspaceFolders[0].uri.fsPath : undefined;
 
-  const serverModule = require.resolve("@verter/language-server/dist/server.js");
-  console.log("Using server from", serverModule);
+  const binaryPath = findLspBinary(context.extensionPath, log);
 
-  const runExecArgv: string[] = [];
-  const port = runtimeConfig.get<number>("port") ?? -1;
-  const debugArgs: string[] = [];
-
-  if (port < 0) {
-    debugArgs.push("--inspect=6009");
-  } else {
-    console.log("setting port to", port);
-    runExecArgv.push(`--inspect=${port}`);
-  }
-
-  debugArgs.push(...runExecArgv);
-
-  // If the extension is launched in debug mode then the debug server options are used
-  // Otherwise the run options are used
-  const serverOptions: ServerOptions = {
-    run: {
-      module: serverModule,
-      transport: TransportKind.ipc,
-      options: { execArgv: runExecArgv },
-    },
-    debug: {
-      module: serverModule,
-      transport: TransportKind.ipc,
-      options: { execArgv: debugArgs },
-    },
-  };
+  // CSS intellisense service — created after client, referenced by middleware closures
+  let cssService: CssService | undefined;
+  const cssDiagnostics = languages.createDiagnosticCollection("verter-css");
+  context.subscriptions.push(cssDiagnostics);
 
   // Options to control the language client
   const clientOptions: LanguageClientOptions = {
@@ -103,8 +131,10 @@ export function activateVueLanguageServer(context: ExtensionContext) {
       { scheme: "file", language: "vue" },
       { scheme: "file", language: "javascript" },
       { scheme: "file", language: "typescript" },
+      // Virtual files from the Verter Analysis panel — route through the LSP
+      // so it can provide position-mapped features (hover, definition, etc.)
+      { scheme: VirtualFileContentProvider.scheme },
     ],
-    // revealOutputChannelOn: RevealOutputChannelOn.Never,
     synchronize: {
       fileEvents: workspace.createFileSystemWatcher("**/*.{vue}"),
     },
@@ -121,12 +151,205 @@ export function activateVueLanguageServer(context: ExtensionContext) {
         html: workspace.getConfiguration("html"),
       },
       statistics: getStatisticsInitialization(rootPath),
-      // dontFilterIncompleteCompletions: true,
+    },
+    outputChannel: log,
+    traceOutputChannel: log,
+    revealOutputChannelOn: RevealOutputChannelOn.Never,
+    middleware: {
+      provideCompletionItem: async (document, position, context, token, next) => {
+        if (document.languageId !== "vue" || !cssService) {
+          return next(document, position, context, token);
+        }
+
+        const source = document.getText();
+        if (!cssService.isInStyleBlock(source, position.line, position.character)) {
+          return next(document, position, context, token);
+        }
+
+        const uri = document.uri.toString();
+        const [cssResult, lspResult] = await Promise.all([
+          cssService.doComplete(uri, source, document.version, position.line, position.character),
+          next(document, position, context, token),
+        ]);
+
+        if (!cssResult || !cssResult.items.length) return lspResult;
+
+        // Convert CSS service result (LSP protocol types) → VS Code types
+        const p2c = client.protocol2CodeConverter;
+        const converted = await p2c.asCompletionResult(cssResult);
+
+        if (!lspResult) return converted;
+
+        // Merge: CSS items first, then LSP items (Vue-specific: template classes, v-bind)
+        const cssItems = Array.isArray(converted) ? converted : converted?.items ?? [];
+        const lspItems = Array.isArray(lspResult) ? lspResult : lspResult?.items ?? [];
+
+        // Deduplicate by label
+        const seen = new Set(cssItems.map((i) => i.label.toString()));
+        const merged = [...cssItems, ...lspItems.filter((i) => !seen.has(i.label.toString()))];
+
+        return { items: merged, isIncomplete: true };
+      },
+
+      provideHover: async (document, position, token, next) => {
+        if (document.languageId !== "vue" || !cssService) {
+          return next(document, position, token);
+        }
+
+        const source = document.getText();
+        if (!cssService.isInStyleBlock(source, position.line, position.character)) {
+          return next(document, position, token);
+        }
+
+        const uri = document.uri.toString();
+        const [cssResult, lspResult] = await Promise.all([
+          cssService.doHover(uri, source, document.version, position.line, position.character),
+          next(document, position, token),
+        ]);
+
+        if (!cssResult) return lspResult;
+
+        // Convert CSS hover → VS Code hover
+        const p2c = client.protocol2CodeConverter;
+        const cssHover = p2c.asHover(cssResult);
+
+        if (!lspResult) return cssHover;
+
+        // Merge: CSS docs first, then Vue-specific info
+        if (cssHover && lspResult) {
+          return {
+            contents: [...cssHover.contents, ...lspResult.contents],
+            range: cssHover.range ?? lspResult.range,
+          };
+        }
+        return cssHover ?? lspResult;
+      },
+
+      provideDocumentColors: async (document, token, next) => {
+        if (document.languageId !== "vue" || !cssService) {
+          return next(document, token);
+        }
+
+        const source = document.getText();
+        const uri = document.uri.toString();
+        const [cssResult, lspResult] = await Promise.all([
+          cssService.findDocumentColors(uri, source, document.version),
+          next(document, token),
+        ]);
+
+        if (!cssResult.length) return lspResult;
+
+        const p2c = client.protocol2CodeConverter;
+        const cssColors = await p2c.asColorInformations(cssResult);
+
+        if (!lspResult?.length) return cssColors;
+
+        // Merge and deduplicate by range
+        return [...(cssColors ?? []), ...(lspResult ?? [])];
+      },
+
+      provideColorPresentations: async (color, context, token, next) => {
+        if (context.document.languageId !== "vue" || !cssService) {
+          return next(color, context, token);
+        }
+
+        const source = context.document.getText();
+        if (!cssService.isInStyleBlock(source, context.range.start.line, context.range.start.character)) {
+          return next(color, context, token);
+        }
+
+        const uri = context.document.uri.toString();
+        const cssResult = await cssService.getColorPresentations(
+          uri,
+          source,
+          context.document.version,
+          { red: color.red, green: color.green, blue: color.blue, alpha: color.alpha },
+          context.range.start.line,
+          context.range.start.character,
+        );
+
+        if (!cssResult.length) return next(color, context, token);
+
+        const p2c = client.protocol2CodeConverter;
+        return p2c.asColorPresentations(cssResult);
+      },
+
+      provideDocumentHighlights: async (document, position, token, next) => {
+        if (document.languageId !== "vue" || !cssService) {
+          return next(document, position, token);
+        }
+
+        const source = document.getText();
+        if (!cssService.isInStyleBlock(source, position.line, position.character)) {
+          return next(document, position, token);
+        }
+
+        const uri = document.uri.toString();
+        const [cssResult, lspResult] = await Promise.all([
+          cssService.findDocumentHighlights(uri, source, document.version, position.line, position.character),
+          next(document, position, token),
+        ]);
+
+        if (!cssResult.length) return lspResult;
+
+        const p2c = client.protocol2CodeConverter;
+        const cssHighlights = await p2c.asDocumentHighlights(cssResult);
+
+        if (!lspResult?.length) return cssHighlights;
+        return [...(cssHighlights ?? []), ...(lspResult ?? [])];
+      },
     },
   };
 
-  let client = createLanguageServer(serverOptions, clientOptions);
+  let client = createLanguageServer(
+    buildServerOptions(binaryPath, rootPath),
+    clientOptions,
+  );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
+
+  // Initialize CSS service now that getClient is available
+  cssService = new CssService(getClient, rootPath);
+
+  // CSS validation diagnostics — update on document change
+  const updateCssDiagnostics = async (document: TextDocument) => {
+    if (document.languageId !== "vue" || !cssService) return;
+    try {
+      const uri = document.uri.toString();
+      const results = await cssService.doValidation(uri, document.getText(), document.version);
+      const allDiags: VDiagnostic[] = [];
+      for (const { diagnostics } of results) {
+        for (const d of diagnostics) {
+          allDiags.push(
+            new VDiagnostic(
+              new VRange(
+                new VPosition(d.range.start.line, d.range.start.character),
+                new VPosition(d.range.end.line, d.range.end.character),
+              ),
+              d.message,
+              d.severity === 1
+                ? DiagnosticSeverity.Error
+                : d.severity === 2
+                  ? DiagnosticSeverity.Warning
+                  : DiagnosticSeverity.Information,
+            ),
+          );
+        }
+      }
+      cssDiagnostics.set(document.uri, allDiags);
+    } catch {
+      // Silently fail — CSS diagnostics are best-effort
+    }
+  };
+
+  context.subscriptions.push(
+    workspace.onDidChangeTextDocument((e) => {
+      if (e.document.languageId === "vue") {
+        updateCssDiagnostics(e.document);
+      }
+    }),
+    workspace.onDidOpenTextDocument(updateCssDiagnostics),
+    workspace.onDidCloseTextDocument((doc) => cssDiagnostics.delete(doc.uri)),
+  );
 
   context.subscriptions.push(
     commands.registerCommand("verter.restartLanguageServer", async () => {
@@ -141,30 +364,72 @@ export function activateVueLanguageServer(context: ExtensionContext) {
     }
     restarting = true;
     try {
+      log.info("Restarting language server...");
       await client.stop();
-      client = createLanguageServer(serverOptions, clientOptions);
+      client = createLanguageServer(
+        buildServerOptions(binaryPath, rootPath),
+        clientOptions,
+      );
       await client.start();
+      // Reset CSS service cache (virtual files are stale after restart)
+      cssService?.dispose();
+      cssService = new CssService(getClient, rootPath);
+      cssDiagnostics.clear();
       if (showMsg) {
         window.showInformationMessage("Verter Language server restarted");
       }
     } catch (e) {
-      console.error(e);
+      log.error("Failed to restart language server", e as Error);
     } finally {
       restarting = false;
     }
   }
+
+  // Auto-restart on log level change
+  context.subscriptions.push(
+    workspace.onDidChangeConfiguration(async (e) => {
+      if (e.affectsConfiguration("verter.server.logLevel")) {
+        log.info("Log level changed, restarting language server...");
+        await restartLS(false);
+      }
+    }),
+  );
 
   addDidChangeTextDocumentListener(getClient);
   addCompilePreviewCommand(getClient, context);
 
   addWriteVirtualFilesCommand(getClient, context);
 
-  addShowStatisticsCommand(getClient, context);
+  addShowStatisticsCommand(getClient, context, log);
 
   addNodeModulesChangedListener(getClient);
 
+  addVerterAnalysis(getClient, context);
+
   return {
     getClient,
+  };
+}
+
+function buildServerOptions(binaryPath: string, rootPath: string | undefined): ServerOptions {
+  const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
+  return {
+    run: {
+      command: binaryPath,
+      args: rootPath ? [rootPath] : [],
+      transport: TransportKind.stdio,
+      options: {
+        env: { ...process.env, VERTER_LOG: logLevel },
+      },
+    },
+    debug: {
+      command: binaryPath,
+      args: rootPath ? [rootPath] : [],
+      transport: TransportKind.stdio,
+      options: {
+        env: { ...process.env, VERTER_LOG: "debug" },
+      },
+    },
   };
 }
 
@@ -246,8 +511,6 @@ function addCompilePreviewCommand(getClient: GetClient, context: ExtensionContex
           return await window.showTextDocument(CompiledCodeContentProvider.previewWindowUri, {
             preview: true,
             viewColumn: ViewColumn.Beside,
-            // TODO add selection to the window, it needs to be resolved
-            // selection: editor.selection,
           });
         },
       );
@@ -280,8 +543,6 @@ function addWriteVirtualFilesCommand(getClient: GetClient, context: ExtensionCon
           return await window.showTextDocument(CompiledCodeContentProvider.previewWindowUri, {
             preview: true,
             viewColumn: ViewColumn.Beside,
-            // TODO add selection to the window, it needs to be resolved
-            // selection: editor.selection,
           });
         },
       );
@@ -289,7 +550,7 @@ function addWriteVirtualFilesCommand(getClient: GetClient, context: ExtensionCon
   );
 }
 
-function addShowStatisticsCommand(getClient: GetClient, context: ExtensionContext) {
+function addShowStatisticsCommand(getClient: GetClient, context: ExtensionContext, log: LogOutputChannel) {
   const channel = window.createOutputChannel("Verter Statistics");
 
   context.subscriptions.push(
@@ -312,6 +573,7 @@ function addShowStatisticsCommand(getClient: GetClient, context: ExtensionContex
         renderStatisticsSnapshot(channel, snapshot);
         channel.show(true);
       } catch (err) {
+        log.error("Failed to fetch statistics", err as Error);
         const message = err instanceof Error ? err.message : String(err);
         window.showErrorMessage(`Failed to fetch Verter statistics: ${message}`);
       }
@@ -355,27 +617,174 @@ function formatSummaryLine(key: string, summary: StatisticsSummary) {
   )}ms, min=${summary.minMs.toFixed(2)}ms, max=${summary.maxMs.toFixed(2)}ms`;
 }
 
+function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
+  // Read config and set context for `when` clauses
+  const updateAnalysisEnabled = () => {
+    const enabled = workspace.getConfiguration("verter.analysis").get("enabled", false);
+    commands.executeCommand("setContext", "verter.analysisEnabled", enabled);
+  };
+  updateAnalysisEnabled();
+  context.subscriptions.push(
+    workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("verter.analysis.enabled")) {
+        updateAnalysisEnabled();
+      }
+    }),
+  );
+
+  // Track last active Vue file URI so sidebar persists when virtual files or non-.vue files are focused
+  let lastVueFileUri: string | undefined;
+  const getLastVueUri = () => lastVueFileUri;
+  const updateLastVueFile = () => {
+    const editor = window.activeTextEditor;
+    if (editor?.document?.languageId === "vue") {
+      lastVueFileUri = editor.document.uri.toString();
+    }
+  };
+  updateLastVueFile();
+  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateLastVueFile));
+
+  // Track whether active editor is a Vue file
+  const updateHasActiveVueFile = () => {
+    const isVue = window.activeTextEditor?.document?.languageId === "vue";
+    commands.executeCommand("setContext", "verter.hasActiveVueFile", isVue);
+  };
+  updateHasActiveVueFile();
+  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateHasActiveVueFile));
+
+  // Create content provider for virtual files (no disk writes — uses verter-virtual:// scheme)
+  const contentProvider = new VirtualFileContentProvider();
+  context.subscriptions.push(
+    workspace.registerTextDocumentContentProvider(
+      VirtualFileContentProvider.scheme,
+      contentProvider,
+    ),
+    contentProvider,
+  );
+
+  const virtualFilesProvider = new UnifiedVirtualFilesProvider(getClient, contentProvider, getLastVueUri);
+  const componentTreeProvider = new ComponentTreeProvider(getClient, getLastVueUri);
+  const analysisProvider = new AnalysisTreeProvider(getClient, getLastVueUri);
+  const decorationProvider = new VueApiDecorationProvider(getClient);
+  const bindingColorProvider = new BindingColorDecorationProvider(getClient);
+  const propConstnessProvider = new PropConstnessDecorationProvider(getClient);
+  const sourceMapPanel = new SourceMapWebviewPanel();
+
+  // Register tree views
+  context.subscriptions.push(
+    window.createTreeView("verterVirtualFiles", {
+      treeDataProvider: virtualFilesProvider,
+    }),
+    window.createTreeView("verterComponentTree", {
+      treeDataProvider: componentTreeProvider,
+    }),
+    window.createTreeView("verterAnalysis", {
+      treeDataProvider: analysisProvider,
+    }),
+  );
+
+  // Register commands
+  context.subscriptions.push(
+    commands.registerCommand("verter.openVirtualFile", (item: UnifiedVirtualFileItem) => {
+      virtualFilesProvider.openVirtualFile(item);
+    }),
+    commands.registerCommand("verter.refreshVirtualFiles", () => {
+      virtualFilesProvider.refresh();
+    }),
+    commands.registerCommand("verter.refreshAnalysis", () => {
+      analysisProvider.refresh();
+      componentTreeProvider.refresh();
+    }),
+    commands.registerCommand("verter.showSourceMapVisualization", async () => {
+      const sourceUri = getLastVueUri();
+      if (!sourceUri) {
+        window.showInformationMessage("No Vue file active");
+        return;
+      }
+
+      // Get source code from the open document or fall back to reading from disk
+      const vueDoc = workspace.textDocuments.find(
+        (d) => d.uri.toString() === sourceUri,
+      );
+      const sourceCode = vueDoc?.getText() ?? "";
+
+      // Use cached items from the tree provider (already fetched)
+      const items = virtualFilesProvider.getCachedItems();
+      if (items.length === 0) {
+        window.showInformationMessage("No virtual files available");
+        return;
+      }
+
+      sourceMapPanel.show(sourceCode, sourceUri, items);
+    }),
+    commands.registerCommand(
+      "verter.showSourceMapForFile",
+      async (item: UnifiedVirtualFileItem) => {
+        const sourceUri = item.sourceUri || getLastVueUri();
+        if (!sourceUri) {
+          window.showInformationMessage("No Vue file active");
+          return;
+        }
+
+        const vueDoc = workspace.textDocuments.find(
+          (d) => d.uri.toString() === sourceUri,
+        );
+        const sourceCode = vueDoc?.getText() ?? "";
+
+        const items = virtualFilesProvider.getCachedItems();
+        if (items.length === 0) {
+          window.showInformationMessage("No virtual files available");
+          return;
+        }
+
+        // Find the tab index matching the clicked item
+        const tabIndex = items
+          .filter((vf) => vf.sourceMap)
+          .findIndex((vf) => vf.kind === item.kind);
+
+        sourceMapPanel.show(sourceCode, sourceUri, items, Math.max(0, tabIndex));
+      },
+    ),
+    commands.registerCommand("verter.goToComponent", (node: ComponentNode) => {
+      componentTreeProvider.goToComponent(node);
+    }),
+    commands.registerCommand("verter.goToParentFile", (node: ParentFileNode) => {
+      componentTreeProvider.goToParentFile(node);
+    }),
+  );
+
+  // Cleanup on deactivate
+  context.subscriptions.push({
+    dispose() {
+      virtualFilesProvider.dispose();
+      componentTreeProvider.dispose();
+      analysisProvider.dispose();
+      decorationProvider.dispose();
+      bindingColorProvider.dispose();
+      propConstnessProvider.dispose();
+      sourceMapPanel.dispose();
+    },
+  });
+}
+
 function addNodeModulesChangedListener(getClient: GetClient) {
   const watchers = new Map<string, FileSystemWatcher>();
   function watchFolder(folder: WorkspaceFolder) {
     const fp = normalize(join(folder.uri.fsPath, "node_modules/**/*"));
     const watcher = workspace.createFileSystemWatcher(fp);
     watcher.onDidChange((e) => {
-      console.log("changed", e.fsPath);
       getClient().sendNotification(NotificationType.OnFileChanged, {
         type: "update",
         uri: e.fsPath,
       });
     });
     watcher.onDidCreate((e) => {
-      console.log("created", e.fsPath);
       getClient().sendNotification(NotificationType.OnFileChanged, {
         type: "create",
         uri: e.fsPath,
       });
     });
     watcher.onDidDelete((e) => {
-      console.log("deleted", e.fsPath);
       getClient().sendNotification(NotificationType.OnFileChanged, {
         type: "delete",
         uri: e.fsPath,

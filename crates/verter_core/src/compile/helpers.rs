@@ -45,6 +45,10 @@ pub(crate) fn remove_inter_block_gaps(
 }
 
 /// SHA-256 hash → 8 hex chars (first 4 bytes).
+///
+/// Used for scope IDs (`data-v-{hash}`) and component IDs. SHA-256 is chosen
+/// for compatibility with `@vue/compiler-sfc` which uses the same algorithm.
+/// See `verter_host::hash` module docs for the full hash algorithm rationale.
 pub(crate) fn get_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());

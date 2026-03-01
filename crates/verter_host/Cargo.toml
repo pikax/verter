@@ -12,11 +12,14 @@ host_metrics = []
 [dependencies]
 verter_core = { path = "../verter_core" }
 verter_analysis = { path = "../verter_analysis" }
+verter_span = { path = "../verter_span" }
 oxc_allocator = { workspace = true }
 oxc_span = { workspace = true }
 rustc-hash = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 serde = { workspace = true }
+serde_json = { workspace = true }
+sourcemap = "9"
 thiserror = "2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

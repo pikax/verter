@@ -11,7 +11,13 @@ export interface CompiledFile {
   css: string;
   types: string;
   typesSourceMap: string;
+  /** Raw template render function code (before merging into assembled JS). */
+  templateCode: string;
   verterSourceMap: string;
+  /** TSC declaration output (minimal .d.ts). */
+  tscCode: string;
+  /** SSR-compiled JS output (when SSR mode is enabled). */
+  ssrCode: string;
   errors: string[];
   compilerDiagnostics: HostDiagnostic[];
   analysis: FileAnalysis | null;
@@ -26,7 +32,10 @@ export class File {
     css: "",
     types: "",
     typesSourceMap: "",
+    templateCode: "",
     verterSourceMap: "",
+    tscCode: "",
+    ssrCode: "",
     errors: [],
     compilerDiagnostics: [],
     analysis: null,
@@ -57,7 +66,15 @@ export class File {
   }
 }
 
-export type OutputMode = "preview" | "js" | "css" | "types" | "analysis" | "lint";
+export type OutputMode = "preview" | "js" | "ssr" | "css" | "types" | "tsc" | "analysis" | "lint" | "outline" | "files" | "cssMatch" | "map" | "diagnostics";
+
+export interface TsDiagnosticEntry {
+  message: string;
+  start: number;
+  end: number;
+  severity: "error" | "warning" | "info";
+  code: number;
+}
 
 export interface CompilerOptions {
   isProduction: boolean;
@@ -70,6 +87,8 @@ export interface CompileTiming {
   parseDurationMs: number | null; // ms for Rust parse phase
 }
 
+export type TypeCheckerMode = "tsc" | "tsgo";
+
 export interface StoreState {
   files: Record<string, File>;
   activeFilename: string;
@@ -81,6 +100,7 @@ export interface StoreState {
   autoSave: boolean;
   compilerOptions: CompilerOptions;
   compileTiming: CompileTiming;
+  typeChecker: TypeCheckerMode;
 }
 
 // ── Analysis types (mirror Rust FileAnalysisSnapshot) ──

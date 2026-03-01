@@ -2,7 +2,7 @@
 //!
 //! This module contains all the types used by the binding extraction system.
 
-use crate::common::Span;
+use crate::common::RelativeSpan;
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use std::collections::HashSet;
@@ -48,8 +48,9 @@ pub type ParamBytes<'a> = SmallVec<[&'a str; 8]>;
 pub struct Binding<'a> {
     /// The name of the identifier
     pub name: &'a str,
-    /// The span of the identifier in the source
-    pub span: Span,
+    /// The span of the identifier relative to the parsed expression start.
+    /// OXC produces expression-relative offsets; this preserves that semantic.
+    pub span: RelativeSpan,
     /// The absolute position (span.start + base_offset)
     pub pos: u32,
     /// Whether this binding should be ignored (is a keyword, parameter, or local variable)
@@ -63,10 +64,10 @@ pub struct Binding<'a> {
 /// Represents a function found in an expression (byte-optimized version).
 #[derive(Debug, Clone)]
 pub struct FunctionBinding {
-    /// The span of the function
-    pub span: Span,
-    /// The span of the function body
-    pub body_span: Span,
+    /// The span of the function relative to the parsed expression start.
+    pub span: RelativeSpan,
+    /// The span of the function body relative to the parsed expression start.
+    pub body_span: RelativeSpan,
     /// The absolute position (span.start + base_offset)
     pub pos: u32,
     /// The absolute position of the body
@@ -76,8 +77,8 @@ pub struct FunctionBinding {
 /// Represents a literal found in an expression (byte-optimized version).
 #[derive(Debug, Clone)]
 pub struct LiteralBinding<'a> {
-    /// The span of the literal
-    pub span: Span,
+    /// The span of the literal relative to the parsed expression start.
+    pub span: RelativeSpan,
     /// The absolute position (span.start + base_offset)
     pub pos: u32,
     /// The string representation of the literal value
@@ -303,28 +304,28 @@ mod tests {
         let mut result = BindingExtractionResult::default();
         result.bindings.push(Binding {
             name: "foo",
-            span: Span::new(0, 3),
+            span: RelativeSpan::new(0, 3),
             pos: 0,
             ignore: false,
             is_shorthand: false,
         });
         result.bindings.push(Binding {
             name: "bar",
-            span: Span::new(6, 9),
+            span: RelativeSpan::new(6, 9),
             pos: 6,
             ignore: false,
             is_shorthand: false,
         });
         result.bindings.push(Binding {
             name: "foo",
-            span: Span::new(12, 15),
+            span: RelativeSpan::new(12, 15),
             pos: 12,
             ignore: false,
             is_shorthand: false,
         }); // duplicate
         result.bindings.push(Binding {
             name: "ignored",
-            span: Span::new(18, 25),
+            span: RelativeSpan::new(18, 25),
             pos: 18,
             ignore: true,
             is_shorthand: false,
