@@ -73,4 +73,16 @@ pub trait TypeProvider: Send + Sync {
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>>;
+
+    /// Resolve a completion item to get additional text edits (e.g., auto-import).
+    ///
+    /// `data` is the opaque data from the original completion item.
+    /// Returns `None` if no additional edits are needed.
+    fn resolve_completion(
+        &self,
+        _path: &str,
+        _data: serde_json::Value,
+    ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
+        Box::pin(async { Ok(None) })
+    }
 }

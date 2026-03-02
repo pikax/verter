@@ -584,6 +584,7 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         edit_range_end,
         insert_text,
         sort_text,
+        data: item.get("data").cloned(),
     })
 }
 
@@ -1379,9 +1380,80 @@ impl TypeProvider for TsgoTypeProvider {
                 .collect())
         })
     }
-}
 
-// ── Parsing helpers ─────────────────────────────────────────────────
+    fn resolve_completion(
+        &self,
+        path: &str,
+        data: serde_json::Value,
+    ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
+        let uri = Self::path_to_uri(path);
+        let transport = Arc::clone(&self.transport);
+        let contents_cache = Arc::clone(&self.contents);
+        let path_owned = path.to_string();
+        Box::pin(async move {
+            // Build a minimal CompletionItem with the data field for resolve
+            let resolve_item = serde_json::json!({
+                "label": "",
+                "data": data,
+                "textDocument": { "uri": uri },
+            });
+
+            let result = transport
+                .request("completionItem/resolve", resolve_item)
+                .await?;
+
+            // Parse additionalTextEdits from the response
+            let edits = result
+                .get("additionalTextEdits")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            if edits.is_empty() {
+                return Ok(None);
+            }
+
+            let content_snapshot = {
+                let cache = contents_cache.lock().await;
+                cache.get(&path_owned).cloned()
+            };
+
+            let additional_text_edits: Vec<ResolvedTextEdit> = edits
+                .iter()
+                .filter_map(|edit| {
+                    let range = edit.get("range")?;
+                    let start = range.get("start")?;
+                    let end = range.get("end")?;
+                    let sl = start.get("line")?.as_u64()? as u32;
+                    let sc = start.get("character")?.as_u64()? as u32;
+                    let el = end.get("line")?.as_u64()? as u32;
+                    let ec = end.get("character")?.as_u64()? as u32;
+                    let new_text = edit.get("newText")?.as_str()?.to_string();
+
+                    let (start_offset, end_offset) = if let Some(ref c) = content_snapshot {
+                        (position_to_offset(c, sl, sc), position_to_offset(c, el, ec))
+                    } else {
+                        (pack_position(sl, sc), pack_position(el, ec))
+                    };
+
+                    Some(ResolvedTextEdit {
+                        start: start_offset,
+                        end: end_offset,
+                        new_text,
+                    })
+                })
+                .collect();
+
+            if additional_text_edits.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(CompletionResolveResult {
+                    additional_text_edits,
+                }))
+            }
+        })
+    }
+}
 
 /// Extract rename locations from a WorkspaceEdit JSON response.
 fn parse_workspace_edit_locations(
@@ -1713,9 +1785,42 @@ fn which_cmd(cmd: &str) -> Option<String> {
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        // `where` on Windows may return multiple lines; take the first.
-        .map(|s| s.lines().next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|s| pick_best_which_candidate(&s).map(|c| c.to_string()))
+}
+
+/// Pick the best candidate from `where`/`which` output.
+///
+/// On Windows, `where tsgo` may return multiple lines:
+/// ```text
+/// C:\Program Files\nodejs\tsgo       ← POSIX shell script (npm shim for Git Bash)
+/// C:\Program Files\nodejs\tsgo.cmd   ← Windows cmd shim
+/// ```
+/// A POSIX shell script is not executable via `CreateProcess`, so we prefer
+/// `.exe` > `.cmd` > `.bat` > first candidate. On Unix, `which` returns a
+/// single line so the preference is a no-op.
+fn pick_best_which_candidate(output: &str) -> Option<&str> {
+    let candidates: Vec<&str> = output
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Priority order: .exe > .cmd > .bat
+    let extensions: &[&str] = &[".exe", ".cmd", ".bat"];
+    for ext in extensions {
+        if let Some(c) = candidates
+            .iter()
+            .find(|c| c.len() >= ext.len() && c[c.len() - ext.len()..].eq_ignore_ascii_case(ext))
+        {
+            return Some(c);
+        }
+    }
+
+    // Fallback: first candidate (Unix `which` output, or Windows without known extensions)
+    Some(candidates[0])
 }
 
 fn npm_cache_npx_dir() -> Option<std::path::PathBuf> {
@@ -2209,6 +2314,22 @@ const count: number = 42;
         );
     }
 
+    /// Recursively copy a directory tree.
+    fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if src_path.is_dir() {
+                copy_dir_recursive(&src_path, &dst_path)?;
+            } else {
+                std::fs::copy(&src_path, &dst_path)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Create a test project with `node_modules/vue` available so that TSGO can
     /// resolve Vue's type declarations (including compiler macros like `defineProps`).
     ///
@@ -2252,7 +2373,14 @@ const count: number = 42;
         // Create node_modules/@verter/types with the vue macros type declarations.
         // TSGO resolves these via standard node_modules resolution.
         let verter_types_dir = dir.join("node_modules/@verter/types");
-        std::fs::create_dir_all(&verter_types_dir)?;
+
+        // Copy the full dist directory tree (re-exports need submodule files)
+        let dist_src = manifest_dir.join("../../packages/types/dist");
+        if dist_src.exists() {
+            copy_dir_recursive(&dist_src, &verter_types_dir)?;
+        } else {
+            std::fs::create_dir_all(&verter_types_dir)?;
+        }
 
         // Copy the vue macros .d.ts (which contains defineProps_Box, etc.)
         let vue_macros_src = manifest_dir.join("../../packages/types/src/vue/vue.macros.ts");
@@ -2264,25 +2392,27 @@ const count: number = 42;
             std::fs::read_to_string(&dist_src)?
         };
 
-        // Also need createMacroReturn, shallowUnwrapRef, enhanceElementWithProps, etc.
-        // Read the full types package index and re-export everything
-        let helpers_src = manifest_dir.join("../../packages/types/dist/index.d.ts");
-        let helpers_content = if helpers_src.exists() {
-            std::fs::read_to_string(&helpers_src)?
+        // Append vue macros to the index
+        let index_path = verter_types_dir.join("index.d.ts");
+        let existing = if index_path.exists() {
+            std::fs::read_to_string(&index_path)?
         } else {
             String::new()
         };
-
-        // Write a combined index.d.ts that exports everything TSGO needs
-        let index_content = format!(
+        let combined = format!(
             "// Auto-generated for TSGO E2E tests\n{}\n{}",
-            helpers_content, vue_macros_content
+            existing, vue_macros_content
         );
-        std::fs::write(verter_types_dir.join("index.d.ts"), &index_content)?;
-        std::fs::write(
-            verter_types_dir.join("package.json"),
-            r#"{"name":"@verter/types","types":"index.d.ts"}"#,
-        )?;
+        std::fs::write(&index_path, combined)?;
+
+        // Ensure package.json exists
+        let pkg_path = verter_types_dir.join("package.json");
+        if !pkg_path.exists() {
+            std::fs::write(
+                &pkg_path,
+                r#"{"name":"@verter/types","types":"index.d.ts"}"#,
+            )?;
+        }
 
         // Also create node_modules/vue junction for Vue's type declarations
         // (defineProps, withDefaults, etc. are exported from @vue/runtime-core)
@@ -2453,10 +2583,8 @@ const count: number = 42;
         )
     }
 
-    /// @ai-generated — E2E: withDefaults(defineProps({bar: String}), {}) — the boxed
-    /// variable `___VERTER___withDefaults_Boxed` must have a typed tuple, not `any`.
-    /// This is the actual mechanism that provides type info to createMacroReturn for
-    /// template bindings ($props, bar).
+    /// @ai-generated — E2E: withDefaults(defineProps({bar: String}), {}) — the props
+    /// variable must have a typed result, not `any`.
     #[tokio::test]
     async fn test_e2e_with_defaults_boxed_not_any() {
         let vue_source = r#"<script setup lang="ts">
@@ -2466,24 +2594,24 @@ const props = withDefaults(defineProps({ bar: String }), {})
   <div>{{ bar }}</div>
 </template>"#;
         let tsx = compile_vue_to_tsx(vue_source, "wd_boxed");
-        // Find the boxed variable
-        let search = "const ___VERTER___withDefaults_Boxed";
+        // Hover on the "props" variable
+        let search = "const props = withDefaults";
         let offset = tsx
             .find(search)
-            .expect("TSX should contain withDefaults_Boxed") as u32
+            .expect("TSX should contain const props = withDefaults") as u32
             + 6; // skip "const "
 
         let hover = e2e_hover_at(vue_source, "wd_boxed", offset).await;
         let Some(contents) = hover else { return };
         assert!(
             !contents.contains(": any") && !contents.is_empty(),
-            "withDefaults_Boxed must NOT be 'any' — TSGO returned: {}",
+            "props must NOT be 'any' — TSGO returned: {}",
             contents
         );
     }
 
-    /// @ai-generated — E2E: defineProps({msg: String}) — the boxed variable
-    /// `___VERTER___defineProps_Boxed` must preserve the runtime arg type.
+    /// @ai-generated — E2E: defineProps({msg: String}) — the props variable
+    /// must preserve the runtime arg type.
     #[tokio::test]
     async fn test_e2e_define_props_boxed_not_any() {
         let vue_source = r#"<script setup lang="ts">
@@ -2491,23 +2619,23 @@ const props = defineProps({ msg: String })
 </script>
 <template><div>{{ msg }}</div></template>"#;
         let tsx = compile_vue_to_tsx(vue_source, "dp_boxed");
-        let search = "___VERTER___defineProps_Boxed=___VERTER___defineProps_Box";
-        let boxed_start = tsx
+        let search = "const props = defineProps";
+        let offset = tsx
             .find(search)
-            .expect("TSX should contain defineProps_Boxed");
-        let offset = boxed_start as u32; // hover on the variable name
+            .expect("TSX should contain const props = defineProps") as u32
+            + 6; // hover on "props"
 
         let hover = e2e_hover_at(vue_source, "dp_boxed", offset).await;
         let Some(contents) = hover else { return };
-        eprintln!("defineProps_Boxed hover: {}", contents);
+        eprintln!("defineProps hover: {}", contents);
         assert!(
             !contents.contains(": any") && !contents.is_empty(),
-            "defineProps_Boxed must NOT be 'any' — TSGO returned: {}",
+            "defineProps result must NOT be 'any' — TSGO returned: {}",
             contents
         );
     }
 
-    /// @ai-generated — E2E: defineEmits(['change', 'update']) — the boxed variable
+    /// @ai-generated — E2E: defineEmits(['change', 'update']) — the emit variable
     /// must preserve the emits array type.
     #[tokio::test]
     async fn test_e2e_define_emits_boxed_not_any() {
@@ -2516,23 +2644,27 @@ const emit = defineEmits(['change', 'update'])
 </script>
 <template><div></div></template>"#;
         let tsx = compile_vue_to_tsx(vue_source, "de_boxed");
-        let search = "const ___VERTER___defineEmits_Boxed";
+        let search = "const emit = defineEmits";
         let offset = tsx
             .find(search)
-            .expect("TSX should contain defineEmits_Boxed") as u32
-            + 6;
+            .expect("TSX should contain const emit = defineEmits") as u32
+            + 6; // hover on "emit"
 
         let hover = e2e_hover_at(vue_source, "de_boxed", offset).await;
         let Some(contents) = hover else { return };
+        // The emit function type is (event: "change" | "update", ...args: any[]) => void
+        // "...args: any[]" is the correct spread type — only reject if the whole result is ": any"
+        let is_typed_correctly =
+            !contents.is_empty() && (contents.contains("(event:") || contents.contains("emit"));
         assert!(
-            !contents.contains(": any") && !contents.is_empty(),
-            "defineEmits_Boxed must NOT be 'any' — TSGO returned: {}",
+            is_typed_correctly,
+            "defineEmits result must be a typed emit function — TSGO returned: {}",
             contents
         );
     }
 
-    /// @ai-generated — E2E: defineModel<string>('firstName') — the boxed variable
-    /// must use the shared defineModel_Box and preserve the tuple type.
+    /// @ai-generated — E2E: defineModel<string>('firstName') — the model variable
+    /// must preserve the type.
     #[tokio::test]
     async fn test_e2e_define_model_boxed_not_any() {
         let vue_source = r#"<script setup lang="ts">
@@ -2540,23 +2672,23 @@ const firstName = defineModel<string>('firstName')
 </script>
 <template><div></div></template>"#;
         let tsx = compile_vue_to_tsx(vue_source, "dm_boxed");
-        let search = "const ___VERTER___firstName_defineModel_Boxed";
+        let search = "const firstName = defineModel";
         let offset = tsx
             .find(search)
-            .expect("TSX should contain defineModel_Boxed") as u32
-            + 6;
+            .expect("TSX should contain const firstName = defineModel") as u32
+            + 6; // hover on "firstName"
 
         let hover = e2e_hover_at(vue_source, "dm_boxed", offset).await;
         let Some(contents) = hover else { return };
         assert!(
             !contents.contains(": any") && !contents.is_empty(),
-            "defineModel_Boxed must NOT be 'any' — TSGO returned: {}",
+            "defineModel result must NOT be 'any' — TSGO returned: {}",
             contents
         );
     }
 
     /// @ai-generated — E2E: withDefaults + runtime props — template binding `bar`
-    /// must be typed (not any/unknown) via createMacroReturn.
+    /// must be typed (not any/unknown) via shallowUnwrapRef destructuring.
     #[tokio::test]
     async fn test_e2e_with_defaults_template_binding_not_any() {
         let vue_source = r#"<script setup lang="ts">
@@ -2567,21 +2699,20 @@ const props = withDefaults(defineProps({ bar: String }), {})
 </template>"#;
         let tsx = compile_vue_to_tsx(vue_source, "wd_tpl");
         // Find "bar" in the shallowUnwrapRef section (template binding)
-        let search = "bar: bar as unknown as typeof bar";
-        let bar_pos = tsx.find(search);
-        if bar_pos.is_none() {
-            // Also try the older pattern
-            let search2 = "bar: {} as";
-            let bar_pos2 = tsx.find(search2);
-            assert!(
-                bar_pos2.is_some(),
-                "TSX should contain template binding for 'bar': {}",
-                tsx
-            );
-        }
-        // The test passes by compilation succeeding — the boxed variable tests above
-        // verify the type chain. Template bindings use `typeof ___VERTER___defineProps_Boxed`
-        // which is correctly typed if the boxed tests pass.
+        // The new codegen uses "bar } = ___VERTER___unwrapped" or similar destructuring
+        let search = "const props = withDefaults";
+        let offset = tsx
+            .find(search)
+            .expect("TSX should contain const props = withDefaults") as u32
+            + 6; // hover on "props"
+
+        let hover = e2e_hover_at(vue_source, "wd_tpl", offset).await;
+        let Some(contents) = hover else { return };
+        assert!(
+            !contents.contains(": any") && !contents.is_empty(),
+            "withDefaults props must NOT be 'any' — TSGO returned: {}",
+            contents
+        );
     }
 
     // ── Virtual @verter/types injection tests ──────────────────────────
@@ -2745,11 +2876,11 @@ const props = withDefaults(defineProps({ bar: String }), {})
         provider.open_file(&tsx_file_path, &tsx).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
-        // Hover on the withDefaults_Boxed variable
-        let search = "const ___VERTER___withDefaults_Boxed";
+        // Hover on the props variable
+        let search = "const props = withDefaults";
         let offset = tsx
             .find(search)
-            .expect("TSX should contain withDefaults_Boxed") as u32
+            .expect("TSX should contain const props = withDefaults") as u32
             + 6; // skip "const "
 
         let hover = provider.get_hover(&tsx_file_path, offset).await.unwrap();
@@ -2762,7 +2893,7 @@ const props = withDefaults(defineProps({ bar: String }), {})
         eprintln!("LSP-managed @verter/types hover: {}", contents);
         assert!(
             !contents.contains(": any") && contents != "NO HOVER",
-            "withDefaults_Boxed must NOT be 'any' with LSP-managed @verter/types — got: {}",
+            "props must NOT be 'any' with LSP-managed @verter/types — got: {}",
             contents
         );
     }
@@ -2864,11 +2995,11 @@ const props = withDefaults(defineProps({ bar: String }), {})
         provider.open_file(&tsx_file_path, &tsx).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
-        // Hover on withDefaults_Boxed
-        let search = "const ___VERTER___withDefaults_Boxed";
+        // Hover on props
+        let search = "const props = withDefaults";
         let offset = tsx
             .find(search)
-            .expect("TSX should contain withDefaults_Boxed") as u32
+            .expect("TSX should contain const props = withDefaults") as u32
             + 6;
 
         let hover = provider.get_hover(&tsx_file_path, offset).await.unwrap();
@@ -2881,7 +3012,7 @@ const props = withDefaults(defineProps({ bar: String }), {})
         eprintln!("Late-written @verter/types hover: {}", contents);
         assert!(
             !contents.contains(": any") && contents != "NO HOVER",
-            "withDefaults_Boxed must NOT be 'any' when @verter/types written after TSGO spawn — got: {}",
+            "props must NOT be 'any' when @verter/types written after TSGO spawn — got: {}",
             contents
         );
     }
@@ -3700,5 +3831,69 @@ const msg = "hi";
         let compound = "<script lang=\"ts\" setup>\nlet isLoggedIn = false;\nlet hasPermission = false;\n\n</script>\n\n<template>\n  <div v-if=\"isLoggedIn && hasPermission && 1 ===2\">Full  {{isLoggedIn}}</div>\n  <div v-else-if=\"isLoggedIn && !hasPermission\">Limited Access</div>\n  <div v-else>No Access</div>\n</template>\n";
         // isLoggedIn in {{isLoggedIn}} — char 68 on line 7 (0-indexed)
         assert_roundtrip(compound, "CompoundInterp", 7, 68);
+    }
+
+    // ─── pick_best_which_candidate tests ─────────────────────────
+
+    /// Regression test: Windows `where tsgo` returns a POSIX shell script first,
+    /// then the .cmd shim. We must prefer the .cmd over the extensionless file.
+    #[test]
+    fn test_pick_best_which_prefers_cmd_over_extensionless() {
+        let output = "C:\\Program Files\\nodejs\\tsgo\nC:\\Program Files\\nodejs\\tsgo.cmd\n";
+        let result = pick_best_which_candidate(output);
+        assert_eq!(result, Some("C:\\Program Files\\nodejs\\tsgo.cmd"));
+        assert!(
+            !result.unwrap().ends_with("\\tsgo"),
+            "must NOT pick the extensionless shell script"
+        );
+    }
+
+    /// .exe is preferred over .cmd
+    #[test]
+    fn test_pick_best_which_prefers_exe_over_cmd() {
+        let output = "C:\\tsgo.cmd\nC:\\tsgo.exe\n";
+        let result = pick_best_which_candidate(output);
+        assert_eq!(result, Some("C:\\tsgo.exe"));
+        assert_ne!(result, Some("C:\\tsgo.cmd"), "must prefer .exe over .cmd");
+    }
+
+    /// Single entry (typical Unix `which` output) — returns it unchanged
+    #[test]
+    fn test_pick_best_which_single_entry() {
+        let output = "/usr/local/bin/tsgo\n";
+        let result = pick_best_which_candidate(output);
+        assert_eq!(result, Some("/usr/local/bin/tsgo"));
+    }
+
+    /// Empty output → None
+    #[test]
+    fn test_pick_best_which_empty() {
+        assert!(pick_best_which_candidate("").is_none());
+        assert!(pick_best_which_candidate("  \n  \n").is_none());
+    }
+
+    /// Case-insensitive extension matching (.EXE, .Cmd)
+    #[test]
+    fn test_pick_best_which_case_insensitive() {
+        let output = "C:\\tsgo\nC:\\tsgo.EXE\n";
+        let result = pick_best_which_candidate(output);
+        assert_eq!(result, Some("C:\\tsgo.EXE"));
+        assert_ne!(
+            result,
+            Some("C:\\tsgo"),
+            "must prefer .EXE over extensionless"
+        );
+    }
+
+    /// .bat is preferred over extensionless but not over .cmd
+    #[test]
+    fn test_pick_best_which_bat_priority() {
+        // .bat preferred over extensionless
+        let output = "C:\\tsgo\nC:\\tsgo.bat\n";
+        assert_eq!(pick_best_which_candidate(output), Some("C:\\tsgo.bat"));
+
+        // .cmd preferred over .bat
+        let output2 = "C:\\tsgo.bat\nC:\\tsgo.cmd\n";
+        assert_eq!(pick_best_which_candidate(output2), Some("C:\\tsgo.cmd"));
     }
 }

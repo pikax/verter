@@ -195,6 +195,97 @@ fn map_code_action_to_lsp(
     })
 }
 
+/// Get position-based refactoring actions from the action engine at a byte
+/// offset (cursor position).
+///
+/// This calls `actions_at()` on all registered providers and converts results
+/// to LSP types.
+pub fn action_engine_refactorings(
+    engine: &verter_actions::ActionEngine,
+    analysis: &FileAnalysisSnapshot,
+    source: &str,
+    line_index: &LineIndex,
+    linter: &verter_diagnostics::Linter,
+    offset: u32,
+    uri: &Uri,
+) -> Vec<CodeActionOrCommand> {
+    use verter_actions::ActionContext;
+
+    let script = script_from_host(analysis);
+    let lint_set = linter.lint_with_source(
+        Some(&script),
+        analysis.template.as_ref(),
+        &analysis.styles,
+        Some(source),
+    );
+
+    let file_id = uri.as_str();
+    let ctx = ActionContext {
+        source,
+        file_id,
+        diagnostics: &lint_set,
+        template: analysis.template.as_ref(),
+        script: Some(&script),
+        styles: &analysis.styles,
+    };
+
+    let actions = engine.actions_at(offset, &ctx);
+    actions
+        .iter()
+        .map(|a| map_refactoring_action_to_lsp(a, line_index, uri))
+        .collect()
+}
+
+fn map_refactoring_action_to_lsp(
+    action: &verter_actions::CodeAction,
+    line_index: &LineIndex,
+    uri: &Uri,
+) -> CodeActionOrCommand {
+    use verter_actions::ActionKind;
+
+    let kind = match action.kind {
+        ActionKind::QuickFix => CodeActionKind::QUICKFIX,
+        ActionKind::Refactor => CodeActionKind::REFACTOR,
+        ActionKind::Source => CodeActionKind::SOURCE,
+    };
+
+    let mut text_edits = Vec::new();
+    for edit in &action.edits {
+        if edit.file_id.is_some() {
+            continue;
+        }
+        let start = line_index
+            .offset_to_position(edit.span.start)
+            .unwrap_or(Position {
+                line: 0,
+                character: 0,
+            });
+        let end = line_index
+            .offset_to_position(edit.span.end)
+            .unwrap_or(start);
+        text_edits.push(TextEdit {
+            range: Range { start, end },
+            new_text: edit.replacement.clone(),
+        });
+    }
+
+    #[allow(clippy::mutable_key_type)]
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(uri.clone(), text_edits);
+
+    CodeActionOrCommand::CodeAction(tower_lsp_server::lsp_types::CodeAction {
+        title: action.title.clone(),
+        kind: Some(kind),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(action.is_preferred),
+        ..Default::default()
+    })
+}
+
 fn map_lint_severity(severity: &Severity) -> DiagnosticSeverity {
     match severity {
         Severity::Error => DiagnosticSeverity::ERROR,

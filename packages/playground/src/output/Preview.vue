@@ -2,7 +2,7 @@
 import { ref, watch, onMounted, computed } from "vue";
 import type { Store } from "../core/store";
 import srcdocTemplate from "./srcdoc.html?raw";
-import { transformForPreview } from "./previewTransforms";
+import { transformForPreview, orderScriptsByDependency } from "./previewTransforms";
 
 const props = defineProps<{
   store: Store;
@@ -34,16 +34,23 @@ function updatePreview() {
 
   const scripts: string[] = [];
 
-  // Add all compiled JS as modules (transformed to work without ES module imports)
+  // Build transformed JS map, then topologically sort so dependencies evaluate first
+  const transformedFiles: Record<string, string> = {};
   for (const [filename, file] of Object.entries(props.store.files)) {
     if (file.compiled.js) {
       const moduleName = "./" + filename.replace(/\.(vue|ts)$/, ".js");
-      const transformed = transformForPreview(file.compiled.js, moduleName);
-      scripts.push(`
-        window.__modules__["${moduleName}"] = {}
-        ${transformed}
-      `);
+      transformedFiles[filename] = transformForPreview(file.compiled.js, moduleName);
     }
+  }
+
+  const ordered = orderScriptsByDependency(transformedFiles, props.store.mainFile);
+
+  for (const filename of ordered) {
+    const moduleName = "./" + filename.replace(/\.(vue|ts)$/, ".js");
+    scripts.push(`
+        window.__modules__["${moduleName}"] = {}
+        ${transformedFiles[filename]}
+      `);
   }
 
   // Mount the app (store reference for proper unmounting on next eval)
@@ -86,7 +93,11 @@ function onIframeLoad() {
 }
 
 watch(
-  () => [props.store.activeFile?.compiled.js, allCss.value],
+  () => [
+    // Watch all files' compiled JS (not just active file) so multi-file changes trigger preview
+    ...Object.values(props.store.files).map((f) => f.compiled.js),
+    allCss.value,
+  ],
   () => {
     updatePreview();
   },

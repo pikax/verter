@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Store } from "../core/store";
+import ProjectManager from "./ProjectManager.vue";
 import VersionSelect from "./VersionSelect.vue";
 import VueVersionSelect from "./VueVersionSelect.vue";
 
@@ -23,6 +24,7 @@ function verterTimingTitle(): string {
       <img src="/logo.svg" alt="Verter" class="logo-img" />
       <span class="logo-text">Verter Playground</span>
     </div>
+    <ProjectManager :store="store" />
     <VersionSelect :store="store" />
     <VueVersionSelect :store="store" />
     <div class="actions">
@@ -66,6 +68,14 @@ function verterTimingTitle(): string {
           tsgo
         </button>
       </div>
+      <button
+        class="toggle-btn"
+        :class="{ active: store.editableOutput }"
+        @click="store.toggleEditableOutput"
+        title="Toggle editable output (Types/TSC tabs)"
+      >
+        Edit Output {{ store.editableOutput ? "ON" : "OFF" }}
+      </button>
       <div
         class="timing"
         v-if="store.compileTiming.verterNew !== null"

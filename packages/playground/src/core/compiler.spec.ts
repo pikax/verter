@@ -445,6 +445,56 @@ const msg: string | number = Math.random() > 0.5 ? 'x' : 0
     expect(code).toContain("msg.toLowerCase()");
     expect(code).toContain("onClick=");
   });
+
+  it("generated TSX has no unused warnings for script setup with refs", async () => {
+    const source = `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+const message = ref('hello')
+</script>
+<template><div>{{ count }} {{ message }}</div></template>`;
+    const { code } = await generateRealTsxOutput(source);
+    const { service, fileName } = createTypecheckService(code);
+    const messages = collectTypeScriptDiagnostics(service, fileName);
+    // Filter to TS6133/6196 (unused variable) errors
+    const unusedWarnings = messages.filter(
+      (m) => /TS6133|TS6196/.test(m) || /declared but/.test(m),
+    );
+    expect(unusedWarnings).toEqual([]);
+  });
+
+  it("generated TSX has no unused warnings for Comp/Instance/TemplateBindingFN", async () => {
+    const source = `<script setup lang="ts">
+import { ref, getCurrentInstance } from 'vue'
+const el = ref<HTMLDivElement>()
+const instance = getCurrentInstance()
+</script>
+<template><div ref="el">{{ instance?.proxy }}</div></template>`;
+    const { code } = await generateRealTsxOutput(source);
+    const { service, fileName } = createTypecheckService(code);
+    const messages = collectTypeScriptDiagnostics(service, fileName);
+    const unusedWarnings = messages.filter((m) => /declared but/.test(m));
+    expect(unusedWarnings).toEqual([]);
+    // Positive: generated code uses export keyword
+    expect(code).toContain("export function ___VERTER___TemplateBindingFN");
+    expect(code).toContain("export type ___VERTER___Instance");
+  });
+
+  it("generated TSX without ref has no Comp functions or unused warnings", async () => {
+    const source = `<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>`;
+    const { code } = await generateRealTsxOutput(source);
+    // No Comp functions when no ref
+    expect(code).not.toContain("function ___VERTER___Comp");
+    expect(code).not.toContain("___VERTER___getRootComponent");
+    // And no unused warnings
+    const { service, fileName } = createTypecheckService(code);
+    const messages = collectTypeScriptDiagnostics(service, fileName);
+    const unusedWarnings = messages.filter((m) => /declared but/.test(m));
+    expect(unusedWarnings).toEqual([]);
+  });
 });
 
 // ── Combined source map integration tests (real WASM) ──────────

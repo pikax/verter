@@ -63,7 +63,8 @@ pub fn generate_tsx_template<'alloc>(
     bindings: &FxHashMap<&'alloc str, BindingType>,
     options: &TsxTemplateOptions<'_>,
 ) {
-    let resolver = BindingResolver::new(bindings.clone(), true);
+    let mut resolver = BindingResolver::new(bindings.clone(), true);
+    resolver.set_tsx(true);
 
     let root = &ast.root;
     let content = match &root.content {
@@ -303,9 +304,12 @@ fn walk_element<'a, 'alloc>(
 
             // Build the call expression
             let call = if slot_props.is_empty() {
-                format!("$slots.{}?.()", slot_name)
+                format!("___VERTER___instance.$slots.{}?.()", slot_name)
             } else {
-                format!("$slots.{}?.({{ {} }})", slot_name, slot_props)
+                format!(
+                    "___VERTER___instance.$slots.{}?.({{ {} }})",
+                    slot_name, slot_props
+                )
             };
 
             // Overwrite open tag with slot call prefix
@@ -1268,18 +1272,24 @@ mod tests {
 
     #[test]
     fn interpolation_basic() {
-        let result = gen_tsx_template("<template><div>{{ msg }}</div></template>");
+        let result = gen_tsx_template_with_bindings(
+            "<template><div>{{ msg }}</div></template>",
+            &[("msg", BindingType::SetupRef)],
+        );
         assert!(
-            result.contains("{ _ctx.msg }"),
-            "{{ msg }} should become {{ _ctx.msg }}, got: {}",
+            result.contains("{ msg }"),
+            "{{ msg }} should become bare identifier in TSX mode, got: {}",
             result
         );
     }
 
     #[test]
     fn interpolation_expression() {
-        let result = gen_tsx_template("<template><div>{{ a + b }}</div></template>");
-        assert!(result.contains("{ _ctx.a + _ctx.b }"), "got: {}", result);
+        let result = gen_tsx_template_with_bindings(
+            "<template><div>{{ a + b }}</div></template>",
+            &[("a", BindingType::SetupRef), ("b", BindingType::SetupRef)],
+        );
+        assert!(result.contains("{ a + b }"), "got: {}", result);
     }
 
     #[test]
@@ -1326,10 +1336,10 @@ mod tests {
             "<template><div>{{ count }}</div></template>",
             &[("count", BindingType::SetupRef)],
         );
-        // In inline mode, SetupRef gets no prefix but gets .value suffix
+        // In TSX mode, SetupRef gets no prefix and no .value suffix (block scope handles unwrapping)
         assert!(
-            result.contains("count.value"),
-            "SetupRef should get .value suffix in inline mode, got: {}",
+            result.contains("{ count }") && !result.contains("count.value"),
+            "SetupRef should be bare identifier in TSX mode (no .value), got: {}",
             result
         );
     }
@@ -1367,10 +1377,13 @@ mod tests {
     /// @ai-generated — v-if attribute must be removed from JSX output
     #[test]
     fn v_if_attribute_removed_from_output() {
-        let result = gen_tsx_template(r#"<template><div v-if="show">hello</div></template>"#);
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><div v-if="show">hello</div></template>"#,
+            &[("show", BindingType::SetupRef)],
+        );
         // Positive: IIFE if-block should be present
         assert!(
-            result.contains("if(_ctx.show)"),
+            result.contains("if(show)"),
             "v-if condition should produce IIFE if-block, got: {}",
             result
         );
@@ -1385,8 +1398,10 @@ mod tests {
     /// @ai-generated — v-if with compound expression: attribute removed, ternary present
     #[test]
     fn v_if_compound_expr_attribute_removed() {
-        let result =
-            gen_tsx_template(r#"<template><div v-if="a || b" class="foo">hello</div></template>"#);
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><div v-if="a || b" class="foo">hello</div></template>"#,
+            &[("a", BindingType::SetupRef), ("b", BindingType::SetupRef)],
+        );
         assert!(
             !result.contains("v-if"),
             "v-if attribute must not appear in output, got: {}",
@@ -1394,7 +1409,7 @@ mod tests {
         );
         // The condition should be in the ternary
         assert!(
-            result.contains("_ctx.a || _ctx.b"),
+            result.contains("a || b"),
             "resolved condition should be in ternary, got: {}",
             result
         );
@@ -1705,8 +1720,8 @@ mod tests {
             result
         );
         assert!(
-            result.contains("todos.value.map("),
-            "SetupRef iterable should get .value suffix, got: {}",
+            result.contains("todos.map(") && !result.contains("todos.value"),
+            "SetupRef iterable should be bare identifier in TSX mode (no .value), got: {}",
             result
         );
     }
@@ -1791,10 +1806,13 @@ mod tests {
     /// @ai-generated — v-if produces IIFE with if-block
     #[test]
     fn v_if_iife_structure() {
-        let result = gen_tsx_template(r#"<template><div v-if="visible">hello</div></template>"#);
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><div v-if="visible">hello</div></template>"#,
+            &[("visible", BindingType::SetupRef)],
+        );
         // Must have IIFE pattern: {()=>{if(cond){...}}}
         assert!(
-            result.contains("{()=>{if(_ctx.visible){"),
+            result.contains("{()=>{if(visible){"),
             "v-if should open with IIFE if-block, got: {}",
             result
         );
@@ -1820,17 +1838,18 @@ mod tests {
     /// @ai-generated — v-if/v-else-if/v-else produces IIFE with if/else-if/else chain
     #[test]
     fn v_if_else_chain_iife_structure() {
-        let result = gen_tsx_template(
+        let result = gen_tsx_template_with_bindings(
             r#"<template><div v-if="a">A</div><div v-else-if="b">B</div><div v-else>C</div></template>"#,
+            &[("a", BindingType::SetupRef), ("b", BindingType::SetupRef)],
         );
         // Should have IIFE if/else-if/else chain
         assert!(
-            result.contains("{()=>{if(_ctx.a){"),
+            result.contains("{()=>{if(a){"),
             "should have IIFE if-block, got: {}",
             result
         );
         assert!(
-            result.contains("else if(_ctx.b){"),
+            result.contains("else if(b){"),
             "should have else-if block, got: {}",
             result
         );
@@ -1856,16 +1875,17 @@ mod tests {
     /// @ai-generated — v-if/v-else-if without v-else closes properly
     #[test]
     fn v_if_else_if_without_else_closes() {
-        let result = gen_tsx_template(
+        let result = gen_tsx_template_with_bindings(
             r#"<template><div v-if="a">A</div><div v-else-if="b">B</div></template>"#,
+            &[("a", BindingType::SetupRef), ("b", BindingType::SetupRef)],
         );
         assert!(
-            result.contains("{()=>{if(_ctx.a){"),
+            result.contains("{()=>{if(a){"),
             "should have IIFE if-block, got: {}",
             result
         );
         assert!(
-            result.contains("else if(_ctx.b){"),
+            result.contains("else if(b){"),
             "should have else-if block, got: {}",
             result
         );
@@ -1906,7 +1926,7 @@ mod tests {
             result
         );
         assert!(
-            result.contains("_ctx.show"),
+            result.contains("show"),
             "guard should reference the condition, got: {}",
             result
         );
@@ -1957,8 +1977,12 @@ mod tests {
     /// @ai-generated — nested v-if gets block guard from parent scope
     #[test]
     fn v_if_nested_gets_block_guard() {
-        let result = gen_tsx_template(
+        let result = gen_tsx_template_with_bindings(
             r#"<template><div v-if="parent"><span v-if="child">nested</span></div></template>"#,
+            &[
+                ("parent", BindingType::SetupRef),
+                ("child", BindingType::SetupRef),
+            ],
         );
         // Nested v-if should have block guard: if(!(condText)) return;
         let has_guard = result.contains("return;") && result.contains("if(!(");
@@ -1969,7 +1993,7 @@ mod tests {
         );
         // Should still have the nested if-condition
         assert!(
-            result.contains("if(_ctx.child)"),
+            result.contains("if(child)"),
             "nested v-if should have its own if-condition, got: {}",
             result
         );
@@ -1979,13 +2003,14 @@ mod tests {
 
     #[test]
     fn v_if_comment_before_repositioned_inside_iife() {
-        let result = gen_tsx_template(
+        let result = gen_tsx_template_with_bindings(
             r#"<template><!-- @ts-expect-error --><div v-if="show">hello</div></template>"#,
+            &[("show", BindingType::SetupRef)],
         );
         // Comment should appear INSIDE the IIFE, after the if(cond){ line
         // Pattern: {()=>{if(cond){ {/* @ts-expect-error */} <div>...
         assert!(
-            result.contains("if(_ctx.show)"),
+            result.contains("if(show)"),
             "should have IIFE condition, got:\n{}",
             result
         );
@@ -2010,10 +2035,13 @@ mod tests {
 
     #[test]
     fn v_if_without_preceding_comment_no_change() {
-        let result = gen_tsx_template(r#"<template><div v-if="show">hello</div></template>"#);
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><div v-if="show">hello</div></template>"#,
+            &[("show", BindingType::SetupRef)],
+        );
         // No comment to reposition — should work normally
         assert!(
-            result.contains("{()=>{if(_ctx.show){"),
+            result.contains("{()=>{if(show){"),
             "should have IIFE pattern, got:\n{}",
             result
         );
@@ -2030,13 +2058,14 @@ mod tests {
     #[test]
     fn v_if_else_with_whitespace_between_elements() {
         // Simulates formatted template: <img v-if="cond" />\n  <span v-else>fallback</span>
-        let result = gen_tsx_template(
+        let result = gen_tsx_template_with_bindings(
             "<template>\n  <img v-if=\"show\" />\n  <span v-else>fallback</span>\n</template>",
+            &[("show", BindingType::SetupRef)],
         );
 
         // Positive: must have complete IIFE chain with if/else
         assert!(
-            result.contains("{()=>{if(_ctx.show){"),
+            result.contains("{()=>{if(show){"),
             "should have IIFE if-block, got:\n{}",
             result
         );
@@ -2088,18 +2117,19 @@ mod tests {
     /// @ai-generated — v-if/v-else-if/v-else with formatted whitespace stays in single IIFE
     #[test]
     fn v_if_else_if_else_with_whitespace() {
-        let result = gen_tsx_template(
+        let result = gen_tsx_template_with_bindings(
             "<template>\n  <div v-if=\"a\">A</div>\n  <div v-else-if=\"b\">B</div>\n  <div v-else>C</div>\n</template>",
+            &[("a", BindingType::SetupRef), ("b", BindingType::SetupRef)],
         );
 
         // Positive: complete IIFE chain
         assert!(
-            result.contains("{()=>{if(_ctx.a){"),
+            result.contains("{()=>{if(a){"),
             "should have IIFE if-block, got:\n{}",
             result
         );
         assert!(
-            result.contains("else if(_ctx.b){"),
+            result.contains("else if(b){"),
             "should have else-if block, got:\n{}",
             result
         );
@@ -2165,7 +2195,7 @@ mod tests {
         );
         // The IIFE pattern should NOT wrap the slot template
         assert!(
-            !result.contains("{()=>{if(_ctx.show){"),
+            !result.contains("{()=>{if(show){"),
             "template with v-if + v-slot should not get IIFE wrapping, got:\n{}",
             result
         );
@@ -2443,8 +2473,8 @@ mod tests {
             &[("visible", BindingType::SetupRef)],
         );
         assert!(
-            result.contains("visible.value"),
-            "v-show ref binding should have .value suffix. Got: {}",
+            result.contains("visible") && !result.contains("visible.value"),
+            "v-show ref binding should be bare identifier in TSX mode (no .value). Got: {}",
             result
         );
         assert!(
@@ -2487,8 +2517,8 @@ mod tests {
             result
         );
         assert!(
-            result.contains("visible.value"),
-            "v-show should resolve visible as ref. Got: {}",
+            result.contains("visible") && !result.contains("visible.value"),
+            "v-show should resolve visible as bare identifier in TSX mode (no .value). Got: {}",
             result
         );
     }
@@ -2497,15 +2527,24 @@ mod tests {
 
     #[test]
     fn v_model_basic_component() {
-        let result = gen_tsx_template(r#"<template><Comp v-model="count" /></template>"#);
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><Comp v-model="count" /></template>"#,
+            &[("count", BindingType::SetupRef)],
+        );
         assert!(
-            result.contains("modelValue={_ctx.count}"),
+            result.contains("modelValue={count}"),
             "v-model should produce modelValue prop. Got: {}",
             result
         );
         assert!(
-            result.contains("\"onUpdate:modelValue\"="),
-            "v-model should produce quoted onUpdate:modelValue handler. Got: {}",
+            result.contains("\"onUpdate:modelValue\""),
+            "v-model should produce onUpdate:modelValue handler. Got: {}",
+            result
+        );
+        // Must use spread syntax (bare quoted attribute is invalid JSX)
+        assert!(
+            !result.contains("\"onUpdate:modelValue\"={"),
+            "onUpdate handler must NOT be a bare JSX attribute. Got: {}",
             result
         );
         assert!(
@@ -2517,15 +2556,24 @@ mod tests {
 
     #[test]
     fn v_model_named() {
-        let result = gen_tsx_template(r#"<template><Comp v-model:title="title" /></template>"#);
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><Comp v-model:title="title" /></template>"#,
+            &[("title", BindingType::SetupRef)],
+        );
         assert!(
-            result.contains("title={_ctx.title}"),
+            result.contains("title={title}"),
             "named v-model should produce named prop. Got: {}",
             result
         );
         assert!(
-            result.contains("\"onUpdate:title\"="),
-            "named v-model should produce quoted onUpdate:title handler. Got: {}",
+            result.contains("\"onUpdate:title\""),
+            "named v-model should produce onUpdate:title handler. Got: {}",
+            result
+        );
+        // Must use spread syntax (bare quoted attribute is invalid JSX)
+        assert!(
+            !result.contains("\"onUpdate:title\"={"),
+            "named onUpdate handler must NOT be a bare JSX attribute. Got: {}",
             result
         );
     }
@@ -2537,19 +2585,38 @@ mod tests {
             &[("count", BindingType::SetupRef)],
         );
         assert!(
-            result.contains("modelValue={count.value}"),
-            "v-model on ref should resolve to .value. Got: {}",
+            result.contains("modelValue={count}") && !result.contains("count.value"),
+            "v-model on ref should resolve to bare identifier in TSX mode (no .value). Got: {}",
             result
         );
     }
 
     #[test]
     fn v_model_on_native_element() {
-        let result = gen_tsx_template(r#"<template><input v-model="msg" /></template>"#);
-        // For native elements, v-model also produces modelValue/onUpdate pair in TSX
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><input v-model="msg" /></template>"#,
+            &[("msg", BindingType::SetupRef)],
+        );
+        // Native input should use `value` (not `modelValue`) and native event handler
         assert!(
-            result.contains("modelValue={_ctx.msg}") || result.contains("value={_ctx.msg}"),
-            "v-model on native input should produce value binding. Got: {}",
+            result.contains("value={msg}"),
+            "v-model on native input should produce value prop. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("modelValue"),
+            "v-model on native input must NOT use modelValue. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("onInput={"),
+            "v-model on native input should use onInput event. Got: {}",
+            result
+        );
+        // Must not have any quoted attribute names (invalid JSX)
+        assert!(
+            !result.contains(r#""onUpdate:"#),
+            "native input must not have quoted onUpdate attribute. Got: {}",
             result
         );
         assert!(
@@ -2565,13 +2632,18 @@ mod tests {
     fn slot_outlet_default() {
         let result = gen_tsx_template(r#"<template><slot /></template>"#);
         assert!(
-            result.contains("$slots.default?.()"),
-            "Default slot outlet should produce $slots.default?.(). Got: {}",
+            result.contains("___VERTER___instance.$slots.default?.()"),
+            "Default slot outlet should produce ___VERTER___instance.$slots.default?.(). Got: {}",
             result
         );
         assert!(
             !result.contains("<slot"),
             "<slot> tag must be replaced. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("{ $slots.default"),
+            "Bare $slots without instance prefix must not appear. Got: {}",
             result
         );
     }
@@ -2580,8 +2652,13 @@ mod tests {
     fn slot_outlet_named() {
         let result = gen_tsx_template(r#"<template><slot name="header" /></template>"#);
         assert!(
-            result.contains("$slots.header?.()"),
-            "Named slot outlet should produce $slots.header?.(). Got: {}",
+            result.contains("___VERTER___instance.$slots.header?.()"),
+            "Named slot outlet should produce ___VERTER___instance.$slots.header?.(). Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("{ $slots.header"),
+            "Bare $slots without instance prefix must not appear. Got: {}",
             result
         );
     }
@@ -2591,13 +2668,14 @@ mod tests {
         let result =
             gen_tsx_template(r#"<template><slot name="item" :data="itemData" /></template>"#);
         assert!(
-            result.contains("$slots.item"),
-            "Slot call should reference $slots.item. Got: {}",
+            result.contains("___VERTER___instance.$slots.item"),
+            "Slot call should reference ___VERTER___instance.$slots.item. Got: {}",
             result
         );
         assert!(
-            result.contains("data: _ctx.itemData") || result.contains("data:_ctx.itemData"),
-            "Slot props should include data binding. Got: {}",
+            result.contains("data: ___VERTER___instance.itemData")
+                || result.contains("data:___VERTER___instance.itemData"),
+            "Slot props should include data binding with instance prefix (unresolved). Got: {}",
             result
         );
     }
@@ -2606,13 +2684,75 @@ mod tests {
     fn slot_outlet_with_fallback() {
         let result = gen_tsx_template(r#"<template><slot>fallback</slot></template>"#);
         assert!(
-            result.contains("$slots.default?.()"),
-            "Slot with fallback should have $slots call. Got: {}",
+            result.contains("___VERTER___instance.$slots.default?.()"),
+            "Slot with fallback should have ___VERTER___instance.$slots call. Got: {}",
             result
         );
         assert!(
             result.contains("??"),
             "Slot with fallback should use ?? operator. Got: {}",
+            result
+        );
+    }
+
+    // ── Instance property resolution in TSX ─────────────────────────
+
+    #[test]
+    fn tsx_unresolved_dollar_emit_gets_instance_prefix() {
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><div>{{ $emit('click') }}</div></template>"#,
+            &[],
+        );
+        assert!(
+            result.contains("___VERTER___instance.$emit"),
+            "Unresolved $emit should get instance prefix. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("{ $emit(") && !result.contains("{$emit("),
+            "Bare $emit without prefix must not appear. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn tsx_unresolved_dollar_attrs_gets_instance_prefix() {
+        let result =
+            gen_tsx_template_with_bindings(r#"<template><div>{{ $attrs }}</div></template>"#, &[]);
+        assert!(
+            result.contains("___VERTER___instance.$attrs"),
+            "Unresolved $attrs should get instance prefix. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn tsx_known_setup_binding_stays_bare() {
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><div>{{ count }}</div></template>"#,
+            &[("count", BindingType::SetupRef)],
+        );
+        assert!(
+            !result.contains("___VERTER___instance.count"),
+            "Known binding should NOT get instance prefix. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn tsx_props_binding_stays_dunder_props() {
+        let result = gen_tsx_template_with_bindings(
+            r#"<template><div>{{ msg }}</div></template>"#,
+            &[("msg", BindingType::Props)],
+        );
+        assert!(
+            result.contains("__props.msg"),
+            "Props binding should use __props. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("___VERTER___instance.msg"),
+            "Props binding should NOT get instance prefix. Got: {}",
             result
         );
     }
@@ -2641,8 +2781,8 @@ mod tests {
             &[("eventName", BindingType::SetupRef)],
         );
         assert!(
-            result.contains("eventName.value"),
-            "Dynamic event name on ref should resolve to .value. Got: {}",
+            result.contains("eventName") && !result.contains("eventName.value"),
+            "Dynamic event name on ref should be bare identifier in TSX mode (no .value). Got: {}",
             result
         );
     }
@@ -2825,13 +2965,13 @@ mod tests {
 
     #[test]
     fn component_is_dynamic_resolves_data_binding() {
-        // Data bindings need _ctx. prefix even in inline mode.
+        // In TSX mode, Data bindings are bare identifiers (no _ctx. prefix).
         let source = r#"<template><component :is="currentView">hello</component></template>"#;
         let output = gen_tsx_template_with_bindings(source, &[("currentView", BindingType::Data)]);
 
         assert!(
-            output.contains("_ctx.currentView"),
-            "Data binding should get _ctx. prefix: {output}"
+            output.contains("currentView") && !output.contains("_ctx.currentView"),
+            "Data binding should be bare identifier in TSX mode: {output}"
         );
         assert!(
             !output.contains(":is="),

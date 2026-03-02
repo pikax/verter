@@ -668,11 +668,12 @@ pub fn compile(
     // Produces a single combined `.tsx` file for LSP type checking.
     let tsx_block = if options.target.needs_tsx() {
         let tsx_start = Instant::now();
-        let js_component_name =
-            tsx::sanitize_js_identifier(options.filename.as_deref().unwrap_or("App.vue"));
+        let filename_str = options.filename.as_deref().unwrap_or("App.vue");
+        let js_component_name = tsx::sanitize_js_identifier(filename_str);
         let tsx_script_opts = tsx::TsxScriptOptions {
             component_name: &component_name,
             js_component_name: &js_component_name,
+            filename: filename_str,
             scope_id: &scope_id_full,
             has_scoped_style,
             runtime_module_name: options.runtime_module_name.as_deref().unwrap_or("vue"),

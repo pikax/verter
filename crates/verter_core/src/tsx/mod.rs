@@ -37,6 +37,8 @@ pub struct TsxScriptOptions<'a> {
     pub component_name: &'a str,
     /// Sanitized JS identifier for the component (e.g., `_123Widget` for `123-widget.vue`).
     pub js_component_name: &'a str,
+    /// Original filename (e.g., `"App.vue"`) used for self-import.
+    pub filename: &'a str,
     /// Scoped style ID (e.g., `"data-v-abc123"`).
     pub scope_id: &'a str,
     /// Whether any `<style scoped>` block exists.
@@ -73,6 +75,7 @@ const GENERIC_SANITISE_PREFIX: &str = "__VERTER__TS__";
 /// original source, extracted names, sanitised names (prefixed to avoid
 /// collisions), and a full declaration string for the public API types.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TsxGenericInfo {
     /// Original generic source (e.g., `"T extends object"`).
     pub source: String,
@@ -85,6 +88,7 @@ pub struct TsxGenericInfo {
     pub declaration: String,
 }
 
+#[allow(dead_code)]
 impl TsxGenericInfo {
     /// Build generic info from the raw generic attribute source string.
     ///

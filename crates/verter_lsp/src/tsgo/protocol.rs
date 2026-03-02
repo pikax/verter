@@ -43,6 +43,9 @@ pub struct Completion {
     pub edit_range_end: Option<u32>,
     pub insert_text: Option<String>,
     pub sort_text: Option<String>,
+    /// Opaque data preserved for `completionItem/resolve`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -62,6 +65,24 @@ pub enum CompletionKind {
     EnumMember,
     Constant,
     TypeParameter,
+}
+
+/// Result of resolving a completion item (additional text edits, e.g., auto-import).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionResolveResult {
+    /// Additional text edits to apply (e.g., import statements).
+    pub additional_text_edits: Vec<ResolvedTextEdit>,
+}
+
+/// A text edit within a completion resolve result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedTextEdit {
+    /// Byte offset start in the generated file.
+    pub start: u32,
+    /// Byte offset end in the generated file.
+    pub end: u32,
+    /// The replacement text.
+    pub new_text: String,
 }
 
 /// Hover information from the type provider.

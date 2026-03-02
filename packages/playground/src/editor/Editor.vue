@@ -15,7 +15,9 @@ import {
   getDecorationStyles,
 } from "./decorations";
 import type { TypeScriptServiceBridge } from "./lspProviders";
-import typeHelpersSource from "@verter/types/string";
+import { prefixWith } from "@verter/types/string";
+
+const typeHelpersSource = prefixWith("");
 
 const props = defineProps<{
   store: Store;
@@ -201,6 +203,17 @@ async function syncTypeScript() {
     return;
   }
 
+  // Sync ALL files' .d.ts to the worker for cross-file import resolution
+  const dtsFiles: Array<{ filename: string; dtsCode: string }> = [];
+  for (const [filename, f] of Object.entries(props.store.files)) {
+    if (f.compiled.tscCode) {
+      dtsFiles.push({ filename, dtsCode: f.compiled.tscCode });
+    }
+  }
+  if (dtsFiles.length > 0 && tsService instanceof TypeScriptService) {
+    await tsService.syncDtsFiles(dtsFiles);
+  }
+
   // Capture version to detect stale results
   const version = ++tsSyncVersion;
 
@@ -220,6 +233,8 @@ async function syncTypeScript() {
     tsDiagnostics = diagnostics.filter((diag) => {
       const unusedName = extractUnusedBindingName(diag);
       if (!unusedName) return true;
+      // Suppress unused warnings for compiler-generated variables and style v-bind identifiers
+      if (unusedName.startsWith("___VERTER___")) return false;
       return !styleVBindIdentifiers.has(unusedName);
     });
   } catch {
@@ -409,6 +424,25 @@ onMounted(() => {
         updateMarkers();
         syncTypeScript();
       }
+    },
+  );
+
+  // Watch file list changes to clean up removed files from TS worker
+  let prevFileKeys = new Set(Object.keys(props.store.files));
+  watch(
+    () => Object.keys(props.store.files),
+    (newKeys) => {
+      const newKeySet = new Set(newKeys);
+      if (tsService instanceof TypeScriptService) {
+        for (const key of prevFileKeys) {
+          if (!newKeySet.has(key)) {
+            tsService.closeFile(key);
+          }
+        }
+      }
+      prevFileKeys = newKeySet;
+      // Re-sync so newly added files are available for cross-file resolution
+      scheduleTsSync();
     },
   );
 

@@ -53,6 +53,16 @@ interface TsRenameResponse {
   locations: TsSpanLike[];
 }
 
+export interface RawTsDiagnostic {
+  message: string;
+  /** TSX byte offset (start) — NOT mapped through source map */
+  start: number;
+  /** TSX byte offset (end) */
+  end: number;
+  severity: "error" | "warning" | "info";
+  code: number;
+}
+
 export interface MappedDiagnostic {
   message: string;
   /** Vue source byte offset (start) */
@@ -124,6 +134,8 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   // Current file state
   private currentMapper: SourceMapMapper | null = null;
   private currentTsxPath: string | null = null;
+  private currentTsxCode: string | null = null;
+  private currentVueCode: string | null = null;
 
   async init(options?: { verterTypesContent?: string; vueVersion?: string }): Promise<void> {
     if (this.initialized) return;
@@ -185,6 +197,8 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
     const tsxPath = `/${vueFilename}.tsx`;
     this.currentTsxPath = tsxPath;
+    this.currentTsxCode = tsxCode;
+    this.currentVueCode = vueCode;
 
     // Create mapper if source map is available
     if (sourceMapJson && sourceMapJson.length > 2) {
@@ -225,6 +239,77 @@ export class TypeScriptService implements TypeScriptServiceBridge {
         code: d.code,
       };
     });
+  }
+
+  /**
+   * Ensure the worker file and source map mapper are up to date before LSP operations.
+   * This is called by LSP providers (completions, hover, etc.) to avoid using
+   * a stale mapper when the TSX has changed but syncTsx hasn't fired yet (debounced).
+   */
+  async ensureTsxCurrent(
+    vueFilename: string,
+    tsxCode: string,
+    vueCode: string,
+    sourceMapJson: string | null,
+  ): Promise<void> {
+    if (!this.initialized) return;
+    // Skip if nothing changed
+    if (this.currentTsxCode === tsxCode && this.currentVueCode === vueCode) return;
+
+    const tsxPath = `/${vueFilename}.tsx`;
+    this.currentTsxPath = tsxPath;
+    this.currentTsxCode = tsxCode;
+    this.currentVueCode = vueCode;
+
+    if (sourceMapJson && sourceMapJson.length > 2) {
+      this.currentMapper = new SourceMapMapper(sourceMapJson, tsxCode, vueCode);
+    } else {
+      this.currentMapper = null;
+    }
+
+    await this.send("updateFile", { path: tsxPath, content: tsxCode });
+  }
+
+  /**
+   * Sync all files' .d.ts declarations to the worker for cross-file import resolution.
+   * Uses tscCode (which has `export default`) as virtual .d.ts files.
+   */
+  async syncDtsFiles(files: Array<{ filename: string; dtsCode: string }>): Promise<void> {
+    if (!this.initialized) return;
+
+    for (const { filename, dtsCode } of files) {
+      const dtsPath = `/${filename}.d.ts`;
+      await this.send("updateFile", { path: dtsPath, content: dtsCode });
+    }
+  }
+
+  /**
+   * Remove a file from the worker's virtual FS.
+   */
+  async closeFile(filename: string): Promise<void> {
+    if (!this.initialized) return;
+    const tsxPath = `/${filename}.tsx`;
+    await this.send("closeFile", { path: tsxPath });
+  }
+
+  /**
+   * Send TSX code directly to the worker and return raw (unmapped) diagnostics.
+   * Used by the editable output panel — does NOT touch currentMapper or currentTsxPath.
+   */
+  async syncTsxDirect(tsxCode: string): Promise<RawTsDiagnostic[]> {
+    if (!this.initialized) return [];
+
+    const directPath = "/direct-edit.tsx";
+    await this.send("updateFile", { path: directPath, content: tsxCode });
+    const diagnostics = (await this.send("getDiagnostics", { path: directPath })) as TsDiagnostic[];
+
+    return diagnostics.map((d) => ({
+      message: d.message,
+      start: d.start,
+      end: d.start + d.length,
+      severity: d.category === 1 ? "error" : d.category === 0 ? "warning" : "info",
+      code: d.code,
+    }));
   }
 
   /**
@@ -405,17 +490,60 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   private mapTsxSpanToVueSpan(span: TsSpanLike): MappedSpan | null {
     if (!this.currentTsxPath || span.fileName !== this.currentTsxPath) return null;
 
-    let start = span.start;
-    let end = span.start + span.length;
+    const start = span.start;
+    const end = span.start + span.length;
 
     if (this.currentMapper) {
       const mappedStart = this.currentMapper.tsxOffsetToVueOffset(start);
       const mappedEnd = this.currentMapper.tsxOffsetToVueOffset(end);
-      if (mappedStart != null) start = mappedStart;
-      if (mappedEnd != null) end = mappedEnd;
+      if (mappedStart != null && mappedEnd != null) {
+        return { start: mappedStart, end: mappedEnd };
+      }
+      if (mappedStart != null) return { start: mappedStart, end: mappedEnd ?? end };
+      if (mappedEnd != null) return { start: mappedStart ?? start, end: mappedEnd };
     }
 
-    return { start, end };
+    // Source map failed — try offset comment fallback
+    const resolved = this.resolveFromOffsetComment(start);
+    if (resolved) return resolved;
+
+    return null;
+  }
+
+  /**
+   * Convert a UTF-8 byte offset to a JavaScript string index (UTF-16 code units).
+   */
+  private utf8ByteOffsetToJsOffset(source: string, byteOffset: number): number {
+    let jsIdx = 0;
+    let byteIdx = 0;
+    while (byteIdx < byteOffset && jsIdx < source.length) {
+      const codePoint = source.codePointAt(jsIdx)!;
+      const charByteLen =
+        codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+      byteIdx += charByteLen;
+      jsIdx += codePoint > 0xffff ? 2 : 1; // surrogate pair = 2 UTF-16 code units
+    }
+    return jsIdx;
+  }
+
+  /**
+   * Search backward from a TSX offset for a /*start,end*​/ offset comment pattern.
+   * Returns the mapped Vue span if found, or null.
+   */
+  private resolveFromOffsetComment(tsxOffset: number): MappedSpan | null {
+    if (!this.currentTsxCode || !this.currentVueCode) return null;
+    // Search backward from tsxOffset for the closest /* comment
+    const before = this.currentTsxCode.lastIndexOf("/*", tsxOffset);
+    if (before === -1) return null;
+    const commentEnd = this.currentTsxCode.indexOf("*/", before);
+    if (commentEnd === -1 || commentEnd >= tsxOffset) return null;
+    const content = this.currentTsxCode.slice(before + 2, commentEnd);
+    const match = /^(\d+),(\d+)$/.exec(content);
+    if (!match) return null;
+    return {
+      start: this.utf8ByteOffsetToJsOffset(this.currentVueCode, parseInt(match[1], 10)),
+      end: this.utf8ByteOffsetToJsOffset(this.currentVueCode, parseInt(match[2], 10)),
+    };
   }
 
   dispose(): void {
@@ -426,5 +554,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     this.initPromise = null;
     this.currentMapper = null;
     this.currentTsxPath = null;
+    this.currentTsxCode = null;
+    this.currentVueCode = null;
   }
 }

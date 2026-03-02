@@ -69,15 +69,30 @@ Triggered on push of tags matching `v*` (e.g., `v0.0.1-alpha.1`, `v1.0.0`).
 ```
 validate
   ├── build-native (matrix: 7 targets)   ← parallel
+  ├── build-lsp (matrix: 5 targets)      ← parallel
   └── build-wasm                          ← parallel
         │
         ├── publish-crates (needs: validate)
         │
         └── publish-npm (needs: validate, build-native, build-wasm)
               │
-              ├── github-release (needs: build-native, build-wasm, publish-npm)
-              └── deploy-playground (needs: build-wasm)
+              ├── publish-vscode (needs: validate, build-lsp, build-native, publish-npm)
+              │     │
+              │     └── github-release (needs: all builds + publish-npm + publish-vscode)
+              │
+              └── integration-test (needs: validate, publish-npm)
 ```
+
+### Deployment Environments
+
+Each publishing job uses a GitHub environment for deployment tracking (green checkmarks on releases):
+
+| Job | Environment | URL |
+| --- | ----------- | --- |
+| `publish-crates` | `crates-io` | crates.io/crates/verter_core |
+| `publish-npm` | `npm` | npmjs.com/package/@verter/core |
+| `publish-vscode` | `vscode-marketplace` | VS Code Marketplace |
+| `github-release` | `github-releases` | GitHub Release page |
 
 ### Native Build Matrix
 
@@ -91,12 +106,32 @@ validate
 | `aarch64-apple-darwin`       | macos-latest   | Direct        |
 | `x86_64-pc-windows-msvc`     | windows-latest | Direct        |
 
+### LSP Build Matrix
+
+| Target                       | Runner         | vsce-target   | Method        |
+| ---------------------------- | -------------- | ------------- | ------------- |
+| `x86_64-unknown-linux-gnu`   | ubuntu-22.04   | linux-x64     | Direct        |
+| `aarch64-unknown-linux-gnu`  | ubuntu-latest  | linux-arm64   | Cross-compile |
+| `x86_64-apple-darwin`        | macos-15-intel | darwin-x64    | Direct        |
+| `aarch64-apple-darwin`       | macos-15       | darwin-arm64  | Direct        |
+| `x86_64-pc-windows-msvc`     | windows-latest | win32-x64     | Direct        |
+
 ### Publishing Process
 
 1. **Rust crates**: Only `verter_core` is published to crates.io (binding crates are consumed via npm)
 2. **npm platform packages**: Published first (e.g., `@verter/native-darwin-arm64`)
 3. **npm packages**: Published in topological order via `scripts/check-versions.mjs`
-4. **GitHub Release**: Created with changelog (via git-cliff) and all binary assets
+4. **VS Code extension**: Platform-specific VSIX packages built and published to VS Code Marketplace
+5. **GitHub Release**: Created with changelog (via git-cliff) and all binary assets (.node, .wasm, .vsix)
+
+### VS Code Extension Packaging
+
+The extension is bundled with esbuild into a single `dist/extension.js`. The build script (`esbuild.mjs`):
+
+1. Bundles all deps except `vscode` (provided by VS Code) and `@verter/typescript-plugin` (loaded by TS server)
+2. Copies `@verter/typescript-plugin` and `@verter/native` into `dist/node_modules/` (since vsce ignores root `node_modules/`)
+3. In CI, the correct platform's `.node` binary is placed in `packages/native/dist/` before each `vsce package --target <platform>` call
+4. Each platform VSIX includes: bundled extension.js, LSP binary in `bin/`, typescript-plugin + native binding in `dist/node_modules/`
 
 ### Changelog Generation
 
@@ -233,6 +268,7 @@ Uses `workspace:^` and `workspace:*` protocol. `pnpm publish` (not `npm publish`
 | `NETLIFY_SITE_ID`      | Netlify site identification          |
 | `CARGO_REGISTRY_TOKEN` | crates.io publishing                 |
 | `NPM_TOKEN`            | npm publishing (with `--provenance`) |
+| `VSCE_PAT`             | VS Code Marketplace publishing       |
 
 The `GITHUB_TOKEN` is automatically provided and used for:
 

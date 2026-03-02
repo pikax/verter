@@ -93,6 +93,10 @@ pub struct BindingResolver<'alloc> {
     bindings: FxHashMap<&'alloc str, BindingType>,
     is_inline: bool,
     is_vapor: bool,
+    /// TSX mode: props use `__props.`, known bindings are bare, unresolved use
+    /// `___VERTER___instance.` for instance property access. No `.value` suffix.
+    /// Block scope `shallowUnwrapRef` handles unwrapping.
+    is_tsx: bool,
     /// Props known to be constant across all call sites (from cross-file analysis).
     /// These are treated as `Static` for reactivity purposes while keeping
     /// their `$props.`/`__props.` prefix for correct runtime access.
@@ -106,6 +110,7 @@ impl<'alloc> BindingResolver<'alloc> {
             bindings,
             is_inline,
             is_vapor: false,
+            is_tsx: false,
             const_props: None,
         }
     }
@@ -123,6 +128,7 @@ impl<'alloc> BindingResolver<'alloc> {
             bindings,
             is_inline,
             is_vapor: false,
+            is_tsx: false,
             const_props,
         }
     }
@@ -131,6 +137,13 @@ impl<'alloc> BindingResolver<'alloc> {
     #[inline]
     pub fn set_vapor(&mut self, vapor: bool) {
         self.is_vapor = vapor;
+    }
+
+    /// Set the TSX mode flag. When true, unresolved bindings use
+    /// `___VERTER___instance.` prefix and refs have no `.value` suffix.
+    #[inline]
+    pub fn set_tsx(&mut self, tsx: bool) {
+        self.is_tsx = tsx;
     }
 
     /// Look up the binding type for an identifier.
@@ -181,6 +194,9 @@ impl<'alloc> BindingResolver<'alloc> {
 
     /// Resolve the accessor prefix for an identifier.
     ///
+    /// - **TSX mode**: props use `__props.`, known bindings are bare (no prefix),
+    ///   unresolved identifiers use `___VERTER___instance.` (matches Vue's `_ctx.` behavior),
+    ///   globals and keywords remain bare
     /// - **Vapor mode**: all bindings use `_ctx.` (matching Vue's official vapor compiler)
     /// - **VDOM mode**:
     ///   - Props: `__props.` (inline) or `$props.` (standalone)
@@ -188,6 +204,17 @@ impl<'alloc> BindingResolver<'alloc> {
     ///   - Data/Options/Unresolved: `_ctx.`
     #[inline]
     pub fn resolve_prefix(&self, ident: &str) -> &'static str {
+        if self.is_tsx {
+            // TSX mode: props → __props., known → bare,
+            // globals/keywords → bare,
+            // unresolved → instance prefix (matches Vue's _ctx. behavior)
+            return match self.bindings.get(ident) {
+                Some(bt) if bt.is_props() => "__props.",
+                Some(_) => "",
+                None if is_global(ident.as_bytes()) || is_keyword(ident.as_bytes()) => "",
+                None => "___VERTER___instance.",
+            };
+        }
         if self.is_vapor {
             return "_ctx.";
         }
@@ -230,10 +257,10 @@ impl<'alloc> BindingResolver<'alloc> {
     /// Resolve the accessor suffix for an identifier.
     ///
     /// Returns `.value` for `SetupRef` and `SetupMaybeRef` bindings in inline mode,
-    /// empty string otherwise. Vapor mode never adds `.value`.
+    /// empty string otherwise. Vapor mode and TSX mode never add `.value`.
     #[inline]
     pub fn resolve_suffix(&self, ident: &str) -> &'static str {
-        if self.is_vapor || !self.is_inline {
+        if self.is_vapor || self.is_tsx || !self.is_inline {
             return "";
         }
         match self.bindings.get(ident) {
@@ -879,6 +906,66 @@ mod tests {
     fn vapor_resolve_simple_expr_keyword_prop_uses_bracket_notation() {
         let resolver = make_vapor_resolver(&[("class", BindingType::Props)]);
         assert_eq!(resolver.resolve_simple_expr("class"), r#"_ctx["class"]"#);
+    }
+
+    // ==================== TSX mode bindings ====================
+
+    fn make_tsx_resolver(entries: &[(&'static str, BindingType)]) -> BindingResolver<'static> {
+        let mut map = FxHashMap::default();
+        for &(name, bt) in entries {
+            map.insert(name, bt);
+        }
+        let mut r = BindingResolver::new(map, true);
+        r.set_tsx(true);
+        r
+    }
+
+    #[test]
+    fn tsx_unresolved_binding_prefix_is_instance() {
+        let resolver = make_tsx_resolver(&[]);
+        assert_eq!(resolver.resolve_prefix("$emit"), "___VERTER___instance.");
+    }
+
+    #[test]
+    fn tsx_unresolved_dollar_slots_prefix_is_instance() {
+        let resolver = make_tsx_resolver(&[]);
+        assert_eq!(resolver.resolve_prefix("$slots"), "___VERTER___instance.");
+    }
+
+    #[test]
+    fn tsx_known_binding_prefix_is_empty() {
+        let resolver = make_tsx_resolver(&[("count", BindingType::SetupRef)]);
+        assert_eq!(resolver.resolve_prefix("count"), "");
+    }
+
+    #[test]
+    fn tsx_props_binding_prefix_is_dunder_props() {
+        let resolver = make_tsx_resolver(&[("msg", BindingType::Props)]);
+        assert_eq!(resolver.resolve_prefix("msg"), "__props.");
+    }
+
+    #[test]
+    fn tsx_unresolved_resolve_simple_expr() {
+        let resolver = make_tsx_resolver(&[]);
+        assert_eq!(
+            resolver.resolve_simple_expr("$emit"),
+            "___VERTER___instance.$emit"
+        );
+    }
+
+    #[test]
+    fn tsx_global_stays_bare() {
+        let resolver = make_tsx_resolver(&[]);
+        assert_eq!(resolver.resolve_prefix("Math"), "");
+        assert_eq!(resolver.resolve_prefix("console"), "");
+        assert_eq!(resolver.resolve_prefix("undefined"), "");
+        assert_eq!(resolver.resolve_prefix("parseInt"), "");
+    }
+
+    #[test]
+    fn tsx_known_binding_resolve_simple_expr_bare() {
+        let resolver = make_tsx_resolver(&[("count", BindingType::SetupConst)]);
+        assert_eq!(resolver.resolve_simple_expr("count"), "count");
     }
 
     // ==================== Const prop overrides ====================

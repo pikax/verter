@@ -3,7 +3,12 @@
  * These test the conversion of ES module imports/exports to window.__modules__ assignments.
  */
 import { describe, it, expect } from "vitest";
-import { transformImportList, transformForPreview } from "./previewTransforms";
+import {
+  transformImportList,
+  transformForPreview,
+  extractLocalImports,
+  orderScriptsByDependency,
+} from "./previewTransforms";
 
 describe("transformImportList", () => {
   it("transforms 'x as y' to 'x: y'", () => {
@@ -210,5 +215,104 @@ describe("transformForPreview", () => {
       expect(result).toContain("function render() {");
       expect(result).toContain(`window.__modules__["${mod}"].default = __sfc__`);
     });
+  });
+});
+
+describe("extractLocalImports", () => {
+  it("extracts default import from .vue file", () => {
+    const code = `const Comp = window.__modules__["./Comp.js"].default`;
+    expect(extractLocalImports(code)).toEqual(["./Comp.js"]);
+  });
+
+  it("extracts named import from .ts file", () => {
+    const code = `const { helper } = window.__modules__["./utils.js"]`;
+    expect(extractLocalImports(code)).toEqual(["./utils.js"]);
+  });
+
+  it("ignores non-local imports (vue, node_modules)", () => {
+    const code = `const { ref } = window.Vue\nconst x = 1`;
+    expect(extractLocalImports(code)).toEqual([]);
+  });
+
+  it("extracts multiple imports", () => {
+    const code = [
+      `const Comp = window.__modules__["./Comp.js"].default`,
+      `const { helper } = window.__modules__["./utils.js"]`,
+    ].join("\n");
+    expect(extractLocalImports(code)).toEqual(["./Comp.js", "./utils.js"]);
+  });
+
+  it("returns empty for no imports", () => {
+    const code = `const x = 1;\nconsole.log(x);`;
+    expect(extractLocalImports(code)).toEqual([]);
+  });
+
+  it("deduplicates repeated imports of the same module", () => {
+    const code = [
+      `const A = window.__modules__["./Comp.js"].default`,
+      `const B = window.__modules__["./Comp.js"].default`,
+    ].join("\n");
+    expect(extractLocalImports(code)).toEqual(["./Comp.js"]);
+  });
+});
+
+describe("orderScriptsByDependency", () => {
+  it("puts dependency before dependent (single dep)", () => {
+    const files: Record<string, string> = {
+      "App.vue": `const Comp = window.__modules__["./Comp.js"].default`,
+      "Comp.vue": `window.__modules__["./Comp.js"].default = {}`,
+    };
+    const result = orderScriptsByDependency(files, "App.vue");
+    expect(result).toEqual(["Comp.vue", "App.vue"]);
+  });
+
+  it("handles diamond dependency: D before B,C before App", () => {
+    const files: Record<string, string> = {
+      "App.vue": [
+        `const B = window.__modules__["./B.js"].default`,
+        `const C = window.__modules__["./C.js"].default`,
+      ].join("\n"),
+      "B.vue": `const D = window.__modules__["./D.js"].default`,
+      "C.vue": `const D = window.__modules__["./D.js"].default`,
+      "D.vue": `window.__modules__["./D.js"].default = {}`,
+    };
+    const result = orderScriptsByDependency(files, "App.vue");
+    // D must come before B and C; B and C must come before App
+    expect(result.indexOf("D.vue")).toBeLessThan(result.indexOf("B.vue"));
+    expect(result.indexOf("D.vue")).toBeLessThan(result.indexOf("C.vue"));
+    expect(result.indexOf("B.vue")).toBeLessThan(result.indexOf("App.vue"));
+    expect(result.indexOf("C.vue")).toBeLessThan(result.indexOf("App.vue"));
+    expect(result).toHaveLength(4);
+  });
+
+  it("handles circular dependency gracefully", () => {
+    const files: Record<string, string> = {
+      "App.vue": `const A = window.__modules__["./A.js"].default`,
+      "A.vue": `const App = window.__modules__["./App.js"].default`,
+    };
+    const result = orderScriptsByDependency(files, "App.vue");
+    // Should not crash, should contain all files
+    expect(result).toHaveLength(2);
+    expect(result).toContain("App.vue");
+    expect(result).toContain("A.vue");
+  });
+
+  it("handles single file", () => {
+    const files: Record<string, string> = {
+      "App.vue": `window.__modules__["./App.js"].default = {}`,
+    };
+    const result = orderScriptsByDependency(files, "App.vue");
+    expect(result).toEqual(["App.vue"]);
+  });
+
+  it("excludes files with empty compiled JS", () => {
+    const files: Record<string, string> = {
+      "App.vue": `const Comp = window.__modules__["./Comp.js"].default`,
+      "Comp.vue": `window.__modules__["./Comp.js"].default = {}`,
+      "Empty.vue": "",
+    };
+    const result = orderScriptsByDependency(files, "App.vue");
+    expect(result).toEqual(["Comp.vue", "App.vue"]);
+    expect(result).not.toContain("Empty.vue");
   });
 });

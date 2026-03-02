@@ -192,6 +192,7 @@ pub fn merge_completions(
     mapper: &PositionMapper,
     tsx_line_index: &LineIndex,
     vue_line_index: &LineIndex,
+    tsx_path: Option<&str>,
 ) -> (Vec<CompletionItem>, bool) {
     let is_incomplete = type_result.is_incomplete;
     let mut result = verter_items;
@@ -226,6 +227,20 @@ pub fn merge_completions(
             })
         });
 
+        // Tag TSGO items with marker data for completion resolve
+        let data = if item.data.is_some() {
+            let mut tagged = serde_json::json!({
+                "tsgo": true,
+                "original_data": item.data,
+            });
+            if let Some(p) = tsx_path {
+                tagged["tsx_path"] = serde_json::Value::String(p.to_string());
+            }
+            Some(tagged)
+        } else {
+            None
+        };
+
         result.push(CompletionItem {
             label: item.label,
             kind: item.kind.map(convert_completion_kind),
@@ -238,6 +253,7 @@ pub fn merge_completions(
             }),
             sort_text: item.sort_text,
             text_edit,
+            data,
             ..Default::default()
         });
     }
@@ -951,6 +967,7 @@ mod tests {
             edit_range_end: None,
             insert_text: None,
             sort_text: None,
+            data: None,
         }
     }
 
@@ -965,7 +982,7 @@ mod tests {
         };
 
         let (result, is_incomplete) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
         assert_eq!(result.len(), 3);
         assert!(!is_incomplete);
         let labels: Vec<&str> = result.iter().map(|i| i.label.as_str()).collect();
@@ -984,7 +1001,7 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -1002,7 +1019,7 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -1018,7 +1035,7 @@ mod tests {
         };
 
         let (result, is_incomplete) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
         assert_eq!(result.len(), 2);
         assert!(
             is_incomplete,
@@ -1039,7 +1056,7 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -1057,7 +1074,7 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
         let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
         assert_eq!(
             on_mounted_count, 1,
@@ -1080,7 +1097,7 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li);
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
         let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
         assert_eq!(
             on_mounted_count, 1,

@@ -1,7 +1,7 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
 import type { VerterHost } from "@verter/native";
 
-const FALLBACK_STUB = "export default {} as any";
+export const FALLBACK_STUB = "export default {} as any";
 
 let host: VerterHost | null = null;
 let loadFailed = false;

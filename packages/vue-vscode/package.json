@@ -21,36 +21,39 @@
   "type": "commonjs",
   "main": "dist/extension.js",
   "scripts": {
-    "build": "tsc -b",
-    "watch": "pnpm build --watch",
+    "build": "node esbuild.mjs --production",
+    "build:dev": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "vscode:prepublish": "node esbuild.mjs --production",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "package": "vsce package",
-    "package:win32-x64": "vsce package --target win32-x64",
-    "package:linux-x64": "vsce package --target linux-x64",
-    "package:linux-arm64": "vsce package --target linux-arm64",
-    "package:darwin-x64": "vsce package --target darwin-x64",
-    "package:darwin-arm64": "vsce package --target darwin-arm64"
+    "package": "node package.mjs",
+    "package:win32-x64": "node package.mjs --target win32-x64",
+    "package:linux-x64": "node package.mjs --target linux-x64",
+    "package:linux-arm64": "node package.mjs --target linux-arm64",
+    "package:darwin-x64": "node package.mjs --target darwin-x64",
+    "package:darwin-arm64": "node package.mjs --target darwin-arm64"
   },
   "dependencies": {
+    "@verter/typescript-plugin": "workspace:^"
+  },
+  "devDependencies": {
     "@types/lodash": "^4.17.23",
     "@types/vscode": "^1.109.0",
     "@verter/language-shared": "workspace:^",
-    "@verter/typescript-plugin": "workspace:^",
+    "@vscode/vsce": "^3.7.1",
     "brace-expansion": "^4.0.1",
+    "esbuild": "^0.25.0",
     "lodash": "^4.17.23",
     "minimatch": "^10.1.2",
     "source-map": "^0.7.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
     "vscode-css-languageservice": "^6.3.9",
     "vscode-jsonrpc": "^8.2.1",
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver-protocol": "^3.17.5",
     "vscode-languageserver-textdocument": "^1.0.12",
     "vscode-languageserver-types": "^3.17.5"
-  },
-  "devDependencies": {
-    "@vscode/vsce": "^3.7.1",
-    "typescript": "^5.9.3",
-    "vite": "^7.3.1"
   },
   "configurationDefaults": {
     "emmet.includeLanguages": {
@@ -496,10 +499,10 @@
     "onLanguage:vue"
   ],
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.109.0"
   },
   "vsce": {
-    "dependencies": true,
+    "dependencies": false,
     "yarn": false
   }
 }

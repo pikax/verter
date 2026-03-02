@@ -82,3 +82,124 @@ export function transformForPreview(code: string, moduleName: string): string {
 
   return transformed;
 }
+
+/**
+ * Extract local module paths (./X.js) that appear as `window.__modules__["./X.js"]`
+ * in already-transformed preview code.
+ */
+export function extractLocalImports(code: string): string[] {
+  const seen = new Set<string>();
+  const re = /window\.__modules__\["(\.\/[^"]+)"\]/g;
+  let match;
+  while ((match = re.exec(code)) !== null) {
+    seen.add(match[1]);
+  }
+  return [...seen];
+}
+
+/**
+ * Topological sort of filenames by dependency order (Kahn's algorithm).
+ * Dependencies evaluate before dependents so that `window.__modules__` is populated.
+ *
+ * @param files - Map of filename → transformed compiled JS
+ * @param mainFile - The entry point filename (goes last)
+ * @returns Ordered list of filenames with non-empty JS
+ */
+export function orderScriptsByDependency(
+  files: Record<string, string>,
+  mainFile: string,
+): string[] {
+  // Build filename → module name mapping and reverse
+  const filenameToModule = new Map<string, string>();
+  const moduleToFilename = new Map<string, string>();
+  const nonEmpty: string[] = [];
+
+  for (const [filename, code] of Object.entries(files)) {
+    if (!code) continue;
+    nonEmpty.push(filename);
+    const moduleName = "./" + filename.replace(/\.(vue|ts)$/, ".js");
+    filenameToModule.set(filename, moduleName);
+    moduleToFilename.set(moduleName, filename);
+  }
+
+  if (nonEmpty.length <= 1) return nonEmpty;
+
+  // Build adjacency: edges[A] = [B] means A depends on B (B must come first)
+  const deps = new Map<string, Set<string>>();
+  const inDegree = new Map<string, number>();
+
+  for (const f of nonEmpty) {
+    deps.set(f, new Set());
+    inDegree.set(f, 0);
+  }
+
+  for (const filename of nonEmpty) {
+    const imports = extractLocalImports(files[filename]);
+    for (const imp of imports) {
+      const depFilename = moduleToFilename.get(imp);
+      if (depFilename && depFilename !== filename) {
+        deps.get(filename)!.add(depFilename);
+      }
+    }
+  }
+
+  // Compute in-degrees
+  for (const [filename, depSet] of deps) {
+    for (const dep of depSet) {
+      inDegree.set(dep, (inDegree.get(dep) ?? 0) + 1);
+    }
+  }
+
+  // Kahn's: start with nodes that have no dependents (in-degree 0 = leaves)
+  // We want leaves first, so nodes with in-degree 0 from the *reverse* graph.
+  // Actually, we want: if A depends on B, B comes first.
+  // In-degree counts how many files depend ON this file. High in-degree = needed early.
+  // Kahn's on forward graph (A→B means A depends on B):
+  //   Process nodes with in-degree 0 in the REVERSE graph = nodes nobody depends on = leaf consumers.
+  // Easier: reverse the perspective. Build graph where edge B→A means "B must come before A".
+  // Then Kahn's on that graph gives the right order.
+
+  // Rebuild: edge from dep → filename (dep must come before filename)
+  const mustComeBefore = new Map<string, Set<string>>();
+  const reverseDegree = new Map<string, number>();
+
+  for (const f of nonEmpty) {
+    mustComeBefore.set(f, new Set());
+    reverseDegree.set(f, 0);
+  }
+
+  for (const [filename, depSet] of deps) {
+    for (const dep of depSet) {
+      mustComeBefore.get(dep)!.add(filename);
+      reverseDegree.set(filename, (reverseDegree.get(filename) ?? 0) + 1);
+    }
+  }
+
+  const queue: string[] = [];
+  for (const [f, deg] of reverseDegree) {
+    if (deg === 0) queue.push(f);
+  }
+
+  const result: string[] = [];
+  while (queue.length > 0) {
+    const node = queue.shift()!;
+    result.push(node);
+    for (const dependent of mustComeBefore.get(node) ?? []) {
+      const newDeg = reverseDegree.get(dependent)! - 1;
+      reverseDegree.set(dependent, newDeg);
+      if (newDeg === 0) queue.push(dependent);
+    }
+  }
+
+  // Cycle fallback: if not all nodes were visited, add remaining (non-main first)
+  if (result.length < nonEmpty.length) {
+    const inResult = new Set(result);
+    const remaining = nonEmpty.filter((f) => !inResult.has(f));
+    // Put non-main remaining files before main
+    const nonMain = remaining.filter((f) => f !== mainFile);
+    const main = remaining.filter((f) => f === mainFile);
+    result.push(...nonMain, ...main);
+  }
+
+  return result;
+}

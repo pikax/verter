@@ -2,7 +2,7 @@ import type tsModule from "typescript/lib/tsserverlibrary";
 import path from "node:path";
 import fs from "node:fs";
 import { isRelativeVue, isVue } from "./helpers/utils";
-import { parseFile } from "./helpers/getDtsSnapshot";
+import { parseFile, FALLBACK_STUB } from "./helpers/getDtsSnapshot";
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
 
 function normalizePath(p: string): string {
@@ -89,9 +89,9 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
               path.resolve(path.dirname(containingFile), moduleName),
           );
           return {
-            extension: ts.Extension.Tsx,
+            extension: ts.Extension.Dts,
             isExternalLibraryImport: false,
-            resolvedFileName: path.resolve(path.dirname(containingFile), moduleName),
+            resolvedFileName: path.resolve(path.dirname(containingFile), moduleName) + ".d.ts",
           };
         }
         if (!isVue(moduleName)) {
@@ -126,6 +126,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
         return VERTER_TYPES_STUB;
       }
+      // .vue.d.ts virtual file → read underlying .vue, return getTsc()
+      if (fileName.endsWith(".vue.d.ts")) {
+        const vuePath = fileName.slice(0, -5); // strip ".d.ts"
+        const file = _readFile(vuePath);
+        if (file) return parseFile(vuePath, file, logger);
+        return FALLBACK_STUB;
+      }
+      // Direct .vue reads (for other TS operations)
       const file = _readFile(fileName);
       if (isVue(fileName) && file) {
         logger.info("[Verter] readFile - " + fileName + " -- " + file!.length);
@@ -139,7 +147,76 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
         return true;
       }
+      if (fileName.endsWith(".vue.d.ts")) {
+        return _fileExists(fileName.slice(0, -5)); // check if .vue exists
+      }
       return _fileExists(fileName);
+    };
+
+    // Fix auto-import paths: .vue.d.ts → .vue in all completion-related surfaces
+    const _getCompletionEntryDetails =
+      languageService.getCompletionEntryDetails.bind(languageService);
+    languageService.getCompletionEntryDetails = (
+      fileName,
+      position,
+      entryName,
+      formatOptions,
+      source,
+      preferences,
+      data,
+    ) => {
+      const result = _getCompletionEntryDetails(
+        fileName,
+        position,
+        entryName,
+        formatOptions,
+        source,
+        preferences,
+        data,
+      );
+      if (result?.codeActions) {
+        for (const action of result.codeActions) {
+          // Fix display text (what user sees in tooltip)
+          action.description = action.description.replace(/\.vue\.d\.ts/g, ".vue");
+          for (const change of action.changes) {
+            for (const edit of change.textChanges) {
+              // Fix actual import statement text
+              edit.newText = edit.newText.replace(/\.vue\.d\.ts(['"])/g, ".vue$1");
+            }
+          }
+        }
+      }
+      // Fix sourceDisplay if present (shown next to completion item)
+      if (result?.sourceDisplay) {
+        result.sourceDisplay = result.sourceDisplay.map((part) => ({
+          ...part,
+          text: part.text.replace(/\.vue\.d\.ts/g, ".vue"),
+        }));
+      }
+      return result;
+    };
+
+    // Fix completion list source paths
+    const _getCompletionsAtPosition =
+      languageService.getCompletionsAtPosition.bind(languageService);
+    languageService.getCompletionsAtPosition = (fileName, position, options, formattingSettings) => {
+      const result = _getCompletionsAtPosition(fileName, position, options, formattingSettings);
+      if (result?.entries) {
+        for (const entry of result.entries) {
+          // Fix source display text in completion list
+          if (entry.sourceDisplay) {
+            entry.sourceDisplay = entry.sourceDisplay.map((part) => ({
+              ...part,
+              text: part.text.replace(/\.vue\.d\.ts/g, ".vue"),
+            }));
+          }
+          // Fix source property (used for grouping)
+          if (entry.source?.endsWith(".vue.d.ts")) {
+            entry.source = entry.source.slice(0, -5); // strip .d.ts
+          }
+        }
+      }
+      return result;
     };
 
     return languageService;
@@ -148,7 +225,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   const getExternalFiles = (project: tsModule.server.ConfiguredProject) => {
     const files = project.getFileNames(true, true).filter(isVue);
     project.projectService.logger.info("[Verter] Got files\n" + files.join("\n"));
-    return files;
+    return files.map((f) => f + ".d.ts");
   };
 
   return {

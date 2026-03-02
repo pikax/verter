@@ -10,6 +10,7 @@ mod remove_unsafe_url;
 mod remove_unused_css;
 mod shorthand_directive;
 mod symbol_provide;
+mod v_bind_shorthand;
 
 pub use add_component_is::AddComponentIs;
 pub use html_self_close::HtmlSelfClose;
@@ -21,6 +22,7 @@ pub use remove_unsafe_url::RemoveUnsafeUrl;
 pub use remove_unused_css::RemoveUnusedCss;
 pub use shorthand_directive::ShorthandDirective;
 pub use symbol_provide::SymbolProvide;
+pub use v_bind_shorthand::VBindShorthand;
 
 use crate::engine::ActionEngine;
 
@@ -36,4 +38,5 @@ pub fn register_builtin_providers(engine: &mut ActionEngine) {
     engine.register(Box::new(ShorthandDirective));
     engine.register(Box::new(SymbolProvide));
     engine.register(Box::new(RemoveUnsafeUrl));
+    engine.register(Box::new(VBindShorthand));
 }

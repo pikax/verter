@@ -10,8 +10,9 @@ import {
 } from "./types";
 import { compileFile, initCompilers, switchWasmVersion } from "./compiler";
 import { getDefaultImportMap, extractVueVersion, type ImportMap } from "./importMap";
-import { serializeToHash, deserializeFromHash } from "./urlState";
+import { serializeToHash, deserializeFromHash, type SerializedState } from "./urlState";
 import type { VersionEntry } from "./versions";
+import * as projectStorage from "./projectStorage";
 
 const defaultAppCode = `<script setup lang="ts">
 import { ref } from 'vue'
@@ -69,6 +70,14 @@ export interface Store extends StoreState {
   switchVerterVersion(entry: VersionEntry): Promise<void>;
   setVueVersion(version: string): void;
   vueVersion: string;
+  // Project management
+  saveProject(name?: string): void;
+  loadProject(name: string, state: SerializedState): Promise<void>;
+  deleteProject(name: string): void;
+  // Editable output
+  toggleEditableOutput(): void;
+  updateTsxOverride(code: string): void;
+  clearTsxOverride(): void;
 }
 
 export function useStore(): Store {
@@ -96,6 +105,11 @@ export function useStore(): Store {
   const verterVersion = ref("local");
   const versionLoading = ref(false);
   const tsDiagnostics: Ref<TsDiagnosticEntry[]> = ref([]);
+
+  const currentProjectName = ref<string | null>(null);
+  const editableOutput = ref(false);
+  const tsxUserEdited = ref(false);
+  const tsxOverrideCode = ref<string | null>(null);
 
   const importMap = reactive(getDefaultImportMap());
   const vueVersion = computed(() => extractVueVersion(importMap) ?? "3.5.26");
@@ -176,6 +190,7 @@ export function useStore(): Store {
           const timing = await compileFile(activeFile.value, compilerOptions);
           Object.assign(compileTiming, timing);
           errors.value = activeFile.value.compiled.errors;
+          clearTsxOverride();
         }
       },
     );
@@ -190,6 +205,7 @@ export function useStore(): Store {
           const timing = await compileFile(file, compilerOptions);
           Object.assign(compileTiming, timing);
           errors.value = file.compiled.errors;
+          clearTsxOverride();
         }
       },
     );
@@ -212,7 +228,12 @@ export function useStore(): Store {
       }),
       (state) => {
         if (saveTimeout) clearTimeout(saveTimeout);
-        saveTimeout = setTimeout(() => serializeToHash(state), 500);
+        saveTimeout = setTimeout(() => {
+          serializeToHash(state);
+          if (currentProjectName.value) {
+            projectStorage.saveProject(currentProjectName.value, state);
+          }
+        }, 500);
       },
       { deep: true },
     );
@@ -308,6 +329,90 @@ export function useStore(): Store {
     }
   }
 
+  function getCurrentState(): SerializedState {
+    return {
+      files: Object.fromEntries(Object.entries(files.value).map(([k, f]) => [k, f.code])),
+      activeFile: activeFilename.value,
+      outputMode: outputMode.value,
+      compilerOptions: { ...compilerOptions },
+      importMap: {
+        imports: { ...importMap.imports },
+        scopes: importMap.scopes ? { ...importMap.scopes } : undefined,
+      },
+      vueVersion: extractVueVersion(importMap) ?? undefined,
+      verterVersion: verterVersion.value,
+      typeChecker: typeChecker.value,
+    };
+  }
+
+  function saveCurrentProject(name?: string) {
+    const projectName = name ?? currentProjectName.value;
+    if (!projectName) return;
+    currentProjectName.value = projectName;
+    projectStorage.saveProject(projectName, getCurrentState());
+  }
+
+  async function loadProject(name: string, state: SerializedState) {
+    // Reset files
+    files.value = {};
+    for (const [filename, code] of Object.entries(state.files)) {
+      files.value[filename] = new File(filename, code);
+    }
+    if (!files.value[mainFile.value]) {
+      files.value[mainFile.value] = new File(mainFile.value, defaultAppCode);
+    }
+
+    // Restore state
+    if (state.activeFile && (files.value[state.activeFile] || state.activeFile === IMPORT_MAP_FILENAME)) {
+      activeFilename.value = state.activeFile;
+    } else {
+      activeFilename.value = mainFile.value;
+    }
+    if (state.outputMode) outputMode.value = state.outputMode;
+    if (state.compilerOptions) Object.assign(compilerOptions, state.compilerOptions);
+    if (state.vueVersion) {
+      const defaults = getDefaultImportMap(state.vueVersion);
+      Object.assign(importMap, defaults);
+    }
+    if (state.importMap?.imports) Object.assign(importMap.imports, state.importMap.imports);
+    if (state.importMap?.scopes) importMap.scopes = state.importMap.scopes;
+    if (state.typeChecker) typeChecker.value = state.typeChecker;
+
+    currentProjectName.value = name;
+    clearTsxOverride();
+
+    // Recompile all files
+    let lastTiming: CompileTiming = { verterNew: null, verterNewJs: null, parseDurationMs: null };
+    for (const file of Object.values(files.value)) {
+      lastTiming = await compileFile(file, compilerOptions);
+    }
+    Object.assign(compileTiming, lastTiming);
+  }
+
+  function deleteCurrentProject(name: string) {
+    projectStorage.deleteProject(name);
+    if (currentProjectName.value === name) {
+      currentProjectName.value = null;
+    }
+  }
+
+  function toggleEditableOutput() {
+    editableOutput.value = !editableOutput.value;
+    if (!editableOutput.value) {
+      clearTsxOverride();
+    }
+  }
+
+  function updateTsxOverride(code: string) {
+    tsxOverrideCode.value = code;
+    tsxUserEdited.value = true;
+  }
+
+  function clearTsxOverride() {
+    tsxOverrideCode.value = null;
+    tsxUserEdited.value = false;
+  }
+
   async function switchVersion(entry: VersionEntry) {
     versionLoading.value = true;
     try {
@@ -354,5 +459,17 @@ export function useStore(): Store {
     switchVerterVersion: switchVersion,
     setVueVersion,
     vueVersion,
+    // Project management
+    currentProjectName,
+    saveProject: saveCurrentProject,
+    loadProject,
+    deleteProject: deleteCurrentProject,
+    // Editable output
+    editableOutput,
+    tsxUserEdited,
+    tsxOverrideCode,
+    toggleEditableOutput,
+    updateTsxOverride,
+    clearTsxOverride,
   }) as Store;
 }

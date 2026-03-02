@@ -407,7 +407,7 @@ fn build_event_callback_body(
 fn process_v_model<'alloc>(
     prop: &NodeProp,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
-    _el: &ElementNode,
+    el: &ElementNode,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
@@ -461,16 +461,31 @@ fn process_v_model<'alloc>(
         )
     };
 
-    // Build the replacement: prop={expr} event={handler} [modifiers={...}]
+    // Build the replacement.
+    // For native HTML elements, use the actual DOM property (value/checked)
+    // and a valid JSX event handler (onInput/onChange).
+    // For components, use modelValue prop + spread for the event handler
+    // (since "onUpdate:modelValue" is not a valid JSX attribute name).
+    let is_native = el.tag_type.is_element();
+
     let mut replacement = if is_dynamic_arg {
-        // Dynamic: use spread syntax for computed prop names
+        // Dynamic: always use spread syntax for computed prop names
         format!(
             "{{...{{{}:{}, \"{}\":($event: any) => (({}) = $event)}}}}",
             value_prop, resolved, update_event, resolved
         )
-    } else {
+    } else if is_native {
+        // Native element: use DOM property + native event handler
+        let tag = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+        let (dom_prop, event_name) = native_vmodel_prop_and_event(el, source, tag);
         format!(
-            "{}={{{}}} \"{}\"={{($event: any) => (({}) = $event)}}",
+            "{}={{{}}} {}={{($event: any) => (({}) = $event)}}",
+            dom_prop, resolved, event_name, resolved
+        )
+    } else {
+        // Component: modelValue + spread for event handler
+        format!(
+            "{}={{{}}} {{...{{\"{}\":($event: any) => (({}) = $event)}}}}",
             value_prop, resolved, update_event, resolved
         )
     };
@@ -492,6 +507,37 @@ fn process_v_model<'alloc>(
     }
 
     out.overwrite(prop.start, prop_end, &replacement);
+}
+
+/// Determine the DOM property and event handler for v-model on native elements.
+/// Returns (prop_name, event_name) — both are valid JSX attribute identifiers.
+fn native_vmodel_prop_and_event(
+    el: &ElementNode,
+    source: &str,
+    tag: &str,
+) -> (&'static str, &'static str) {
+    match tag {
+        "input" => {
+            // Check for type="checkbox" or type="radio"
+            for prop in &el.props {
+                if !prop.is_directive {
+                    let name = &source[prop.start as usize..prop.name_end as usize];
+                    if name == "type" {
+                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                            let type_value = &source[vs as usize..ve as usize];
+                            if type_value == "checkbox" || type_value == "radio" {
+                                return ("checked", "onChange");
+                            }
+                        }
+                    }
+                }
+            }
+            ("value", "onInput")
+        }
+        "select" => ("value", "onChange"),
+        "textarea" => ("value", "onInput"),
+        _ => ("value", "onInput"),
+    }
 }
 
 /// Process `v-html="expr"` → `innerHTML={expr}`.

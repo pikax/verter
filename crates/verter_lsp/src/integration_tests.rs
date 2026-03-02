@@ -2694,7 +2694,6 @@ const emit = defineEmits<{ change: [v: string] }>();
 
     // All type helpers must come from @verter/types
     assert!(tsx.code.contains("___VERTER___Prettify"));
-    assert!(tsx.code.contains("___VERTER___createMacroReturn"));
     assert!(tsx.code.contains(r#"from "@verter/types""#));
     assert!(!tsx.code.contains(r#"from "$verter/types$""#));
     assert!(
@@ -2794,5 +2793,170 @@ fn verter_types_stub_covers_tsx_imports() {
     assert!(
         stub.contains("defineOptions_Box"),
         "stub must export defineOptions_Box"
+    );
+}
+
+// ─── Hover with MockTypeProvider (regression test for TSGO integration) ───
+
+/// Regression test: verifies the hover merge pipeline that runs in server.rs.
+///
+/// This test exercises the EXACT same code path as the server hover handler:
+/// 1. Open Vue SFC → get verter-only hover
+/// 2. Get TSX + position mapper from registry
+/// 3. Map Vue position → TSX offset (validated)
+/// 4. Query type_provider.get_hover() at that offset
+/// 5. merge_hover() combines verter + TSGO results
+///
+/// If type_provider is None (the bug we're preventing), step 4-5 are skipped
+/// and the merged hover won't contain TSGO type information.
+#[tokio::test]
+async fn integration_hover_merge_with_mock_type_provider() {
+    use crate::documents::line_index::LineIndex;
+    use crate::tsgo::merge;
+    use crate::tsgo::mock::MockTypeProvider;
+    use crate::tsgo::protocol::HoverInfo;
+    use crate::tsgo::traits::TypeProvider;
+
+    let source = r#"<script setup lang="ts">
+const count = 42
+</script>
+
+<template>
+  <div>{{ count }}</div>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+
+    // Step 1: verter-only hover on "count" in template
+    let position = position_of(source, "{{ count }}");
+    // Move to the 'c' in count (skip "{{ ")
+    let position = Position {
+        line: position.line,
+        character: position.character + 3,
+    };
+
+    let doc = registry.get(&uri).unwrap();
+    let analysis = registry.get_analysis(&uri);
+    let blocks = scan_sfc_blocks(&doc.source);
+
+    let verter_hover = hover_at_position(
+        &position,
+        &doc.source,
+        &blocks,
+        analysis.as_ref(),
+        &doc.line_index,
+    );
+
+    // Verter-only hover should exist but NOT contain TSGO type info
+    assert!(
+        verter_hover.is_some(),
+        "verter should provide hover for count"
+    );
+    let verter_text = match &verter_hover.as_ref().unwrap().contents {
+        HoverContents::Markup(m) => m.value.clone(),
+        _ => String::new(),
+    };
+    assert!(
+        !verter_text.contains("const count: 42"),
+        "verter-only hover must NOT contain TSGO type signature (negative assertion)"
+    );
+
+    // Step 2: get TSX + mapper
+    let tsx_response = registry.get_tsx(&uri).expect("TSX should be generated");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("position mapper should exist");
+    let tsx_li = LineIndex::new(&tsx_response.code, registry.encoding());
+
+    // Step 3: map Vue position → TSX offset
+    let tsx_offset =
+        merge::vue_position_to_tsx_offset_validated(&position, &doc.line_index, &mapper, &tsx_li);
+    assert!(
+        tsx_offset.is_some(),
+        "position mapping must succeed for a script binding used in template"
+    );
+    let tsx_offset = tsx_offset.unwrap();
+
+    // Step 4: configure MockTypeProvider with hover at that offset
+    let mock = MockTypeProvider::new();
+    let tsx_path = format!("{}.tsx", crate::documents::uri_to_canonical_id(&uri));
+    mock.set_hover(
+        &tsx_path,
+        tsx_offset,
+        Some(HoverInfo {
+            contents: "const count: 42".to_string(),
+            range_start: None,
+            range_end: None,
+        }),
+    );
+
+    let type_hover = mock.get_hover(&tsx_path, tsx_offset).await.unwrap();
+    assert!(type_hover.is_some(), "mock must return configured hover");
+
+    // Step 5: merge — the exact same call as server.rs:1743
+    let merged = merge::merge_hover(verter_hover, type_hover, &mapper, &tsx_li, &doc.line_index);
+
+    // Positive: merged result contains TSGO type signature
+    assert!(merged.is_some(), "merged hover must exist");
+    let merged_text = match &merged.unwrap().contents {
+        HoverContents::Markup(m) => m.value.clone(),
+        _ => String::new(),
+    };
+    assert!(
+        merged_text.contains("const count: 42"),
+        "merged hover must contain TSGO type signature, got: {merged_text}"
+    );
+    // Negative: confirm mock was called
+    let calls = mock.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|c| matches!(c, crate::tsgo::mock::MockCall::GetHover { .. })),
+        "mock get_hover must have been called"
+    );
+}
+
+/// Regression: hover without type_provider still returns verter-only result.
+#[test]
+fn integration_hover_without_type_provider_returns_verter_only() {
+    let source = r#"<script setup lang="ts">
+const count = 42
+</script>
+
+<template>
+  <div>{{ count }}</div>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let analysis = registry.get_analysis(&uri);
+    let blocks = scan_sfc_blocks(&doc.source);
+
+    let position = position_of(source, "{{ count }}");
+    let position = Position {
+        line: position.line,
+        character: position.character + 3,
+    };
+
+    let hover = hover_at_position(
+        &position,
+        &doc.source,
+        &blocks,
+        analysis.as_ref(),
+        &doc.line_index,
+    );
+
+    // Positive: verter hover exists and has content
+    assert!(hover.is_some(), "verter hover must exist for 'count'");
+    let text = match &hover.unwrap().contents {
+        HoverContents::Markup(m) => m.value.clone(),
+        _ => String::new(),
+    };
+    assert!(!text.is_empty(), "hover content must not be empty");
+
+    // Negative: no TSGO type signature in verter-only mode
+    assert!(
+        !text.contains("const count: 42"),
+        "verter-only hover must NOT contain TSGO type signature"
     );
 }

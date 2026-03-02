@@ -43,6 +43,13 @@ export interface TypeScriptServiceBridge {
     triggerSpan: { start: number; end: number } | null;
     locations: Array<{ start: number; end: number }>;
   }>;
+  /** Ensure the worker has the latest TSX file and source map before LSP operations. */
+  ensureTsxCurrent?: (
+    vueFilename: string,
+    tsxCode: string,
+    vueCode: string,
+    sourceMapJson: string | null,
+  ) => Promise<void>;
 }
 
 // Mapping from analysis completion kind to Monaco CompletionItemKind
@@ -114,56 +121,61 @@ export function registerLspProviders(
 ): monaco.IDisposable[] {
   const disposables: monaco.IDisposable[] = [];
 
+  /** Ensure TSX compilation and worker sync are current before any LSP operation. */
+  async function ensureTsxSynced() {
+    const file = store.activeFile;
+    if (!tsBridge?.ensureTsxCurrent || !file) return;
+    // Force recompile — handles the race where the user just typed but
+    // Vue's async watcher hasn't triggered compileFile yet.
+    // The WASM compile is synchronous (~2ms); the host skips if source unchanged.
+    await store.recompile();
+    const tsxCode = file.compiled.types;
+    if (!tsxCode) return;
+    const sourceMap = file.compiled.typesSourceMap || null;
+    await tsBridge.ensureTsxCurrent(file.filename, tsxCode, file.code, sourceMap);
+  }
+
   // Hover provider
   disposables.push(
     monaco.languages.registerHoverProvider("vue", {
       async provideHover(model, position) {
         const file = store.activeFile;
         const analysis = file?.compiled.analysis;
+        const word = model.getWordAtPosition(position);
+        const offset = model.getOffsetAt(position);
 
-        // Try Verter analysis first
-        if (analysis) {
-          const word = model.getWordAtPosition(position);
-          if (word) {
-            const content = hoverForWord(word.word, analysis);
-            if (content) {
-              return {
-                range: new monaco.Range(
-                  position.lineNumber,
-                  word.startColumn,
-                  position.lineNumber,
-                  word.endColumn,
-                ),
-                contents: [{ value: content }],
-              };
-            }
-          }
-        }
+        const range = word
+          ? new monaco.Range(
+              position.lineNumber,
+              word.startColumn,
+              position.lineNumber,
+              word.endColumn,
+            )
+          : new monaco.Range(
+              position.lineNumber,
+              position.column,
+              position.lineNumber,
+              position.column,
+            );
 
-        // Fall back to TypeScript service
+        // Collect hover content from both sources
+        const contents: monaco.IMarkdownString[] = [];
+
+        // TS type info first (primary)
         if (tsBridge && file) {
-          const offset = model.getOffsetAt(position);
+          await ensureTsxSynced();
           const tsContent = await tsBridge.getHover(file.filename, offset);
-          if (tsContent) {
-            const word = model.getWordAtPosition(position);
-            const range = word
-              ? new monaco.Range(
-                  position.lineNumber,
-                  word.startColumn,
-                  position.lineNumber,
-                  word.endColumn,
-                )
-              : new monaco.Range(
-                  position.lineNumber,
-                  position.column,
-                  position.lineNumber,
-                  position.column,
-                );
-            return { range, contents: [{ value: tsContent }] };
-          }
+          if (tsContent) contents.push({ value: tsContent });
         }
 
-        return null;
+        // Analysis info second (supplementary)
+        if (analysis && word) {
+          const analysisContent = hoverForWord(word.word, analysis);
+          if (analysisContent) contents.push({ value: analysisContent });
+        }
+
+        if (contents.length === 0) return null;
+        return { range, contents };
       },
     }),
   );
@@ -191,9 +203,14 @@ export function registerLspProviders(
         const isInScript = isOffsetInScriptBlock(source, offset);
         const isInTemplate = !isInScript && isOffsetInTemplateBlock(source, offset);
 
+        // Detect member access: cursor right after `.` → only TS member completions
+        const lineContent = model.getLineContent(position.lineNumber);
+        const charBeforeIdx = position.column - 2; // 0-based, column is 1-based
+        const isMemberAccess = charBeforeIdx >= 0 && lineContent[charBeforeIdx] === ".";
+
         let templateCompletionCount = 0;
 
-        if (isInTemplate) {
+        if (isInTemplate && !isMemberAccess) {
           const openFilenames = Object.keys(store.files as Record<string, unknown>);
           const templateCompletions = collectTemplateCompletions({
             source,
@@ -226,8 +243,8 @@ export function registerLspProviders(
           }
         }
 
-        // Analysis completions are still valuable in script and generic expression contexts.
-        if (analysis && (templateCompletionCount === 0 || isInScript)) {
+        // Analysis completions: identifiers/bindings — skip for member access (e.g. `count.`)
+        if (analysis && !isMemberAccess && (templateCompletionCount === 0 || isInScript)) {
           const entries = collectCompletions(analysis, isInScript);
           for (const entry of entries) {
             if (seenLabels.has(entry.label)) continue;
@@ -244,6 +261,7 @@ export function registerLspProviders(
 
         // Merge TS completions
         if (tsBridge && file) {
+          await ensureTsxSynced();
           const tsItems = await tsBridge.getCompletions(file.filename, offset);
           for (const tsItem of tsItems) {
             if (seenLabels.has(tsItem.label)) continue;
@@ -270,6 +288,7 @@ export function registerLspProviders(
         async provideDefinition(model, position) {
           const file = store.activeFile;
           if (!file) return null;
+          await ensureTsxSynced();
           const offset = model.getOffsetAt(position);
           const defs = await tsBridge.getDefinition!(file.filename, offset);
           if (defs.length === 0) return null;
@@ -289,6 +308,7 @@ export function registerLspProviders(
         async provideReferences(model, position) {
           const file = store.activeFile;
           if (!file) return [];
+          await ensureTsxSynced();
           const offset = model.getOffsetAt(position);
           const refs = await tsBridge.getReferences!(file.filename, offset);
           return refs.map((ref) => ({
@@ -307,6 +327,7 @@ export function registerLspProviders(
         async provideDocumentHighlights(model, position) {
           const file = store.activeFile;
           if (!file) return [];
+          await ensureTsxSynced();
           const offset = model.getOffsetAt(position);
           const highlights = await tsBridge.getDocumentHighlights!(file.filename, offset);
           return highlights.map((span) => ({
@@ -325,6 +346,7 @@ export function registerLspProviders(
         async resolveRenameLocation(model, position) {
           const file = store.activeFile;
           if (!file) return null;
+          await ensureTsxSynced();
           const offset = model.getOffsetAt(position);
           const rename = await tsBridge.getRenameLocations!(file.filename, offset);
           if (!rename.canRename || !rename.triggerSpan) return null;
@@ -343,6 +365,7 @@ export function registerLspProviders(
             };
           }
 
+          await ensureTsxSynced();
           const offset = model.getOffsetAt(position);
           const rename = await tsBridge.getRenameLocations!(file.filename, offset);
           if (!rename.canRename) {

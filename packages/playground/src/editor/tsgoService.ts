@@ -207,6 +207,38 @@ export class TsgoService implements TypeScriptServiceBridge {
     return [];
   }
 
+  /**
+   * Ensure the worker file and source map mapper are up to date before LSP operations.
+   */
+  async ensureTsxCurrent(
+    vueFilename: string,
+    tsxCode: string,
+    vueCode: string,
+    sourceMapJson: string | null,
+  ): Promise<void> {
+    if (!this.initialized || !this.available) return;
+    if (this.currentTsxCode === tsxCode && this.currentVueCode === vueCode) return;
+
+    const tsxPath = `/${vueFilename}.tsx`;
+    this.currentTsxPath = tsxPath;
+    this.currentVueCode = vueCode;
+    this.currentTsxCode = tsxCode;
+
+    this.currentMapper =
+      sourceMapJson && sourceMapJson.length > 2
+        ? new SourceMapMapper(sourceMapJson, tsxCode, vueCode)
+        : null;
+
+    const version = (this.fileVersions.get(tsxPath) ?? 0) + 1;
+    this.fileVersions.set(tsxPath, version);
+
+    if (version === 1) {
+      await this.send("openFile", { path: tsxPath, content: tsxCode });
+    } else {
+      await this.send("updateFile", { path: tsxPath, content: tsxCode, version });
+    }
+  }
+
   private handlePushDiagnostics(params: PublishDiagnosticsParams): void {
     if (!this.onDiagnostics || !this.currentVueCode) return;
 

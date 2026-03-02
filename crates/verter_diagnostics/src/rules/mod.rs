@@ -208,6 +208,7 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(vue::VOnStyle));
     registry.register(Box::new(vue::VSlotStyle));
     registry.register(Box::new(vue::PreferTrueAttributeShorthand));
+    registry.register(Box::new(vue::PreferVBindShorthand));
     registry.register(Box::new(vue::NoTemplateTargetBlank));
     registry.register(Box::new(vue::NoVForIndexAsKey));
     registry.register(Box::new(vue::NoConstantCondition));

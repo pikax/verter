@@ -15,17 +15,26 @@
 //! // Hoisted type declarations
 //! interface Foo { ... }
 //!
-//! // TemplateBinding wrapper function
-//! ;function ___VERTER___TemplateBindingFN() {
+//! // Temp variable (outside block scope to avoid TDZ)
+//! const ___VERTER___unwrapped = ___VERTER___shallowUnwrapRef({
+//!     /** My counter */
+//!     count: count as unknown as typeof count,
+//! });
+//!
+//! // Exported TemplateBinding wrapper function
+//! ;export function ___VERTER___TemplateBindingFN() {
 //!   // Setup body (macros boxed, bindings extracted)
 //!   ;type ___VERTER___defineProps_Type=___VERTER___Prettify<Props>;
 //!   const props = defineProps<___VERTER___defineProps_Type>()
 //!   const count = ref(0)
 //!
-//!   ;return {...___VERTER___shallowUnwrapRef({
-//!     count: count as unknown as typeof count,
-//!   }),___VERTER___createMacroReturn({props:{...}})}
-//! }
+//!   // Block scope: destructure from temp with offset comments, then template JSX
+//!   { const {
+//!     /*45,50*/
+//!     count } = ___VERTER___unwrapped;
+//!     <div>{ count }</div>
+//!   } // close block scope
+//! } // close templateBindingFN
 //! ```
 
 use oxc_allocator::Allocator;
@@ -33,6 +42,7 @@ use oxc_ast::ast::{
     Argument, BindingPattern, CallExpression, Declaration, ExportDefaultDeclarationKind,
     Expression, ForStatementInit, Function, ObjectPropertyKind, Statement,
 };
+use oxc_ast::{Comment, CommentContent};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -50,24 +60,18 @@ use crate::utils::oxc::vue::{
 
 use super::{event_to_jsx_name, get_directive_name, TsxGenericInfo, TsxScriptOptions};
 
-// ── Macro Boxing Types ────────────────────────────────────────────
+// ── Macro State Types ────────────────────────────────────────────
 
-/// Accumulated macro processing info for TemplateBinding and type constructs.
+/// Accumulated macro processing info for type constructs.
 #[derive(Debug, Default)]
 struct TsxMacroState {
-    /// Per-macro binding info for createMacroReturn.
+    /// Per-macro binding info.
     macro_bindings: Vec<MacroBindingEntry>,
     /// DefineModel entries.
     model_bindings: Vec<ModelBindingEntry>,
-    /// Whether defineOptions was used (with args), stores the boxed name.
-    define_options_boxed: Option<String>,
-    /// Set of Box helper imports needed (e.g., "defineProps_Box").
-    needed_box_helpers: FxHashSet<String>,
-    /// Whether any macro was processed (determines if createMacroReturn import is needed).
-    has_macros: bool,
 }
 
-/// Info about a boxed macro binding (defineProps, defineEmits, defineSlots, withDefaults).
+/// Info about a macro binding (defineProps, defineEmits, defineSlots, withDefaults).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct MacroBindingEntry {
@@ -77,13 +81,11 @@ struct MacroBindingEntry {
     var_name: Option<String>,
     /// Type alias name if type params were used (e.g., `___VERTER___defineProps_Type`).
     type_name: Option<String>,
-    /// Boxed const name if runtime args were used (e.g., `___VERTER___defineProps_Boxed`).
-    boxed_name: Option<String>,
     /// Whether this macro used type params.
     is_type: bool,
 }
 
-/// Info about a boxed defineModel binding.
+/// Info about a defineModel binding.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct ModelBindingEntry {
@@ -93,8 +95,6 @@ struct ModelBindingEntry {
     var_name: String,
     /// Type alias name if type params were used.
     type_name: Option<String>,
-    /// Boxed const name if runtime args were used.
-    boxed_name: Option<String>,
     /// Whether this model used type params.
     is_type: bool,
 }
@@ -102,7 +102,7 @@ struct ModelBindingEntry {
 /// Shared context for macro processing functions.
 ///
 /// Groups the 4 parameters threaded through `process_single_macro`,
-/// `box_standard_macro`, `process_define_model`, and `process_with_defaults`.
+/// `process_standard_macro`, `process_define_model`, and `process_with_defaults`.
 struct MacroSourceCtx<'a, 'alloc> {
     source: &'a str,
     content_str: &'a str,
@@ -176,18 +176,14 @@ pub fn generate_tsx_script<'alloc>(
         (None, None) => {
             // No script blocks — emit minimal wrapper + full type constructs
             return_close = emit_minimal_wrapper(&mut out, options, 0, template_end);
-            let macro_state = TsxMacroState::default();
-            emit_helper_imports(&mut out, 0, &macro_state, options, &builtin_components);
+            emit_helper_imports(&mut out, 0, options, &builtin_components);
             emit_type_constructs(
                 &mut type_constructs,
                 &None,        // no generics
-                &[],          // no binding names
-                &[],          // no import binding names
-                &[],          // no declaration texts
                 template_ast, // needed for Comp functions
                 source,
                 options,
-                &macro_state,
+                false, // no getCurrentInstance
             );
         }
     }
@@ -247,12 +243,52 @@ fn process_tsx_script_setup<'alloc>(
     let source_type = SourceType::tsx();
     let parser_ret = Parser::new(&oxc_alloc, content_str, source_type).parse();
 
+    // Rewrite `<Type>expr` angle bracket assertions to `(expr as Type)` for TSX validity.
+    // Must run BEFORE the error check because angle bracket assertions like `<string>x`
+    // cause OXC TSX parse errors (parsed as JSX), but are valid TS. The rewrite uses a
+    // separate TS-mode parse and modifies ct directly.
+    rewrite_ts_type_assertions(content_str, content_start, ct);
+
+    // ── Error Recovery: File-Scope Mode ──────────────────────────
+    // When OXC has parse errors (e.g. `count.` during typing), it returns
+    // an empty or partial AST. In this case, keep the script body at file
+    // scope so TS can still resolve variables for IntelliSense, and emit
+    // a minimal TemplateBindingFN wrapper for the template only.
+    //
+    // Only enter error mode if the TS-mode parse also has errors. If only the
+    // TSX parse fails (but TS succeeds), the errors are from angle bracket
+    // type assertions which `rewrite_ts_type_assertions` already handled.
+    if !parser_ret.errors.is_empty() {
+        let ts_alloc = Allocator::default();
+        let ts_check = Parser::new(&ts_alloc, content_str, SourceType::ts()).parse();
+        if !ts_check.errors.is_empty() {
+            return process_tsx_script_setup_error_mode(
+                setup,
+                source,
+                out,
+                type_constructs,
+                options,
+                builtin_components,
+                template_end,
+                hoist_pos,
+            );
+        }
+    }
+
     let parse_result = parse_script_with_companion(
         &parser_ret.program,
         ScriptMode::Setup,
         content_start,
         content_str,
         None, // No companion types needed for TSX — we preserve types as-is
+    );
+
+    // Build binding source info for JSDoc + offset comments
+    let binding_source_info = build_binding_source_info(
+        &parser_ret.program.body,
+        &parser_ret.program.comments,
+        content_str,
+        content_start,
     );
 
     // Infer event-handler parameter types from template usage (v5/process parity).
@@ -276,9 +312,6 @@ fn process_tsx_script_setup<'alloc>(
             out,
         );
     }
-
-    // Rewrite `<Type>expr` angle bracket assertions to `(expr as Type)` for TSX validity.
-    rewrite_ts_type_assertions(content_str, content_start, ct);
 
     // Hoist imports to file top (before component wrapper).
     // Uses move_with_suffix to preserve sourcemap mappings — the moved content
@@ -335,7 +368,7 @@ fn process_tsx_script_setup<'alloc>(
         (None, None)
     };
 
-    // Process macros: box type params and runtime args
+    // Process macros: emit type aliases only (no boxing)
     let mut macro_ctx = MacroSourceCtx {
         source,
         content_str,
@@ -344,6 +377,9 @@ fn process_tsx_script_setup<'alloc>(
     };
     let macro_state = process_macros(&parse_result.items, &mut macro_ctx);
     let out = macro_ctx.out;
+
+    // Detect getCurrentInstance() usage for conditional type emission
+    let has_get_current_instance = detect_get_current_instance(&parser_ret.program.body);
 
     // Build component function wrapper opening
     // Replace <script setup> tag with ___VERTER___TemplateBindingFN function declaration.
@@ -355,72 +391,16 @@ fn process_tsx_script_setup<'alloc>(
         .unwrap_or_default();
     let async_prefix = if parse_result.is_async { "async " } else { "" };
     let wrapper_start = format!(
-        ";{}function {}TemplateBindingFN{}() {{\n",
+        ";export {}function {}TemplateBindingFN{}() {{\n",
         async_prefix, PREFIX, generic_bracket,
     );
     out.overwrite(setup.tag_open.start, setup.tag_open.end, &wrapper_start);
 
-    // Replace </script> tag with setup suffix; emit return + close at template end
+    // Replace </script> tag with block scope opening; close deferred to template end
     if let Some(tag_close) = &setup.tag_close {
-        let mut wrapper_end = String::with_capacity(256);
-
-        // Inject TemplateBinding return statement with bindings and macro metadata
-        let binding_entries: Vec<String> = bindings
-            .keys()
-            .map(|name| format!("{name}: {name} as unknown as typeof {name}", name = name))
-            .collect();
-
-        // Model returns: unwrap ModelRef
-        let model_entries: Vec<String> = macro_state
-            .model_bindings
-            .iter()
-            .map(|m| {
-                format!(
-                    "{}: {{}} as typeof {} extends import('vue').ModelRef<infer V> ? V extends boolean|undefined ? boolean : V & {{b: 1}} : import('vue').UnwrapRef<typeof {}> & {{a: 1}}",
-                    m.model_name, m.var_name, m.var_name,
-                )
-            })
-            .collect();
-
-        // Props spread for TemplateBinding return
-        let props_return: Vec<String> = macro_state
-            .macro_bindings
-            .iter()
-            .filter(|e| e.macro_name == "defineProps" && e.var_name.is_some())
-            .map(|e| {
-                let var = e
-                    .var_name
-                    .as_ref()
-                    .expect("invariant: filtered by var_name.is_some()");
-                let key_type = if let Some(t) = &e.type_name {
-                    format!("keyof {}", t)
-                } else {
-                    format!("keyof typeof {}", var)
-                };
-                format!("...({{}} as Pick<typeof {}, {}>)", var, key_type)
-            })
-            .collect();
-
-        // Build macro return content
-        let macro_return_str = if macro_state.has_macros {
-            let content = build_macro_return_content(&macro_state);
-            format!(",{}createMacroReturn({})", PREFIX, content)
-        } else {
-            String::new()
-        };
-
-        // Combine all return entries
-        let all_return_entries: Vec<&str> = props_return
-            .iter()
-            .map(|s| s.as_str())
-            .chain(binding_entries.iter().map(|s| s.as_str()))
-            .chain(model_entries.iter().map(|s| s.as_str()))
-            .filter(|s| !s.is_empty())
-            .collect();
+        let mut wrapper_end = String::with_capacity(512);
 
         // Inject __props alias so template codegen's `__props.xxx` references resolve.
-        // BindingResolver emits `__props.xxx` for Props bindings, but only `props` (or
-        // the user's variable) is declared by the macro expansion above.
         if let Some(props_var) = macro_state
             .macro_bindings
             .iter()
@@ -430,90 +410,253 @@ fn process_tsx_script_setup<'alloc>(
             wrapper_end.push_str(&format!("\nconst __props = {};", props_var));
         }
 
-        // Build return + function close string
-        let return_close = format!(
-            "\n;return {{...{}shallowUnwrapRef({{{}}}){}}}",
-            PREFIX,
-            all_return_entries.join(",\n"),
-            if macro_return_str.is_empty() {
-                String::new()
-            } else {
-                format!("\n{}", macro_return_str)
-            },
-        );
+        // Declare ___VERTER___instance for instance property access in template.
+        wrapper_end.push_str(&instance_declaration(options.filename));
+
+        // Build block scope with shallowUnwrapRef destructuring.
+        // Includes ALL setup bindings except Props/PropsAliased (accessed via __props).
+        // Imports are already in scope from hoisting, so they're excluded too.
+        // Non-template bindings are intentionally included so that:
+        //  1. IntelliSense always shows unwrapped types in the template
+        //  2. TS flags unused destructured bindings (the LSP remaps these
+        //     diagnostics to the original declaration via the offset comments)
+        let import_names: FxHashSet<&str> = parse_result
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let ScriptItem::Import(imp) = item {
+                    Some(imp.bindings.iter().map(|b| b.name))
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+
+        let setup_bindings: Vec<(&str, BindingType)> = bindings
+            .iter()
+            .filter(|(_, bt)| !bt.is_props() && !matches!(bt, BindingType::PropsAliased))
+            .filter(|(name, _)| {
+                let n: &str = name;
+                !import_names.contains(n)
+            })
+            .map(|(name, bt)| (*name, *bt))
+            .collect();
+
+        if !setup_bindings.is_empty() {
+            let entries: String = setup_bindings
+                .iter()
+                .map(|(name, _)| {
+                    let jsdoc = binding_source_info
+                        .get(name)
+                        .and_then(|info| info.jsdoc.as_deref());
+                    if let Some(jsdoc) = jsdoc {
+                        format!(
+                            "{}\n    {}: {} as unknown as typeof {}",
+                            jsdoc, name, name, name
+                        )
+                    } else {
+                        format!("{}: {} as unknown as typeof {}", name, name, name)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",\n    ");
+
+            // Temp variable OUTSIDE block scope — avoids TDZ where
+            // `const { count } = shallowUnwrapRef({ count: count })` would
+            // self-reference the uninitialized block-scoped `count`.
+            wrapper_end.push_str(&format!(
+                "\nconst {P}unwrapped = {P}shallowUnwrapRef({{\n    {entries}\n  }});\n",
+                P = PREFIX,
+                entries = entries,
+            ));
+            // Block scope with destructuring FROM the temp variable.
+            // Each binding gets an offset comment /*sfc_start,sfc_end*/ for go-to-definition
+            // AND for the LSP to remap "unused variable" diagnostics to the declaration site.
+            //
+            // Split into `const` (truly immutable: SetupConst, LiteralConst) and
+            // `let` (assignable: SetupRef, SetupLet, SetupReactiveConst, SetupMaybeRef)
+            // so that v-model assignment handlers don't trigger TS2588.
+            let const_names: Vec<&str> = setup_bindings
+                .iter()
+                .filter(|(_, bt)| matches!(bt, BindingType::SetupConst | BindingType::LiteralConst))
+                .map(|(name, _)| *name)
+                .collect();
+            let let_names: Vec<&str> = setup_bindings
+                .iter()
+                .filter(|(_, bt)| {
+                    !matches!(bt, BindingType::SetupConst | BindingType::LiteralConst)
+                })
+                .map(|(name, _)| *name)
+                .collect();
+
+            let format_destruct_entries = |names: &[&str]| -> String {
+                names
+                    .iter()
+                    .map(|name| {
+                        if let Some(info) = binding_source_info.get(name) {
+                            format!(
+                                "\n    /*{},{}*/\n    {}",
+                                info.sfc_start, info.sfc_end, name
+                            )
+                        } else {
+                            format!("\n    {}", name)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+
+            let mut destruct_block = String::from("{ ");
+            if !const_names.is_empty() {
+                destruct_block.push_str(&format!(
+                    "const {{ {} }} = {P}unwrapped;",
+                    format_destruct_entries(&const_names),
+                    P = PREFIX,
+                ));
+            }
+            if !let_names.is_empty() {
+                if !const_names.is_empty() {
+                    destruct_block.push(' ');
+                }
+                destruct_block.push_str(&format!(
+                    "let {{ {} }} = {P}unwrapped;",
+                    format_destruct_entries(&let_names),
+                    P = PREFIX,
+                ));
+            }
+            destruct_block.push('\n');
+            wrapper_end.push_str(&destruct_block);
+        } else {
+            wrapper_end.push_str("\n{\n");
+        }
 
         if template_end.is_some() {
-            // Unified CT: script wrapper extends to template end.
-            // At </script>: emit only the setup suffix (e.g., __props alias).
-            wrapper_end.push('\n');
+            // Unified CT: emit block scope opening at </script>.
             out.overwrite(tag_close.start, tag_close.end, &wrapper_end);
 
-            // Return+close is deferred — compile/mod.rs will apply it after
-            // template codegen to avoid interleaving with template mutations.
-            deferred_return_close = Some({
-                let mut tail = return_close;
-                tail.push_str("\n}\n");
-                tail
-            });
+            // Build deferred close: } (block scope) + Comp functions + global fallbacks + } (function)
+            let mut tail = String::with_capacity(512);
+            tail.push_str("\n} // close block scope\n"); // close block scope
+
+            // Emit Comp functions + getRootComponent inside templateBindingFN
+            let gs = generic_info
+                .as_ref()
+                .map(|g| g.source_bracket())
+                .unwrap_or_default();
+            let gn = generic_info
+                .as_ref()
+                .map(|g| g.names_bracket())
+                .unwrap_or_default();
+            let (root_comp_offset, all_comp_offsets) =
+                emit_comp_functions_to_string(&mut tail, &gs, &gn, template_ast, source);
+            // Only emit getRootComponent when there are ref elements
+            if !all_comp_offsets.is_empty() {
+                emit_get_root_component_to_string(&mut tail, &gs, &gn, root_comp_offset);
+            }
+
+            // Emit void references to suppress unused warnings for Comp/getRootComponent
+            if !all_comp_offsets.is_empty() {
+                tail.push_str(&format!(
+                    "\nvoid {P}getRootComponent; void {P}getRootComponentPassedProps;",
+                    P = PREFIX,
+                ));
+            }
+            for offset in &all_comp_offsets {
+                tail.push_str(&format!(
+                    "\nvoid {P}Comp{offset};",
+                    P = PREFIX,
+                    offset = offset,
+                ));
+            }
+
+            // Emit global component fallback consts
+            emit_global_component_fallbacks(&mut tail, template_ast, source, bindings);
+
+            // Emit instance completion probe line (LSP uses this for autocomplete)
+            tail.push_str(&instance_probe_line());
+
+            tail.push_str("\n} // close templateBindingFN\n");
+            deferred_return_close = Some(tail);
         } else {
-            // No template block: emit everything at </script>.
-            wrapper_end.push_str(&return_close);
-            wrapper_end.push_str("\n}\n");
+            // No template: emit block scope + close immediately.
+            wrapper_end.push_str("\n} // close block scope\n");
+            wrapper_end.push_str("\n} // close templateBindingFN\n");
             out.overwrite(tag_close.start, tag_close.end, &wrapper_end);
         }
     }
 
-    // Collect binding names for FullContext emission
-    let binding_names: Vec<String> = bindings.keys().map(|k| k.to_string()).collect();
-
-    // Collect declaration source texts for FullContext body
-    let declaration_texts: Vec<String> = parse_result
-        .items
-        .iter()
-        .filter_map(|item| {
-            if let ScriptItem::Declaration(decl) = item {
-                let abs_start = content_start + decl.span.start;
-                let abs_end = content_start + decl.span.end;
-                Some(source[abs_start as usize..abs_end as usize].to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Collect import binding names for FullContext
-    let import_binding_names: Vec<String> = parse_result
-        .items
-        .iter()
-        .filter_map(|item| {
-            if let ScriptItem::Import(imp) = item {
-                Some(
-                    imp.bindings
-                        .iter()
-                        .map(|b| b.name.to_string())
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                None
-            }
-        })
-        .flatten()
-        .collect();
-
     // Emit helper imports (hoisted before wrapper)
-    emit_helper_imports(out, hoist_pos, &macro_state, options, builtin_components);
+    emit_helper_imports(out, hoist_pos, options, builtin_components);
 
     // Emit type constructs (appended after source map, no sourcemap needed)
     emit_type_constructs(
         type_constructs,
         &generic_info,
-        &binding_names,
-        &import_binding_names,
-        &declaration_texts,
         template_ast,
         source,
         options,
-        &macro_state,
+        has_get_current_instance,
+    );
+
+    deferred_return_close
+}
+
+// ── Script Setup Error Recovery ─────────────────────────────────
+
+/// Error recovery mode for `<script setup>` when OXC has parse errors.
+///
+/// Keeps the script body at **file scope** (no function wrapper) so
+/// TypeScript can still resolve variables for IntelliSense completions.
+/// Emits a minimal `___VERTER___TemplateBindingFN` wrapper for the template
+/// only. Skips shallowUnwrapRef destructuring, macro processing, and
+/// binding extraction since the OXC AST is unreliable.
+#[allow(clippy::too_many_arguments)]
+fn process_tsx_script_setup_error_mode(
+    setup: &RootNodeScript,
+    source: &str,
+    out: &mut CodeGenOutput<'_>,
+    type_constructs: &mut String,
+    options: &TsxScriptOptions<'_>,
+    builtin_components: &[&str],
+    template_end: Option<u32>,
+    hoist_pos: u32,
+) -> Option<String> {
+    // Replace <script setup> tag with newline — script body stays at file scope.
+    out.overwrite(setup.tag_open.start, setup.tag_open.end, "\n");
+
+    // Replace </script> tag with TemplateBindingFN wrapper for template.
+    let mut deferred_return_close: Option<String> = None;
+    if let Some(tag_close) = &setup.tag_close {
+        if template_end.is_some() {
+            // Template exists: open the wrapper, defer the close
+            let mut wrapper_open = format!("\nexport function {}TemplateBindingFN() {{\n", PREFIX);
+            // Declare instance for instance property access in template.
+            wrapper_open.push_str(&instance_declaration(options.filename));
+            out.overwrite(tag_close.start, tag_close.end, &wrapper_open);
+            let mut close = String::from("\n");
+            close.push_str(&instance_probe_line());
+            close.push_str("} // close templateBindingFN\n");
+            deferred_return_close = Some(close);
+        } else {
+            // No template: just remove the tag
+            out.overwrite(tag_close.start, tag_close.end, "\n");
+        }
+    }
+
+    // Emit helper imports (hoisted before script body).
+    // In error mode we still import shallowUnwrapRef — it's harmless and
+    // avoids the need for a separate helper-import variant.
+    emit_helper_imports(out, hoist_pos, options, builtin_components);
+
+    // Emit minimal type constructs (instance type for self-import).
+    emit_type_constructs(
+        type_constructs,
+        &None, // no generic info
+        None,  // no template AST for type constructs
+        source,
+        options,
+        false, // no getCurrentInstance detection
     );
 
     deferred_return_close
@@ -2016,8 +2159,10 @@ fn process_tsx_script_only<'alloc>(
     out.overwrite(script.tag_open.start, script.tag_open.end, "");
     if let Some(tag_close) = &script.tag_close {
         // Append export default at end
-        let mut close = String::with_capacity(32);
+        let mut close = String::with_capacity(128);
         close.push_str("\nexport default __sfc__;\n");
+        // Ambient instance declaration for template property access.
+        close.push_str(&instance_declaration_ambient(options.filename));
         out.overwrite(tag_close.start, tag_close.end, &close);
     }
 
@@ -2032,62 +2177,21 @@ fn process_tsx_script_only<'alloc>(
     }
 
     // Emit helper imports + type constructs (same as template-only and setup paths)
-    let macro_state = TsxMacroState::default();
-    emit_helper_imports(out, hoist_pos, &macro_state, options, builtin_components);
-
-    // Collect binding names for type constructs
-    let binding_names: Vec<String> = bindings.keys().map(|k| k.to_string()).collect();
-
-    // Collect import binding names
-    let import_binding_names: Vec<String> = parse_result
-        .items
-        .iter()
-        .filter_map(|item| {
-            if let ScriptItem::Import(imp) = item {
-                Some(
-                    imp.bindings
-                        .iter()
-                        .map(|b| b.name.to_string())
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                None
-            }
-        })
-        .flatten()
-        .collect();
-
-    // Collect declaration source texts
-    let declaration_texts: Vec<String> = parse_result
-        .items
-        .iter()
-        .filter_map(|item| {
-            if let ScriptItem::Declaration(decl) = item {
-                let abs_start = content_start + decl.span.start;
-                let abs_end = content_start + decl.span.end;
-                Some(source[abs_start as usize..abs_end as usize].to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
+    emit_helper_imports(out, hoist_pos, options, builtin_components);
 
     emit_type_constructs(
         type_constructs,
         &None, // no generics (Options API can't have them)
-        &binding_names,
-        &import_binding_names,
-        &declaration_texts,
         template_ast,
         source,
         options,
-        &macro_state,
+        false, // no getCurrentInstance detection for Options API
     );
 }
 
 // ── Macro Boxing ──────────────────────────────────────────────────
 
-/// Process all macros in the parsed items: box type params and runtime args.
+/// Process all macros in the parsed items: emit type aliases (no boxing).
 fn process_macros(items: &[ScriptItem<'_>], ctx: &mut MacroSourceCtx<'_, '_>) -> TsxMacroState {
     let mut state = TsxMacroState::default();
 
@@ -2100,36 +2204,28 @@ fn process_macros(items: &[ScriptItem<'_>], ctx: &mut MacroSourceCtx<'_, '_>) ->
     state
 }
 
-/// Process a single macro call: box its type params and/or runtime args.
+/// Process a single macro call: emit type alias if type params present.
 fn process_single_macro(
     mac: &ScriptMacro<'_>,
     ctx: &mut MacroSourceCtx<'_, '_>,
     state: &mut TsxMacroState,
 ) {
-    state.has_macros = true;
-
     match mac {
         ScriptMacro::DefineProps {
             span,
             declarator,
             type_params,
-            object_arg,
-            array_arg,
+            object_arg: _,
+            array_arg: _,
         } => {
-            let arg_span = object_arg
-                .as_ref()
-                .map(|o| o.span)
-                .or(array_arg.as_ref().map(|a| a.span));
-            let entry = box_standard_macro(
+            let entry = process_standard_macro(
                 "defineProps",
                 "props",
                 *span,
                 declarator.as_ref(),
                 type_params.as_ref(),
-                arg_span,
                 false,
                 ctx,
-                &mut state.needed_box_helpers,
             );
             state.macro_bindings.push(entry);
         }
@@ -2137,23 +2233,17 @@ fn process_single_macro(
             span,
             declarator,
             type_params,
-            object_arg,
-            array_arg,
+            object_arg: _,
+            array_arg: _,
         } => {
-            let arg_span = object_arg
-                .as_ref()
-                .map(|o| o.span)
-                .or(array_arg.as_ref().map(|a| a.span));
-            let entry = box_standard_macro(
+            let entry = process_standard_macro(
                 "defineEmits",
                 "emits",
                 *span,
                 declarator.as_ref(),
                 type_params.as_ref(),
-                arg_span,
                 false,
                 ctx,
-                &mut state.needed_box_helpers,
             );
             state.macro_bindings.push(entry);
         }
@@ -2162,60 +2252,47 @@ fn process_single_macro(
             declarator,
             type_params,
         } => {
-            let entry = box_standard_macro(
+            let entry = process_standard_macro(
                 "defineSlots",
                 "slots",
                 *span,
                 declarator.as_ref(),
                 type_params.as_ref(),
-                None,
                 false,
                 ctx,
-                &mut state.needed_box_helpers,
             );
             state.macro_bindings.push(entry);
         }
         ScriptMacro::DefineExpose {
             span,
             declarator,
-            object_arg,
+            object_arg: _,
         } => {
-            let arg_span = object_arg.as_ref().map(|o| o.span);
-            // defineExpose is a no-return macro (no variable created when no declarator)
-            let entry = box_standard_macro(
+            let entry = process_standard_macro(
                 "defineExpose",
                 "expose",
                 *span,
                 declarator.as_ref(),
                 None,
-                arg_span,
                 true,
                 ctx,
-                &mut state.needed_box_helpers,
             );
             state.macro_bindings.push(entry);
         }
         ScriptMacro::DefineOptions {
             span,
             declarator,
-            object_arg,
+            object_arg: _,
         } => {
-            let arg_span = object_arg.as_ref().map(|o| o.span);
-            // defineOptions is a no-return macro
-            let entry = box_standard_macro(
+            let entry = process_standard_macro(
                 "defineOptions",
                 "options",
                 *span,
                 declarator.as_ref(),
                 None,
-                arg_span,
                 true,
                 ctx,
-                &mut state.needed_box_helpers,
             );
-            if entry.boxed_name.is_some() {
-                state.define_options_boxed = entry.boxed_name.clone();
-            }
             state.macro_bindings.push(entry);
         }
         ScriptMacro::DefineModel {
@@ -2223,14 +2300,13 @@ fn process_single_macro(
             declarator,
             type_params,
             name_span,
-            options_span,
+            options_span: _,
         } => {
             process_define_model(
                 *span,
                 declarator.as_ref(),
                 type_params.as_ref(),
                 *name_span,
-                *options_span,
                 ctx,
                 state,
             );
@@ -2238,17 +2314,15 @@ fn process_single_macro(
         ScriptMacro::WithDefaults {
             span,
             declarator,
-            define_props_span,
+            define_props_span: _,
             define_props_type_params,
             defaults: _,
-            defaults_arg_span,
+            defaults_arg_span: _,
         } => {
             process_with_defaults(
                 *span,
                 declarator.as_ref(),
-                *define_props_span,
                 define_props_type_params.as_ref(),
-                *defaults_arg_span,
                 ctx,
                 state,
             );
@@ -2256,39 +2330,32 @@ fn process_single_macro(
     }
 }
 
-/// Box a standard macro (defineProps, defineEmits, defineSlots, defineExpose, defineOptions).
+/// Process a standard macro (defineProps, defineEmits, defineSlots, defineExpose, defineOptions).
 ///
 /// For type params: emit type alias, replace type param in call with alias name.
-/// For runtime args: emit boxed const, replace arg in call with boxed name.
 /// For no-declarator non-no-return macros: prepend `const ___VERTER___xxx=`.
 #[allow(clippy::too_many_arguments)]
-fn box_standard_macro(
+fn process_standard_macro(
     macro_name: &str,
     var_suffix: &str,
     call_span: crate::common::Span,
     declarator: Option<&MacroDeclarator<'_>>,
     type_params: Option<&MacroTypeParams>,
-    arg_span: Option<crate::common::Span>,
     is_no_return: bool,
     ctx: &mut MacroSourceCtx<'_, '_>,
-    needed_helpers: &mut FxHashSet<String>,
 ) -> MacroBindingEntry {
     let type_name_str = format!("{}{}_Type", PREFIX, macro_name);
-    let boxed_name_str = format!("{}{}_Boxed", PREFIX, macro_name);
-    let box_fn_name = format!("{}{}_Box", PREFIX, macro_name);
     let auto_var_name = format!("{}{}", PREFIX, var_suffix);
 
     let has_type_params = type_params.is_some();
-    let has_args = arg_span.is_some();
 
     // Determine the statement start position for prepending
     let stmt_start = declarator
         .map(|d| ctx.content_start + d.statement_span.start)
         .unwrap_or(ctx.content_start + call_span.start);
 
-    // 1. Box type params: emit type alias, replace type param content with alias name
+    // Emit type alias for type params
     if let Some(tp) = type_params {
-        // type_params spans are already absolute (include content_offset)
         let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
         let needs_prettify = !is_simple_type_reference(type_text);
 
@@ -2299,31 +2366,12 @@ fn box_standard_macro(
         };
         ctx.out.prepend_alloc(stmt_start, &type_decl);
 
-        // Replace type arg content with alias name (type_span is already absolute)
+        // Replace type arg content with alias name
         ctx.out
             .overwrite(tp.type_span.start, tp.type_span.end, &type_name_str);
-
-        needed_helpers.insert(format!("{}_Box", macro_name));
     }
 
-    // 2. Box runtime args: emit boxed const, replace arg with boxed name
-    if let Some(a_span) = arg_span {
-        // arg spans are relative to content_str
-        let arg_text = &ctx.content_str[a_span.start as usize..a_span.end as usize];
-        let abs_arg_start = ctx.content_start + a_span.start;
-        let abs_arg_end = ctx.content_start + a_span.end;
-
-        let boxed_decl = format!(";const {}={}({});", boxed_name_str, box_fn_name, arg_text);
-        ctx.out.prepend_alloc(stmt_start, &boxed_decl);
-
-        // Replace arg with boxed name
-        ctx.out
-            .overwrite(abs_arg_start, abs_arg_end, &boxed_name_str);
-
-        needed_helpers.insert(format!("{}_Box", macro_name));
-    }
-
-    // 3. Add variable assignment if no declarator and not a no-return macro
+    // Add variable assignment if no declarator and not a no-return macro
     if declarator.is_none() && !is_no_return {
         let call_abs_start = ctx.content_start + call_span.start;
         ctx.out
@@ -2349,26 +2397,22 @@ fn box_standard_macro(
         } else {
             None
         },
-        boxed_name: if has_args { Some(boxed_name_str) } else { None },
         is_type: has_type_params,
     }
 }
 
-/// Process defineModel macro: handles named models with tuple spread.
+/// Process defineModel macro.
 fn process_define_model(
     call_span: crate::common::Span,
     declarator: Option<&MacroDeclarator<'_>>,
     type_params: Option<&MacroTypeParams>,
     name_span: Option<crate::common::Span>,
-    options_span: Option<crate::common::Span>,
     ctx: &mut MacroSourceCtx<'_, '_>,
     state: &mut TsxMacroState,
 ) {
     // Determine model name
     let model_name = if let Some(ns) = name_span {
-        // name_span is relative to content_str
         let name_text = &ctx.content_str[ns.start as usize..ns.end as usize];
-        // Strip quotes
         name_text.trim_matches('\'').trim_matches('"').to_string()
     } else {
         "modelValue".to_string()
@@ -2376,21 +2420,15 @@ fn process_define_model(
 
     let prepend = format!("{}_", model_name);
     let type_name_str = format!("{}{}defineModel_Type", PREFIX, prepend);
-    let boxed_name_str = format!("{}{}defineModel_Boxed", PREFIX, prepend);
-    // TS v5 parity: box function is always shared `___VERTER___defineModel_Box`,
-    // NOT per-model `___VERTER___title_defineModel_Box`. The per-model prefix
-    // only applies to the Boxed const and Type alias.
-    let box_fn_name = format!("{}defineModel_Box", PREFIX);
     let auto_var_name = format!("{}models_{}", PREFIX, model_name);
 
     let has_type_params = type_params.is_some();
-    let has_args = name_span.is_some() || options_span.is_some();
 
     let stmt_start = declarator
         .map(|d| ctx.content_start + d.statement_span.start)
         .unwrap_or(ctx.content_start + call_span.start);
 
-    // Box type params
+    // Emit type alias for type params
     if let Some(tp) = type_params {
         let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
         let needs_prettify = !is_simple_type_reference(type_text);
@@ -2405,60 +2443,6 @@ fn process_define_model(
         // Replace type arg content with alias name
         ctx.out
             .overwrite(tp.type_span.start, tp.type_span.end, &type_name_str);
-
-        state
-            .needed_box_helpers
-            .insert("defineModel_Box".to_string());
-    }
-
-    // Box runtime args (name + options): defineModel_Box returns tuple [name, options]
-    if has_args {
-        let mut args_text = String::new();
-        if let Some(ns) = name_span {
-            let text = &ctx.content_str[ns.start as usize..ns.end as usize];
-            args_text.push_str(text);
-        }
-        if let Some(os) = options_span {
-            if !args_text.is_empty() {
-                args_text.push_str(", ");
-            }
-            let text = &ctx.content_str[os.start as usize..os.end as usize];
-            args_text.push_str(text);
-        }
-
-        // Emit boxed const — include type params if present (TS v5 parity)
-        let type_param_str = if let Some(tp) = type_params {
-            let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
-            format!("<{}>", type_text)
-        } else {
-            String::new()
-        };
-        let boxed_decl = format!(
-            ";const {}={}{}({});",
-            boxed_name_str, box_fn_name, type_param_str, args_text
-        );
-        ctx.out.prepend_alloc(stmt_start, &boxed_decl);
-
-        // Replace all args in the call with spread from boxed tuple
-        // For named model: defineModel('name', opts) → defineModel(Boxed[0], Boxed[1])
-        let first_arg_start = name_span.unwrap_or_else(|| {
-            options_span.expect("invariant: has_args guarantees at least one span")
-        });
-        let last_arg_end = options_span.unwrap_or_else(|| {
-            name_span.expect("invariant: has_args guarantees at least one span")
-        });
-        let abs_first = ctx.content_start + first_arg_start.start;
-        let abs_last = ctx.content_start + last_arg_end.end;
-
-        // TS v5 parity: ALWAYS use [0],[1] indexing for defineModel args,
-        // regardless of whether it's name-only, options-only, or both.
-        // defineModel_Box returns a tuple and the call must spread it back.
-        let replacement = format!("{}[0],{}[1]", boxed_name_str, boxed_name_str);
-        ctx.out.overwrite(abs_first, abs_last, &replacement);
-
-        state
-            .needed_box_helpers
-            .insert("defineModel_Box".to_string());
     }
 
     // Add variable assignment if no declarator
@@ -2480,7 +2464,6 @@ fn process_define_model(
         } else {
             None
         },
-        boxed_name: if has_args { Some(boxed_name_str) } else { None },
         is_type: has_type_params,
     });
 }
@@ -2489,15 +2472,11 @@ fn process_define_model(
 fn process_with_defaults(
     call_span: crate::common::Span,
     declarator: Option<&MacroDeclarator<'_>>,
-    define_props_span: Option<crate::common::Span>,
     define_props_type_params: Option<&MacroTypeParams>,
-    defaults_arg_span: Option<crate::common::Span>,
     ctx: &mut MacroSourceCtx<'_, '_>,
     state: &mut TsxMacroState,
 ) {
     let type_name_str = format!("{}defineProps_Type", PREFIX);
-    let wd_boxed_name = format!("{}withDefaults_Boxed", PREFIX);
-    let wd_box_fn = format!("{}withDefaults_Box", PREFIX);
     let auto_var_name = format!("{}props", PREFIX);
 
     let has_type_params = define_props_type_params.is_some();
@@ -2506,7 +2485,7 @@ fn process_with_defaults(
         .map(|d| ctx.content_start + d.statement_span.start)
         .unwrap_or(ctx.content_start + call_span.start);
 
-    // Box inner defineProps type params
+    // Emit type alias for inner defineProps type params
     if let Some(tp) = define_props_type_params {
         let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
         let needs_prettify = !is_simple_type_reference(type_text);
@@ -2521,80 +2500,6 @@ fn process_with_defaults(
         // Replace type arg in the inner defineProps
         ctx.out
             .overwrite(tp.type_span.start, tp.type_span.end, &type_name_str);
-
-        state
-            .needed_box_helpers
-            .insert("defineProps_Box".to_string());
-    }
-
-    // Names for boxing the inner defineProps args (runtime props case)
-    let dp_boxed_name = format!("{}defineProps_Boxed", PREFIX);
-    let dp_box_fn = format!("{}defineProps_Box", PREFIX);
-
-    // Box defaults arg — withDefaults_Box(propsCall, defaultsObj)
-    let has_defaults = defaults_arg_span.is_some();
-    // Track whether we boxed the inner defineProps args (runtime props only)
-    let mut boxed_define_props = false;
-
-    if let Some(d_span) = defaults_arg_span {
-        let arg_text = &ctx.content_str[d_span.start as usize..d_span.end as usize];
-
-        // Build the first arg (the defineProps call text for the boxed declaration)
-        let dp_call_text = if has_type_params {
-            // Type was already aliased above — use the alias name
-            format!("defineProps<{}>()", type_name_str)
-        } else if let Some(dp_span) = define_props_span {
-            // Runtime props: wrap inner args with defineProps_Box and capture in dp_boxed_name
-            // TS v5 parity: defineProps(DP_Boxed=DP_Box({bar: String}))
-            let full_dp_call =
-                ctx.content_str[dp_span.start as usize..dp_span.end as usize].to_string();
-            if let Some(paren_pos) = full_dp_call.find('(') {
-                let dp_args = &full_dp_call[paren_pos + 1..full_dp_call.len() - 1];
-                if !dp_args.trim().is_empty() {
-                    boxed_define_props = true;
-                    state
-                        .needed_box_helpers
-                        .insert("defineProps_Box".to_string());
-                    format!("defineProps({}={}({}))", dp_boxed_name, dp_box_fn, dp_args)
-                } else {
-                    full_dp_call
-                }
-            } else {
-                full_dp_call
-            }
-        } else {
-            "defineProps()".to_string()
-        };
-
-        // Build the boxed declaration, optionally prepended by `let dp_boxed_name;`
-        let let_decl = if boxed_define_props {
-            format!(";let {};", dp_boxed_name)
-        } else {
-            String::new()
-        };
-        let boxed_decl = format!(
-            "{}const {}={}({}, {});",
-            let_decl, wd_boxed_name, wd_box_fn, dp_call_text, arg_text
-        );
-        ctx.out.prepend_alloc(stmt_start, &boxed_decl);
-
-        // TS v5 parity: overwrite both args of withDefaults with [0]/[1] indexing.
-        // Replace from defineProps call start to defaults arg end.
-        let replacement = format!("{}[0],{}[1]", wd_boxed_name, wd_boxed_name);
-        if let Some(dp_span) = define_props_span {
-            let dp_abs_start = ctx.content_start + dp_span.start;
-            let def_abs_end = ctx.content_start + d_span.end;
-            ctx.out.overwrite(dp_abs_start, def_abs_end, &replacement);
-        } else {
-            // Fallback: only overwrite the defaults arg
-            let abs_start = ctx.content_start + d_span.start;
-            let abs_end = ctx.content_start + d_span.end;
-            ctx.out.overwrite(abs_start, abs_end, &replacement);
-        }
-
-        state
-            .needed_box_helpers
-            .insert("withDefaults_Box".to_string());
     }
 
     // Add variable assignment if no declarator
@@ -2608,32 +2513,16 @@ fn process_with_defaults(
         .and_then(|d| d.name.map(|n| n.to_string()))
         .unwrap_or_else(|| auto_var_name.clone());
 
-    // Register both defineProps and withDefaults bindings
+    // Register defineProps binding (withDefaults wraps it)
     state.macro_bindings.push(MacroBindingEntry {
         macro_name: "defineProps".to_string(),
-        var_name: Some(effective_var_name.clone()),
+        var_name: Some(effective_var_name),
         type_name: if has_type_params {
             Some(type_name_str)
         } else {
             None
         },
-        boxed_name: if boxed_define_props {
-            Some(dp_boxed_name)
-        } else {
-            None
-        },
         is_type: has_type_params,
-    });
-    state.macro_bindings.push(MacroBindingEntry {
-        macro_name: "withDefaults".to_string(),
-        var_name: Some(effective_var_name),
-        type_name: None,
-        boxed_name: if has_defaults {
-            Some(wd_boxed_name)
-        } else {
-            None
-        },
-        is_type: false,
     });
 }
 
@@ -2654,79 +2543,185 @@ fn is_simple_type_reference(type_text: &str) -> bool {
             .is_some_and(|c| c.is_alphabetic() || c == '_')
 }
 
-/// Build the `createMacroReturn({...})` content string from macro state.
-fn build_macro_return_content(state: &TsxMacroState) -> String {
-    let mut parts = Vec::new();
-
-    for entry in &state.macro_bindings {
-        let name = normalise_define_name(&entry.macro_name);
-        let info_str = build_macro_info_string(
-            entry.var_name.as_deref(),
-            entry.type_name.as_deref(),
-            entry.boxed_name.as_deref(),
-        );
-        if !info_str.is_empty() {
-            parts.push(format!("{}:{{{}}}", name, info_str));
+/// Detect if script setup body contains a `getCurrentInstance()` call.
+fn detect_get_current_instance(body: &[Statement<'_>]) -> bool {
+    for stmt in body {
+        if detect_gci_in_stmt(stmt) {
+            return true;
         }
     }
+    false
+}
 
-    if !state.model_bindings.is_empty() {
-        let model_entries: Vec<String> = state
-            .model_bindings
-            .iter()
-            .map(|m| {
-                let info_str = build_macro_info_string(
-                    Some(&m.var_name),
-                    m.type_name.as_deref(),
-                    m.boxed_name.as_deref(),
-                );
-                format!("{}:{{{}}}", m.model_name, info_str)
+fn detect_gci_in_stmt(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::VariableDeclaration(var_decl) => {
+            for decl in &var_decl.declarations {
+                if let Some(init) = &decl.init {
+                    if detect_gci_in_expr(init) {
+                        return true;
+                    }
+                }
+            }
+        }
+        Statement::ExpressionStatement(expr_stmt) => {
+            if detect_gci_in_expr(&expr_stmt.expression) {
+                return true;
+            }
+        }
+        Statement::ReturnStatement(ret) => {
+            if let Some(arg) = &ret.argument {
+                if detect_gci_in_expr(arg) {
+                    return true;
+                }
+            }
+        }
+        Statement::BlockStatement(block) => {
+            for s in &block.body {
+                if detect_gci_in_stmt(s) {
+                    return true;
+                }
+            }
+        }
+        Statement::IfStatement(if_stmt) => {
+            if detect_gci_in_expr(&if_stmt.test) || detect_gci_in_stmt(&if_stmt.consequent) {
+                return true;
+            }
+            if let Some(alt) = &if_stmt.alternate {
+                if detect_gci_in_stmt(alt) {
+                    return true;
+                }
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn detect_gci_in_expr(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::CallExpression(call) => {
+            if let Some(name) = callee_identifier_name(&call.callee) {
+                if name == "getCurrentInstance" {
+                    return true;
+                }
+            }
+            if detect_gci_in_expr(&call.callee) {
+                return true;
+            }
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    if detect_gci_in_expr(e) {
+                        return true;
+                    }
+                }
+            }
+        }
+        Expression::AssignmentExpression(ae) => {
+            if detect_gci_in_expr(&ae.right) {
+                return true;
+            }
+        }
+        Expression::ParenthesizedExpression(p) => {
+            if detect_gci_in_expr(&p.expression) {
+                return true;
+            }
+        }
+        Expression::ConditionalExpression(c) => {
+            if detect_gci_in_expr(&c.test)
+                || detect_gci_in_expr(&c.consequent)
+                || detect_gci_in_expr(&c.alternate)
+            {
+                return true;
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            if detect_gci_in_expr(&l.left) || detect_gci_in_expr(&l.right) {
+                return true;
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Emit global component fallback consts for unresolved components inside templateBindingFN.
+fn emit_global_component_fallbacks(
+    buf: &mut String,
+    template_ast: Option<&TemplateAst>,
+    source: &str,
+    bindings: &FxHashMap<&str, BindingType>,
+) {
+    let ast = match template_ast {
+        Some(a) => a,
+        None => return,
+    };
+
+    let binding_names: FxHashSet<&str> = bindings.keys().copied().collect();
+    let mut seen = FxHashSet::default();
+
+    for node in &ast.nodes {
+        if let AstNodeKind::Element(ref el) = node.kind {
+            if !el.tag_type.is_component() {
+                continue;
+            }
+            let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
+
+            // Skip builtins
+            if crate::template::code_gen::shared::helpers::is_builtin_component(tag_name).is_some()
+            {
+                continue;
+            }
+
+            // Convert to PascalCase for binding lookup
+            let pascal = to_pascal_case(tag_name);
+            if binding_names.contains(pascal.as_str()) || binding_names.contains(tag_name) {
+                continue;
+            }
+
+            // Skip member expressions like Foo.Bar
+            if tag_name.contains('.') {
+                continue;
+            }
+
+            if seen.insert(pascal.clone()) {
+                use std::fmt::Write;
+                write!(
+                    buf,
+                    "\nconst {pascal} = {{}} as import('vue').GlobalComponents extends {{ {pascal}: infer C }} ? C : unknown;",
+                    pascal = pascal,
+                )
+                .expect("write to String is infallible");
+            }
+        }
+    }
+}
+
+/// Convert a kebab-case or camelCase tag name to PascalCase.
+fn to_pascal_case(tag: &str) -> String {
+    if tag.contains('-') {
+        tag.split('-')
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(c) => {
+                        let upper: String = c.to_uppercase().collect();
+                        format!("{}{}", upper, chars.as_str())
+                    }
+                    None => String::new(),
+                }
             })
-            .collect();
-        parts.push(format!("model:{{{}}}", model_entries.join(",")));
-    }
-
-    format!("{{{}}}", parts.join(","))
-}
-
-/// Build a single macro info string: `"value":{} as typeof x,"type":{} as T`.
-fn build_macro_info_string(
-    var_name: Option<&str>,
-    type_name: Option<&str>,
-    boxed_name: Option<&str>,
-) -> String {
-    let mut parts = Vec::new();
-    if let Some(v) = var_name {
-        parts.push(format!("\"value\":{{}} as typeof {}", v));
-    }
-    if let Some(t) = type_name {
-        parts.push(format!("\"type\":{{}} as {}", t));
-    }
-    if let Some(o) = boxed_name {
-        parts.push(format!("\"object\":{{}} as typeof {}", o));
-    }
-    // If no type_name and no boxed_name but we have var_name, also emit object
-    if type_name.is_none() && boxed_name.is_none() {
-        if let Some(v) = var_name {
-            parts.push(format!("\"object\":{{}} as typeof {}", v));
-        }
-    }
-    parts.join(",")
-}
-
-/// Strip "define" prefix and lowercase first char: "defineProps" → "props".
-fn normalise_define_name(name: &str) -> String {
-    if let Some(rest) = name.strip_prefix("define") {
-        let mut chars = rest.chars();
+            .collect()
+    } else {
+        // Already PascalCase or camelCase — capitalize first letter
+        let mut chars = tag.chars();
         match chars.next() {
             Some(c) => {
-                let lower: String = c.to_lowercase().collect();
-                format!("{}{}", lower, chars.as_str())
+                let upper: String = c.to_uppercase().collect();
+                format!("{}{}", upper, chars.as_str())
             }
-            None => name.to_string(),
+            None => String::new(),
         }
-    } else {
-        name.to_string()
     }
 }
 
@@ -2738,21 +2733,19 @@ fn emit_minimal_wrapper(
     pos: u32,
     template_end: Option<u32>,
 ) -> Option<String> {
-    let _ = options; // suppress unused warning
     if template_end.is_some() {
-        // Unified CT: function start at pos, return + close deferred
-        let start = format!("function {}TemplateBindingFN() {{\n", PREFIX);
+        // Unified CT: function start at pos, close deferred
+        let mut start = format!("export function {}TemplateBindingFN() {{\n", PREFIX);
+        // Declare instance for instance property access in template.
+        start.push_str(&instance_declaration(options.filename));
         out.prepend_alloc(pos, &start);
-        Some(format!(
-            "\n;return {{...{}shallowUnwrapRef({{}})}}\n}}\n",
-            PREFIX
-        ))
+        let mut close = String::from("\n");
+        close.push_str(&instance_probe_line());
+        close.push_str("}\n");
+        Some(close)
     } else {
         // No template: emit everything at pos
-        let wrapper = format!(
-            "function {}TemplateBindingFN() {{\n;return {{...{}shallowUnwrapRef({{}})}}\n}}\n",
-            PREFIX, PREFIX,
-        );
+        let wrapper = format!("export function {}TemplateBindingFN() {{\n}}\n", PREFIX,);
         out.prepend_alloc(pos, &wrapper);
         None
     }
@@ -2761,9 +2754,123 @@ fn emit_minimal_wrapper(
 /// Prefix for all emitted ___VERTER___ types/functions.
 const PREFIX: &str = "___VERTER___";
 
-/// Instance keys to omit from the base component type.
-const PATCHED_INSTANCE_KEYS: &str =
-    "\"$\"|\"$data\"|\"$props\"|\"$attrs\"|\"$refs\"|\"$options\"|\"$emit\"|\"$el\"|\"$slots\"";
+/// Emit the `___VERTER___instance` declaration and void suppression.
+///
+/// Uses `import()` type expression to get the full component instance type from the
+/// `.vue.d.ts` default export, providing type checking for `$slots`, `$emit`, `$props`,
+/// `$attrs`, and any custom global properties (e.g., `$t`, `$router`).
+fn instance_declaration(filename: &str) -> String {
+    format!(
+        "\n// @ts-ignore\nlet {P}instance!: InstanceType<import('./{filename}')['default']>;\nvoid {P}instance;\n",
+        P = PREFIX,
+        filename = filename,
+    )
+}
+
+/// Ambient variant for Options API (file scope, no TDZ issues).
+///
+/// Uses `declare let` so the declaration is available regardless of position in file.
+/// Needed because template JSX may appear before the script block.
+fn instance_declaration_ambient(filename: &str) -> String {
+    format!(
+        "\n// @ts-ignore\ndeclare let {P}instance: InstanceType<import('./{filename}')['default']>;\n",
+        P = PREFIX,
+        filename = filename,
+    )
+}
+
+/// Emit the instance completion probe line.
+///
+/// Creates a member-access expression at a known position that the LSP can use
+/// to request TSGO completions for all instance members.
+fn instance_probe_line() -> String {
+    format!("\nvoid ({P}instance).valueOf;\n", P = PREFIX)
+}
+
+/// Info about a binding's position and leading JSDoc.
+struct BindingSourceInfo {
+    /// Leading JSDoc comment text (e.g. `/** My counter */`), if any.
+    jsdoc: Option<String>,
+    /// SFC-absolute byte offset of identifier start.
+    sfc_start: u32,
+    /// SFC-absolute byte offset of identifier end.
+    sfc_end: u32,
+}
+
+/// Find a leading JSDoc comment for a declaration at the given position.
+///
+/// OXC's `Comment.attached_to` is the byte offset of the token the comment precedes.
+/// We match comments where `attached_to == target_start` and the comment is a JSDoc
+/// block comment (starts with `/**`).
+fn find_leading_jsdoc(
+    comments: &[Comment],
+    target_start: u32,
+    content_str: &str,
+) -> Option<String> {
+    for comment in comments {
+        if comment.attached_to == target_start
+            && comment.is_block()
+            && matches!(
+                comment.content,
+                CommentContent::Jsdoc | CommentContent::JsdocLegal
+            )
+        {
+            let text = &content_str[comment.span.start as usize..comment.span.end as usize];
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
+/// Build a map of binding name → source info (JSDoc + SFC-absolute identifier span).
+///
+/// Walks OXC's parsed program body to find variable declarations and function declarations,
+/// extracting identifier spans and any leading JSDoc comments.
+fn build_binding_source_info<'a>(
+    body: &'a [Statement<'a>],
+    comments: &[Comment],
+    content_str: &str,
+    content_start: u32,
+) -> FxHashMap<&'a str, BindingSourceInfo> {
+    let mut info: FxHashMap<&'a str, BindingSourceInfo> = FxHashMap::default();
+
+    for stmt in body {
+        match stmt {
+            Statement::VariableDeclaration(decl) => {
+                let decl_start = decl.span.start;
+                for declarator in &decl.declarations {
+                    if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                        let jsdoc = find_leading_jsdoc(comments, decl_start, content_str);
+                        info.insert(
+                            id.name.as_str(),
+                            BindingSourceInfo {
+                                jsdoc,
+                                sfc_start: content_start + id.span.start,
+                                sfc_end: content_start + id.span.end,
+                            },
+                        );
+                    }
+                }
+            }
+            Statement::FunctionDeclaration(func) => {
+                if let Some(id) = &func.id {
+                    let jsdoc = find_leading_jsdoc(comments, func.span.start, content_str);
+                    info.insert(
+                        id.name.as_str(),
+                        BindingSourceInfo {
+                            jsdoc,
+                            sfc_start: content_start + id.span.start,
+                            sfc_end: content_start + id.span.end,
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    info
+}
 
 /// Ambient module declaration for `@verter/types`.
 ///
@@ -2780,75 +2887,8 @@ const PATCHED_INSTANCE_KEYS: &str =
 const VERTER_TYPES_AMBIENT_MODULE: &str = r#"
 declare module "@verter/types" {
   export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
-  export declare function createMacroReturn<T>(o: T): { ____VERTER___MACRO_RETURN_KEY____: T };
-  export type OmitConstructorSignature<T> = { [K in keyof T]: T[K] };
-  export type ExtractComponentProps<T> = T extends { new (): infer I } ? { [K in keyof I]: I[K] } : {};
   export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
-  export type PublicInstanceFromMacro<Props, Emits, Expose, Slots, Attrs, El extends Element = Element> = {
-    $props: Props; $emit: Emits; $slots: Slots; $attrs: Attrs; $el: El;
-  } & Props & Expose;
   export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
-
-  type Data = Record<string, unknown>;
-  type DefaultFactory<T> = (props: Data) => T | null | undefined;
-  type DefineModelOptions<T = any, G = T, S = T> = { get?: (v: T) => G; set?: (v: S) => any };
-  type InferDefault<P, T> = ((props: P) => T & {}) | (T extends NativeType ? T : never);
-  type InferDefaults<T> = { [K in keyof T]?: InferDefault<T, T[K]> };
-  type NativeType = null | undefined | number | string | boolean | symbol | Function;
-  interface PropOptions<T = any, D = T> {
-    type?: import("vue").PropType<T> | true | null;
-    required?: boolean;
-    default?: D | DefaultFactory<D> | null | undefined | object;
-    validator?(value: unknown, props: Data): boolean;
-  }
-
-  export declare function defineProps_Box<PropNames extends string = string>(props: PropNames[]): PropNames[];
-  export declare function defineProps_Box<PP extends import("vue").ComponentObjectPropsOptions = import("vue").ComponentObjectPropsOptions>(props: PP): PP;
-  export declare function defineProps_Box<TypeProps>(): TypeProps;
-
-  export declare function withDefaults_Box<T, Defaults extends InferDefaults<T>>(props: T, defaults: Defaults): [T, Defaults];
-
-  export declare function defineEmits_Box<EE extends string = string>(emitOptions: EE[]): EE[];
-  export declare function defineEmits_Box<E extends import("vue").EmitsOptions = import("vue").EmitsOptions>(emitOptions: E): E;
-  export declare function defineEmits_Box<T extends import("vue").ComponentTypeEmits>(): T;
-
-  export declare function defineOptions_Box<
-    RawBindings = {},
-    D = {},
-    C extends import("vue").ComputedOptions = {},
-    M extends import("vue").MethodOptions = {},
-    Mixin extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin,
-    Extends extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin,
-    InheritAttrs extends true | false = true,
-    T = Record<string, any>
-  >(
-    options?: T &
-      import("vue").ComponentOptionsBase<{}, RawBindings, D, C, M, Mixin, Extends, {}> & {
-        props?: never;
-        emits?: never;
-        expose?: never;
-        slots?: never;
-        inheritAttrs?: InheritAttrs;
-      }
-  ): T;
-
-  export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-    options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>
-  ): ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>;
-  export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-    options?: PropOptions<T> & DefineModelOptions<T, G, S>
-  ): PropOptions<T> & DefineModelOptions<T, G, S>;
-  export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-    name: string,
-    options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>
-  ): [string, ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>];
-  export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-    name: string,
-    options?: PropOptions<T> & DefineModelOptions<T, G, S>
-  ): [string, PropOptions<T> & DefineModelOptions<T, G, S>];
-
-  export declare function defineExpose_Box<Exposed extends Record<string, any> = Record<string, any>>(exposed?: Exposed): Exposed;
-  export declare function defineSlots_Box<S extends Record<string, any> = Record<string, any>>(): S;
 }
 "#;
 
@@ -2866,75 +2906,8 @@ pub const VERTER_TYPES_STANDALONE_DTS: &str = r#"// Auto-generated by verter-lsp
 // the imports emitted by Verter's TSX codegen.
 
 export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
-export declare function createMacroReturn<T>(o: T): { ____VERTER___MACRO_RETURN_KEY____: T };
-export type OmitConstructorSignature<T> = { [K in keyof T]: T[K] };
-export type ExtractComponentProps<T> = T extends { new (): infer I } ? { [K in keyof I]: I[K] } : {};
 export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
-export type PublicInstanceFromMacro<Props, Emits, Expose, Slots, Attrs, El extends Element = Element> = {
-  $props: Props; $emit: Emits; $slots: Slots; $attrs: Attrs; $el: El;
-} & Props & Expose;
 export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
-
-type Data = Record<string, unknown>;
-type DefaultFactory<T> = (props: Data) => T | null | undefined;
-type DefineModelOptions<T = any, G = T, S = T> = { get?: (v: T) => G; set?: (v: S) => any };
-type InferDefault<P, T> = ((props: P) => T & {}) | (T extends NativeType ? T : never);
-type InferDefaults<T> = { [K in keyof T]?: InferDefault<T, T[K]> };
-type NativeType = null | undefined | number | string | boolean | symbol | Function;
-interface PropOptions<T = any, D = T> {
-  type?: import("vue").PropType<T> | true | null;
-  required?: boolean;
-  default?: D | DefaultFactory<D> | null | undefined | object;
-  validator?(value: unknown, props: Data): boolean;
-}
-
-export declare function defineProps_Box<PropNames extends string = string>(props: PropNames[]): PropNames[];
-export declare function defineProps_Box<PP extends import("vue").ComponentObjectPropsOptions = import("vue").ComponentObjectPropsOptions>(props: PP): PP;
-export declare function defineProps_Box<TypeProps>(): TypeProps;
-
-export declare function withDefaults_Box<T, Defaults extends InferDefaults<T>>(props: T, defaults: Defaults): [T, Defaults];
-
-export declare function defineEmits_Box<EE extends string = string>(emitOptions: EE[]): EE[];
-export declare function defineEmits_Box<E extends import("vue").EmitsOptions = import("vue").EmitsOptions>(emitOptions: E): E;
-export declare function defineEmits_Box<T extends import("vue").ComponentTypeEmits>(): T;
-
-export declare function defineOptions_Box<
-  RawBindings = {},
-  D = {},
-  C extends import("vue").ComputedOptions = {},
-  M extends import("vue").MethodOptions = {},
-  Mixin extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin,
-  Extends extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin,
-  InheritAttrs extends true | false = true,
-  T = Record<string, any>
->(
-  options?: T &
-    import("vue").ComponentOptionsBase<{}, RawBindings, D, C, M, Mixin, Extends, {}> & {
-      props?: never;
-      emits?: never;
-      expose?: never;
-      slots?: never;
-      inheritAttrs?: InheritAttrs;
-    }
-): T;
-
-export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>
-): ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>;
-export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-  options?: PropOptions<T> & DefineModelOptions<T, G, S>
-): PropOptions<T> & DefineModelOptions<T, G, S>;
-export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-  name: string,
-  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>
-): [string, ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>];
-export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-  name: string,
-  options?: PropOptions<T> & DefineModelOptions<T, G, S>
-): [string, PropOptions<T> & DefineModelOptions<T, G, S>];
-
-export declare function defineExpose_Box<Exposed extends Record<string, any> = Record<string, any>>(exposed?: Exposed): Exposed;
-export declare function defineSlots_Box<S extends Record<string, any> = Record<string, any>>(): S;
 "#;
 
 /// Collect Vue built-in component names used in the template AST.
@@ -2984,67 +2957,33 @@ fn collect_builtin_components(
 }
 
 /// Emit helper imports hoisted before the wrapper function.
-/// Imports are conditional based on what macros were used.
 fn emit_helper_imports(
     out: &mut CodeGenOutput<'_>,
     pos: u32,
-    macro_state: &TsxMacroState,
     options: &TsxScriptOptions<'_>,
     builtin_components: &[&str],
 ) {
     use std::fmt::Write;
 
-    let type_imports = Vec::from([
-        "Prettify",
-        "PublicInstanceFromMacro",
-        "ExtractComponentProps",
-        "OmitConstructorSignature",
-    ]);
-
-    let type_import_str: String = type_imports
-        .iter()
-        .map(|name| format!("{} as {P}{}", name, name, P = PREFIX))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let mut runtime_verter_imports = vec!["shallowUnwrapRef", "enhanceElementWithProps"];
-    if macro_state.has_macros {
-        runtime_verter_imports.push("createMacroReturn");
-    }
-    // Box helpers are used as runtime function calls (e.g., `___VERTER___defineOptions_Box(...)`)
-    // so they must be value imports, not type-only imports.
-    for helper in &macro_state.needed_box_helpers {
-        runtime_verter_imports.push(helper);
-    }
-    let runtime_import_str: String = runtime_verter_imports
-        .iter()
-        .map(|name| format!("{} as {P}{}", name, name, P = PREFIX))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let vue_imports = ["defineComponent"];
-
-    let vue_import_str: String = vue_imports
-        .iter()
-        .map(|name| format!("{} as {P}{}", name, name, P = PREFIX))
-        .collect::<Vec<_>>()
-        .join(", ");
-
     let mut imports = String::with_capacity(512);
+
+    // Type imports from @verter/types
     writeln!(
         imports,
-        "import type {{ {} }} from \"{}\";",
-        type_import_str, options.types_module_name
+        "import type {{ Prettify as {P}Prettify }} from \"{}\";",
+        options.types_module_name,
+        P = PREFIX,
     )
     .expect("write to String is infallible");
+
+    // Runtime imports from @verter/types
     writeln!(
         imports,
-        "import {{ {} }} from \"{}\";",
-        runtime_import_str, options.types_module_name
+        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps }} from \"{}\";",
+        options.types_module_name,
+        P = PREFIX,
     )
     .expect("write to String is infallible");
-    writeln!(imports, "import {{ {} }} from \"vue\";", vue_import_str)
-        .expect("write to String is infallible");
 
     // Import built-in components without prefix — template JSX references them by bare name
     if !builtin_components.is_empty() {
@@ -3057,143 +2996,33 @@ fn emit_helper_imports(
 }
 
 /// Emit all type constructs to the `buf` string (no sourcemap).
-#[allow(clippy::too_many_arguments)]
 fn emit_type_constructs(
     buf: &mut String,
-    generic_info: &Option<TsxGenericInfo>,
-    binding_names: &[String],
-    import_binding_names: &[String],
-    declaration_texts: &[String],
-    template_ast: Option<&TemplateAst>,
-    source: &str,
+    _generic_info: &Option<TsxGenericInfo>,
+    _template_ast: Option<&TemplateAst>,
+    _source: &str,
     options: &TsxScriptOptions<'_>,
-    macro_state: &TsxMacroState,
+    _has_get_current_instance: bool,
 ) {
-    // Generic helpers — empty strings when no generics
-    let gs = generic_info
-        .as_ref()
-        .map(|g| g.source_bracket())
-        .unwrap_or_default();
-    let gn = generic_info
-        .as_ref()
-        .map(|g| g.names_bracket())
-        .unwrap_or_default();
-    let gd = generic_info
-        .as_ref()
-        .map(|g| g.declaration_bracket())
-        .unwrap_or_default();
-    let gsn = generic_info
-        .as_ref()
-        .map(|g| g.sanitised_names_bracket())
-        .unwrap_or_default();
-
-    // Emit TemplateBinding type alias (from the TemplateBindingFN wrapper)
-    emit_template_binding_type(buf, &gs, &gn);
-
-    emit_full_context(
-        buf,
-        &gs,
-        &gn,
-        binding_names,
-        import_binding_names,
-        declaration_texts,
-    );
-    let root_comp_offset = emit_comp_functions(buf, &gs, &gn, template_ast, source);
-    emit_get_root_component(buf, &gs, &gn, root_comp_offset);
-    emit_default_component(buf, macro_state);
-    emit_attributes_type(buf, &gs);
-    emit_root_element_types(buf, &gs, &gn);
-    emit_instance_types(buf, &gd, &gsn);
-
-    // Append ambient module declaration so imports from "@verter/types" resolve
-    // without requiring the package in node_modules or TS plugin hooks.
+    // Append ambient module declaration
     if options.embed_ambient_types {
         buf.push_str(VERTER_TYPES_AMBIENT_MODULE);
     }
 }
 
-/// Emit TemplateBinding type alias referencing the TemplateBindingFN return type.
-fn emit_template_binding_type(buf: &mut String, gs: &str, gn: &str) {
-    use std::fmt::Write;
-
-    write!(
-        buf,
-        "\nexport type {P}TemplateBinding{gs}=ReturnType<typeof {P}TemplateBindingFN{gn}>;",
-        P = PREFIX,
-        gs = gs,
-        gn = gn,
-    )
-    .expect("write to String is infallible");
-}
-
-/// Emit ___VERTER___attributes type (empty for now, used in Instance type).
-fn emit_attributes_type(buf: &mut String, gs: &str) {
-    use std::fmt::Write;
-
-    write!(buf, "\ntype {P}attributes{gs}={{}};", P = PREFIX, gs = gs,)
-        .expect("write to String is infallible");
-}
-
-/// Emit FullContext function + type alias.
-/// Includes declaration source text in the body and import binding names.
-fn emit_full_context(
-    buf: &mut String,
-    gs: &str,
-    gn: &str,
-    binding_names: &[String],
-    import_binding_names: &[String],
-    declaration_texts: &[String],
-) {
-    use std::fmt::Write;
-
-    // Combine binding names with import binding names
-    let mut all_names: Vec<&str> = binding_names.iter().map(|s| s.as_str()).collect();
-    for name in import_binding_names {
-        if !all_names.contains(&name.as_str()) {
-            all_names.push(name);
-        }
-    }
-
-    // Build binding entries: `name: {} as typeof name`
-    let binding_entries: String = all_names
-        .iter()
-        .map(|name| format!("{}: {{}} as typeof {}", name, name))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    // Build declaration body content
-    let decl_body = if declaration_texts.is_empty() {
-        String::new()
-    } else {
-        declaration_texts.join("\n")
-    };
-
-    write!(
-        buf,
-        "\n;function {P}FullContextFN{gs}() {{{body};return {P}shallowUnwrapRef({{{entries}}})}};\
-         \nexport type {P}FullContext{gs}=ReturnType<typeof {P}FullContextFN{gn}>;",
-        P = PREFIX,
-        gs = gs,
-        gn = gn,
-        body = decl_body,
-        entries = binding_entries,
-    )
-    .expect("write to String is infallible");
-}
-
-/// Emit Comp{offset} functions for template elements.
-/// Returns the offset of the root element's Comp function (if any).
-///
-/// Recursively walks ALL elements in the template AST (not just root children),
-/// building condition scopes for v-if narrowing guards in each Comp function.
-fn emit_comp_functions(
+/// Emit Comp{offset} functions to a string buffer (inside templateBindingFN).
+/// Returns (root_comp_offset, all_emitted_comp_offsets).
+fn emit_comp_functions_to_string(
     buf: &mut String,
     gs: &str,
     gn: &str,
     template_ast: Option<&TemplateAst>,
     source: &str,
-) -> Option<u32> {
-    let ast = template_ast?;
+) -> (Option<u32>, Vec<u32>) {
+    let ast = match template_ast {
+        Some(a) => a,
+        None => return (None, vec![]),
+    };
 
     let root_children = ast
         .root
@@ -3203,6 +3032,7 @@ fn emit_comp_functions(
         .unwrap_or(&[]);
 
     let mut root_comp_offset: Option<u32> = None;
+    let mut all_comp_offsets: Vec<u32> = Vec::new();
 
     walk_children_for_comp(
         buf,
@@ -3213,12 +3043,46 @@ fn emit_comp_functions(
         root_children,
         &[],
         &mut root_comp_offset,
+        &mut all_comp_offsets,
         true,
     );
 
-    root_comp_offset
+    (root_comp_offset, all_comp_offsets)
 }
 
+/// Emit getRootComponent + getRootComponentPassedProps to a string buffer.
+fn emit_get_root_component_to_string(
+    buf: &mut String,
+    gs: &str,
+    gn: &str,
+    root_comp_offset: Option<u32>,
+) {
+    use std::fmt::Write;
+
+    if let Some(offset) = root_comp_offset {
+        write!(
+            buf,
+            "\nfunction {P}getRootComponent{gs}() {{ return {P}Comp{offset}{gn}(); }}\
+             \nfunction {P}getRootComponentPassedProps{gs}() {{ return {{}}; }}",
+            P = PREFIX,
+            gs = gs,
+            gn = gn,
+            offset = offset,
+        )
+        .expect("write to String is infallible");
+    } else {
+        write!(
+            buf,
+            "\nfunction {P}getRootComponent{gs}() {{ return {{}}; }}\
+             \nfunction {P}getRootComponentPassedProps{gs}() {{ return {{}}; }}",
+            P = PREFIX,
+            gs = gs,
+        )
+        .expect("write to String is infallible");
+    }
+}
+
+/// Emit Comp{offset} functions for template elements.
 /// Recursively walk children to emit Comp functions with condition scope tracking.
 #[allow(clippy::too_many_arguments)]
 fn walk_children_for_comp(
@@ -3230,22 +3094,25 @@ fn walk_children_for_comp(
     children: &[crate::types::NodeId],
     parent_scopes: &[super::condition::ConditionScope],
     root_comp_offset: &mut Option<u32>,
+    all_comp_offsets: &mut Vec<u32>,
     is_root: bool,
 ) {
     for &child_id in children {
         let node = &ast.nodes[child_id.0];
         if let AstNodeKind::Element(el) = &node.kind {
             // Build condition scope using raw expressions (no binding prefixes)
-            // because Comp functions have their own FullContext setup
+            // because Comp functions receive variables from the enclosing scope
             let mut scopes = parent_scopes.to_vec();
             if let Some(scope) = build_condition_scope_raw(el, ast, child_id, source) {
                 scopes.push(scope);
             }
 
-            // Emit Comp function (skip Slot/Template)
-            if !matches!(el.tag_type, TagType::SlotOutlet | TagType::Template) {
+            // Emit Comp function (skip Slot/Template, only for elements with ref)
+            if !matches!(el.tag_type, TagType::SlotOutlet | TagType::Template) && el.v_ref.is_some()
+            {
                 let offset = el.tag_open.start;
                 emit_comp_function_for_element(buf, gs, gn, el, source, offset, &scopes);
+                all_comp_offsets.push(offset);
                 if is_root && root_comp_offset.is_none() {
                     *root_comp_offset = Some(offset);
                 }
@@ -3262,6 +3129,7 @@ fn walk_children_for_comp(
                     &content.children,
                     &scopes,
                     root_comp_offset,
+                    all_comp_offsets,
                     false,
                 );
             }
@@ -3270,7 +3138,7 @@ fn walk_children_for_comp(
 }
 
 /// Build a condition scope using raw source expressions (no binding prefixes).
-/// For use in Comp functions where FullContext provides variables directly.
+/// For use in Comp functions where the enclosing scope provides variables directly.
 fn build_condition_scope_raw(
     el: &ElementNode,
     ast: &TemplateAst,
@@ -3402,123 +3270,6 @@ fn emit_comp_function_for_element(
     }
 }
 
-/// Emit getRootComponent + getRootComponentPassedProps.
-fn emit_get_root_component(buf: &mut String, gs: &str, gn: &str, root_comp_offset: Option<u32>) {
-    use std::fmt::Write;
-
-    if let Some(offset) = root_comp_offset {
-        write!(
-            buf,
-            "\nfunction {P}getRootComponent{gs}() {{ return {P}Comp{offset}{gn}(); }}\
-             \nfunction {P}getRootComponentPassedProps{gs}() {{ return {{}}; }}",
-            P = PREFIX,
-            gs = gs,
-            gn = gn,
-            offset = offset,
-        )
-        .expect("write to String is infallible");
-    } else {
-        write!(
-            buf,
-            "\nfunction {P}getRootComponent{gs}() {{ return {{}}; }}\
-             \nfunction {P}getRootComponentPassedProps{gs}() {{ return {{}}; }}",
-            P = PREFIX,
-            gs = gs,
-        )
-        .expect("write to String is infallible");
-    }
-}
-
-/// Emit default_Component. If defineOptions was used with args, pass the boxed name.
-fn emit_default_component(buf: &mut String, macro_state: &TsxMacroState) {
-    use std::fmt::Write;
-
-    if let Some(boxed) = &macro_state.define_options_boxed {
-        write!(
-            buf,
-            "\n;const {P}default_Component = {P}defineComponent({boxed});",
-            P = PREFIX,
-            boxed = boxed,
-        )
-        .expect("write to String is infallible");
-    } else {
-        write!(
-            buf,
-            "\n;const {P}default_Component = {P}defineComponent({{}});",
-            P = PREFIX,
-        )
-        .expect("write to String is infallible");
-    }
-}
-
-/// Emit RootElement + RootElementProps type aliases.
-fn emit_root_element_types(buf: &mut String, gs: &str, gn: &str) {
-    use std::fmt::Write;
-
-    write!(
-        buf,
-        "\ntype {P}RootElement{gs}=ReturnType<typeof {P}getRootComponent{gn}>;\
-         \ntype {P}RootElementProps{gs}={P}Prettify<Omit<{P}ExtractComponentProps<{P}RootElement{gn}>,keyof ReturnType<typeof {P}getRootComponentPassedProps{gn}>>>;",
-        P = PREFIX,
-        gs = gs,
-        gn = gn,
-    )
-    .expect("write to String is infallible");
-}
-
-/// Emit Instance, Instance_TEST, Component types.
-/// Uses TemplateBinding (not FullContext) and includes attributes type.
-fn emit_instance_types(buf: &mut String, gd: &str, gsn: &str) {
-    use std::fmt::Write;
-
-    // Instance — references TemplateBinding and attributes
-    write!(
-        buf,
-        "\nexport type {P}Instance{gd} = \
-         Omit<InstanceType<typeof {P}default_Component>, {keys}> \
-         & {P}PublicInstanceFromMacro<\
-         {P}TemplateBinding{gsn}, \
-         {{}}&{P}attributes&{P}RootElementProps{gsn}, \
-         {P}RootElement{gsn}, false, true\
-         >;",
-        P = PREFIX,
-        gd = gd,
-        gsn = gsn,
-        keys = PATCHED_INSTANCE_KEYS,
-    )
-    .expect("write to String is infallible");
-
-    // Instance_TEST
-    write!(
-        buf,
-        "\nexport type {P}Instance_TEST{gd} = \
-         Omit<InstanceType<typeof {P}default_Component>, {keys}> \
-         & {P}PublicInstanceFromMacro<\
-         {P}TemplateBinding{gsn}, \
-         {{}}&{P}attributes&{P}RootElementProps{gsn}, \
-         {P}RootElement{gsn}, true, true\
-         >;",
-        P = PREFIX,
-        gd = gd,
-        gsn = gsn,
-        keys = PATCHED_INSTANCE_KEYS,
-    )
-    .expect("write to String is infallible");
-
-    // Component
-    write!(
-        buf,
-        "\nexport declare const {P}Component: {P}OmitConstructorSignature<typeof {P}default_Component> & {{\
-         \n  new{gd}(props?: {P}Instance{gsn}['$props']): {P}Prettify<{P}Instance{gsn}>\
-         \n}};\
-         \nexport default {P}Component;",
-        P = PREFIX,
-        gd = gd,
-        gsn = gsn,
-    )
-    .expect("write to String is infallible");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3547,6 +3298,7 @@ mod tests {
         let options = TsxScriptOptions {
             component_name: "App",
             js_component_name: "App",
+            filename: "App.vue",
             scope_id: "data-v-abc123",
             has_scoped_style: false,
             runtime_module_name: "vue",
@@ -3554,6 +3306,15 @@ mod tests {
             is_vapor: false,
             embed_ambient_types: true,
         };
+
+        // Use unified CT mode: pass template_end so comp functions are emitted in code
+        let template_end = syntax.template_ast().map(|tpl| {
+            tpl.root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(tpl.root.tag_open.end)
+        });
 
         let result = generate_tsx_script(
             syntax.script(),
@@ -3563,8 +3324,13 @@ mod tests {
             &mut ct,
             &alloc,
             &options,
-            None, // template_end: tests use legacy two-CT pattern
+            template_end,
         );
+
+        // Apply deferred return+close after template (same as compile.rs)
+        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
+            ct.prepend_left(tpl_end, return_close);
+        }
 
         // Remove template/style blocks from output
         if let Some(tpl) = syntax.template_ast() {
@@ -3613,6 +3379,90 @@ const msg = 'hello'
         assert!(code.contains("function ___VERTER___TemplateBindingFN()"));
         assert!(code.contains("const msg = 'hello'"));
         assert!(bindings.contains_key("msg"));
+    }
+
+    // ── Instance declaration tests ───────────────────────────────
+
+    #[test]
+    fn instance_declaration_in_script_setup() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup>
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        assert!(
+            code.contains("let ___VERTER___instance!:"),
+            "Should declare instance variable. Got: {}",
+            code
+        );
+        assert!(
+            code.contains("InstanceType<import("),
+            "Should use InstanceType import. Got: {}",
+            code
+        );
+        assert!(
+            code.contains("import('./App.vue')"),
+            "Should reference the component's own .vue file. Got: {}",
+            code
+        );
+        assert!(
+            code.contains("void ___VERTER___instance;"),
+            "Should void-suppress instance. Got: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn instance_probe_line_in_script_setup() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup>
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        assert!(
+            code.contains("(___VERTER___instance).valueOf"),
+            "Should have probe line. Got: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn instance_declaration_in_template_only() {
+        let (code, _) = gen_tsx_script(r#"<template><div>hello</div></template>"#);
+        assert!(
+            code.contains("let ___VERTER___instance!:"),
+            "Template-only SFC should declare instance. Got: {}",
+            code
+        );
+        assert!(
+            code.contains("(___VERTER___instance).valueOf"),
+            "Template-only SFC should have probe line. Got: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn instance_declaration_in_options_api() {
+        let (code, _) = gen_tsx_script(
+            r#"<script>
+export default {
+  data() { return { count: 0 } }
+}
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        assert!(
+            code.contains("declare let ___VERTER___instance:"),
+            "Options API should use ambient instance declaration. Got: {}",
+            code
+        );
+        assert!(
+            code.contains("InstanceType<import("),
+            "Options API should use InstanceType import. Got: {}",
+            code
+        );
     }
 
     #[test]
@@ -3918,8 +3768,8 @@ const msg = 'hello'
             code
         );
         assert!(
-            code.contains("import { defineComponent as ___VERTER___defineComponent }"),
-            "should have defineComponent import: {}",
+            !code.contains("import type { default as ___VERTER___Self }"),
+            "self-import should no longer be emitted: {}",
             code
         );
     }
@@ -3939,119 +3789,57 @@ const msg = 'hello'
         );
     }
 
-    // ── FullContext tests ─────────────────────────────────────────
-
-    #[test]
-    fn full_context_non_generic() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts">
-import { ref } from 'vue'
-const a = ref(0)
-</script>"#,
-        );
-        assert!(
-            tc.contains("function ___VERTER___FullContextFN()"),
-            "non-generic FullContext should have no angle brackets: {}",
-            tc
-        );
-        assert!(
-            tc.contains("___VERTER___shallowUnwrapRef("),
-            "FullContext should use shallowUnwrapRef: {}",
-            tc
-        );
-        assert!(
-            tc.contains(
-                "export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN>;"
-            ),
-            "FullContext type should reference FN: {}",
-            tc
-        );
-    }
-
-    #[test]
-    fn full_context_generic() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts" generic="T">
-const a = {} as unknown as T
-</script>"#,
-        );
-        assert!(
-            tc.contains("function ___VERTER___FullContextFN<T>()"),
-            "generic FullContext should have <T>: {}",
-            tc
-        );
-        assert!(
-            tc.contains("export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>>;"),
-            "generic FullContext type alias: {}",
-            tc
-        );
-    }
-
-    #[test]
-    fn full_context_includes_bindings() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts">
-const foo = 'bar'
-const baz = 123
-</script>"#,
-        );
-        // Both bindings should appear in FullContext
-        assert!(
-            tc.contains("foo: {} as typeof foo"),
-            "should include foo binding: {}",
-            tc
-        );
-        assert!(
-            tc.contains("baz: {} as typeof baz"),
-            "should include baz binding: {}",
-            tc
-        );
-    }
-
     // ── Comp function tests ──────────────────────────────────────
 
     #[test]
     fn comp_function_html_element() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts">
-const msg = 'hello'
+import { ref } from 'vue'
+const el = ref<HTMLDivElement>()
 </script>
-<template><div>{{ msg }}</div></template>"#,
+<template><div ref="el">hello</div></template>"#,
         );
         assert!(
-            tc.contains("___VERTER___enhanceElementWithProps({} as HTMLElementTagNameMap[\"div\"]"),
-            "should emit Comp for div: {}",
-            tc
+            code.contains(
+                "___VERTER___enhanceElementWithProps({} as HTMLElementTagNameMap[\"div\"]"
+            ),
+            "should emit Comp for div with ref in code: {}",
+            code
         );
     }
 
     #[test]
     fn comp_function_component() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts">
+import { ref } from 'vue'
 import MyComp from './MyComp.vue'
+const el = ref()
 </script>
-<template><MyComp /></template>"#,
+<template><MyComp ref="el" /></template>"#,
         );
         assert!(
-            tc.contains("return new MyComp({})"),
-            "should emit new MyComp: {}",
-            tc
+            code.contains("return new MyComp({})"),
+            "should emit new MyComp for component with ref in code: {}",
+            code
         );
     }
 
     #[test]
     fn comp_function_generic() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts" generic="T">
+import { ref } from 'vue'
+const el = ref<HTMLDivElement>()
 const msg = {} as T
 </script>
-<template><div>{{ msg }}</div></template>"#,
+<template><div ref="el">{{ msg }}</div></template>"#,
         );
         assert!(
-            tc.contains("function ___VERTER___Comp") && tc.contains("<T>()"),
-            "Comp function should have generics: {}",
-            tc
+            code.contains("function ___VERTER___Comp") && code.contains("<T>()"),
+            "Comp function should have generics in code: {}",
+            code
         );
     }
 
@@ -4059,46 +3847,50 @@ const msg = {} as T
 
     #[test]
     fn get_root_component_with_template() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts">
-const msg = 'hello'
+import { ref } from 'vue'
+const el = ref<HTMLDivElement>()
 </script>
-<template><div>{{ msg }}</div></template>"#,
+<template><div ref="el">hello</div></template>"#,
         );
         assert!(
-            tc.contains("function ___VERTER___getRootComponent()")
-                && tc.contains("return ___VERTER___Comp"),
-            "getRootComponent should delegate to Comp: {}",
-            tc
+            code.contains("function ___VERTER___getRootComponent()")
+                && code.contains("return ___VERTER___Comp"),
+            "getRootComponent should delegate to Comp in code: {}",
+            code
         );
     }
 
     #[test]
     fn get_root_component_generic() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts" generic="T extends string">
+import { ref } from 'vue'
+const el = ref<HTMLDivElement>()
 const msg = {} as T
 </script>
-<template><div>{{ msg }}</div></template>"#,
+<template><div ref="el">{{ msg }}</div></template>"#,
         );
         assert!(
-            tc.contains("function ___VERTER___getRootComponent<T extends string>()"),
-            "getRootComponent should have generics: {}",
-            tc
+            code.contains("function ___VERTER___getRootComponent<T extends string>()"),
+            "getRootComponent should have generics in code: {}",
+            code
         );
     }
 
     #[test]
     fn get_root_component_no_template() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts">
 const msg = 'hello'
 </script>"#,
         );
+        // No template: getRootComponent is not emitted (nothing to wrap)
         assert!(
-            tc.contains("function ___VERTER___getRootComponent()") && tc.contains("return {};"),
-            "getRootComponent should return empty when no template: {}",
-            tc
+            !code.contains("___VERTER___getRootComponent"),
+            "getRootComponent should NOT be emitted when no template: {}",
+            code
         );
     }
 
@@ -4112,9 +3904,8 @@ const msg = 'hello'
 </script>"#,
         );
         assert!(
-            tc.contains("const ___VERTER___default_Component = ___VERTER___defineComponent({})"),
-            "default_Component should use defineComponent: {}",
-            tc
+            !tc.contains("___VERTER___Component"),
+            "Component export should not be emitted"
         );
     }
 
@@ -4128,23 +3919,8 @@ const msg = 'hello'
 </script>"#,
         );
         assert!(
-            tc.contains("export type ___VERTER___Instance ="),
-            "Instance type should be emitted: {}",
-            tc
-        );
-        assert!(
-            tc.contains("export type ___VERTER___Instance_TEST ="),
-            "Instance_TEST type should be emitted: {}",
-            tc
-        );
-        assert!(
-            tc.contains("export declare const ___VERTER___Component:"),
-            "Component should be emitted: {}",
-            tc
-        );
-        assert!(
-            tc.contains("export default ___VERTER___Component;"),
-            "default export should be emitted: {}",
+            !tc.contains("type ___VERTER___Instance"),
+            "Instance type should no longer be emitted: {}",
             tc
         );
     }
@@ -4157,13 +3933,8 @@ const value = {} as unknown as T
 </script>"#,
         );
         assert!(
-            tc.contains("export type ___VERTER___Instance<__VERTER__TS__T = any>"),
-            "Instance should have sanitised generic: {}",
-            tc
-        );
-        assert!(
-            tc.contains("___VERTER___TemplateBinding<__VERTER__TS__T>"),
-            "Instance should reference TemplateBinding with sanitised name: {}",
+            !tc.contains("type ___VERTER___Instance"),
+            "Instance type should no longer be emitted: {}",
             tc
         );
     }
@@ -4176,8 +3947,8 @@ const value = {} as unknown as T
 </script>"#,
         );
         assert!(
-            tc.contains("export type ___VERTER___Instance<__VERTER__TS__T extends string = any>"),
-            "Instance should have constraint: {}",
+            !tc.contains("type ___VERTER___Instance"),
+            "Instance type should no longer be emitted: {}",
             tc
         );
     }
@@ -4191,22 +3962,8 @@ const v = {} as unknown as V
 </script>"#,
         );
         assert!(
-            tc.contains("<__VERTER__TS__K extends string = any, __VERTER__TS__V = any>"),
-            "Instance should have multiple sanitised generics: {}",
-            tc
-        );
-    }
-
-    #[test]
-    fn component_constructor_generic() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts" generic="T">
-const value = {} as unknown as T
-</script>"#,
-        );
-        assert!(
-            tc.contains("new<__VERTER__TS__T = any>(props?: ___VERTER___Instance<__VERTER__TS__T>['$props'])"),
-            "Component constructor should have generic: {}",
+            !tc.contains("type ___VERTER___Instance"),
+            "Instance type should no longer be emitted: {}",
             tc
         );
     }
@@ -4227,10 +3984,8 @@ const count = ref(0)
         // Wrapper function has generic
         assert!(code.contains("function ___VERTER___TemplateBindingFN<T extends { id: number }>()"));
 
-        // Type constructs have the full pipeline
-        assert!(tc.contains("___VERTER___FullContextFN<T extends { id: number }>()"));
-        assert!(tc.contains("___VERTER___Instance<__VERTER__TS__T extends { id: number } = any>"));
-        assert!(tc.contains("export default ___VERTER___Component;"));
+        // Instance type should no longer be emitted
+        assert!(!tc.contains("type ___VERTER___Instance"));
     }
 
     #[test]
@@ -4246,10 +4001,8 @@ const count = ref(0)
         // Wrapper function — no generic
         assert!(code.contains("function ___VERTER___TemplateBindingFN()"));
 
-        // Type constructs — same structure, no angle brackets
-        assert!(tc.contains("___VERTER___FullContextFN()"));
-        assert!(tc.contains("export type ___VERTER___Instance ="));
-        assert!(tc.contains("export default ___VERTER___Component;"));
+        // Type constructs — Instance type should no longer be emitted
+        assert!(!tc.contains("type ___VERTER___Instance"));
         // No component-level <T> generic in the verter type constructs (before ambient module)
         let ambient_start = tc
             .find(r#"declare module "@verter/types""#)
@@ -4342,16 +4095,16 @@ defineProps<Props>()
 defineProps({ a: String })
 </script>"#,
         );
+        // Runtime args stay as-is, variable assignment prepended, no boxing
         assert!(
-            code.contains(
-                "___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })"
-            ),
-            "should emit boxed const: {}",
+            code.contains("const ___VERTER___props=defineProps({ a: String })"),
+            "should prepend variable assignment with args as-is: {}",
             code
         );
+        // No boxing
         assert!(
-            code.contains("defineProps(___VERTER___defineProps_Boxed)"),
-            "should replace arg with boxed name: {}",
+            !code.contains("_Box"),
+            "no boxing should be present: {}",
             code
         );
     }
@@ -4363,16 +4116,16 @@ defineProps({ a: String })
 const props = defineProps({ a: String })
 </script>"#,
         );
+        // Runtime args stay as-is, no boxing
         assert!(
-            code.contains(
-                "___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })"
-            ),
-            "should emit boxed const: {}",
+            code.contains("const props = defineProps({ a: String })"),
+            "should keep user variable and args: {}",
             code
         );
+        // No boxing
         assert!(
-            code.contains("const props = defineProps(___VERTER___defineProps_Boxed)"),
-            "should keep user variable, replace arg: {}",
+            !code.contains("_Box"),
+            "no boxing should be present: {}",
             code
         );
     }
@@ -4419,16 +4172,16 @@ defineEmits<{ (e: 'change'): void }>()
 defineEmits(['change', 'update'])
 </script>"#,
         );
+        // defineEmits with runtime args: variable assignment prepended, no boxing
         assert!(
-            code.contains(
-                "___VERTER___defineEmits_Boxed=___VERTER___defineEmits_Box(['change', 'update'])"
-            ),
-            "should emit boxed const: {}",
+            code.contains("const ___VERTER___emits=defineEmits(['change', 'update'])"),
+            "should prepend variable assignment: {}",
             code
         );
+        // No boxing
         assert!(
-            code.contains("defineEmits(___VERTER___defineEmits_Boxed)"),
-            "should replace arg: {}",
+            !code.contains("_Box"),
+            "no boxing should be present: {}",
             code
         );
     }
@@ -4446,11 +4199,16 @@ defineExpose({ foo: 'bar' })
             "defineExpose should NOT have variable assignment: {}",
             code
         );
+        // defineExpose stays as-is, no boxing
         assert!(
-            code.contains(
-                "___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box({ foo: 'bar' })"
-            ),
-            "should box the args: {}",
+            code.contains("defineExpose({ foo: 'bar' })"),
+            "defineExpose call should be preserved: {}",
+            code
+        );
+        // No boxing
+        assert!(
+            !code.contains("_Box"),
+            "no boxing should be present: {}",
             code
         );
     }
@@ -4467,55 +4225,17 @@ defineOptions({ inheritAttrs: false })
             "defineOptions should NOT have variable assignment: {}",
             code
         );
+        // defineOptions stays as-is, no boxing
         assert!(
-            code.contains("___VERTER___defineOptions_Boxed=___VERTER___defineOptions_Box({ inheritAttrs: false })"),
-            "should box the args: {}",
+            code.contains("defineOptions({ inheritAttrs: false })"),
+            "defineOptions call should be preserved: {}",
             code
         );
-    }
-
-    #[test]
-    fn define_options_boxed_in_default_component() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts">
-defineOptions({ inheritAttrs: false })
-</script>"#,
-        );
+        // No boxing
         assert!(
-            tc.contains("___VERTER___defineComponent(___VERTER___defineOptions_Boxed)"),
-            "default_Component should use defineOptions boxed name: {}",
-            tc
-        );
-    }
-
-    #[test]
-    fn box_helpers_are_value_imports_not_type_imports() {
-        // Box helpers are used as runtime function calls, so they must appear
-        // in the value import line, not the type-only import line.
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-defineOptions({ inheritAttrs: false })
-</script>"#,
-        );
-
-        // The value import line (no "type" keyword)
-        let value_import = code
-            .lines()
-            .find(|l| l.starts_with("import {") && l.contains("@verter/types"))
-            .expect("should have a value import from @verter/types");
-        assert!(
-            value_import.contains("defineOptions_Box"),
-            "defineOptions_Box must be in value import, not type import: {code}"
-        );
-
-        // The type import line
-        let type_import = code
-            .lines()
-            .find(|l| l.starts_with("import type {") && l.contains("@verter/types"))
-            .expect("should have a type import from @verter/types");
-        assert!(
-            !type_import.contains("defineOptions_Box"),
-            "defineOptions_Box must NOT be in type-only import: {code}"
+            !code.contains("_Box"),
+            "no boxing should be present: {}",
+            code
         );
     }
 
@@ -4575,159 +4295,6 @@ const msg = 'hello'
         );
     }
 
-    #[test]
-    fn template_binding_return_with_macro_return() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const props = defineProps<{ msg: string }>()
-</script>"#,
-        );
-        assert!(
-            code.contains("___VERTER___createMacroReturn("),
-            "should have createMacroReturn in return: {}",
-            code
-        );
-        assert!(
-            code.contains("\"value\":{} as typeof props"),
-            "should have props value in macro return: {}",
-            code
-        );
-        assert!(
-            code.contains("\"type\":{} as ___VERTER___defineProps_Type"),
-            "should have type info in macro return: {}",
-            code
-        );
-    }
-
-    #[test]
-    fn template_binding_props_spread() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const props = defineProps<{ msg: string }>()
-</script>"#,
-        );
-        assert!(
-            code.contains("...({} as Pick<typeof props, keyof ___VERTER___defineProps_Type>)"),
-            "should have props spread in return: {}",
-            code
-        );
-    }
-
-    // ── TemplateBinding Type Construct Tests ─────────────────────
-
-    #[test]
-    fn template_binding_type_emitted() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts">
-const msg = 'hello'
-</script>"#,
-        );
-        assert!(
-            tc.contains("export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>"),
-            "should emit TemplateBinding type alias: {}",
-            tc
-        );
-    }
-
-    #[test]
-    fn template_binding_type_generic() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts" generic="T">
-const value = {} as unknown as T
-</script>"#,
-        );
-        assert!(
-            tc.contains("export type ___VERTER___TemplateBinding<T>=ReturnType<typeof ___VERTER___TemplateBindingFN<T>>"),
-            "should emit generic TemplateBinding type: {}",
-            tc
-        );
-    }
-
-    #[test]
-    fn attributes_type_emitted() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts">
-const msg = 'hello'
-</script>"#,
-        );
-        assert!(
-            tc.contains("type ___VERTER___attributes={}"),
-            "should emit attributes type: {}",
-            tc
-        );
-    }
-
-    #[test]
-    fn instance_references_template_binding() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts">
-const msg = 'hello'
-</script>"#,
-        );
-        assert!(
-            tc.contains("___VERTER___TemplateBinding,"),
-            "Instance should reference TemplateBinding, not FullContext: {}",
-            tc
-        );
-        assert!(
-            tc.contains("{}&___VERTER___attributes&___VERTER___RootElementProps"),
-            "Instance should include attributes in second param: {}",
-            tc
-        );
-    }
-
-    // ── Conditional Helper Imports Tests ─────────────────────────
-
-    #[test]
-    fn helper_imports_include_box_when_needed() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-defineProps<{ msg: string }>()
-</script>"#,
-        );
-        assert!(
-            code.contains("defineProps_Box as ___VERTER___defineProps_Box"),
-            "should import defineProps_Box helper: {}",
-            code
-        );
-    }
-
-    #[test]
-    fn helper_imports_include_create_macro_return() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-defineProps<{ msg: string }>()
-</script>"#,
-        );
-        assert!(
-            code.contains("createMacroReturn as ___VERTER___createMacroReturn"),
-            "should import createMacroReturn when macros used: {}",
-            code
-        );
-    }
-
-    // ── FullContext with Declarations Tests ───────────────────────
-
-    #[test]
-    fn full_context_includes_import_bindings() {
-        let (_, _, tc) = gen_tsx_script_full(
-            r#"<script setup lang="ts">
-import { ref } from 'vue'
-const count = ref(0)
-</script>"#,
-        );
-        assert!(
-            tc.contains("ref: {} as typeof ref"),
-            "FullContext should include import binding 'ref': {}",
-            tc
-        );
-        assert!(
-            tc.contains("count: {} as typeof count"),
-            "FullContext should include binding 'count': {}",
-            tc
-        );
-    }
-
     // ── withDefaults Tests ───────────────────────────────────────
 
     #[test]
@@ -4742,11 +4309,18 @@ const props = withDefaults(defineProps<{ msg: string }>(), { msg: 'hello' })
             "should emit defineProps type alias: {}",
             code
         );
+        // withDefaults call stays with type alias replacement, no boxing
         assert!(
             code.contains(
-                "___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(defineProps<___VERTER___defineProps_Type>(), { msg: 'hello' })"
+                "withDefaults(defineProps<___VERTER___defineProps_Type>(), { msg: 'hello' })"
             ),
-            "should box with both defineProps call and defaults arg: {}",
+            "withDefaults call should stay with type alias replacement: {}",
+            code
+        );
+        // No boxing
+        assert!(
+            !code.contains("_Box"),
+            "no boxing should be present: {}",
             code
         );
     }
@@ -4769,92 +4343,102 @@ const props = withDefaults(defineProps<{ msg: string }>(), { msg: 'hello' })
 
     #[test]
     fn comp_v_if_gets_narrowing_guard() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts">
+import { ref } from 'vue'
 const isTypeA = true
+const el = ref<HTMLDivElement>()
 </script>
-<template><div v-if="isTypeA">A</div></template>"#,
+<template><div v-if="isTypeA" ref="el">A</div></template>"#,
         );
         // Comp function should have condition guard
         assert!(
-            tc.contains("if(!((isTypeA))) return null;"),
+            code.contains("if(!((isTypeA))) return null;"),
             "Comp for v-if should have condition guard, got:\n{}",
-            tc
+            code
         );
     }
 
     #[test]
     fn comp_v_else_if_negates_prior_siblings() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts">
+import { ref } from 'vue'
 const isTypeA = true
 const isTypeB = true
+const el = ref<HTMLDivElement>()
 </script>
 <template>
   <div v-if="isTypeA">A</div>
-  <div v-else-if="isTypeB">B</div>
+  <div v-else-if="isTypeB" ref="el">B</div>
 </template>"#,
         );
         // v-else-if Comp should negate prior v-if and include own condition
         assert!(
-            tc.contains("!((isTypeA)) && (isTypeB)"),
+            code.contains("!((isTypeA)) && (isTypeB)"),
             "Comp for v-else-if should negate prior v-if, got:\n{}",
-            tc
+            code
         );
     }
 
     #[test]
     fn comp_v_else_negates_all_prior() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts">
+import { ref } from 'vue'
 const isTypeA = true
+const el = ref<HTMLDivElement>()
 </script>
 <template>
   <div v-if="isTypeA">A</div>
-  <div v-else>B</div>
+  <div v-else ref="el">B</div>
 </template>"#,
         );
         // v-else Comp should negate all prior conditions
         assert!(
-            tc.contains("if(!(!((isTypeA)))) return null;"),
+            code.contains("if(!(!((isTypeA)))) return null;"),
             "Comp for v-else should negate prior v-if, got:\n{}",
-            tc
+            code
         );
     }
 
     #[test]
     fn comp_nested_v_if_combines_parent_and_own() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts">
+import { ref } from 'vue'
 const parent = true
 const child = true
+const el = ref<HTMLSpanElement>()
 </script>
-<template><div v-if="parent"><span v-if="child">nested</span></div></template>"#,
+<template><div v-if="parent"><span v-if="child" ref="el">nested</span></div></template>"#,
         );
         // Nested Comp should combine parent + own condition
         // The span's Comp should have: if(!((parent) && (child))) return null;
         assert!(
-            tc.contains("(parent) && (child)"),
+            code.contains("(parent) && (child)"),
             "nested Comp should combine parent + own condition, got:\n{}",
-            tc
+            code
         );
     }
 
     #[test]
     fn comp_all_elements_get_functions_not_just_root() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (code, _, _tc) = gen_tsx_script_full(
             r#"<script setup lang="ts">
-const msg = 'hello'
+import { ref } from 'vue'
+const el1 = ref<HTMLDivElement>()
+const el2 = ref<HTMLSpanElement>()
 </script>
-<template><div><span>inner</span></div></template>"#,
+<template><div ref="el1"><span ref="el2">inner</span></div></template>"#,
         );
-        // Both div and span should get Comp functions
-        let comp_count = tc.matches("function ___VERTER___Comp").count();
+        // Both div and span should get Comp functions (both have ref)
+        let comp_count = code.matches("function ___VERTER___Comp").count();
         assert!(
             comp_count >= 2,
-            "should emit Comp for all elements (div + span), found {} Comp functions, got:\n{}",
+            "should emit Comp for all ref elements (div + span), found {} Comp functions, got:\n{}",
             comp_count,
-            tc
+            code
         );
     }
 
@@ -4889,31 +4473,14 @@ const msg = 'hello'
             code.contains("from \"@verter/types\""),
             "should import from @verter/types"
         );
-        assert!(code.contains("from \"vue\""), "should import from vue");
-        // Positive: type constructs
+        // Negative: Instance type should no longer be emitted
         assert!(
-            type_constructs.contains("___VERTER___TemplateBinding"),
-            "should emit TemplateBinding"
+            !type_constructs.contains("___VERTER___Instance"),
+            "should not emit Instance"
         );
         assert!(
-            type_constructs.contains("___VERTER___FullContextFN"),
-            "should emit FullContext"
-        );
-        assert!(
-            type_constructs.contains("___VERTER___getRootComponent"),
-            "should emit getRootComponent"
-        );
-        assert!(
-            type_constructs.contains("___VERTER___default_Component"),
-            "should emit default_Component"
-        );
-        assert!(
-            type_constructs.contains("___VERTER___Instance"),
-            "should emit Instance"
-        );
-        assert!(
-            type_constructs.contains("export default"),
-            "should have default export"
+            !type_constructs.contains("InstanceType<typeof ___VERTER___Self>"),
+            "should not emit InstanceType<typeof Self>"
         );
         // Negative: no macro imports (template-only has no macros)
         assert!(
@@ -4954,12 +4521,8 @@ const msg = 'hello'
             "should emit wrapper"
         );
         assert!(
-            type_constructs.contains("___VERTER___TemplateBinding"),
-            "should emit TemplateBinding"
-        );
-        assert!(
-            type_constructs.contains("export default"),
-            "should export default Component"
+            !type_constructs.contains("___VERTER___Instance"),
+            "should not emit Instance"
         );
     }
 
@@ -4987,6 +4550,15 @@ const msg = 'hello'
             )
         });
 
+        // Use unified CT mode: pass template_end so comp functions are emitted in code
+        let template_end = syntax.template_ast().map(|tpl| {
+            tpl.root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(tpl.root.tag_open.end)
+        });
+
         let result = generate_tsx_script(
             syntax.script(),
             syntax.script_setup(),
@@ -4995,8 +4567,13 @@ const msg = 'hello'
             &mut ct,
             &alloc,
             &options,
-            None, // template_end: tests use legacy two-CT pattern
+            template_end,
         );
+
+        // Apply deferred return+close after template (same as compile.rs)
+        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
+            ct.prepend_left(tpl_end, return_close);
+        }
 
         if let Some(tpl) = syntax.template_ast() {
             let start = tpl.root.tag_open.start;
@@ -5051,6 +4628,7 @@ const msg = 'hello'
             TsxScriptOptions {
                 component_name: "App",
                 js_component_name: "App",
+                filename: "App.vue",
                 scope_id: "data-v-abc123",
                 has_scoped_style: false,
                 runtime_module_name: "vue",
@@ -5102,19 +4680,10 @@ export default { props: ['msg'], emits: ['click'] }
             code.contains(r#"from "@verter/types""#),
             "should import types"
         );
-        assert!(code.contains(r#"from "vue""#), "should import vue");
-        // Positive: type constructs
+        // Negative: Instance type should no longer be emitted
         assert!(
-            type_constructs.contains("___VERTER___TemplateBinding"),
-            "TemplateBinding type construct missing"
-        );
-        assert!(
-            type_constructs.contains("___VERTER___FullContextFN"),
-            "FullContext type construct missing"
-        );
-        assert!(
-            type_constructs.contains("export default"),
-            "default export missing"
+            !type_constructs.contains("___VERTER___Instance"),
+            "Instance type should not be emitted"
         );
         // Negative: no macro helpers (Options API has no macros)
         assert!(
@@ -5130,14 +4699,19 @@ export default { props: ['msg'], emits: ['click'] }
 
     #[test]
     fn options_api_with_template_has_comp_functions() {
-        let (_, _, tc) = gen_tsx_script_full(
+        let (_code, _, tc) = gen_tsx_script_full(
             r#"<script>export default { data() { return { x: 1 } } }</script>
 <template><div><span>inner</span></div></template>"#,
         );
+        // Instance type should no longer be emitted
         assert!(
-            tc.contains("function ___VERTER___Comp"),
-            "should emit Comp functions, got:\n{}",
+            !tc.contains("___VERTER___Instance"),
+            "should not emit Instance type, got:\n{}",
             tc
+        );
+        assert!(
+            !tc.contains("___VERTER___Component"),
+            "Component export should not be emitted"
         );
     }
 
@@ -5160,14 +4734,14 @@ export default { props: ['msg'], emits: ['click'] }
             "template-only should have types imports"
         );
 
-        // Both should have type constructs
+        // Neither should have Instance type (removed)
         assert!(
-            opt_tc.contains("___VERTER___TemplateBinding"),
-            "Options API should have TemplateBinding"
+            !opt_tc.contains("___VERTER___Instance"),
+            "Options API should not have Instance"
         );
         assert!(
-            tpl_tc.contains("___VERTER___TemplateBinding"),
-            "template-only should have TemplateBinding"
+            !tpl_tc.contains("___VERTER___Instance"),
+            "template-only should not have Instance"
         );
     }
 
@@ -5541,48 +5115,50 @@ const props = defineProps<{ msg: string }>()
             "ambient module must export Prettify"
         );
         assert!(
-            type_constructs.contains("export declare function createMacroReturn"),
-            "ambient module must export createMacroReturn"
-        );
-        assert!(
             type_constructs.contains("export declare function shallowUnwrapRef"),
             "ambient module must export shallowUnwrapRef"
         );
         assert!(
-            type_constructs.contains("export type PublicInstanceFromMacro"),
-            "ambient module must export PublicInstanceFromMacro"
-        );
-        assert!(
-            type_constructs.contains("export declare function defineProps_Box"),
-            "ambient module must export defineProps_Box"
-        );
-        assert!(
-            type_constructs.contains("export declare function defineEmits_Box"),
-            "ambient module must export defineEmits_Box"
-        );
-        assert!(
-            type_constructs.contains("export declare function defineModel_Box"),
-            "ambient module must export defineModel_Box"
-        );
-        assert!(
-            type_constructs.contains("export declare function defineSlots_Box"),
-            "ambient module must export defineSlots_Box"
-        );
-        assert!(
-            type_constructs.contains("export declare function defineExpose_Box"),
-            "ambient module must export defineExpose_Box"
-        );
-        assert!(
-            type_constructs.contains("export declare function withDefaults_Box"),
-            "ambient module must export withDefaults_Box"
-        );
-        assert!(
-            type_constructs.contains("export declare function defineOptions_Box"),
-            "ambient module must export defineOptions_Box"
-        );
-        assert!(
             type_constructs.contains("export declare function enhanceElementWithProps"),
             "ambient module must export enhanceElementWithProps"
+        );
+
+        // Negative: removed features must NOT be present
+        assert!(
+            !type_constructs.contains("createMacroReturn"),
+            "ambient module must NOT export createMacroReturn (removed)"
+        );
+        assert!(
+            !type_constructs.contains("PublicInstanceFromMacro"),
+            "ambient module must NOT export PublicInstanceFromMacro (removed)"
+        );
+        assert!(
+            !type_constructs.contains("defineProps_Box"),
+            "ambient module must NOT export defineProps_Box (removed)"
+        );
+        assert!(
+            !type_constructs.contains("defineEmits_Box"),
+            "ambient module must NOT export defineEmits_Box (removed)"
+        );
+        assert!(
+            !type_constructs.contains("defineModel_Box"),
+            "ambient module must NOT export defineModel_Box (removed)"
+        );
+        assert!(
+            !type_constructs.contains("defineSlots_Box"),
+            "ambient module must NOT export defineSlots_Box (removed)"
+        );
+        assert!(
+            !type_constructs.contains("defineExpose_Box"),
+            "ambient module must NOT export defineExpose_Box (removed)"
+        );
+        assert!(
+            !type_constructs.contains("withDefaults_Box"),
+            "ambient module must NOT export withDefaults_Box (removed)"
+        );
+        assert!(
+            !type_constructs.contains("defineOptions_Box"),
+            "ambient module must NOT export defineOptions_Box (removed)"
         );
 
         // Negative: no top-level `import ... from "vue"` inside declare module
@@ -5634,6 +5210,7 @@ const props = defineProps<{ msg: string }>()
             TsxScriptOptions {
                 component_name: "App",
                 js_component_name: "App",
+                filename: "App.vue",
                 scope_id: "data-v-abc123",
                 has_scoped_style: false,
                 runtime_module_name: "vue",
@@ -5649,299 +5226,9 @@ const props = defineProps<{ msg: string }>()
         );
     }
 
-    #[test]
-    fn create_macro_return_ambient_signature_matches_real() {
-        let (_, _, type_constructs) = gen_tsx_script_full(
-            r#"<script setup lang="ts">
-const props = defineProps<{ msg: string }>()
-</script>
-<template><div>{{ props.msg }}</div></template>"#,
-        );
-
-        // The ambient createMacroReturn must accept 1 arg and return the keyed wrapper
-        assert!(
-            type_constructs
-                .contains("createMacroReturn<T>(o: T): { ____VERTER___MACRO_RETURN_KEY____: T }"),
-            "createMacroReturn signature must match real @verter/types: {}",
-            type_constructs
-        );
-        // Negative: old 0-arg signature must NOT be present
-        assert!(
-            !type_constructs.contains("createMacroReturn<T>(): T"),
-            "old 0-arg createMacroReturn signature must not be present"
-        );
-    }
-
-    #[test]
-    fn with_defaults_box_runtime_args_two_params() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const props = withDefaults(defineProps<{ msg: string }>(), { msg: 'hello' })
-</script>"#,
-        );
-        // The boxed call must have 2 args: defineProps call + defaults object
-        assert!(
-            code.contains("___VERTER___withDefaults_Box(defineProps<___VERTER___defineProps_Type>(), { msg: 'hello' })"),
-            "withDefaults_Box must have 2 args (defineProps call, defaults): {}",
-            code
-        );
-    }
-
-    #[test]
-    fn with_defaults_box_runtime_no_type_params() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const props = withDefaults(defineProps({ msg: String }), { msg: 'hello' })
-</script>"#,
-        );
-        // TS v5 parity: inner defineProps args are boxed with defineProps_Box
-        assert!(
-            code.contains(
-                "___VERTER___withDefaults_Box(defineProps(___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ msg: String })), { msg: 'hello' })"
-            ),
-            "withDefaults_Box should box inner defineProps args with defineProps_Box: {}",
-            code
-        );
-        // [0]/[1] indexing must be present
-        assert!(
-            code.contains(
-                "withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
-            ),
-            "withDefaults call must use [0]/[1] indexing: {}",
-            code
-        );
-    }
-
-    /// @ai-generated — Reproduction: withDefaults with runtime props must use [0]/[1]
-    /// indexing on the boxed variable, matching the TS v5 transformer output.
-    /// Without indexing, TypeScript resolves `props` as `any` because the full
-    /// `[T, Defaults]` tuple is passed where `InferDefaults<T>` is expected.
-    #[test]
-    fn with_defaults_runtime_props_uses_indexing() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const props = withDefaults(defineProps({ bar: String }), {})
-</script>"#,
-        );
-        // TS v5 behavior: uses [0]/[1] indexing on the boxed variable
-        assert!(
-            code.contains(
-                "withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
-            ),
-            "withDefaults call must use [0]/[1] indexing (TS v5 parity): {}",
-            code
-        );
-        // Must NOT leave the original defineProps call as an arg to withDefaults
-        assert!(
-            !code.contains("withDefaults(defineProps({"),
-            "original defineProps call must NOT appear inside withDefaults args: {}",
-            code
-        );
-    }
-
-    /// @ai-generated — Reproduction: withDefaults with type params must also use [0]/[1]
-    /// indexing, matching the TS v5 transformer output.
-    #[test]
-    fn with_defaults_type_params_uses_indexing() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const props = withDefaults(defineProps<{ msg: string }>(), { msg: 'hello' })
-</script>"#,
-        );
-        // TS v5 behavior: uses [0]/[1] indexing for type-param case too
-        assert!(
-            code.contains(
-                "withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
-            ),
-            "withDefaults call with type params must use [0]/[1] indexing: {}",
-            code
-        );
-    }
-
-    /// @ai-generated — Reproduction: withDefaults with runtime props must box the inner
-    /// defineProps args with defineProps_Box, matching the TS v5 transformer output.
-    #[test]
-    fn with_defaults_runtime_props_boxes_define_props_args() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const props = withDefaults(defineProps({ bar: String }), {})
-</script>"#,
-        );
-        // TS v5 behavior: inner defineProps args wrapped with defineProps_Box
-        assert!(
-            code.contains("___VERTER___defineProps_Boxed=___VERTER___defineProps_Box("),
-            "defineProps args must be boxed with defineProps_Box: {}",
-            code
-        );
-        // The let declaration for defineProps_Boxed must be present
-        assert!(
-            code.contains("let ___VERTER___defineProps_Boxed"),
-            "must declare let ___VERTER___defineProps_Boxed: {}",
-            code
-        );
-    }
-
-    /// @ai-generated — Dump test: withDefaults with explicit import from 'vue'
-    /// (matches examples/src/props/CompWithDefaults.object.no-var.vue)
-    #[test]
-    fn with_defaults_explicit_vue_import_dump() {
-        let (code, _) = gen_tsx_script(
-            r#"<script lang="ts" setup>
-import { withDefaults, defineProps } from 'vue';
-
-const props = withDefaults(
-  defineProps({
-    bar: String,
-  }),
-  {},
-);
-
-</script>"#,
-        );
-        eprintln!(
-            "=== TSX output for explicit import withDefaults ===\n{}\n===",
-            code
-        );
-        // Same checks as the no-import version (multiline-aware)
-        assert!(
-            code.contains("___VERTER___withDefaults_Boxed[0]")
-                && code.contains("___VERTER___withDefaults_Boxed[1]"),
-            "withDefaults call must use [0]/[1] indexing: {}",
-            code
-        );
-        assert!(
-            !code.contains("withDefaults(\n  defineProps("),
-            "original defineProps call must NOT appear inside withDefaults args: {}",
-            code
-        );
-        // Boxing must be present
-        assert!(
-            code.contains("___VERTER___defineProps_Boxed=___VERTER___defineProps_Box("),
-            "defineProps args must be boxed: {}",
-            code
-        );
-        assert!(
-            code.contains("___VERTER___withDefaults_Box(defineProps("),
-            "withDefaults_Box must wrap the full call: {}",
-            code
-        );
-    }
-
-    // ── defineModel Parity Tests ──────────────────────────────────────
-
-    /// @ai-generated — TS v5 parity: defineModel("title") must use shared
-    /// `___VERTER___defineModel_Box` function, NOT per-model `___VERTER___title_defineModel_Box`.
-    #[test]
-    fn define_model_named_uses_shared_box_fn() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const model = defineModel("title")
-</script>"#,
-        );
-        // Box function must be the shared defineModel_Box
-        assert!(
-            code.contains("___VERTER___defineModel_Box(\"title\")"),
-            "must use shared ___VERTER___defineModel_Box, not per-model variant: {}",
-            code
-        );
-        // Must NOT use per-model box function name (check with trailing paren to
-        // avoid matching ___VERTER___title_defineModel_Boxed which is the const name)
-        assert!(
-            !code.contains("___VERTER___title_defineModel_Box("),
-            "must NOT use per-model box function ___VERTER___title_defineModel_Box(): {}",
-            code
-        );
-    }
-
-    /// @ai-generated — TS v5 parity: defineModel("title") must use [0],[1] indexing
-    /// even for name-only arg. defineModel_Box returns a tuple.
-    #[test]
-    fn define_model_named_uses_indexing() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const model = defineModel("title")
-</script>"#,
-        );
-        assert!(
-            code.contains(
-                "defineModel(___VERTER___title_defineModel_Boxed[0],___VERTER___title_defineModel_Boxed[1])"
-            ),
-            "defineModel call must use [0]/[1] indexing: {}",
-            code
-        );
-    }
-
-    /// @ai-generated — TS v5 parity: defineModel<string>('firstName') with type params
-    /// must use shared box function and [0],[1] indexing.
-    #[test]
-    fn define_model_typed_named_uses_shared_box_and_indexing() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const firstName = defineModel<string>('firstName')
-</script>"#,
-        );
-        // Shared box function
-        assert!(
-            code.contains("___VERTER___defineModel_Box<"),
-            "must use shared ___VERTER___defineModel_Box for typed model: {}",
-            code
-        );
-        // Check for the per-model box function call pattern (with opening paren or angle bracket
-        // but NOT matching ___VERTER___firstName_defineModel_Boxed which is the const name)
-        assert!(
-            !code.contains("firstName_defineModel_Box(")
-                && !code.contains("firstName_defineModel_Box<"),
-            "must NOT use per-model box function: {}",
-            code
-        );
-        // [0],[1] indexing
-        assert!(
-            code.contains(
-                "defineModel<___VERTER___firstName_defineModel_Type>(___VERTER___firstName_defineModel_Boxed[0],___VERTER___firstName_defineModel_Boxed[1])"
-            ),
-            "defineModel call must use [0]/[1] indexing: {}",
-            code
-        );
-    }
-
-    /// @ai-generated — TS v5 parity: multiple defineModel calls must each use
-    /// the shared defineModel_Box and per-model Boxed const names.
-    #[test]
-    fn define_model_multiple_uses_shared_box_fn() {
-        let (code, _) = gen_tsx_script(
-            r#"<script setup lang="ts">
-const firstName = defineModel<string>('firstName')
-const lastName = defineModel<string>('lastName')
-</script>"#,
-        );
-        // Both must use the SHARED defineModel_Box, not per-model variants
-        assert!(
-            code.contains("___VERTER___firstName_defineModel_Boxed=___VERTER___defineModel_Box<"),
-            "firstName must use shared defineModel_Box: {}",
-            code
-        );
-        assert!(
-            code.contains("___VERTER___lastName_defineModel_Boxed=___VERTER___defineModel_Box<"),
-            "lastName must use shared defineModel_Box: {}",
-            code
-        );
-        // Both must use [0],[1] indexing
-        assert!(
-            code.contains("___VERTER___firstName_defineModel_Boxed[0],___VERTER___firstName_defineModel_Boxed[1]"),
-            "firstName defineModel must use [0]/[1] indexing: {}",
-            code
-        );
-        assert!(
-            code.contains("___VERTER___lastName_defineModel_Boxed[0],___VERTER___lastName_defineModel_Boxed[1]"),
-            "lastName defineModel must use [0]/[1] indexing: {}",
-            code
-        );
-    }
-
     // ── E2E Macro Type Checking ───────────────────────────────────────
 
-    /// @ai-generated — TS v5 parity: defineProps with runtime args must produce
-    /// correct types (not any).
+    /// @ai-generated — defineProps with runtime args stays as-is (no boxing).
     #[test]
     fn define_props_runtime_args_type_not_any() {
         let (code, _) = gen_tsx_script(
@@ -5949,24 +5236,21 @@ const lastName = defineModel<string>('lastName')
 const props = defineProps({ msg: String })
 </script>"#,
         );
-        // defineProps with runtime args should be boxed
+        // defineProps call preserved as-is
         assert!(
-            code.contains(
-                "___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ msg: String })"
-            ),
-            "defineProps runtime args must be boxed: {}",
+            code.contains("const props = defineProps({ msg: String })"),
+            "defineProps call must be preserved: {}",
             code
         );
-        // createMacroReturn should reference the boxed name
+        // No boxing
         assert!(
-            code.contains("typeof ___VERTER___defineProps_Boxed"),
-            "createMacroReturn must use typeof defineProps_Boxed: {}",
+            !code.contains("_Box"),
+            "no boxing should be present: {}",
             code
         );
     }
 
-    /// @ai-generated — TS v5 parity: defineEmits with runtime args must produce
-    /// correct types (not any).
+    /// @ai-generated — defineEmits with runtime args stays as-is (no boxing).
     #[test]
     fn define_emits_runtime_args_type_not_any() {
         let (code, _) = gen_tsx_script(
@@ -5974,21 +5258,21 @@ const props = defineProps({ msg: String })
 const emit = defineEmits(['change', 'update'])
 </script>"#,
         );
-        // defineEmits with runtime args should be boxed
+        // defineEmits call preserved as-is
         assert!(
-            code.contains("___VERTER___defineEmits_Boxed=___VERTER___defineEmits_Box("),
-            "defineEmits runtime args must be boxed: {}",
+            code.contains("const emit = defineEmits(['change', 'update'])"),
+            "defineEmits call must be preserved: {}",
             code
         );
-        // createMacroReturn should reference the boxed name
+        // No boxing
         assert!(
-            code.contains("typeof ___VERTER___defineEmits_Boxed"),
-            "createMacroReturn must use typeof defineEmits_Boxed: {}",
+            !code.contains("_Box"),
+            "no boxing should be present: {}",
             code
         );
     }
 
-    /// @ai-generated — TS v5 parity: defineExpose must produce correct types.
+    /// @ai-generated — TS v5 parity: defineExpose must preserve call as-is (no boxing).
     #[test]
     fn define_expose_args_type_not_any() {
         let (code, _) = gen_tsx_script(
@@ -5996,11 +5280,944 @@ const emit = defineEmits(['change', 'update'])
 defineExpose({ focus: () => {} })
 </script>"#,
         );
-        // defineExpose with args should be boxed
+        // defineExpose stays as-is, no boxing
         assert!(
-            code.contains("___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box("),
-            "defineExpose args must be boxed: {}",
+            code.contains("defineExpose({ focus: () => {} })"),
+            "defineExpose call must be preserved: {}",
             code
         );
+        // No boxing
+        assert!(
+            !code.contains("_Box"),
+            "no boxing should be present: {}",
+            code
+        );
+    }
+
+    // ── IDE: IntelliSense — Correct Types in Interpolation (A) ──
+
+    /// @ai-generated — A1: ref binding appears in shallowUnwrapRef destructuring with correct cast
+    #[test]
+    fn ref_unwrap_in_interpolation() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        // Positive: ref binding should appear in the destructuring with the unwrap cast
+        assert!(
+            code.contains("count: count as unknown as typeof count"),
+            "count should be in shallowUnwrapRef destructuring: {}",
+            code
+        );
+        // Negative: no .value suffix — block scope handles unwrapping
+        assert!(
+            !code.contains("count.value"),
+            "count.value must not appear — block scope unwraps: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — A2: computed binding appears in shallowUnwrapRef destructuring
+    #[test]
+    fn computed_unwrap_in_interpolation() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { computed } from 'vue'
+const doubled = computed(() => 2)
+</script>
+<template><div>{{ doubled }}</div></template>"#,
+        );
+        assert!(
+            code.contains("doubled: doubled as unknown as typeof doubled"),
+            "computed should be in shallowUnwrapRef destructuring: {}",
+            code
+        );
+        assert!(
+            !code.contains("doubled.value"),
+            "doubled.value must not appear — block scope unwraps: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — A3: reactive binding appears in destructuring (no unwrap needed but still present)
+    #[test]
+    fn reactive_passthrough_in_destructuring() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { reactive } from 'vue'
+const state = reactive({x: 1})
+</script>
+<template><div>{{ state.x }}</div></template>"#,
+        );
+        assert!(
+            code.contains("state: state as unknown as typeof state"),
+            "reactive binding should be in shallowUnwrapRef destructuring: {}",
+            code
+        );
+        // Negative: no _ctx prefix
+        assert!(
+            !code.contains("_ctx.state"),
+            "_ctx.state must not appear — bare identifiers in block scope: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — A4: multiple refs both appear in destructuring
+    #[test]
+    fn multiple_refs_in_interpolation() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+const msg = ref('')
+</script>
+<template><div>{{ count + msg }}</div></template>"#,
+        );
+        assert!(
+            code.contains("count: count as unknown as typeof count"),
+            "count should be in destructuring: {}",
+            code
+        );
+        assert!(
+            code.contains("msg: msg as unknown as typeof msg"),
+            "msg should be in destructuring: {}",
+            code
+        );
+        // Both in the same shallowUnwrapRef call
+        assert!(
+            code.contains("___VERTER___shallowUnwrapRef("),
+            "should use shallowUnwrapRef: {}",
+            code
+        );
+        // No .value on either
+        assert!(
+            !code.contains("count.value"),
+            "count.value must not appear: {}",
+            code
+        );
+        assert!(
+            !code.contains("msg.value"),
+            "msg.value must not appear: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — A5: ref with nested property access (items.length) — no .value in output
+    #[test]
+    fn nested_property_on_ref() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const items = ref([])
+</script>
+<template><div>{{ items.length }}</div></template>"#,
+        );
+        assert!(
+            code.contains("items: items as unknown as typeof items"),
+            "items should be in shallowUnwrapRef destructuring: {}",
+            code
+        );
+        assert!(
+            !code.contains("items.value.length"),
+            "items.value.length must not appear — block scope unwraps: {}",
+            code
+        );
+    }
+
+    // ── IDE: Component Resolution (B) ─────────────────────────────
+
+    /// @ai-generated — B6: imported component is in bindings and gets no global fallback
+    #[test]
+    fn imported_component_no_fallback() {
+        let (code, bindings) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import Foo from './Foo.vue'
+</script>
+<template><Foo /></template>"#,
+        );
+        // Positive: Foo should be in bindings
+        assert!(
+            bindings.contains_key("Foo"),
+            "Foo should be in bindings: {:?}",
+            bindings
+        );
+        // Negative: no global fallback for imported component
+        assert!(
+            !code.contains("as import('vue').GlobalComponents"),
+            "imported component should not get GlobalComponents fallback: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — B7: unresolved component gets GlobalComponents fallback
+    #[test]
+    fn unresolved_component_gets_global_fallback() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><RouterLink to="/" /></template>"#,
+        );
+        // Positive: global fallback for unresolved component
+        assert!(
+            code.contains("const RouterLink = {} as import('vue').GlobalComponents extends { RouterLink: infer C } ? C : unknown"),
+            "unresolved component should get GlobalComponents fallback: {}",
+            code
+        );
+        // Negative: RouterLink should NOT be in the destructuring
+        assert!(
+            !code.contains("RouterLink: RouterLink as unknown as typeof RouterLink"),
+            "unresolved component should not be in destructuring: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — B8: multiple unresolved components each get their own fallback
+    #[test]
+    fn multiple_unresolved_components() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><RouterLink to="/" /><RouterView /></template>"#,
+        );
+        assert!(
+            code.contains("const RouterLink"),
+            "RouterLink should get fallback const: {}",
+            code
+        );
+        assert!(
+            code.contains("const RouterView"),
+            "RouterView should get fallback const: {}",
+            code
+        );
+        // Both should use GlobalComponents
+        assert!(
+            code.contains("RouterLink: infer C"),
+            "RouterLink fallback should use GlobalComponents infer: {}",
+            code
+        );
+        assert!(
+            code.contains("RouterView: infer C"),
+            "RouterView fallback should use GlobalComponents infer: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — B9: builtin component (Transition) is auto-imported, no GlobalComponents fallback
+    #[test]
+    fn builtin_component_no_fallback() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><Transition><div /></Transition></template>"#,
+        );
+        // Positive: Transition should be auto-imported from vue
+        assert!(
+            code.contains("import { Transition") || code.contains(", Transition"),
+            "Transition should be auto-imported from vue: {}",
+            code
+        );
+        // Negative: no GlobalComponents fallback for builtins
+        assert!(
+            !code.contains("as import('vue').GlobalComponents extends { Transition"),
+            "builtin component should not get GlobalComponents fallback: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — B10: component with ref attribute triggers Comp function emission
+    #[test]
+    fn component_with_ref_has_comp_function() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import Foo from './Foo.vue'
+</script>
+<template><Foo ref="myFoo" /></template>"#,
+        );
+        // Positive: Comp function emitted
+        assert!(
+            code.contains("function ___VERTER___Comp"),
+            "Comp function should be emitted for component with ref: {}",
+            code
+        );
+        // Positive: Comp function references Foo via new
+        assert!(
+            code.contains("new Foo("),
+            "Comp function should construct Foo: {}",
+            code
+        );
+        // Negative: no GlobalComponents fallback since Foo is imported
+        assert!(
+            !code.contains("as import('vue').GlobalComponents extends { Foo"),
+            "imported Foo should not get GlobalComponents fallback: {}",
+            code
+        );
+    }
+
+    // ── IDE: Unused Binding Detection (C) ─────────────────────────
+
+    /// @ai-generated — C11: unused ref still appears in destructuring for TS to flag as unused
+    #[test]
+    fn unused_ref_in_destructuring() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const unused = ref(0)
+</script>"#,
+        );
+        // Positive: unused ref is in destructuring so TS can flag it
+        assert!(
+            code.contains("unused: unused as unknown as typeof unused"),
+            "unused ref should be in destructuring for TS unused detection: {}",
+            code
+        );
+        // Negative: no _ctx prefix
+        assert!(
+            !code.contains("_ctx.unused"),
+            "should not have _ctx prefix: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — C12: used ref also appears in destructuring
+    #[test]
+    fn used_ref_in_destructuring() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        assert!(
+            code.contains("count: count as unknown as typeof count"),
+            "used ref should be in destructuring: {}",
+            code
+        );
+        // Negative: no .value
+        assert!(
+            !code.contains("count.value"),
+            "count.value must not appear: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — C13: unused plain const also appears in destructuring
+    #[test]
+    fn unused_const_in_destructuring() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+const msg = 'hello'
+</script>"#,
+        );
+        assert!(
+            code.contains("msg: msg as unknown as typeof msg"),
+            "unused const should be in destructuring: {}",
+            code
+        );
+        // Negative: no _ctx
+        assert!(
+            !code.contains("_ctx.msg"),
+            "_ctx.msg should not appear: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — C14: props are accessed via __props, not in destructuring
+    #[test]
+    fn props_not_in_destructuring() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+const props = defineProps<{title: string}>()
+</script>
+<template><div>{{ title }}</div></template>"#,
+        );
+        // Positive: __props alias is created
+        assert!(
+            code.contains("const __props = props"),
+            "__props alias should be created: {}",
+            code
+        );
+        // Negative: individual prop fields are NOT in destructuring — they use __props.xxx
+        assert!(
+            !code.contains("title: title as unknown as typeof title"),
+            "prop 'title' should NOT be in destructuring — accessed via __props: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — C15: import bindings are not in destructuring (already hoisted)
+    #[test]
+    fn import_not_in_destructuring() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { helper } from './utils'
+const x = helper()
+</script>"#,
+        );
+        // Negative: imports are already hoisted, not in destructuring
+        assert!(
+            !code.contains("helper: helper as unknown as typeof helper"),
+            "import 'helper' should NOT be in destructuring — already hoisted: {}",
+            code
+        );
+        // Positive: setup binding IS in destructuring
+        assert!(
+            code.contains("x: x as unknown as typeof x"),
+            "setup binding 'x' should be in destructuring: {}",
+            code
+        );
+    }
+
+    // ── IDE: v-if Type Narrowing in Block Scope (D) ───────────────
+
+    /// @ai-generated — D16: v-if uses bare identifiers, no _ctx prefix, no .value
+    #[test]
+    fn v_if_bare_identifiers_in_block_scope() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const value = ref<string | null>(null)
+</script>
+<template><div v-if="value">{{ value }}</div></template>"#,
+        );
+        // Positive: value in destructuring
+        assert!(
+            code.contains("value: value as unknown as typeof value"),
+            "value should be in destructuring: {}",
+            code
+        );
+        // Negative: no _ctx prefix anywhere in the output
+        assert!(
+            !code.contains("_ctx.value"),
+            "_ctx.value must not appear — bare identifiers in block scope: {}",
+            code
+        );
+        // Negative: no .value suffix
+        assert!(
+            !code.contains("value.value"),
+            "value.value must not appear — block scope handles unwrapping: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — D17: v-if/v-else-if/v-else chain uses bare identifiers
+    #[test]
+    fn v_if_v_else_chain_bare() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const isA = ref(true)
+const isB = ref(false)
+</script>
+<template><div v-if="isA">A</div><div v-else-if="isB">B</div><div v-else>C</div></template>"#,
+        );
+        // Positive: both refs in destructuring
+        assert!(
+            code.contains("isA: isA as unknown as typeof isA"),
+            "isA should be in destructuring: {}",
+            code
+        );
+        assert!(
+            code.contains("isB: isB as unknown as typeof isB"),
+            "isB should be in destructuring: {}",
+            code
+        );
+        // Negative: no _ctx anywhere in the output
+        assert!(
+            !code.contains("_ctx."),
+            "_ctx. must not appear anywhere in TSX output: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — D19: nested v-if uses bare identifiers in Comp guards
+    #[test]
+    fn nested_v_if_bare() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const a = ref(true)
+const b = ref(true)
+const el = ref<HTMLSpanElement>()
+</script>
+<template><div v-if="a"><span v-if="b" ref="el">nested</span></div></template>"#,
+        );
+        // Positive: condition uses bare identifier for outer
+        assert!(
+            code.contains("(a)"),
+            "v-if condition should use bare 'a': {}",
+            code
+        );
+        // Positive: inner condition uses bare identifier
+        assert!(
+            code.contains("(b)"),
+            "nested v-if condition should use bare 'b': {}",
+            code
+        );
+        // Negative: no _ctx
+        assert!(
+            !code.contains("_ctx."),
+            "_ctx. must not appear in block scope output: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — D20: v-for with v-if uses bare identifiers, no .value on ref
+    #[test]
+    fn v_for_with_v_if() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const items = ref([{active: true, name: 'a'}])
+const el = ref<HTMLDivElement>()
+</script>
+<template><div v-for="item in items" v-if="item.active" ref="el">{{ item.name }}</div></template>"#,
+        );
+        // Positive: items in destructuring
+        assert!(
+            code.contains("items: items as unknown as typeof items"),
+            "items should be in destructuring: {}",
+            code
+        );
+        // Negative: no items.value — block scope unwraps
+        assert!(
+            !code.contains("items.value"),
+            "items.value must not appear — block scope unwraps: {}",
+            code
+        );
+        // Positive: v-for scoped variable used bare in Comp guard
+        assert!(
+            code.contains("item.active"),
+            "v-for scoped variable 'item' should be used bare: {}",
+            code
+        );
+    }
+
+    // ── IDE: Event Handler Typing (E) ─────────────────────────────
+
+    /// @ai-generated — E21: inline event handler uses bare ref, no .value
+    #[test]
+    fn inline_handler_ref_bare() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>click</div></template>"#,
+        );
+        // Positive: count in destructuring for ref unwrap
+        assert!(
+            code.contains("count: count as unknown as typeof count"),
+            "count should be in destructuring: {}",
+            code
+        );
+        // Negative: no count.value
+        assert!(
+            !code.contains("count.value"),
+            "count.value must not appear in block scope: {}",
+            code
+        );
+        // Negative: no _ctx
+        assert!(
+            !code.contains("_ctx.count"),
+            "_ctx.count must not appear: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — E22: method reference in event handler uses bare identifier
+    #[test]
+    fn method_reference_bare() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+function handleClick() {}
+</script>
+<template><div>click</div></template>"#,
+        );
+        // Positive: handleClick in destructuring
+        assert!(
+            code.contains("handleClick: handleClick as unknown as typeof handleClick"),
+            "handleClick should be in destructuring: {}",
+            code
+        );
+        // Negative: no _ctx prefix
+        assert!(
+            !code.contains("_ctx.handleClick"),
+            "_ctx.handleClick must not appear: {}",
+            code
+        );
+    }
+
+    // ── IDE: Slot + v-for Scoped Variables (F) ────────────────────
+
+    /// @ai-generated — F23: v-for scoped variable is NOT in destructuring, but the iterable is
+    #[test]
+    fn v_for_scoped_variable_not_in_destructuring() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const items = ref([{name: 'a'}])
+const el = ref<HTMLDivElement>()
+</script>
+<template><div v-for="item in items" v-if="item.active" ref="el">{{ item.name }}</div></template>"#,
+        );
+        // Positive: iterable 'items' IS in destructuring
+        assert!(
+            code.contains("items: items as unknown as typeof items"),
+            "items should be in destructuring: {}",
+            code
+        );
+        // Negative: v-for scoped variable 'item' is NOT in destructuring (it's a loop variable)
+        assert!(
+            !code.contains("item: item as unknown"),
+            "v-for scoped variable 'item' should NOT be in destructuring: {}",
+            code
+        );
+        // Positive: item.active appears in comp function guard (v-if on v-for element with ref)
+        assert!(
+            code.contains("item.active"),
+            "v-for scoped variable 'item' should be referenced bare in comp guard: {}",
+            code
+        );
+    }
+
+    // ── IDE: Self-Import and Instance Type (G) ────────────────────
+
+    /// @ai-generated — G25: self-import no longer emitted
+    #[test]
+    fn self_import_uses_filename() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+const x = 1
+</script>"#,
+        );
+        // Negative: self-import should no longer be emitted
+        assert!(
+            !code.contains("import type { default as ___VERTER___Self }"),
+            "self-import should no longer be emitted: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — G26: instance type no longer emitted
+    #[test]
+    fn instance_type_uses_self() {
+        let (_code, _, tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const x = 1
+</script>"#,
+        );
+        // Negative: instance type should no longer be emitted
+        assert!(
+            !tc.contains("type ___VERTER___Instance"),
+            "instance type should no longer be emitted: {}",
+            tc
+        );
+        // Negative: old patterns should not appear
+        assert!(
+            !tc.contains("PublicInstanceFromMacro"),
+            "old PublicInstanceFromMacro pattern should not appear: {}",
+            tc
+        );
+        assert!(
+            !tc.contains("OmitConstructorSignature"),
+            "old OmitConstructorSignature pattern should not appear: {}",
+            tc
+        );
+    }
+
+    /// @ai-generated — G27: getCurrentInstance no longer emits CurrentComponentInstance type
+    #[test]
+    fn get_current_instance_emits_type() {
+        let (_code, _, tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import { getCurrentInstance } from 'vue'
+const instance = getCurrentInstance()
+</script>"#,
+        );
+        // Negative: CurrentComponentInstance type should no longer be emitted
+        assert!(
+            !tc.contains("type ___VERTER___CurrentComponentInstance"),
+            "CurrentComponentInstance type should no longer be emitted: {}",
+            tc
+        );
+        // Negative: Instance type should no longer be emitted
+        assert!(
+            !tc.contains("___VERTER___Instance"),
+            "Instance type should no longer be emitted: {}",
+            tc
+        );
+    }
+
+    /// @ai-generated — G28: without getCurrentInstance, no CurrentComponentInstance type
+    #[test]
+    fn no_get_current_instance_no_type() {
+        let (_code, _, tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const x = 1
+</script>"#,
+        );
+        // Negative: CurrentComponentInstance should NOT be emitted
+        assert!(
+            !tc.contains("CurrentComponentInstance"),
+            "CurrentComponentInstance should NOT be emitted without getCurrentInstance: {}",
+            tc
+        );
+        // Negative: Instance type should no longer be emitted either
+        assert!(
+            !tc.contains("type ___VERTER___Instance"),
+            "Instance type should no longer be emitted: {}",
+            tc
+        );
+    }
+
+    // ── IDE: Generic Components (H) ───────────────────────────────
+
+    /// @ai-generated — H29: generic component uses generic parameter in wrapper function
+    #[test]
+    fn generic_block_scope() {
+        let (code, _, tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts" generic="T extends string">
+const value = {} as unknown as T
+</script>
+<template><div>{{ value }}</div></template>"#,
+        );
+        // Positive: wrapper function has generic parameter
+        assert!(
+            code.contains("export function ___VERTER___TemplateBindingFN<T extends string>()"),
+            "wrapper function should have generic parameter: {}",
+            code
+        );
+        // Positive: value in destructuring
+        assert!(
+            code.contains("value: value as unknown as typeof value"),
+            "value should be in destructuring: {}",
+            code
+        );
+        // Negative: instance type should no longer be emitted
+        assert!(
+            !tc.contains("InstanceType<typeof ___VERTER___Self>"),
+            "instance type should no longer be emitted: {}",
+            tc
+        );
+        // Negative: no non-generic wrapper
+        assert!(
+            !code.contains("function ___VERTER___TemplateBindingFN()"),
+            "wrapper function should NOT be non-generic: {}",
+            code
+        );
+    }
+
+    /// @ai-generated — H30: multiple generic parameters all appear in wrapper function
+    #[test]
+    fn generic_multiple_params() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts" generic="T, U extends Record<string, T>">
+const t = {} as unknown as T
+const u = {} as unknown as U
+</script>"#,
+        );
+        // Positive: wrapper function has both generic parameters
+        assert!(
+            code.contains(
+                "function ___VERTER___TemplateBindingFN<T, U extends Record<string, T>>()"
+            ),
+            "wrapper function should have both generic parameters: {}",
+            code
+        );
+        // Positive: both bindings in destructuring
+        assert!(
+            code.contains("t: t as unknown as typeof t"),
+            "t should be in destructuring: {}",
+            code
+        );
+        assert!(
+            code.contains("u: u as unknown as typeof u"),
+            "u should be in destructuring: {}",
+            code
+        );
+        // Negative: no non-generic wrapper
+        assert!(
+            !code.contains("function ___VERTER___TemplateBindingFN()"),
+            "wrapper function should NOT be non-generic: {}",
+            code
+        );
+    }
+
+    // ── Script Error Recovery Tests ─────────────────────────────────
+
+    #[test]
+    fn imports_hoisted_with_script_syntax_error() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+count.
+</script>"#,
+        );
+        // In error mode, script body is at file scope (not wrapped in function).
+        // The import stays in its original position, which is before the
+        // TemplateBindingFN that only wraps the template.
+        assert!(
+            code.contains("import { ref } from 'vue'"),
+            "import must be present:\n{}",
+            code
+        );
+        // Positive: the broken `count.` line must still appear (for TS resolution)
+        assert!(
+            code.contains("count."),
+            "broken expression must be preserved:\n{}",
+            code
+        );
+        // Negative: script body should NOT be wrapped in TemplateBindingFN
+        // (error mode keeps it at file scope)
+        let fn_pos = code.find("function ___VERTER___TemplateBindingFN");
+        if let Some(fn_pos) = fn_pos {
+            let import_pos = code.find("import { ref } from 'vue'").unwrap();
+            assert!(
+                import_pos < fn_pos,
+                "import must be at file scope (before TemplateBindingFN):\n{}",
+                code
+            );
+            let count_dot_pos = code.find("count.\n").unwrap();
+            assert!(
+                count_dot_pos < fn_pos,
+                "broken expression must be at file scope (before TemplateBindingFN):\n{}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn imports_hoisted_with_broken_expression_in_function() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+function increment() {
+  count.value++
+  count.
+}
+</script>"#,
+        );
+        // In error mode, script body is at file scope
+        assert!(
+            code.contains("import { ref } from 'vue'"),
+            "import must be present:\n{}",
+            code
+        );
+        // Positive: the `count.value++` line must appear
+        assert!(
+            code.contains("count.value++"),
+            "valid expression must be preserved:\n{}",
+            code
+        );
+        // Positive: `function increment()` must appear (user function preserved)
+        assert!(
+            code.contains("function increment()"),
+            "user function must be preserved:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn template_wrapper_with_script_error() {
+        let (code, _, _) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+count.
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        // Positive: TemplateBindingFN wrapper must exist (for template)
+        assert!(
+            code.contains("function ___VERTER___TemplateBindingFN()"),
+            "TemplateBindingFN wrapper must exist:\n{}",
+            code
+        );
+        // Positive: import must appear before TemplateBindingFN (file scope)
+        let fn_pos = code.find("function ___VERTER___TemplateBindingFN").unwrap();
+        let import_pos = code.find("import { ref } from 'vue'").unwrap();
+        assert!(
+            import_pos < fn_pos,
+            "import must be at file scope:\n{}",
+            code
+        );
+        // Positive: script body must appear before TemplateBindingFN
+        let count_pos = code.find("const count = ref(0)").unwrap();
+        assert!(
+            count_pos < fn_pos,
+            "script body must be at file scope:\n{}",
+            code
+        );
+        // Positive: wrapper must close
+        assert!(
+            code.contains("close templateBindingFN"),
+            "TemplateBindingFN must be closed:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn script_error_no_block_scope_wrapping() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+count.
+</script>"#,
+        );
+        // Negative: error mode should NOT use block scope destructuring
+        assert!(
+            !code.contains("___VERTER___unwrapped"),
+            "error mode should not use block scope destructuring:\n{}",
+            code
+        );
+        // Negative: no block scope opening/closing
+        assert!(
+            !code.contains("close block scope"),
+            "error mode should not have block scope:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn script_error_file_scope_declarations() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+count.
+</script>"#,
+        );
+        // Positive: declaration should appear in output at file scope
+        assert!(
+            code.contains("const count = ref(0)"),
+            "declaration should be preserved:\n{}",
+            code
+        );
+        // Positive: import should appear in output
+        assert!(
+            code.contains("import { ref } from 'vue'"),
+            "import should be preserved:\n{}",
+            code
+        );
+        // Negative: script body should NOT be inside a function
+        // Check that `const count` comes before any TemplateBindingFN
+        if let Some(fn_pos) = code.find("function ___VERTER___TemplateBindingFN") {
+            let count_pos = code.find("const count = ref(0)").unwrap();
+            assert!(
+                count_pos < fn_pos,
+                "declarations should be at file scope (before TemplateBindingFN):\n{}",
+                code
+            );
+        }
     }
 }

@@ -44,3 +44,7 @@ scripts/compare-tsx-output/
 # VitePress
 docs/.vitepress/dist
 docs/.vitepress/cache
+
+# VS Code extension build artifacts
+packages/vue-vscode/bin/
+*.vsix

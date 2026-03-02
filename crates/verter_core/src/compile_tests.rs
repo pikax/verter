@@ -6441,7 +6441,8 @@ const msg = 'hello'
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(!tsx.code.is_empty(), "TSX code should not be empty");
     assert!(
-        tsx.code.contains("function ___VERTER___TemplateBindingFN"),
+        tsx.code
+            .contains("export function ___VERTER___TemplateBindingFN"),
         "Should contain component wrapper function, got: {}",
         tsx.code
     );
@@ -6477,7 +6478,7 @@ const count = ref(0)
     // Imports should be hoisted above the wrapper function
     let fn_pos = tsx
         .code
-        .find("function ___VERTER___TemplateBindingFN")
+        .find("export function ___VERTER___TemplateBindingFN")
         .expect("wrapper function");
     let ref_pos = tsx
         .code
@@ -6508,10 +6509,233 @@ const msg = 'hello'
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let tsx = result.tsx.as_ref().expect("tsx block");
-    // count is a SetupRef → gets .value suffix in inline mode
+    // count is a SetupRef — in the new output, .value is NOT appended in TSX
     assert!(
-        tsx.code.contains("count.value"),
-        "SetupRef should get .value, got: {}",
+        tsx.code.contains("{ count }"),
+        "SetupRef should appear without .value in TSX, got: {}",
+        tsx.code
+    );
+    // Negative: .value must NOT appear in TSX template interpolations
+    assert!(
+        !tsx.code.contains("count.value"),
+        ".value must not appear in TSX template: {}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_destruct_ref_binding_uses_let() {
+    let result = compile_tsx(
+        r#"<script setup>
+import { ref } from 'vue'
+const msg = ref('')
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // SetupRef must use `let` in destructuring (allows v-model assignment)
+    assert!(
+        tsx.code.contains("let {") && tsx.code.contains("msg"),
+        "SetupRef binding should use `let` in destructuring, got:\n{}",
+        tsx.code
+    );
+    // Must NOT appear in a `const {` destructuring
+    assert!(
+        !tsx.code.contains("const { msg }") && !tsx.code.contains("const {\n    msg"),
+        "SetupRef binding must NOT appear in const destructuring, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_destruct_plain_const_uses_const() {
+    let result = compile_tsx(
+        r#"<script setup>
+const label = 'hello'
+</script>
+<template><div>{{ label }}</div></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // LiteralConst/SetupConst must use `const` in destructuring
+    assert!(
+        tsx.code.contains("const {") && tsx.code.contains("label"),
+        "SetupConst/LiteralConst binding should use `const` in destructuring, got:\n{}",
+        tsx.code
+    );
+    // Must NOT appear in a `let {` destructuring
+    assert!(
+        !tsx.code.contains("let {"),
+        "SetupConst/LiteralConst binding must NOT appear in let destructuring, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_destruct_mixed_const_and_ref_split_correctly() {
+    let result = compile_tsx(
+        r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+const label = 'hello'
+</script>
+<template><div>{{ count }} {{ label }}</div></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Should have both `const {` and `let {` destructuring
+    assert!(
+        tsx.code.contains("const {"),
+        "Should have const destructuring for label, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("let {"),
+        "Should have let destructuring for count, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_destruct_reactive_uses_let() {
+    let result = compile_tsx(
+        r#"<script setup>
+import { reactive } from 'vue'
+const state = reactive({ x: 0 })
+</script>
+<template><div>{{ state.x }}</div></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // SetupReactiveConst must use `let` (mutable properties)
+    assert!(
+        tsx.code.contains("let {") && tsx.code.contains("state"),
+        "SetupReactiveConst binding should use `let` in destructuring, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_destruct_let_binding_uses_let() {
+    let result = compile_tsx(
+        r#"<script setup>
+let x = 0
+</script>
+<template><div>{{ x }}</div></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // SetupLet must use `let`
+    assert!(
+        tsx.code.contains("let {") && tsx.code.contains(" x"),
+        "SetupLet binding should use `let` in destructuring, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("const { x }") && !tsx.code.contains("const {\n    x"),
+        "SetupLet binding must NOT appear in const destructuring, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_v_model_on_component_produces_valid_jsx() {
+    let result = compile_tsx(
+        r#"<script setup>
+import { ref } from 'vue'
+import MyComp from './MyComp.vue'
+const val = ref('')
+</script>
+<template><MyComp v-model="val" /></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // modelValue prop must be present
+    assert!(
+        tsx.code.contains("modelValue={"),
+        "v-model on component should emit modelValue prop, got:\n{}",
+        tsx.code
+    );
+    // Event handler must use spread syntax (quoted keys are invalid JSX attribute names)
+    assert!(
+        tsx.code.contains(r#""onUpdate:modelValue""#),
+        "v-model should emit onUpdate:modelValue handler, got:\n{}",
+        tsx.code
+    );
+    // Negative: quoted string must NOT appear as a standalone JSX attribute (before `=`)
+    // Valid: {...{"onUpdate:modelValue": handler}} — inside spread
+    // Invalid: "onUpdate:modelValue"={handler} — bare quoted attribute
+    assert!(
+        !tsx.code.contains(r#""onUpdate:modelValue"={"#),
+        "onUpdate:modelValue must NOT be a bare JSX attribute (invalid syntax), got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_v_model_on_native_input_uses_value_prop() {
+    let result = compile_tsx(
+        r#"<script setup>
+import { ref } from 'vue'
+const msg = ref('')
+</script>
+<template><input v-model="msg" /></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Native input should use `value` (not `modelValue`)
+    assert!(
+        tsx.code.contains("value={"),
+        "v-model on native input should use value prop, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("modelValue"),
+        "v-model on native input must NOT use modelValue, got:\n{}",
+        tsx.code
+    );
+    // Must not have quoted attribute names (invalid JSX)
+    assert!(
+        !tsx.code.contains(r#""onUpdate:"#),
+        "native input must not have quoted onUpdate attribute, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_v_model_named_on_component_uses_spread() {
+    let result = compile_tsx(
+        r#"<script setup>
+import { ref } from 'vue'
+import MyComp from './MyComp.vue'
+const title = ref('')
+</script>
+<template><MyComp v-model:title="title" /></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Named model: title prop + onUpdate:title handler
+    assert!(
+        tsx.code.contains("title={"),
+        "named v-model should emit title prop, got:\n{}",
+        tsx.code
+    );
+    // Must not have bare quoted attribute
+    assert!(
+        !tsx.code.contains(r#""onUpdate:title"={"#),
+        "named v-model must NOT use bare quoted JSX attribute, got:\n{}",
         tsx.code
     );
 }
@@ -7302,44 +7526,66 @@ let el = useTemplateRef('el')
 fn tsx_binding_v5_process_parity_matrix() {
     let cases: [(&str, &[&str], &[&str]); 8] = [
         (
-            r#"<template>{{ test }}</template>"#,
-            &["{ _ctx.test }"],
-            &[],
+            r#"<script setup>
+const test = 1
+</script>
+<template>{{ test }}</template>"#,
+            &["{ test }"],
+            &["_ctx."],
         ),
         (
-            r#"<template><div :test="test" @click="handler"></div></template>"#,
-            &["test={_ctx.test}", "onClick={_ctx.handler}"],
-            &[],
+            r#"<script setup>
+const test = 1
+const handler = () => {}
+</script>
+<template><div :test="test" @click="handler"></div></template>"#,
+            &["test={test}", "onClick={handler}"],
+            &["_ctx."],
         ),
         (
-            r#"<template><div v-for="item in items">{{ item + items.length }}</div></template>"#,
-            &["items.map((item) => (", "{ item + _ctx.items.length }"],
-            &[],
+            r#"<script setup>
+const items = [1]
+</script>
+<template><div v-for="item in items">{{ item + items.length }}</div></template>"#,
+            &["items.map((item) => (", "{ item + items.length }"],
+            &["_ctx."],
         ),
         (
-            r#"<template><div :[msg]="msg" /></template>"#,
-            &["{...{[_ctx.msg]: _ctx.msg}}"],
-            &[],
+            r#"<script setup>
+const msg = ''
+</script>
+<template><div :[msg]="msg" /></template>"#,
+            &["{...{[msg]: msg}}"],
+            &["_ctx."],
         ),
         (
-            r#"<template><Comp v-model:[`${msg}ss`]="msg" /></template>"#,
-            &[r#"[`${_ctx.msg}ss`]:_ctx.msg"#],
-            &[r#"v-model:"#],
+            r#"<script setup>
+const msg = ''
+</script>
+<template><Comp v-model:[`${msg}ss`]="msg" /></template>"#,
+            &[r#"[`${msg}ss`]:msg"#],
+            &[r#"v-model:"#, "_ctx."],
         ),
         (
-            r#"<template>{{ { test } }}</template>"#,
-            &["{ { test: _ctx.test } }"],
-            &[],
+            r#"<script setup>
+const test = 1
+</script>
+<template>{{ { test } }}</template>"#,
+            &["{ { test } }"],
+            &["_ctx."],
         ),
         (
-            r#"<template>{{ [ test, { test }, [test] ] }}</template>"#,
-            &["{ [ _ctx.test, { test: _ctx.test }, [_ctx.test] ] }"],
-            &[],
+            r#"<script setup>
+const test = 1
+</script>
+<template>{{ [ test, { test }, [test] ] }}</template>"#,
+            &["{ [ test, { test }, [test] ] }"],
+            &["_ctx."],
         ),
         (
             r#"<template>{{ (foo:string)=> { foo.toLowerCase(); } }}</template>"#,
             &["(foo:string)=> { foo.toLowerCase(); }"],
-            &["_ctx.foo"],
+            &["_ctx.foo", "___VERTER___instance.foo"],
         ),
     ];
 
@@ -7404,39 +7650,60 @@ fn tsx_prop_v5_process_parity_matrix() {
             &[],
         ),
         (
-            r#"<template><div :test="test" /></template>"#,
-            &[r#"<div test={_ctx.test} />"#],
-            &[],
+            r#"<script setup>
+const test = 1
+</script>
+<template><div :test="test" /></template>"#,
+            &[r#"<div test={test} />"#],
+            &["_ctx."],
         ),
         (
-            r#"<template><div :test /></template>"#,
-            &[r#"<div test={_ctx.test} />"#],
-            &[],
+            r#"<script setup>
+const test = 1
+</script>
+<template><div :test /></template>"#,
+            &[r#"<div test={test} />"#],
+            &["_ctx."],
         ),
         (
-            r#"<template><div :test-to-foo /></template>"#,
-            &[r#"<div test-to-foo={_ctx.testToFoo} />"#],
-            &[],
+            r#"<script setup>
+const testToFoo = 1
+</script>
+<template><div :test-to-foo /></template>"#,
+            &[r#"<div test-to-foo={testToFoo} />"#],
+            &["_ctx."],
         ),
         (
-            r#"<template><div :[msg]="msg" /></template>"#,
-            &[r#"<div {...{[_ctx.msg]: _ctx.msg}} />"#],
-            &[],
+            r#"<script setup>
+const msg = ''
+</script>
+<template><div :[msg]="msg" /></template>"#,
+            &[r#"<div {...{[msg]: msg}} />"#],
+            &["_ctx."],
         ),
         (
-            r#"<template><div v-bind="obj" /></template>"#,
-            &[r#"<div {..._ctx.obj} />"#],
-            &[],
+            r#"<script setup>
+const obj = {}
+</script>
+<template><div v-bind="obj" /></template>"#,
+            &[r#"<div {...obj} />"#],
+            &["_ctx."],
         ),
         (
-            r#"<template><div @test="test" /></template>"#,
-            &[r#"<div onTest={_ctx.test} />"#],
-            &[],
+            r#"<script setup>
+const test = () => {}
+</script>
+<template><div @test="test" /></template>"#,
+            &[r#"<div onTest={test} />"#],
+            &["_ctx."],
         ),
         (
-            r#"<template><div @test-camel-case="test" /></template>"#,
-            &[r#"<div onTestCamelCase={_ctx.test} />"#],
-            &[r#"onTest-camel-case"#],
+            r#"<script setup>
+const test = () => {}
+</script>
+<template><div @test-camel-case="test" /></template>"#,
+            &[r#"<div onTestCamelCase={test} />"#],
+            &[r#"onTest-camel-case"#, "_ctx."],
         ),
         (
             r#"<template><div aria-label="test" data-test="value" /></template>"#,
@@ -7444,14 +7711,17 @@ fn tsx_prop_v5_process_parity_matrix() {
             &[],
         ),
         (
-            r#"<template><div :style="{ color: 'red' }" style="color: blue" :class="{ active: ok }" class="btn" /></template>"#,
+            r#"<script setup>
+const ok = true
+</script>
+<template><div :style="{ color: 'red' }" style="color: blue" :class="{ active: ok }" class="btn" /></template>"#,
             &[
                 r#"style={{ color: 'red' }}"#,
                 r#"style="color: blue""#,
-                r#"class={{ active: _ctx.ok }}"#,
+                r#"class={{ active: ok }}"#,
                 r#"class="btn""#,
             ],
-            &[],
+            &["_ctx."],
         ),
     ];
 
@@ -8170,12 +8440,12 @@ const msg: string | number = Math.random() > 0.5 ? 'x' : 0
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
-    // msg is classified as SetupMaybeRef (ternary init) so gets .value in inline mode
+    // In the new output, .value is NOT appended — msg stays as msg
     assert!(
         normalized.contains(
-            "onClick={()=>{if(!((typeofmsg.value==='string'))){returnundefined;}msg.value.toLowerCase()}}"
+            "onClick={()=>{if(!((typeofmsg==='string'))){returnundefined;}msg.toLowerCase()}}"
         ),
-        "v-if event handlers should include the guard inside callback for narrowing, got:\n{}",
+        "v-if event handlers should include the guard inside callback for narrowing (no .value), got:\n{}",
         tsx.code
     );
 }
@@ -8203,24 +8473,34 @@ const doThat = () => {}
 
 #[test]
 fn tsx_interpolation_without_spaces() {
-    let result = compile_tsx(r#"<template>{{test}}</template>"#);
+    let result = compile_tsx(
+        r#"<script setup>
+const test = 1
+</script>
+<template>{{test}}</template>"#,
+    );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("{_ctx.test}"),
-        "Interpolation without spaces should become {{_ctx.test}} with binding prefix, got:\n{}",
+        tsx.code.contains("{test}"),
+        "Interpolation without spaces should become {{test}} (no _ctx. prefix), got:\n{}",
         tsx.code
     );
 }
 
 #[test]
 fn tsx_interpolation_preserves_inner_spaces() {
-    let result = compile_tsx(r#"<template>{{  test  }}</template>"#);
+    let result = compile_tsx(
+        r#"<script setup>
+const test = 1
+</script>
+<template>{{  test  }}</template>"#,
+    );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("{  _ctx.test  }"),
-        "Interpolation with spaces should preserve inner spaces, got:\n{}",
+        tsx.code.contains("{  test  }"),
+        "Interpolation with spaces should preserve inner spaces (no _ctx. prefix), got:\n{}",
         tsx.code
     );
 }
@@ -8228,14 +8508,17 @@ fn tsx_interpolation_preserves_inner_spaces() {
 #[test]
 fn tsx_interpolation_preserves_inner_newlines() {
     let result = compile_tsx(
-        r#"<template>{{  test
+        r#"<script setup>
+const test = 1
+</script>
+<template>{{  test
   }}</template>"#,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("{  _ctx.test\n  }"),
-        "Interpolation with newlines should preserve inner formatting, got:\n{}",
+        tsx.code.contains("{  test\n  }"),
+        "Interpolation with newlines should preserve inner formatting (no _ctx. prefix), got:\n{}",
         tsx.code
     );
 }
@@ -8309,7 +8592,7 @@ fn tsx_template_tag_replacement_wraps_content_in_fragment() {
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
         tsx.code
-            .contains("function ___VERTER___TemplateBindingFN()"),
+            .contains("export function ___VERTER___TemplateBindingFN()"),
         "Template should be emitted inside component function wrapper, got:\n{}",
         tsx.code
     );
@@ -8452,7 +8735,11 @@ fn tsx_v_for_with_v_if_combination_contains_condition_and_map() {
 #[test]
 fn tsx_parent_v_if_with_child_v_for_contains_outer_condition() {
     let result = compile_tsx(
-        r#"<template><div v-if="show"><div v-for="item in items">{{ item }}</div></div></template>"#,
+        r#"<script setup>
+const show = true
+const items = [1]
+</script>
+<template><div v-if="show"><div v-for="item in items">{{ item }}</div></div></template>"#,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
@@ -8559,7 +8846,11 @@ const as = 'div'
 #[test]
 fn tsx_component_with_v_if_and_v_for_preserves_component_tags() {
     let result = compile_tsx(
-        r#"<template>
+        r#"<script setup>
+const test = true
+const items = [1]
+</script>
+<template>
   <Comp v-if="test"></Comp>
   <Comp v-for="item in items"></Comp>
 </template>"#,
@@ -9246,7 +9537,7 @@ function increment() {
         tsx.code
     );
     assert!(
-        fn_body.contains("message.value"),
+        fn_body.contains("message"),
         "Template interpolation should be inside TemplateBindingFN body, but body is:\n{}",
         fn_body,
     );
@@ -9262,6 +9553,85 @@ function increment() {
     assert!(
         !tsx.code.contains("<></>"),
         "Empty fragment placeholder <></> should be replaced with template content.\nTSX:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_block_scope_no_double_braces() {
+    // Double braces `}}` / `{{` in push_str should not appear —
+    // they are NOT format-escaping, they emit literal characters.
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+
+<template>
+  <div>{{ count }}</div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Should NOT contain `}}` followed by " // close" (old double-brace bug)
+    assert!(
+        !tsx.code.contains("}} // close"),
+        "Double braces `}}` must not appear in block scope / templateBindingFN close.\nTSX:\n{}",
+        tsx.code
+    );
+
+    // Should contain single-brace closes
+    assert!(
+        tsx.code.contains("} // close block scope"),
+        "Block scope should close with single brace.\nTSX:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("} // close templateBindingFN"),
+        "TemplateBindingFN should close with single brace.\nTSX:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_shallow_unwrap_ref_avoids_tdz() {
+    // The shallowUnwrapRef call must use a temp variable outside the block scope
+    // to avoid TDZ (Temporal Dead Zone) errors where `const { count } = shallowUnwrapRef({ count: count ... })`
+    // would self-reference the uninitialized binding.
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+const message = ref('hello')
+</script>
+
+<template>
+  <div>{{ count }} {{ message }}</div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: temp variable pattern
+    assert!(
+        tsx.code
+            .contains("___VERTER___unwrapped = ___VERTER___shallowUnwrapRef("),
+        "Should use temp variable for shallowUnwrapRef.\nTSX:\n{}",
+        tsx.code
+    );
+
+    // Positive: destructuring from temp
+    assert!(
+        tsx.code.contains("} = ___VERTER___unwrapped;"),
+        "Should destructure from ___VERTER___unwrapped temp variable.\nTSX:\n{}",
+        tsx.code
+    );
+
+    // Negative: old combined pattern must not appear (TDZ-prone)
+    assert!(
+        !tsx.code.contains("} = ___VERTER___shallowUnwrapRef("),
+        "Old combined destructure+call pattern must not appear (causes TDZ).\nTSX:\n{}",
         tsx.code
     );
 }
@@ -10090,18 +10460,10 @@ export default { props: ['msg'] }
         "Options API should have types imports, got:\n{}",
         tsx.code
     );
+    // Negative: Instance type should no longer be emitted
     assert!(
-        tsx.code.contains(r#"from "vue""#),
-        "Options API should have vue imports"
-    );
-    // Type constructs present (appended after source map)
-    assert!(
-        tsx.code.contains("___VERTER___TemplateBinding"),
-        "Options API should have TemplateBinding type construct"
-    );
-    assert!(
-        tsx.code.contains("___VERTER___FullContextFN"),
-        "Options API should have FullContext"
+        !tsx.code.contains("___VERTER___Instance"),
+        "Options API should not have Instance type construct"
     );
     // OXC validation
     let alloc = oxc_allocator::Allocator::new();
@@ -10496,5 +10858,703 @@ fn static_hoist_backtick_in_html() {
         code.contains("\\`"),
         "backtick should be escaped in template literal\n--- code ---\n{}",
         code
+    );
+}
+
+// ── TSX export / Comp / JSDoc / offset comment tests ──────────────────
+
+#[test]
+fn tsx_export_template_binding_fn() {
+    let result = compile_tsx(
+        r#"<script setup>
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Positive: TemplateBindingFN should be exported
+    assert!(
+        tsx.code
+            .contains("export function ___VERTER___TemplateBindingFN"),
+        "TemplateBindingFN should be exported, got:\n{}",
+        tsx.code
+    );
+    // Negative: no bare (non-exported) function declaration
+    // Check that every "function ___VERTER___TemplateBindingFN" is preceded by "export "
+    let needle = "function ___VERTER___TemplateBindingFN";
+    let mut search_from = 0;
+    while let Some(pos) = tsx.code[search_from..].find(needle) {
+        let abs_pos = search_from + pos;
+        let before = &tsx.code[..abs_pos];
+        assert!(
+            before.ends_with("export "),
+            "TemplateBindingFN at offset {} is not preceded by 'export ': {}",
+            abs_pos,
+            tsx.code
+        );
+        search_from = abs_pos + needle.len();
+    }
+}
+
+#[test]
+fn tsx_export_instance_type() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { getCurrentInstance } from 'vue'
+const instance = getCurrentInstance()
+</script>
+<template><div>{{ instance?.proxy }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Negative: Instance and CurrentComponentInstance should no longer be exported
+    assert!(
+        !tsx.code.contains("export type ___VERTER___Instance"),
+        "Instance type should no longer be exported, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code
+            .contains("export type ___VERTER___CurrentComponentInstance"),
+        "CurrentComponentInstance type should no longer be exported, got:\n{}",
+        tsx.code
+    );
+    // Negative: no bare type declarations either
+    assert!(
+        !tsx.code.contains("\ntype ___VERTER___Instance"),
+        "Instance type should NOT have bare 'type' declaration:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_comp_only_for_ref_elements() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const el = ref<HTMLDivElement>()
+</script>
+<template><div ref="el">a</div><span>b</span></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Positive: Comp function present for div (has ref)
+    assert!(
+        tsx.code.contains("___VERTER___Comp"),
+        "Should have Comp function for ref element, got:\n{}",
+        tsx.code
+    );
+    // Negative: should NOT have a Comp for the span (no ref)
+    // The span's tag_open.start offset should NOT appear as a Comp function
+    // Since div has ref and span doesn't, we check there's exactly one Comp function
+    let comp_count = tsx.code.matches("function ___VERTER___Comp").count();
+    assert_eq!(
+        comp_count, 1,
+        "Should have exactly 1 Comp function (for ref element only), got {}: \n{}",
+        comp_count, tsx.code
+    );
+}
+
+#[test]
+fn tsx_comp_not_emitted_without_ref() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div><MyComp /></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Negative: no Comp functions when no ref (check for function declarations, not ___VERTER___Component)
+    assert!(
+        !tsx.code.contains("function ___VERTER___Comp"),
+        "Should have no Comp function without ref, got:\n{}",
+        tsx.code
+    );
+    // Negative: no getRootComponent when no ref
+    assert!(
+        !tsx.code.contains("___VERTER___getRootComponent"),
+        "Should have no getRootComponent without ref, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_jsdoc_on_shallow_unwrap_ref_entries() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+/** My counter */
+const count = ref(0)
+const plain = "hello"
+</script>
+<template><div>{{ count }} {{ plain }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Positive: shallowUnwrapRef should contain JSDoc before count
+    assert!(
+        tsx.code.contains("/** My counter */\n    count:"),
+        "shallowUnwrapRef should have JSDoc before count entry, got:\n{}",
+        tsx.code
+    );
+    // Negative: plain should NOT have JSDoc before it
+    let plain_in_unwrap = tsx.code.find("plain: plain as unknown");
+    if let Some(pos) = plain_in_unwrap {
+        let before = &tsx.code[pos.saturating_sub(20)..pos];
+        assert!(
+            !before.contains("/**"),
+            "plain should not have JSDoc before it in shallowUnwrapRef:\n{}",
+            tsx.code
+        );
+    }
+}
+
+#[test]
+fn tsx_offset_comments_on_destructuring() {
+    let source = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+const message = ref("hi")
+</script>
+<template><div>{{ count }} {{ message }}</div></template>"#;
+    let result = compile_tsx(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Find the byte offset of "count" identifier in the SFC source
+    let count_decl_pos = source.find("const count").unwrap();
+    let count_ident_start = count_decl_pos + "const ".len();
+    let count_ident_end = count_ident_start + "count".len();
+
+    // Positive: destructuring should have offset comment before count
+    let expected_comment = format!("/*{},{}*/", count_ident_start, count_ident_end);
+    assert!(
+        tsx.code.contains(&expected_comment),
+        "Destructuring should have offset comment {} for 'count', got:\n{}",
+        expected_comment,
+        tsx.code
+    );
+
+    // Find message's byte offset
+    let msg_decl_pos = source.find("const message").unwrap();
+    let msg_ident_start = msg_decl_pos + "const ".len();
+    let msg_ident_end = msg_ident_start + "message".len();
+    let expected_msg_comment = format!("/*{},{}*/", msg_ident_start, msg_ident_end);
+    assert!(
+        tsx.code.contains(&expected_msg_comment),
+        "Destructuring should have offset comment {} for 'message', got:\n{}",
+        expected_msg_comment,
+        tsx.code
+    );
+
+    // Verify the offset comments point to the correct identifier text
+    assert_eq!(&source[count_ident_start..count_ident_end], "count");
+    assert_eq!(&source[msg_ident_start..msg_ident_end], "message");
+}
+
+#[test]
+fn tsx_offset_comments_non_ascii_are_byte_offsets() {
+    // Emoji 😀 is 4 UTF-8 bytes, 2 UTF-16 code units
+    let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\n// 😀\nconst name = ref('')\n</script>\n<template><div>{{ name }}</div></template>";
+    let result = compile_tsx(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // "name" identifier starts after "const " in the line after the emoji comment
+    let name_decl_pos = source.find("const name").unwrap();
+    let name_ident_start = name_decl_pos + "const ".len();
+    let name_ident_end = name_ident_start + "name".len();
+
+    // Verify it's the correct identifier in the source
+    assert_eq!(&source[name_ident_start..name_ident_end], "name");
+
+    // The offset comment should use UTF-8 byte offsets
+    let expected_comment = format!("/*{},{}*/", name_ident_start, name_ident_end);
+    assert!(
+        tsx.code.contains(&expected_comment),
+        "Offset comment should be UTF-8 byte offsets {}, got:\n{}",
+        expected_comment,
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_comp_with_ref_has_void_reference() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const el = ref<HTMLDivElement>()
+</script>
+<template><div ref="el">text</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Positive: void reference to suppress unused warning
+    assert!(
+        tsx.code.contains("void ___VERTER___Comp"),
+        "Comp function should have void reference to suppress unused warning, got:\n{}",
+        tsx.code
+    );
+}
+
+// ── TSX OXC parse-validity tests ─────────────────────────────────────
+// These compile a full Vue SFC to TSX and then parse the entire output
+// with OXC to verify it is syntactically valid TypeScript/TSX.
+
+/// Compile a Vue SFC to TSX and assert the output parses without errors.
+fn assert_tsx_parses(source: &str, label: &str) {
+    let result = compile_tsx(source);
+    assert!(
+        result.errors.is_empty(),
+        "[{}] compile errors: {:?}",
+        label,
+        result.errors
+    );
+    let tsx = result
+        .tsx
+        .as_ref()
+        .unwrap_or_else(|| panic!("[{}] no tsx block", label));
+    let alloc = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "[{}] OXC parse errors: {:?}\n--- TSX output ---\n{}",
+        label,
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_model_input() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const msg = ref('Hello')
+</script>
+<template>
+  <input v-model="msg" />
+</template>"#,
+        "v-model on input",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_model_textarea() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const text = ref('')
+</script>
+<template>
+  <textarea v-model="text"></textarea>
+</template>"#,
+        "v-model on textarea",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_model_select() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const selected = ref('a')
+</script>
+<template>
+  <select v-model="selected">
+    <option value="a">A</option>
+    <option value="b">B</option>
+  </select>
+</template>"#,
+        "v-model on select",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_model_checkbox() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const checked = ref(false)
+</script>
+<template>
+  <input type="checkbox" v-model="checked" />
+</template>"#,
+        "v-model on checkbox",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_model_component() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+import Comp from './Comp.vue'
+const count = ref(0)
+</script>
+<template>
+  <Comp v-model="count" />
+</template>"#,
+        "v-model on component",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_model_named() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+import Comp from './Comp.vue'
+const title = ref('')
+</script>
+<template>
+  <Comp v-model:title="title" />
+</template>"#,
+        "v-model:title named model",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_model_with_modifiers() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const msg = ref('')
+</script>
+<template>
+  <input v-model.trim.lazy="msg" />
+</template>"#,
+        "v-model with modifiers",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_events_click() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+function handleClick() {}
+</script>
+<template>
+  <button @click="handleClick">Click</button>
+</template>"#,
+        "event @click",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_events_inline_expression() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template>
+  <button @click="count++">{{ count }}</button>
+</template>"#,
+        "event inline expression",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_events_with_event_param() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+function handle(e: Event) {}
+</script>
+<template>
+  <input @input="handle($event)" />
+</template>"#,
+        "event with $event",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_events_multi_statement() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const a = ref(0)
+const b = ref(0)
+</script>
+<template>
+  <button @click="a++; b--">go</button>
+</template>"#,
+        "event multi-statement",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_slot_outlet_default() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+</script>
+<template>
+  <div><slot></slot></div>
+</template>"#,
+        "slot outlet default",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_slot_outlet_named() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+</script>
+<template>
+  <div>
+    <slot name="header"></slot>
+    <slot></slot>
+    <slot name="footer"></slot>
+  </div>
+</template>"#,
+        "slot outlet named",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_slot_outlet_scoped() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const items = ref([1, 2, 3])
+</script>
+<template>
+  <div>
+    <slot :items="items" :count="items.length"></slot>
+  </div>
+</template>"#,
+        "slot outlet scoped",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_slot_outlet_with_fallback() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+</script>
+<template>
+  <div>
+    <slot name="header">Default header</slot>
+  </div>
+</template>"#,
+        "slot outlet with fallback",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_component_named_slots() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+<template>
+  <MyComp>
+    <template #header>Header content</template>
+    <template #default>Body content</template>
+    <template #footer>Footer content</template>
+  </MyComp>
+</template>"#,
+        "component named slots",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_component_scoped_slot() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+<template>
+  <MyComp v-slot="{ item, index }">
+    <span>{{ item }} {{ index }}</span>
+  </MyComp>
+</template>"#,
+        "component scoped slot",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_define_model() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+const firstName = defineModel<string>('firstName')
+</script>
+<template>
+  <input v-model="firstName" />
+</template>"#,
+        "defineModel",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_define_emits() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+const emit = defineEmits<{
+  change: [value: string]
+  update: [id: number, value: string]
+}>()
+</script>
+<template>
+  <button @click="emit('change', 'hello')">go</button>
+</template>"#,
+        "defineEmits typed",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_define_props_with_defaults() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+const props = withDefaults(defineProps<{
+  msg: string
+  count?: number
+}>(), {
+  count: 0,
+})
+</script>
+<template>
+  <div>{{ msg }} {{ count }}</div>
+</template>"#,
+        "defineProps + withDefaults",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_if_v_for_combined() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const show = ref(true)
+const items = ref([{ id: 1, name: 'a' }, { id: 2, name: 'b' }])
+</script>
+<template>
+  <div v-if="show">
+    <ul>
+      <li v-for="item in items" :key="item.id">
+        <span v-if="item.name">{{ item.name }}</span>
+        <span v-else>unnamed</span>
+      </li>
+    </ul>
+  </div>
+  <div v-else>hidden</div>
+</template>"#,
+        "v-if + v-for nested",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_component_with_all_features() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+import Comp from './Comp.vue'
+const msg = ref('Hello World!')
+</script>
+<template>
+  <div>
+    <h1>{{ msg }}</h1>
+    <input v-model="msg" />
+    <Comp :foo="msg" @update="msg = $event">
+      <template #header>Header</template>
+      <template #default="{ data }">{{ data }}</template>
+    </Comp>
+  </div>
+</template>"#,
+        "component with props, events, v-model, slots",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_html_v_text() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const html = ref('<b>bold</b>')
+const text = ref('plain')
+</script>
+<template>
+  <div v-html="html"></div>
+  <div v-text="text"></div>
+</template>"#,
+        "v-html and v-text",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_dynamic_component() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+import CompA from './CompA.vue'
+import CompB from './CompB.vue'
+const current = ref(CompA)
+</script>
+<template>
+  <component :is="current" />
+</template>"#,
+        "dynamic component :is",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_bind_dynamic() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const attrs = ref({ id: 'foo', class: 'bar' })
+</script>
+<template>
+  <div v-bind="attrs">content</div>
+</template>"#,
+        "v-bind object spread",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_template_ref() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const el = ref<HTMLDivElement>()
+</script>
+<template>
+  <div ref="el">text</div>
+</template>"#,
+        "template ref",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_show() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const visible = ref(true)
+</script>
+<template>
+  <div v-show="visible">shown</div>
+</template>"#,
+        "v-show",
+    );
+}
+
+#[test]
+fn tsx_parse_valid_v_on_object() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+function onMouseDown() {}
+function onMouseUp() {}
+</script>
+<template>
+  <div v-on="{ mousedown: onMouseDown, mouseup: onMouseUp }">drag me</div>
+</template>"#,
+        "v-on object syntax",
     );
 }

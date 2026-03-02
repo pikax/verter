@@ -121,6 +121,14 @@ function getTabBadge(mode: OutputMode): string | null {
   }
   return null;
 }
+
+function isEditableMode(mode: OutputMode): boolean {
+  return props.store.editableOutput && (mode === "types" || mode === "tsc");
+}
+
+function isEditedMode(mode: OutputMode): boolean {
+  return mode === "types" && props.store.tsxUserEdited;
+}
 </script>
 
 <template>
@@ -140,6 +148,7 @@ function getTabBadge(mode: OutputMode): string | null {
         <span v-if="getTabBadge(tab.mode)" class="lint-badge">
           {{ getTabBadge(tab.mode) }}
         </span>
+        <span v-if="isEditedMode(tab.mode)" class="edited-badge">edited</span>
       </button>
       <button
         v-if="showSourceMapButton"
@@ -159,7 +168,7 @@ function getTabBadge(mode: OutputMode): string | null {
       <CssMatchPanel v-else-if="store.outputMode === 'cssMatch'" :store="store" />
       <SourceMapPanel v-else-if="store.outputMode === 'map'" :store="store" />
       <DiagnosticsPanel v-else-if="store.outputMode === 'diagnostics'" :store="store" />
-      <CodeOutput v-else :store="store" :mode="store.outputMode" />
+      <CodeOutput v-else :store="store" :mode="store.outputMode" :editable="isEditableMode(store.outputMode)" />
     </div>
   </div>
 </template>
@@ -224,6 +233,16 @@ function getTabBadge(mode: OutputMode): string | null {
   border-radius: 10px;
   min-width: 16px;
   text-align: center;
+}
+
+.edited-badge {
+  margin-left: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border-radius: 10px;
 }
 
 .sourcemap-btn {

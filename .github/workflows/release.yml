@@ -12,6 +12,7 @@ concurrency:
 permissions:
   contents: write
   id-token: write
+  deployments: write
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -45,7 +46,7 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # Build native binaries (matrix)
+  # Build native binaries (matrix — for npm platform packages)
   # ---------------------------------------------------------------------------
   build-native:
     name: Build Native (${{ matrix.target }})
@@ -109,6 +110,74 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Build LSP binary (matrix — for VS Code extension bundling)
+  # ---------------------------------------------------------------------------
+  build-lsp:
+    name: Build LSP (${{ matrix.target }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            vsce-target: linux-x64
+            binary: verter-lsp
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+            vsce-target: linux-arm64
+            binary: verter-lsp
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            vsce-target: darwin-x64
+            binary: verter-lsp
+          - target: aarch64-apple-darwin
+            os: macos-15
+            vsce-target: darwin-arm64
+            binary: verter-lsp
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            vsce-target: win32-x64
+            binary: verter-lsp.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lsp-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lsp-${{ matrix.target }}-
+      - name: Setup Zig
+        if: matrix.use-cross
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install cargo-zigbuild
+        if: matrix.use-cross
+        run: cargo install cargo-zigbuild --locked
+      - name: Build LSP binary
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cargo zigbuild --release --package verter_lsp --target ${{ matrix.target }}
+          else
+            cargo build --release --package verter_lsp --target ${{ matrix.target }}
+          fi
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lsp-${{ matrix.vsce-target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Build WASM
   # ---------------------------------------------------------------------------
   build-wasm:
@@ -156,6 +225,9 @@ jobs:
     name: Publish Crates
     needs: validate
     runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/verter_core
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -181,6 +253,9 @@ jobs:
     name: Publish npm
     needs: [validate, build-native, build-wasm]
     runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@verter/core
     permissions:
       id-token: write
       contents: read
@@ -264,12 +339,137 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ---------------------------------------------------------------------------
+  # Publish VS Code Extension (platform-specific VSIX)
+  # ---------------------------------------------------------------------------
+  publish-vscode:
+    name: Publish VS Code Extension
+    needs: [validate, build-lsp, build-native, publish-npm]
+    runs-on: ubuntu-latest
+    environment:
+      name: vscode-marketplace
+      url: https://marketplace.visualstudio.com/items?itemName=pikax.verter-vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Build TS (extension + typescript-plugin dependencies)
+      - name: Build TS packages
+        run: pnpm run build:ts
+
+      # Download all LSP binaries
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lsp-*
+          path: /tmp/lsp-artifacts
+
+      # Download all native binaries
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: /tmp/native-artifacts
+
+      # Package and publish per platform
+      - name: Package and publish VSIX
+        run: |
+          IS_PRE="${{ needs.validate.outputs.is-prerelease }}"
+
+          PRE_RELEASE_FLAG=""
+          if [ "$IS_PRE" = "true" ]; then
+            PRE_RELEASE_FLAG="--pre-release"
+          fi
+
+          # Map: vsce-target → rust-target → native .node filename → lsp binary name
+          declare -A RUST_TARGET=(
+            [linux-x64]="x86_64-unknown-linux-gnu"
+            [linux-arm64]="aarch64-unknown-linux-gnu"
+            [darwin-x64]="x86_64-apple-darwin"
+            [darwin-arm64]="aarch64-apple-darwin"
+            [win32-x64]="x86_64-pc-windows-msvc"
+          )
+          declare -A NATIVE_FILE=(
+            [linux-x64]="verter-native.linux-x64-gnu.node"
+            [linux-arm64]="verter-native.linux-arm64-gnu.node"
+            [darwin-x64]="verter-native.darwin-x64.node"
+            [darwin-arm64]="verter-native.darwin-arm64.node"
+            [win32-x64]="verter-native.win32-x64-msvc.node"
+          )
+
+          for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+            echo ""
+            echo "=========================================="
+            echo "  Packaging $platform"
+            echo "=========================================="
+
+            rust_target="${RUST_TARGET[$platform]}"
+            native_file="${NATIVE_FILE[$platform]}"
+
+            # --- LSP binary ---
+            mkdir -p packages/vue-vscode/bin
+            if [ "$platform" = "win32-x64" ]; then
+              LSP_BIN="verter-lsp.exe"
+            else
+              LSP_BIN="verter-lsp"
+            fi
+            cp "/tmp/lsp-artifacts/lsp-${platform}/${LSP_BIN}" "packages/vue-vscode/bin/${LSP_BIN}"
+            chmod +x "packages/vue-vscode/bin/${LSP_BIN}" 2>/dev/null || true
+
+            # --- Native binding ---
+            # Place the platform's .node file where the esbuild prepareDeps() will find it
+            mkdir -p packages/native/dist
+            rm -f packages/native/dist/verter-native.*.node
+            cp "/tmp/native-artifacts/native-${rust_target}/${native_file}" "packages/native/dist/${native_file}"
+
+            # --- Clean previous build output ---
+            rm -rf packages/vue-vscode/dist/node_modules
+            rm -rf packages/vue-vscode/node_modules/@verter
+
+            # --- Build & package (package.mjs handles dep copying + version patching + vsce) ---
+            cd packages/vue-vscode
+            node package.mjs --target "$platform" $PRE_RELEASE_FLAG
+            cd "$GITHUB_WORKSPACE"
+
+            # --- Move VSIX ---
+            VSIX_FILE=$(ls packages/vue-vscode/*.vsix | head -1)
+            VSIX_NAME="verter-vscode-${platform}.vsix"
+            mv "$VSIX_FILE" "/tmp/${VSIX_NAME}"
+
+            echo "  VSIX: /tmp/${VSIX_NAME} ($(du -h "/tmp/${VSIX_NAME}" | cut -f1))"
+
+            # --- Publish to VS Code Marketplace ---
+            npx @vscode/vsce publish --packagePath "/tmp/${VSIX_NAME}" $PRE_RELEASE_FLAG
+
+            # --- Clean up for next platform ---
+            rm -rf packages/vue-vscode/bin
+          done
+
+          echo ""
+          echo "All platform VSIXes:"
+          ls -lh /tmp/verter-vscode-*.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      # Upload all VSIX files for GitHub Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: /tmp/verter-vscode-*.vsix
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # GitHub Release
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [validate, build-native, build-wasm, publish-npm]
+    needs: [validate, build-native, build-wasm, publish-npm, publish-vscode]
     runs-on: ubuntu-latest
+    environment:
+      name: github-releases
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -305,6 +505,11 @@ jobs:
           name: wasm
           path: /tmp/release-assets/wasm
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+          path: /tmp/release-assets/vsix
+
       - name: Create GitHub Release
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -315,9 +520,9 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          # Collect all .node and .wasm files
+          # Collect all .node, .wasm, .js, and .vsix files
           ASSETS=""
-          for f in $(find /tmp/release-assets -name '*.node' -o -name '*.wasm' -o -name '*.js' | head -50); do
+          for f in $(find /tmp/release-assets -name '*.node' -o -name '*.wasm' -o -name '*.js' -o -name '*.vsix' | head -50); do
             ASSETS="$ASSETS $f"
           done
 

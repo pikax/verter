@@ -125,24 +125,30 @@ async function fetchLibFile(name: string, db: IDBDatabase): Promise<string> {
 
 function createLanguageServiceHost(): ts.LanguageServiceHost {
   const ts = tsLib!;
+
+  const compilerOptions: ts.CompilerOptions = {
+    target: ts.ScriptTarget.ESNext,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    jsx: ts.JsxEmit.Preserve,
+    jsxImportSource: "vue",
+    strict: true,
+    noUnusedLocals: true,
+    noUnusedParameters: true,
+    esModuleInterop: true,
+    allowJs: true,
+    noEmit: true,
+    skipLibCheck: true,
+    lib: ["lib.es2020.d.ts", "lib.dom.d.ts"],
+  };
+
+  const moduleResolutionHost: ts.ModuleResolutionHost = {
+    fileExists: (name) => files.has(name),
+    readFile: (name) => files.get(name)?.content,
+  };
+
   return {
-    getCompilationSettings() {
-      return {
-        target: ts.ScriptTarget.ESNext,
-        module: ts.ModuleKind.ESNext,
-        moduleResolution: ts.ModuleResolutionKind.Bundler,
-        jsx: ts.JsxEmit.Preserve,
-        jsxImportSource: "vue",
-        strict: true,
-        noUnusedLocals: true,
-        noUnusedParameters: true,
-        esModuleInterop: true,
-        allowJs: true,
-        noEmit: true,
-        skipLibCheck: true,
-        lib: ["lib.es2020.d.ts", "lib.dom.d.ts"],
-      };
-    },
+    getCompilationSettings: () => compilerOptions,
     getScriptFileNames() {
       return [...files.keys()];
     },
@@ -161,6 +167,23 @@ function createLanguageServiceHost(): ts.LanguageServiceHost {
     },
     readFile(fileName) {
       return files.get(fileName)?.content;
+    },
+    resolveModuleNames(moduleNames: string[], containingFile: string) {
+      return moduleNames.map((moduleName) => {
+        // Handle relative .vue imports: ./Comp.vue → /Comp.vue.d.ts
+        if (moduleName.startsWith("./") && moduleName.endsWith(".vue")) {
+          const dtsPath = "/" + moduleName.slice(2) + ".d.ts";
+          if (files.has(dtsPath)) {
+            return {
+              resolvedFileName: dtsPath,
+              extension: ts.Extension.Dts,
+            } as ts.ResolvedModule;
+          }
+        }
+        // Fall back to TypeScript's default resolution for everything else (vue, @verter/types, etc.)
+        return ts.resolveModuleName(moduleName, containingFile, compilerOptions, moduleResolutionHost)
+          .resolvedModule;
+      });
     },
   };
 }

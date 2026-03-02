@@ -101,6 +101,10 @@ export interface StoreState {
   compilerOptions: CompilerOptions;
   compileTiming: CompileTiming;
   typeChecker: TypeCheckerMode;
+  currentProjectName: string | null;
+  editableOutput: boolean;
+  tsxUserEdited: boolean;
+  tsxOverrideCode: string | null;
 }
 
 // ── Analysis types (mirror Rust FileAnalysisSnapshot) ──

@@ -497,6 +497,23 @@ impl VerterLanguageServer {
         format!("{canonical}.tsx")
     }
 
+    /// Get TSX content and mapper by TSX path (reverse lookup).
+    fn tsx_context_by_tsx_path(
+        &self,
+        tsx_path: &str,
+    ) -> Option<(String, Arc<str>, PositionMapper)> {
+        // TSX path is "{canonical_id}.tsx" — strip the .tsx suffix to get the canonical_id
+        let canonical_id = tsx_path.strip_suffix(".tsx")?;
+        let uri = self.documents.canonical_id_to_uri(canonical_id)?;
+        self.tsx_context(&uri)
+    }
+
+    /// Find the Vue URI corresponding to a TSX path.
+    fn vue_uri_from_tsx_path(&self, tsx_path: &str) -> Option<Uri> {
+        let canonical_id = tsx_path.strip_suffix(".tsx")?;
+        self.documents.canonical_id_to_uri(canonical_id)
+    }
+
     /// Resolve a child component's analysis from an import source path.
     ///
     /// Tries three strategies:
@@ -1943,6 +1960,7 @@ impl LanguageServer for VerterLanguageServer {
                                     &mapper,
                                     &tsx_li,
                                     &doc.line_index,
+                                    Some(&tsx_path),
                                 );
                                 return Ok(if merged.is_empty() {
                                     None
@@ -1973,7 +1991,7 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
-        // Check if this item requires auto-import
+        // Check if this item requires auto-import (verter workspace components)
         if let Some(ref data) = item.data {
             if data.get("auto_import").and_then(|v| v.as_bool()) == Some(true) {
                 if let (Some(import_path), Some(component_name), Some(doc_uri)) = (
@@ -1985,6 +2003,59 @@ impl LanguageServer for VerterLanguageServer {
                         self.build_auto_import_edit(doc_uri, component_name, import_path)
                     {
                         item.additional_text_edits = Some(vec![edit]);
+                    }
+                }
+            }
+
+            // Check if this item is from TSGO and needs resolve for auto-import
+            if data.get("tsgo").and_then(|v| v.as_bool()) == Some(true) {
+                if let Some(tp) = &self.type_provider {
+                    if let (Some(tsx_path), Some(original_data)) = (
+                        data.get("tsx_path").and_then(|v| v.as_str()),
+                        data.get("original_data"),
+                    ) {
+                        // Only call resolve if original_data is not null
+                        if !original_data.is_null() {
+                            if let Ok(Some(resolve_result)) =
+                                tp.resolve_completion(tsx_path, original_data.clone()).await
+                            {
+                                if !resolve_result.additional_text_edits.is_empty() {
+                                    // Map TSX positions to Vue positions
+                                    if let Some((_, tsx_content, mapper)) =
+                                        self.tsx_context_by_tsx_path(tsx_path)
+                                    {
+                                        let tsx_li =
+                                            LineIndex::new(&tsx_content, self.documents.encoding());
+                                        // Find the Vue URI from tsx_path
+                                        if let Some(vue_uri) = self.vue_uri_from_tsx_path(tsx_path)
+                                        {
+                                            if let Some(doc) = self.documents.get(&vue_uri) {
+                                                let edits: Vec<TextEdit> = resolve_result
+                                                    .additional_text_edits
+                                                    .iter()
+                                                    .filter_map(|e| {
+                                                        let range = merge::tsx_range_to_vue_range(
+                                                            e.start,
+                                                            e.end,
+                                                            &tsx_li,
+                                                            &mapper,
+                                                            &doc.line_index,
+                                                        )?;
+                                                        Some(TextEdit {
+                                                            range,
+                                                            new_text: e.new_text.clone(),
+                                                        })
+                                                    })
+                                                    .collect();
+                                                if !edits.is_empty() {
+                                                    item.additional_text_edits = Some(edits);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2641,6 +2712,16 @@ impl LanguageServer for VerterLanguageServer {
                 );
                 all_actions.extend(comp_actions);
 
+                // Suggest matching props from parent bindings to child component tags
+                let suggest_actions = crate::features::component_actions::suggest_matching_props(
+                    analysis,
+                    &doc.source,
+                    &doc.line_index,
+                    uri,
+                    &|import_source| self.resolve_component_context(uri, import_source),
+                );
+                all_actions.extend(suggest_actions);
+
                 // Event handler type hint actions
                 let mut event_actions = crate::features::event_type_hints::event_type_hint_actions(
                     analysis,
@@ -2660,6 +2741,21 @@ impl LanguageServer for VerterLanguageServer {
                     &params.context.diagnostics,
                     uri,
                 ));
+
+                // Action engine position-based refactorings (e.g., expand v-bind shorthand)
+                if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
+                    all_actions.extend(
+                        crate::features::diagnostics_bridge::action_engine_refactorings(
+                            &self.action_engine,
+                            analysis,
+                            &doc.source,
+                            &doc.line_index,
+                            &self.linter,
+                            offset,
+                            uri,
+                        ),
+                    );
+                }
             }
         }
 

@@ -311,6 +311,19 @@ impl DocumentRegistry {
             .map(|d| d.canonical_id.clone())
     }
 
+    /// Reverse lookup: find the URI for a given canonical ID.
+    ///
+    /// Iterates all open documents to find a match. Used by completion resolve
+    /// to map TSX paths back to Vue URIs.
+    pub fn canonical_id_to_uri(&self, canonical_id: &str) -> Option<Uri> {
+        for entry in self.documents.iter() {
+            if entry.value().canonical_id == canonical_id {
+                return entry.key().parse().ok();
+            }
+        }
+        None
+    }
+
     /// Get the TSX output for a document.
     pub fn get_tsx(&self, uri: &Uri) -> Option<TsxResponse> {
         let canonical_id = self.get_canonical_id(uri)?;
