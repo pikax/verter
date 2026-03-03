@@ -110,6 +110,56 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Build verter-tsc binary (matrix — for npm platform packages)
+  # ---------------------------------------------------------------------------
+  build-tsc:
+    name: Build TSC (${{ matrix.target }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            npm-pkg: linux-x64-gnu
+            binary: verter-tsc
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            npm-pkg: darwin-x64
+            binary: verter-tsc
+          - target: aarch64-apple-darwin
+            os: macos-15
+            npm-pkg: darwin-arm64
+            binary: verter-tsc
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            npm-pkg: win32-x64-msvc
+            binary: verter-tsc.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-tsc-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tsc-${{ matrix.target }}-
+      - name: Build verter-tsc binary
+        run: cargo build --release --package verter_tsc --target ${{ matrix.target }}
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsc-${{ matrix.npm-pkg }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Build LSP binary (matrix — for VS Code extension bundling)
   # ---------------------------------------------------------------------------
   build-lsp:
@@ -251,7 +301,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-npm:
     name: Publish npm
-    needs: [validate, build-native, build-wasm]
+    needs: [validate, build-native, build-tsc, build-wasm]
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -293,6 +343,27 @@ jobs:
             done
           done
 
+      # Download all tsc artifacts into platform package dirs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tsc-*
+          path: /tmp/tsc-artifacts
+
+      - name: Move tsc artifacts to platform packages
+        run: |
+          for dir in /tmp/tsc-artifacts/tsc-*/; do
+            platform=$(basename "$dir")
+            platform=${platform#tsc-}  # strip "tsc-" prefix
+            target_dir="packages/verter-tsc/npm/${platform}"
+            if [ -d "$target_dir" ]; then
+              cp "$dir"verter-tsc* "$target_dir/"
+              chmod +x "$target_dir"/verter-tsc* 2>/dev/null || true
+              echo "Copied verter-tsc binary -> $target_dir/"
+            else
+              echo "Warning: no tsc platform dir for $platform"
+            fi
+          done
+
       # Download WASM artifact
       - uses: actions/download-artifact@v4
         with:
@@ -313,8 +384,18 @@ jobs:
             PUBLISH_ARGS="$PUBLISH_ARGS --tag $DIST_TAG"
           fi
 
-          # Publish platform packages first
+          # Publish native platform packages first
           for platform_dir in packages/native/npm/*/; do
+            if [ -f "$platform_dir/package.json" ]; then
+              echo "Publishing $(basename $platform_dir)..."
+              cd "$platform_dir"
+              pnpm publish $PUBLISH_ARGS || echo "Already published or failed: $(basename $platform_dir)"
+              cd "$GITHUB_WORKSPACE"
+            fi
+          done
+
+          # Publish tsc platform packages
+          for platform_dir in packages/verter-tsc/npm/*/; do
             if [ -f "$platform_dir/package.json" ]; then
               echo "Publishing $(basename $platform_dir)..."
               cd "$platform_dir"

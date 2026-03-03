@@ -3,11 +3,14 @@
   "displayName": "Verter OXC bindings",
   "version": "0.0.1-alpha.3",
   "description": "Resolves and downloads OXC bindings",
+  "keywords": ["vue", "oxc", "parser", "bindings"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
+  "author": "pikax",
+  "homepage": "https://verterjs.dev/",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -b"

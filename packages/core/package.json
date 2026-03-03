@@ -1,14 +1,15 @@
 {
   "name": "@verter/core",
   "version": "0.0.1-alpha.3",
-  "description": "",
-  "keywords": [],
+  "description": "Vue SFC parser and TSX transformer",
+  "keywords": ["vue", "compiler", "sfc", "typescript", "tsx"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
-  "author": "",
+  "author": "pikax",
+  "homepage": "https://verterjs.dev/",
   "type": "commonjs",
   "main": "dist/index.js",
   "module": "dist/index.js",

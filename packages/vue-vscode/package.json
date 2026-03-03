@@ -13,6 +13,7 @@
   ],
   "license": "MIT",
   "author": "Carlos Rodrigues <pikax>",
+  "homepage": "https://verterjs.dev/",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"

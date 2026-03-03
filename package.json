@@ -2,14 +2,14 @@
   "name": "verter",
   "version": "0.0.1-alpha.3",
   "private": true,
-  "description": "",
-  "keywords": [],
+  "description": "Vue compiler and Language Server Protocol implementation",
+  "keywords": ["vue", "compiler", "sfc", "typescript", "lsp"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
-  "author": "",
+  "author": "pikax",
   "main": "index.js",
   "scripts": {
     "test": "pnpm --filter @verter/types --filter @verter/core test",

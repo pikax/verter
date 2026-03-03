@@ -3,6 +3,10 @@ name = "verter_mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "MCP server for Verter — Model Context Protocol server for AI-assisted Vue development"
 publish = false
 
 [lib]

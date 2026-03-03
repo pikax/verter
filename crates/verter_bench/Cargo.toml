@@ -3,6 +3,9 @@ name = "verter_bench"
 version.workspace = true
 edition.workspace = true
 license = "MIT"
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 publish = false
 description = "Benchmarks and examples for verter_core"
 

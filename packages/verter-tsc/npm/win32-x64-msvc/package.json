@@ -1,0 +1,22 @@
+{
+  "name": "@verter/tsc-win32-x64-msvc",
+  "version": "0.0.1-alpha.3",
+  "description": "verter-tsc binary for Windows x64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "files": [
+    "verter-tsc.exe"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

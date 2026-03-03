@@ -2,13 +2,14 @@
   "name": "@verter/types",
   "version": "0.0.1-alpha.3",
   "description": "Type helpers for Verter",
-  "keywords": [],
+  "keywords": ["vue", "typescript", "types", "sfc"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
-  "author": "",
+  "author": "pikax",
+  "homepage": "https://verterjs.dev/",
   "files": [
     "dist",
     "readme.md",

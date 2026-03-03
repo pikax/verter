@@ -3,6 +3,10 @@ name = "verter_host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "In-memory file host for Verter — caching, dependency tracking, multi-file compilation"
 publish = false
 
 [features]

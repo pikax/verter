@@ -3,7 +3,10 @@ name = "verter_tsc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "verter-tsc — vue-tsc replacement: parallel Vue SFC type checker using verter codegen"
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "verter-tsc — Vue SFC type checker using Verter codegen"
 
 [[bin]]
 name = "verter-tsc"

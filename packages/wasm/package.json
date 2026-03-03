@@ -2,11 +2,14 @@
   "name": "@verter/wasm",
   "version": "0.0.1-alpha.3",
   "description": "WASM bindings for Verter Vue compiler",
+  "keywords": ["vue", "compiler", "wasm", "webassembly"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
+  "author": "pikax",
+  "homepage": "https://verterjs.dev/",
   "files": [
     "dist",
     "wasm"

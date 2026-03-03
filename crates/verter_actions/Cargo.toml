@@ -3,7 +3,10 @@ name = "verter_actions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Vue SFC code actions for Verter — quick fixes, refactoring, source actions"
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Code actions engine for Verter Vue compiler — quick fixes and refactoring"
 
 [dependencies]
 verter_span = { path = "../verter_span" }

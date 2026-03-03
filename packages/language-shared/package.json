@@ -2,7 +2,8 @@
   "name": "@verter/language-shared",
   "version": "0.0.1-alpha.3",
   "description": "Contains shared information between the language server and the language client",
-  "keywords": [],
+  "keywords": ["vue", "lsp", "language-server", "protocol"],
+  "homepage": "https://verterjs.dev/",
   "license": "MIT",
   "repository": {
     "type": "git",

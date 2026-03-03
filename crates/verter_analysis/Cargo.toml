@@ -3,6 +3,10 @@ name = "verter_analysis"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Static analysis for Vue SFCs — imports, exports, bindings, type resolution"
 publish = false
 
 [dependencies]

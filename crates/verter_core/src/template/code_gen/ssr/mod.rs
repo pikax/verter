@@ -3646,16 +3646,18 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 return "\"\"".to_string();
             }
             // Dynamic :value="expr" or v-bind:value="expr"
-            if prop.is_directive && (name == ":" || name == "v-bind") && prop.arg_start.is_some() {
-                let arg = &source[prop.arg_start.unwrap() as usize..prop.arg_end.unwrap() as usize];
-                if arg == "value" {
-                    if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-                        let expr = &source[vs as usize..ve as usize];
-                        let oxc_prop = oxc.and_then(|o| find_oxc_prop(o, i));
-                        let oxc_expr = oxc_prop.and_then(|p| p.exp.as_ref());
-                        return self.resolve_expr(expr, vs, oxc_expr);
+            if prop.is_directive && (name == ":" || name == "v-bind") {
+                if let (Some(arg_s), Some(arg_e)) = (prop.arg_start, prop.arg_end) {
+                    let arg = &source[arg_s as usize..arg_e as usize];
+                    if arg == "value" {
+                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                            let expr = &source[vs as usize..ve as usize];
+                            let oxc_prop = oxc.and_then(|o| find_oxc_prop(o, i));
+                            let oxc_expr = oxc_prop.and_then(|p| p.exp.as_ref());
+                            return self.resolve_expr(expr, vs, oxc_expr);
+                        }
+                        return "\"\"".to_string();
                     }
-                    return "\"\"".to_string();
                 }
             }
         }

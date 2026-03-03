@@ -4367,8 +4367,13 @@ const msg = "hi";
         }
         #[cfg(not(windows))]
         {
-            // On Unix, send signal 0 to check if process exists.
-            unsafe { libc::kill(pid as i32, 0) == 0 }
+            // On Unix, use kill -0 to check if process exists.
+            use std::process::Command;
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
         }
     }
 

@@ -3,6 +3,8 @@
   "version": "0.0.1-alpha.3",
   "description": "Vue SFC type checker — verter-native vue-tsc replacement",
   "license": "MIT",
+  "author": "pikax",
+  "homepage": "https://verterjs.dev/",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"

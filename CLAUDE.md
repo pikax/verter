@@ -192,6 +192,7 @@ Run these after making changes:
 ```bash
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
+pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this)
 ```
 
 ### Documentation Updates

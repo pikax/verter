@@ -2,12 +2,12 @@
 name = "verter_core"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 description = "Vue 3 SFC compiler - transforms Vue Single File Components to render functions with TypeScript support"
-repository = "https://github.com/pikax/verter"
+repository.workspace = true
 documentation = "https://github.com/pikax/verter"
-homepage = "https://play.verterjs.dev/"
-authors = ["pikax"]
+homepage.workspace = true
+authors.workspace = true
 keywords = ["vue", "compiler", "sfc", "typescript", "codegen"]
 categories = ["compilers", "template-engine"]
 

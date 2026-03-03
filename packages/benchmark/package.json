@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "description": "Performance benchmarks comparing Vue and Verter compilation",
+  "license": "MIT",
+  "author": "pikax",
   "scripts": {
     "bench": "node --import tsx src/index.ts",
     "bench:json": "node --import tsx src/index.ts --json",

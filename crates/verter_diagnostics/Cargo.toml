@@ -3,7 +3,10 @@ name = "verter_diagnostics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Vue SFC diagnostic engine for Verter — detection rules produce diagnostics, no fixes"
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Vue SFC diagnostic engine — lint rules and DiagnosticSet"
 
 [dependencies]
 verter_span = { path = "../verter_span" }

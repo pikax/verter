@@ -2,7 +2,8 @@
   "name": "@verter/typescript-plugin",
   "version": "0.0.1-alpha.3",
   "description": "Vue TypeScript Plugin powered by Verter",
-  "keywords": [],
+  "keywords": ["vue", "typescript", "plugin", "language-service"],
+  "homepage": "https://verterjs.dev/",
   "license": "MIT",
   "repository": {
     "type": "git",
