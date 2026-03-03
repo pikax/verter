@@ -41,8 +41,8 @@ impl std::fmt::Display for TypeProviderKind {
 
 /// Configuration for creating a verter LSP server instance.
 pub struct LspConfig {
-    /// The verter host instance (always required).
-    pub host: VerterHost,
+    /// The verter host instance (always required, shared via Arc for MCP embedding).
+    pub host: Arc<VerterHost>,
     /// Optional type provider for TSGO integration.
     /// When `None`, the LSP runs in verter-only mode.
     pub type_provider: Option<Arc<dyn TypeProvider>>,

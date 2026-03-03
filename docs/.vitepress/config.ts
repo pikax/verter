@@ -82,6 +82,7 @@ export default withMermaid(
             items: [
               { text: 'VS Code Extension', link: '/editor/vscode' },
               { text: 'LSP Features', link: '/editor/lsp-features' },
+              { text: 'MCP Server', link: '/editor/mcp-server' },
               { text: 'Settings Reference', link: '/editor/settings' },
             ],
           },

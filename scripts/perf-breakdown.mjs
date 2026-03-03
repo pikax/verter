@@ -2,11 +2,12 @@
 // by comparing verter-tsc total time against plain tsc on the same tsconfig.
 import { spawnSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 
 const IS_WIN = process.platform === 'win32';
-const REPOS = 'D:/dev/github/verter-test-repos';
-const VERTER_TSC = 'D:/dev/personal/verter/target/release/verter-tsc.exe';
+const REPOS = process.env.VERTER_TEST_REPOS;
+if (!REPOS) { console.error('Set VERTER_TEST_REPOS env var'); process.exit(1); }
+const VERTER_TSC = join(resolve(import.meta.dirname, '..'), 'target', 'release', `verter-tsc${process.platform === 'win32' ? '.exe' : ''}`);
 
 const PROJECTS = [
   { name: 'vuetify', tsconfig: 'tsconfig.json' },

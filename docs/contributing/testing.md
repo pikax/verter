@@ -50,6 +50,29 @@ cargo test --package verter_core -- --nocapture # With stdout output
 cargo test --package verter_core 2>&1 | tail -60  # Truncated output
 ```
 
+### Test File Organization
+
+When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a separate sibling file to keep source files focused on production code.
+
+**For standalone files** (e.g., `analysis.rs`):
+```rust
+// In analysis.rs:
+#[cfg(test)]
+#[path = "analysis_tests.rs"]
+mod analysis_tests;
+```
+
+**For `mod.rs` files** (e.g., `ide/template/mod.rs`):
+```rust
+// In mod.rs — loads tests.rs from the same directory:
+#[cfg(test)]
+mod tests;
+```
+
+The extracted file contains `use super::*;`, helper functions, and `#[test]` functions directly — no wrapping `mod tests { }` block.
+
+Small rule files (e.g., diagnostic rules at 50-150 lines) can keep tests inline.
+
 ## TDD Workflow
 
 **Test-Driven Development is mandatory.** For every change:

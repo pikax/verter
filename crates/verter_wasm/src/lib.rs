@@ -299,9 +299,9 @@ impl WasmVerterHost {
     /// Unlike `getIde`, this does NOT require a prior compilation pass.
     ///
     /// Returns `{ code: string, sourceMap?: string, isJsx: boolean }` or `null`.
-    #[wasm_bindgen(js_name = getTsc)]
-    pub fn get_tsc(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
-        let result = catch_panic(|| self.inner.get_tsc(canonical_id))?;
+    #[wasm_bindgen(js_name = getPublicApi)]
+    pub fn get_public_api(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
+        let result = catch_panic(|| self.inner.get_public_api(canonical_id))?;
         to_wasm_value(&result.map(|r| FfiIdeResponse {
             code: r.code.to_string(),
             source_map: r.source_map.map(|s| s.to_string()),

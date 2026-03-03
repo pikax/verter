@@ -129,6 +129,11 @@ pub fn process_dynamic_props(
             continue;
         }
 
+        // ===== v-memo: handled at the root element level, not as a prop =====
+        if name == "v-memo" {
+            continue;
+        }
+
         // ===== v-bind (with or without arg) =====
         // Determine argument if present
         let arg = match (prop.arg_start, prop.arg_end) {

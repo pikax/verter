@@ -262,8 +262,7 @@ template/
     ├── binding.rs        # BindingResolver (_ctx./$setup. prefix resolution)
     ├── shared/           # Shared codegen helpers
     ├── vdom/             # VDOM render function output (_createElementVNode, etc.)
-    ├── vapor/            # Vapor mode output (_template, _renderEffect, etc.)
-    └── vapor2/           # Experimental: alternative Vapor codegen approach
+    └── vapor/            # Vapor mode output (_template, _renderEffect, etc.)
 ide/                      # IDE codegen: TSX or JSX+JSDoc (for LSP/TSGO type checking)
 ├── mod.rs                # generate_ide_template() — Vue template → valid JSX; IdeScriptOptions, IdeTemplateOptions
 ├── script.rs             # generate_ide_script() — script block → TS or JS+JSDoc wrapper
@@ -346,7 +345,6 @@ Three backends implement the `TemplateCodeGen` trait, called by `walker::walk_te
 
 - **VDOM** (`vdom/`): In-place source overwrites producing `_createElementVNode()` calls
 - **Vapor** (`vapor/`): Replaces entire template block with direct DOM manipulation code
-- **Vapor2** (`vapor2/`): Experimental alternative Vapor approach (kept for comparison)
 
 ### CSS Processing Pipeline
 

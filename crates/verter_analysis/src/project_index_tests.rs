@@ -1,0 +1,659 @@
+use super::*;
+use crate::file_usage::{
+    ComponentUsageOwned, FileUsageFlags, InjectUsageOwned, ProvideUsageOwned, StyleUsageInfoOwned,
+};
+
+fn make_file_info() -> FileUsageInfoOwned {
+    FileUsageInfoOwned::default()
+}
+
+fn make_file_with_provide(key: &str) -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    info.provides.push(ProvideUsageOwned {
+        key: Some(key.to_string()),
+        is_dynamic_key: false,
+        start: 0,
+        end: 10,
+    });
+    info.flags |= FileUsageFlags::HAS_PROVIDE.bits();
+    info
+}
+
+fn make_file_with_inject(key: &str) -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    info.injects.push(InjectUsageOwned {
+        key: Some(key.to_string()),
+        is_dynamic_key: false,
+        has_default: false,
+        binding_name: None,
+        start: 0,
+        end: 10,
+    });
+    info.flags |= FileUsageFlags::HAS_INJECT.bits();
+    info
+}
+
+fn make_file_with_dynamic_inject() -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    info.injects.push(InjectUsageOwned {
+        key: None,
+        is_dynamic_key: true,
+        has_default: false,
+        binding_name: None,
+        start: 0,
+        end: 10,
+    });
+    info.flags |= FileUsageFlags::HAS_INJECT.bits();
+    info
+}
+
+fn make_file_with_component(name: &str) -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    info.components.push(ComponentUsageOwned {
+        name: Some(name.to_string()),
+        is_dynamic: false,
+        start: 0,
+        end: 10,
+    });
+    info.flags |= FileUsageFlags::HAS_COMPONENT_USAGE.bits();
+    info
+}
+
+#[test]
+fn new_index_is_empty() {
+    let index = ProjectIndex::new();
+    assert_eq!(index.file_count(), 0);
+    assert_eq!(index.all_provide_keys().count(), 0);
+    assert_eq!(index.all_inject_keys().count(), 0);
+}
+
+#[test]
+fn add_and_get_file() {
+    let mut index = ProjectIndex::new();
+    let path = PathBuf::from("src/App.vue");
+    let info = make_file_info();
+
+    index.add_file(path.clone(), info);
+
+    assert!(index.contains_file(&path));
+    assert_eq!(index.file_count(), 1);
+    assert!(index.get_file(&path).is_some());
+}
+
+#[test]
+fn remove_file() {
+    let mut index = ProjectIndex::new();
+    let path = PathBuf::from("src/App.vue");
+    let info = make_file_with_provide("theme");
+
+    index.add_file(path.clone(), info);
+    assert_eq!(index.files_providing("theme").count(), 1);
+
+    let removed = index.remove_file(&path);
+    assert!(removed.is_some());
+    assert!(!index.contains_file(&path));
+    assert_eq!(index.files_providing("theme").count(), 0);
+}
+
+#[test]
+fn provide_index() {
+    let mut index = ProjectIndex::new();
+
+    let app_path = PathBuf::from("src/App.vue");
+    let child_path = PathBuf::from("src/Child.vue");
+
+    index.add_file(app_path.clone(), make_file_with_provide("theme"));
+    index.add_file(child_path.clone(), make_file_with_provide("theme"));
+
+    let providers: Vec<_> = index.files_providing("theme").collect();
+    assert_eq!(providers.len(), 2);
+    assert!(providers.iter().any(|p| p.as_ref() == app_path.as_path()));
+    assert!(providers.iter().any(|p| p.as_ref() == child_path.as_path()));
+}
+
+#[test]
+fn inject_index() {
+    let mut index = ProjectIndex::new();
+
+    let child1_path = PathBuf::from("src/Child1.vue");
+    let child2_path = PathBuf::from("src/Child2.vue");
+
+    index.add_file(child1_path.clone(), make_file_with_inject("theme"));
+    index.add_file(child2_path.clone(), make_file_with_inject("theme"));
+
+    assert_eq!(index.files_injecting("theme").count(), 2);
+}
+
+#[test]
+fn validate_inject_valid() {
+    let mut index = ProjectIndex::new();
+
+    let provider_path = PathBuf::from("src/Provider.vue");
+    let consumer_path = PathBuf::from("src/Consumer.vue");
+
+    index.add_file(provider_path.clone(), make_file_with_provide("config"));
+    index.add_file(consumer_path.clone(), make_file_with_inject("config"));
+
+    let validation = index.validate_inject(&consumer_path, "config");
+    match validation {
+        InjectValidation::Valid { providers } => {
+            assert_eq!(providers.len(), 1);
+            assert!(providers
+                .iter()
+                .any(|p| p.as_ref() == provider_path.as_path()));
+        }
+        _ => panic!("Expected Valid validation"),
+    }
+}
+
+#[test]
+fn validate_inject_no_provider() {
+    let mut index = ProjectIndex::new();
+
+    let consumer_path = PathBuf::from("src/Consumer.vue");
+    index.add_file(consumer_path.clone(), make_file_with_inject("missing"));
+
+    let validation = index.validate_inject(&consumer_path, "missing");
+    assert_eq!(validation, InjectValidation::NoProvider);
+}
+
+#[test]
+fn validate_inject_dynamic_key() {
+    let mut index = ProjectIndex::new();
+
+    let consumer_path = PathBuf::from("src/Consumer.vue");
+    let info = make_file_with_dynamic_inject();
+    index.add_file(consumer_path.clone(), info);
+
+    let file_validation = index.validate_file_injects(&consumer_path);
+    assert_eq!(file_validation.dynamic_keys.len(), 1);
+}
+
+#[test]
+fn validate_inject_key_not_found() {
+    let mut index = ProjectIndex::new();
+
+    let consumer_path = PathBuf::from("src/Consumer.vue");
+    index.add_file(consumer_path.clone(), make_file_with_inject("exists"));
+
+    let validation = index.validate_inject(&consumer_path, "nonexistent");
+    assert_eq!(validation, InjectValidation::KeyNotFound);
+}
+
+#[test]
+fn validate_file_injects_mixed() {
+    let mut index = ProjectIndex::new();
+
+    let provider_path = PathBuf::from("src/Provider.vue");
+    let consumer_path = PathBuf::from("src/Consumer.vue");
+
+    index.add_file(provider_path, make_file_with_provide("provided"));
+
+    let mut consumer_info = make_file_info();
+    consumer_info.injects.push(InjectUsageOwned {
+        key: Some("provided".to_string()),
+        is_dynamic_key: false,
+        has_default: false,
+        binding_name: None,
+        start: 0,
+        end: 10,
+    });
+    consumer_info.injects.push(InjectUsageOwned {
+        key: Some("missing".to_string()),
+        is_dynamic_key: false,
+        has_default: false,
+        binding_name: None,
+        start: 20,
+        end: 30,
+    });
+    consumer_info.injects.push(InjectUsageOwned {
+        key: None,
+        is_dynamic_key: true,
+        has_default: false,
+        binding_name: None,
+        start: 40,
+        end: 50,
+    });
+    consumer_info.flags |= FileUsageFlags::HAS_INJECT.bits();
+    index.add_file(consumer_path.clone(), consumer_info);
+
+    let validation = index.validate_file_injects(&consumer_path);
+    assert_eq!(validation.valid.len(), 1);
+    assert_eq!(validation.valid[0].key, "provided");
+    assert_eq!(validation.missing_providers.len(), 1);
+    assert_eq!(validation.missing_providers[0].key, "missing");
+    assert_eq!(validation.dynamic_keys.len(), 1);
+}
+
+#[test]
+fn component_graph() {
+    let mut index = ProjectIndex::new();
+
+    let app_path = PathBuf::from("src/App.vue");
+    let mut app_info = make_file_info();
+    app_info.components.push(ComponentUsageOwned {
+        name: Some("Header".to_string()),
+        is_dynamic: false,
+        start: 0,
+        end: 10,
+    });
+    app_info.components.push(ComponentUsageOwned {
+        name: Some("Footer".to_string()),
+        is_dynamic: false,
+        start: 20,
+        end: 30,
+    });
+    index.add_file(app_path.clone(), app_info);
+
+    let components = index.components_used_by(&app_path);
+    assert_eq!(components.len(), 2);
+
+    let files_using_header: Vec<_> = index.files_using_component("Header").collect();
+    assert_eq!(files_using_header.len(), 1);
+    assert!(files_using_header
+        .iter()
+        .any(|p| p.as_ref() == app_path.as_path()));
+}
+
+#[test]
+fn provide_inject_summary() {
+    let mut index = ProjectIndex::new();
+
+    index.add_file(
+        PathBuf::from("src/Provider.vue"),
+        make_file_with_provide("theme"),
+    );
+    index.add_file(
+        PathBuf::from("src/Provider2.vue"),
+        make_file_with_provide("config"),
+    );
+    index.add_file(
+        PathBuf::from("src/Consumer.vue"),
+        make_file_with_inject("theme"),
+    );
+    index.add_file(
+        PathBuf::from("src/Consumer2.vue"),
+        make_file_with_inject("missing"),
+    );
+
+    let summary = index.provide_inject_summary();
+    assert_eq!(summary.provide_keys.len(), 2);
+    assert_eq!(summary.inject_keys.len(), 2);
+    assert_eq!(summary.unused_provides.len(), 1);
+    assert_eq!(summary.missing_provides.len(), 1);
+}
+
+#[test]
+fn project_stats() {
+    let mut index = ProjectIndex::new();
+
+    let mut info1 = make_file_with_provide("theme");
+    info1.flags |= FileUsageFlags::HAS_DEFINE_PROPS.bits();
+    index.add_file(PathBuf::from("src/App.vue"), info1);
+
+    let mut info2 = make_file_with_inject("theme");
+    info2.flags |= (FileUsageFlags::HAS_DEFINE_EMITS | FileUsageFlags::IS_ASYNC_SETUP).bits();
+    index.add_file(PathBuf::from("src/Child.vue"), info2);
+
+    let stats = index.stats();
+    assert_eq!(stats.file_count, 2);
+    assert_eq!(stats.files_with_provide, 1);
+    assert_eq!(stats.files_with_inject, 1);
+    assert_eq!(stats.files_with_props, 1);
+    assert_eq!(stats.files_with_emits, 1);
+    assert_eq!(stats.files_with_async_setup, 1);
+    assert_eq!(stats.unique_provide_keys, 1);
+    assert_eq!(stats.unique_inject_keys, 1);
+}
+
+#[test]
+fn update_file_reindexes() {
+    let mut index = ProjectIndex::new();
+    let path = PathBuf::from("src/App.vue");
+
+    index.add_file(path.clone(), make_file_with_provide("old"));
+    assert_eq!(index.files_providing("old").count(), 1);
+    assert_eq!(index.files_providing("new").count(), 0);
+
+    index.add_file(path.clone(), make_file_with_provide("new"));
+    assert_eq!(index.files_providing("old").count(), 0);
+    assert_eq!(index.files_providing("new").count(), 1);
+}
+
+#[test]
+fn clear_index() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("src/App.vue"),
+        make_file_with_provide("theme"),
+    );
+
+    assert_eq!(index.file_count(), 1);
+    index.clear();
+    assert_eq!(index.file_count(), 0);
+    assert_eq!(index.all_provide_keys().count(), 0);
+}
+
+#[test]
+fn component_usage_summary() {
+    let mut index = ProjectIndex::new();
+
+    index.add_file(
+        PathBuf::from("src/App.vue"),
+        make_file_with_component("Header"),
+    );
+    index.add_file(
+        PathBuf::from("src/Page.vue"),
+        make_file_with_component("Header"),
+    );
+    index.add_file(
+        PathBuf::from("src/Other.vue"),
+        make_file_with_component("Footer"),
+    );
+
+    let summary = index.component_usage_summary();
+    assert_eq!(summary.component_names.len(), 2);
+    assert_eq!(summary.usage_counts.get("Header"), Some(&2));
+    assert_eq!(summary.usage_counts.get("Footer"), Some(&1));
+}
+
+#[test]
+fn file_paths_iterator() {
+    let mut index = ProjectIndex::new();
+    let path1 = PathBuf::from("src/App.vue");
+    let path2 = PathBuf::from("src/Child.vue");
+
+    index.add_file(path1.clone(), make_file_info());
+    index.add_file(path2.clone(), make_file_info());
+
+    let paths: Vec<_> = index.file_paths().collect();
+    assert_eq!(paths.len(), 2);
+    assert!(paths.iter().any(|p| p.as_ref() == path1.as_path()));
+    assert!(paths.iter().any(|p| p.as_ref() == path2.as_path()));
+}
+
+// ==================== Style Index Tests ====================
+
+fn make_file_with_styles(
+    class_names: &[&str],
+    v_binds: &[&str],
+    custom_props: &[&str],
+    scoped: bool,
+) -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    info.styles.push(StyleUsageInfoOwned {
+        lang: Some("css".to_string()),
+        scoped,
+        class_names: class_names.iter().map(|s| s.to_string()).collect(),
+        v_bind_expressions: v_binds.iter().map(|s| s.to_string()).collect(),
+        custom_property_names: custom_props.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    });
+    let mut flags = FileUsageFlags::empty();
+    if scoped {
+        flags |= FileUsageFlags::HAS_SCOPED_STYLE;
+    }
+    if !v_binds.is_empty() {
+        flags |= FileUsageFlags::HAS_V_BIND_CSS;
+    }
+    info.flags |= flags.bits();
+    info
+}
+
+#[test]
+fn test_class_index_add_remove() {
+    let mut index = ProjectIndex::new();
+    let path = PathBuf::from("src/App.vue");
+
+    index.add_file(
+        path.clone(),
+        make_file_with_styles(&["btn", "active"], &[], &[], false),
+    );
+
+    assert_eq!(index.files_defining_class("btn").count(), 1);
+    assert_eq!(index.files_defining_class("active").count(), 1);
+    assert_eq!(index.files_defining_class("missing").count(), 0);
+
+    // Remove file - indexes should be cleaned up
+    index.remove_file(&path);
+    assert_eq!(index.files_defining_class("btn").count(), 0);
+    assert_eq!(index.files_defining_class("active").count(), 0);
+}
+
+#[test]
+fn test_v_bind_css_index() {
+    let mut index = ProjectIndex::new();
+
+    index.add_file(
+        PathBuf::from("src/A.vue"),
+        make_file_with_styles(&[], &["color"], &[], false),
+    );
+    index.add_file(
+        PathBuf::from("src/B.vue"),
+        make_file_with_styles(&[], &["color", "size"], &[], false),
+    );
+
+    assert_eq!(index.files_using_v_bind_css("color").count(), 2);
+    assert_eq!(index.files_using_v_bind_css("size").count(), 1);
+    assert_eq!(index.files_using_v_bind_css("missing").count(), 0);
+}
+
+#[test]
+fn test_custom_property_index() {
+    let mut index = ProjectIndex::new();
+
+    index.add_file(
+        PathBuf::from("src/A.vue"),
+        make_file_with_styles(&[], &[], &["--primary", "--spacing"], false),
+    );
+
+    assert_eq!(index.files_defining_custom_property("--primary").count(), 1);
+    assert_eq!(index.files_defining_custom_property("--spacing").count(), 1);
+    assert_eq!(index.files_defining_custom_property("--missing").count(), 0);
+
+    assert_eq!(index.all_custom_properties().count(), 2);
+}
+
+#[test]
+fn test_stats_with_styles() {
+    let mut index = ProjectIndex::new();
+
+    index.add_file(
+        PathBuf::from("src/A.vue"),
+        make_file_with_styles(&["btn"], &["color"], &["--primary"], true),
+    );
+
+    let mut module_info = make_file_info();
+    module_info.styles.push(StyleUsageInfoOwned {
+        is_module: true,
+        class_names: vec!["card".to_string()],
+        ..Default::default()
+    });
+    module_info.flags |= FileUsageFlags::HAS_CSS_MODULES.bits();
+    index.add_file(PathBuf::from("src/B.vue"), module_info);
+
+    let stats = index.stats();
+    assert_eq!(stats.files_with_scoped_styles, 1);
+    assert_eq!(stats.files_with_css_modules, 1);
+    assert_eq!(stats.files_with_v_bind_css, 1);
+    assert_eq!(stats.unique_css_classes, 2); // "btn" and "card"
+    assert_eq!(stats.unique_custom_properties, 1);
+}
+
+#[test]
+fn test_class_index_multiple_files() {
+    let mut index = ProjectIndex::new();
+
+    index.add_file(
+        PathBuf::from("src/A.vue"),
+        make_file_with_styles(&["btn"], &[], &[], false),
+    );
+    index.add_file(
+        PathBuf::from("src/B.vue"),
+        make_file_with_styles(&["btn"], &[], &[], false),
+    );
+
+    assert_eq!(index.files_defining_class("btn").count(), 2);
+    assert_eq!(index.all_class_names().count(), 1);
+}
+
+#[test]
+fn test_style_reindex_on_update() {
+    let mut index = ProjectIndex::new();
+    let path = PathBuf::from("src/App.vue");
+
+    index.add_file(
+        path.clone(),
+        make_file_with_styles(&["old-class"], &[], &[], false),
+    );
+    assert_eq!(index.files_defining_class("old-class").count(), 1);
+
+    index.add_file(
+        path.clone(),
+        make_file_with_styles(&["new-class"], &[], &[], false),
+    );
+    assert_eq!(index.files_defining_class("old-class").count(), 0);
+    assert_eq!(index.files_defining_class("new-class").count(), 1);
+}
+
+#[test]
+fn stress_test_200_files() {
+    let mut index = ProjectIndex::with_capacity(200);
+
+    // Add 200 files with varied provide/inject/component usage
+    for i in 0..200 {
+        let path = PathBuf::from(format!("src/components/Comp{i}.vue"));
+        let mut info = make_file_info();
+
+        // Every 3rd file provides a key
+        if i % 3 == 0 {
+            info.provides.push(ProvideUsageOwned {
+                key: Some(format!("key-{}", i % 15)),
+                is_dynamic_key: false,
+                start: 0,
+                end: 10,
+            });
+            info.flags |= FileUsageFlags::HAS_PROVIDE.bits();
+        }
+
+        // Every 4th file injects a key
+        if i % 4 == 0 {
+            info.injects.push(InjectUsageOwned {
+                key: Some(format!("key-{}", (i + 3) % 15)),
+                is_dynamic_key: false,
+                has_default: false,
+                binding_name: None,
+                start: 0,
+                end: 10,
+            });
+            info.flags |= FileUsageFlags::HAS_INJECT.bits();
+        }
+
+        // Every 2nd file uses a component
+        if i % 2 == 0 {
+            info.components.push(ComponentUsageOwned {
+                name: Some(format!("Widget{}", i % 10)),
+                is_dynamic: false,
+                start: 0,
+                end: 10,
+            });
+            info.flags |= FileUsageFlags::HAS_COMPONENT_USAGE.bits();
+        }
+
+        // Some files have styles
+        if i % 5 == 0 {
+            info.styles.push(StyleUsageInfoOwned {
+                class_names: vec![format!("cls-{}", i % 20)],
+                custom_property_names: vec![format!("--var-{}", i % 10)],
+                scoped: i % 10 == 0,
+                ..Default::default()
+            });
+            if i % 10 == 0 {
+                info.flags |= FileUsageFlags::HAS_SCOPED_STYLE.bits();
+            }
+        }
+
+        index.add_file(path, info);
+    }
+
+    assert_eq!(index.file_count(), 200);
+
+    let stats_before = index.stats();
+    assert_eq!(stats_before.file_count, 200);
+    assert!(stats_before.files_with_provide > 0);
+    assert!(stats_before.files_with_inject > 0);
+    assert!(stats_before.unique_provide_keys > 0);
+
+    let summary = index.provide_inject_summary();
+    assert!(!summary.provide_keys.is_empty());
+    assert!(!summary.inject_keys.is_empty());
+
+    // Update 20 files (change their provide keys)
+    for i in (0..200).step_by(10) {
+        let path = PathBuf::from(format!("src/components/Comp{i}.vue"));
+        let mut info = make_file_info();
+        info.provides.push(ProvideUsageOwned {
+            key: Some(format!("updated-key-{}", i % 5)),
+            is_dynamic_key: false,
+            start: 0,
+            end: 10,
+        });
+        info.flags |= FileUsageFlags::HAS_PROVIDE.bits();
+        index.add_file(path, info);
+    }
+
+    assert_eq!(
+        index.file_count(),
+        200,
+        "file count should stay the same after updates"
+    );
+
+    // Remove 50 files
+    for i in 0..50 {
+        let path = PathBuf::from(format!("src/components/Comp{i}.vue"));
+        index.remove_file(&path);
+    }
+
+    assert_eq!(index.file_count(), 150);
+
+    let stats_after = index.stats();
+    assert_eq!(stats_after.file_count, 150);
+
+    // Summary should still be consistent
+    let summary_after = index.provide_inject_summary();
+    // Provide keys in index should match what files actually provide
+    for key in &summary_after.provide_keys {
+        assert!(
+            index.has_providers(key),
+            "provide key '{key}' should have at least one provider"
+        );
+    }
+    for key in &summary_after.inject_keys {
+        assert!(
+            index.has_injectors(key),
+            "inject key '{key}' should have at least one injector"
+        );
+    }
+}
+
+#[test]
+fn validate_inject_unindexed_file() {
+    let index = ProjectIndex::new();
+    let path = PathBuf::from("src/Unknown.vue");
+    let result = index.validate_inject(&path, "anything");
+    assert_eq!(
+        result,
+        InjectValidation::KeyNotFound,
+        "validate_inject on unindexed file should return KeyNotFound"
+    );
+}
+
+#[test]
+fn validate_file_injects_unindexed_file() {
+    let index = ProjectIndex::new();
+    let path = PathBuf::from("src/Unknown.vue");
+    let result = index.validate_file_injects(&path);
+    assert!(result.valid.is_empty());
+    assert!(result.missing_providers.is_empty());
+    assert!(result.dynamic_keys.is_empty());
+}

@@ -89,10 +89,6 @@ name = "profile_ast"
 path = "examples/profile_ast.rs"
 
 [[example]]
-name = "compare_vapor"
-path = "examples/compare_vapor.rs"
-
-[[example]]
 name = "new_impl_check"
 path = "examples/new_impl_check.rs"
 

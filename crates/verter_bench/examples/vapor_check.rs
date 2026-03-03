@@ -33,14 +33,12 @@ fn find_test_repos_root() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    for candidate in &[
-        "D:/dev/github/verter-test-repos",
-        "../../../verter-test-repos",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.is_dir() {
-            return Some(p);
-        }
+    let workspace_repos = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".integration-tests")
+        .join("repos");
+    if workspace_repos.is_dir() {
+        return Some(workspace_repos);
     }
     None
 }
@@ -132,7 +130,7 @@ fn normalize_error(msg: &str) -> String {
 
 fn main() {
     let root = find_test_repos_root().expect(
-        "Test repos not found. Set VERTER_TEST_REPOS env var or ensure D:/dev/github/verter-test-repos exists.",
+        "Test repos not found. Set VERTER_TEST_REPOS env var to the path of verter-test-repos.",
     );
 
     println!("Test repos root: {}", root.display());

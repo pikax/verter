@@ -5,7 +5,11 @@ import { dirname, basename } from "path";
 import fs from "fs-extra";
 import { parse } from "@vue/compiler-sfc";
 
-const mainDir = "D:/dev/hypermob/judis-app/packages";
+const mainDir = process.argv[2];
+if (!mainDir) {
+  console.error("Usage: node processDir.js <directory>");
+  process.exit(1);
+}
 
 const genFiles = glob.sync(`${mainDir}/**/*.vue`);
 

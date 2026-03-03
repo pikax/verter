@@ -667,6 +667,29 @@ fn v_memo_static() {
     );
 }
 
+#[test]
+fn v_memo_dynamic() {
+    // v-memo with dynamic content wraps render effect in _withMemo
+    let source = r#"<template><div v-memo="[x]" :class="cls">{{ msg }}</div></template>"#;
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("_withMemo([x]"),
+        "Expected _withMemo([x]) for v-memo dynamic content, got: {result}"
+    );
+    assert!(
+        result.contains("_renderEffect"),
+        "v-memo dynamic should have _renderEffect wrapper, got: {result}"
+    );
+    assert!(
+        result.contains("_cache"),
+        "v-memo should reference _cache, got: {result}"
+    );
+    assert!(
+        !result.contains("v-memo"),
+        "v-memo attribute must not appear in output, got: {result}"
+    );
+}
+
 // ==================== enter/leave_template: empty ====================
 
 #[test]

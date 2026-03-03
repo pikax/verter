@@ -372,7 +372,7 @@ impl VerterHost {
         })
     }
 
-    /// Generate TSC output for a Vue SFC — minimal TypeScript declarations.
+    /// Generate public API output for a Vue SFC — minimal TypeScript declarations.
     ///
     /// Unlike [`get_ide`](Self::get_ide), this does NOT require a prior
     /// [`get_virtual_file`](Self::get_virtual_file) call. It performs
@@ -380,7 +380,7 @@ impl VerterHost {
     /// and generates a `ComponentPublicInstance`-based declaration.
     ///
     /// Returns `None` if the file is not in the host or not a Vue SFC.
-    pub fn get_tsc(&self, canonical_id: &str) -> Option<TscResponse> {
+    pub fn get_public_api(&self, canonical_id: &str) -> Option<TscResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let (source, file_kind) = {
             let files = read_lock(&self.files);

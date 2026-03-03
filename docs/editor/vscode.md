@@ -28,6 +28,7 @@ Alternatively, you can build from source (see [Building from Source](#building-f
 - **Vue API call annotations** -- inline annotations for lifecycle hooks, watchers, reactivity primitives, and provide/inject
 - **Semantic tokens** -- 23 token types and 10 modifiers for fine-grained syntax highlighting
 - **Analysis sidebar** -- virtual files, component tree, and analysis views (opt-in)
+- **MCP server** -- built-in MCP endpoint sharing LSP data, providing 36+ Vue analysis tools to AI agents
 
 ## Commands
 
@@ -44,6 +45,7 @@ Alternatively, you can build from source (see [Building from Source](#building-f
 | Show Source Map Visualization | `verter.showSourceMapVisualization` | Show source map visualization side-by-side |
 | Go to Component Definition | `verter.goToComponent` | Navigate to a component's definition file |
 | Go to Parent File | `verter.goToParentFile` | Navigate to the parent file |
+| Setup MCP for Claude Code | `verter.setupMcpForClaudeCode` | Configure `.mcp.json` for Claude Code MCP integration |
 
 ## Analysis Sidebar
 

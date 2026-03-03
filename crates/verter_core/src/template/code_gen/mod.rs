@@ -8,13 +8,12 @@
 //!
 //! - **[`vdom::VdomCodeGen`]** — Default Vue 3 target. Emits `_createElementVNode` /
 //!   `_createElementBlock` render function calls with patch flags and dynamic props.
-//! - **[`vapor::VaporCodeGen`]** — First-generation Vapor mode. Emits `_template()` +
+//! - **[`vapor::VaporCodeGen`]** — Vapor mode. Emits `_template()` +
 //!   DOM navigation + `_renderEffect()` with counter-based variable naming (`n0`, `t0`).
-//! - **[`vapor2::Vapor2CodeGen`]** — Second-generation Vapor mode. Same output shape as
-//!   Vapor but uses NodeId-based variable names (no counters) and a stateless
-//!   scope-stack design.
+//! - **[`ssr::SsrCodeGen`]** — SSR mode. Emits `_push()` + `_ssrRenderAttrs()` for
+//!   server-side string concatenation.
 //!
-//! All three backends share significant logic through the sibling modules:
+//! All backends share significant logic through the sibling modules:
 //!
 //! - [`binding`] — Binding classification and `_ctx.`/`$setup.`/`.value` prefix resolution.
 //! - [`walker`] — DFS tree walker that drives the [`TemplateCodeGen`] trait methods.
@@ -26,7 +25,6 @@ pub mod shared;
 pub mod ssr;
 pub mod types;
 pub mod vapor;
-pub mod vapor2;
 pub mod vdom;
 pub mod walker;
 
@@ -48,9 +46,6 @@ pub enum CodeGenMode {
     Vdom,
     /// Vapor mode (direct DOM manipulation) output.
     Vapor,
-    /// Vapor2 — stateless vapor codegen using NodeId-based variable naming.
-    #[allow(dead_code)]
-    Vapor2,
     /// SSR mode — string-concatenation output (`_push()`, `_ssrRenderAttrs()`, etc.).
     Ssr,
 }
@@ -218,7 +213,7 @@ pub fn generate_template<'alloc>(
         .map(|set| set.iter().map(|s| alloc.alloc_str(s) as &str).collect());
 
     let resolver = match options.mode {
-        CodeGenMode::Vapor | CodeGenMode::Vapor2 => {
+        CodeGenMode::Vapor => {
             let mut r = BindingResolver::new_with_const_props(bindings, false, const_props_alloc);
             r.set_vapor(true);
             r
@@ -236,10 +231,6 @@ pub fn generate_template<'alloc>(
         }
         CodeGenMode::Vapor => {
             let mut gen = vapor::VaporCodeGen::new(ast, resolver, source, options);
-            walker::walk_template(ast, oxc_ast, source, &mut gen, &mut out);
-        }
-        CodeGenMode::Vapor2 => {
-            let mut gen = vapor2::Vapor2CodeGen::new(ast, resolver, source, options);
             walker::walk_template(ast, oxc_ast, source, &mut gen, &mut out);
         }
         CodeGenMode::Ssr => {

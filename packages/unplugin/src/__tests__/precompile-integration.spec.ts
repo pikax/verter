@@ -10,7 +10,9 @@ import { unpluginFactory } from "../index";
 import { resetHost } from "../core/compiler";
 import { scanVueFiles } from "../core/scanner";
 
-const COREUI_ROOT = "D:/dev/github/verter-test-repos/coreui-free-vue-admin-template";
+const COREUI_ROOT = process.env.VERTER_TEST_REPOS
+  ? `${process.env.VERTER_TEST_REPOS}/coreui-free-vue-admin-template`
+  : "";
 const hasCoreui = existsSync(join(COREUI_ROOT, "src", "App.vue"));
 
 describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-template", () => {

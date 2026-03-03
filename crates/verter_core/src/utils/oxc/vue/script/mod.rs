@@ -13,10 +13,6 @@
 //! let result = parse_script(program, ScriptMode::Setup, base_offset, source);
 //! ```
 
-// This module is WIP - allow dead code for now
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 pub mod bindings;
 pub mod macros;
 pub mod options;

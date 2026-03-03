@@ -66,7 +66,7 @@ describe("VerterHost", () => {
 describe("VerterHost type declarations in sync with native binary", () => {
   // This test ensures that the TypeScript type declarations in index.ts
   // stay in sync with the actual methods exposed by the Rust NAPI binary.
-  // It catches regressions like getTsc being removed from the TS types
+  // It catches regressions like getPublicApi being removed from the TS types
   // but still existing in the native binary.
 
   // Methods that are intentionally not exposed in the public TS types.
@@ -90,7 +90,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "getDocumentSymbols",
       "getIde",
       "getLintRuleMetadata",
-      "getTsc",
+      "getPublicApi",
       "getVirtualFile",
       "lint",
       "listVirtualFiles",

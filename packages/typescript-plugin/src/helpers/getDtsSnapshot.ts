@@ -36,11 +36,11 @@ export const parseFile = (
   try {
     h.upsert({ inputId: fileName, source: content });
 
-    // getTsc() performs macro-only extraction (fast path — no full template compilation).
+    // getPublicApi() performs macro-only extraction (fast path — no full template compilation).
     // The generated code includes a //# sourceMappingURL= for Go-to-Definition support.
-    const tsc = h.getTsc(fileName);
+    const tsc = h.getPublicApi(fileName);
     if (!tsc) {
-      logger.info(`[Verter] getTsc returned null for ${fileName}, no script block`);
+      logger.info(`[Verter] getPublicApi returned null for ${fileName}, no script block`);
       return FALLBACK_STUB;
     }
 

@@ -1073,10 +1073,10 @@ impl NapiVerterHost {
     /// with inline source map. This is the fast path for IDE type checking.
     ///
     /// Returns `{ code, sourceMap? }` or `null` if no TSC output is available.
-    #[napi(js_name = "getTsc")]
-    pub fn get_tsc(&self, canonical_id: String) -> Result<Option<NapiTscResponse>> {
+    #[napi(js_name = "getPublicApi")]
+    pub fn get_public_api(&self, canonical_id: String) -> Result<Option<NapiTscResponse>> {
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
-            self.inner.get_tsc(&canonical_id)
+            self.inner.get_public_api(&canonical_id)
         }))?;
         Ok(result.map(|r| NapiTscResponse {
             code: r.code.to_string(),

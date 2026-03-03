@@ -226,6 +226,26 @@ assert!(result.contains("if(show)"), "should have IIFE if-block condition"); // 
 
 For codegen tests: always verify that removed/transformed Vue syntax does NOT appear in output. For type tests: always include both positive assertions and `@ts-expect-error` negative assertions to guard against `any`/`never`.
 
+**IMPORTANT — Rust test file organization**:
+
+When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a sibling `*_tests.rs` file:
+
+```rust
+// In foo.rs — replace the inline mod tests block with:
+#[cfg(test)]
+#[path = "foo_tests.rs"]
+mod foo_tests;
+```
+
+For `mod.rs` files, use the simpler form (loads `tests.rs` from the same directory):
+
+```rust
+#[cfg(test)]
+mod tests;
+```
+
+The extracted file contains the module contents directly (no wrapping `mod tests { }`), starting with `use super::*;`.
+
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, E2E best practices, and server cleanup.
 
 ## Dependencies Policy
@@ -273,7 +293,7 @@ Examples:
 
 ## CI/CD
 
-See [.claude/ci-cd.md](.claude/ci-cd.md) for detailed CI/CD documentation including:
+See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for detailed CI/CD documentation including:
 
 - Workflow specifications (CI, nightly, release)
 - Pre-release versioning flow (alpha → beta → rc → stable)

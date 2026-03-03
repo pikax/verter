@@ -194,6 +194,34 @@
           ],
           "description": "Lint rule preset. Only applies when verter.lint.enabled is true."
         },
+        "verter.mcp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start an HTTP MCP endpoint alongside the LSP, providing Vue analysis tools to AI agents."
+        },
+        "verter.mcp.port": {
+          "type": "number",
+          "default": 6772,
+          "description": "Port for the MCP HTTP endpoint. Set to 0 for auto-assign."
+        },
+        "verter.mcp.lintPreset": {
+          "type": "string",
+          "enum": [
+            "essential",
+            "recommended",
+            "all",
+            "performance",
+            "a11y",
+            "strict"
+          ],
+          "default": "recommended",
+          "description": "Lint preset for the MCP server's diagnostic tools."
+        },
+        "verter.mcp.claudeCodeNotification": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a notification when Claude Code is detected with MCP setup instructions."
+        },
         "verter.typeProvider": {
           "type": "string",
           "enum": [
@@ -506,6 +534,10 @@
         "command": "verter.goToParentFile",
         "title": "Verter: Go to Parent File",
         "icon": "$(file-code)"
+      },
+      {
+        "command": "verter.setupMcpForClaudeCode",
+        "title": "Verter: Setup MCP for Claude Code"
       }
     ],
     "menus": {
@@ -538,6 +570,7 @@
   "activationEvents": [
     "onCommand:verter.restartLanguageServer",
     "onCommand:verter.showStatistics",
+    "onCommand:verter.setupMcpForClaudeCode",
     "onView:verterVirtualFiles",
     "onView:verterAnalysis",
     "onLanguage:javascript",

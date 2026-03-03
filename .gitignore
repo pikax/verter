@@ -26,7 +26,12 @@ nul
 
 .vscode/
 
+# Claude Code internal files
+.claude/plans/
+.claude/prompts/
+.claude/memory/
 .claude/settings.local.json
+.claude/*.md
 
 # Benchmark results (generated artifacts)
 packages/bench/results/
@@ -48,3 +53,9 @@ docs/.vitepress/cache
 # VS Code extension build artifacts
 packages/vue-vscode/bin/
 *.vsix
+
+# Scratch files
+cargo_errors.txt
+cargo_test_errors.txt
+benchmark-results.json
+*.bak

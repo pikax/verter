@@ -13,15 +13,44 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
-use tokio::sync::{oneshot, Mutex, Notify};
+use tokio::process::Child;
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::tsgo::protocol::*;
 use crate::tsgo::traits::{ProviderFuture, TypeProvider};
 
+/// Message sent to the dedicated stdin writer task.
+enum TsserverStdinMessage {
+    /// Write a newline-delimited JSON message to stdin.
+    Frame(Vec<u8>),
+    /// Shut down the writer task.
+    Shutdown,
+}
+
+/// Dedicated task that owns the stdin writer and serially writes messages from the channel.
+///
+/// Generic over the writer type to support both `ChildStdin` and test `DuplexStream`.
+async fn tsserver_stdin_writer_loop(
+    mut stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+    mut rx: mpsc::Receiver<TsserverStdinMessage>,
+) {
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            TsserverStdinMessage::Frame(data) => {
+                if stdin.write_all(&data).await.is_err() {
+                    break;
+                }
+                let _ = stdin.flush().await;
+            }
+            TsserverStdinMessage::Shutdown => break,
+        }
+    }
+}
+
 /// Newline-delimited JSON transport for tsserver.
 struct TsserverTransport {
-    stdin: Arc<Mutex<ChildStdin>>,
+    /// Channel sender for writing to the child's stdin via the writer task.
+    stdin_tx: mpsc::Sender<TsserverStdinMessage>,
     /// Pending request senders, keyed by sequence number.
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     next_seq: AtomicI64,
@@ -50,37 +79,33 @@ impl TsserverTransport {
 
         // tsserver uses newline-delimited JSON (no Content-Length framing)
         let frame = format!("{body}\n");
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(frame.as_bytes())
+        self.stdin_tx
+            .send(TsserverStdinMessage::Frame(frame.into_bytes()))
             .await
-            .map_err(|e| TypeProviderError::new(format!("write error: {e}")))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|e| TypeProviderError::new(format!("flush error: {e}")))?;
-        drop(stdin);
+            .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
-            .await
-            .map_err(|_| {
-                TypeProviderError::new(format!("request '{command}' timed out after 10s"))
-            })?
-            .map_err(|_| TypeProviderError::new("response channel closed"))?;
-
-        // Check for tsserver error
-        if let Some(false) = result.get("success").and_then(|v| v.as_bool()) {
-            let msg = result
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error");
-            return Err(TypeProviderError::new(msg));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx).await;
+        match result {
+            Ok(Ok(val)) => {
+                // Check for tsserver error
+                if let Some(false) = val.get("success").and_then(|v| v.as_bool()) {
+                    let msg = val
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown error");
+                    return Err(TypeProviderError::new(msg));
+                }
+                Ok(val.get("body").cloned().unwrap_or(serde_json::Value::Null))
+            }
+            Ok(Err(_)) => Err(TypeProviderError::new("response channel closed")),
+            Err(_) => {
+                // Timeout — clean up the pending entry to prevent leak
+                self.pending.lock().await.remove(&seq);
+                Err(TypeProviderError::new(format!(
+                    "request '{command}' timed out after 10s"
+                )))
+            }
         }
-
-        Ok(result
-            .get("body")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
     }
 
     /// Send a tsserver command without waiting for a response.
@@ -101,15 +126,10 @@ impl TsserverTransport {
             .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
         let frame = format!("{body}\n");
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(frame.as_bytes())
+        self.stdin_tx
+            .send(TsserverStdinMessage::Frame(frame.into_bytes()))
             .await
-            .map_err(|e| TypeProviderError::new(format!("write error: {e}")))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|e| TypeProviderError::new(format!("flush error: {e}")))?;
+            .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
 
         Ok(())
     }
@@ -412,10 +432,13 @@ impl TsserverTypeProvider {
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let stdin = Arc::new(Mutex::new(stdin));
+        // Use a channel + dedicated writer task instead of Arc<Mutex<ChildStdin>>
+        // to eliminate contention between concurrent request() and command_no_response() calls.
+        let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+        tokio::spawn(tsserver_stdin_writer_loop(stdin, stdin_rx));
 
         let transport = Arc::new(TsserverTransport {
-            stdin,
+            stdin_tx: stdin_tx.clone(),
             pending: Arc::clone(&pending),
             next_seq: AtomicI64::new(1),
         });
@@ -486,6 +509,7 @@ impl TsserverTypeProvider {
                         "jsx": "preserve",
                         "allowJs": true,
                         "strict": true,
+                        "allowArbitraryExtensions": true,
                         "baseUrl": ws_root,
                     }
                 }),
@@ -1032,11 +1056,7 @@ impl TypeProvider for TsserverTypeProvider {
                 Ok(body) => {
                     let actions = body
                         .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(parse_tsserver_code_action)
-                                .collect()
-                        })
+                        .map(|arr| arr.iter().filter_map(parse_tsserver_code_action).collect())
                         .unwrap_or_default();
                     Ok(actions)
                 }
@@ -1270,8 +1290,18 @@ impl TypeProvider for TsserverTypeProvider {
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         let transport = Arc::clone(&self.transport);
         Box::pin(async move {
+            // Best-effort: send exit command with 3s timeout.
+            // If tsserver is unresponsive, we don't hang — the child has kill_on_drop.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                let _ = transport
+                    .command_no_response("exit", serde_json::json!({}))
+                    .await;
+            })
+            .await;
+            // Signal the writer task to stop.
             let _ = transport
-                .command_no_response("exit", serde_json::json!({}))
+                .stdin_tx
+                .send(TsserverStdinMessage::Shutdown)
                 .await;
             Ok(())
         })
@@ -1503,5 +1533,72 @@ mod tests {
         assert_eq!(parsed.label, "myFunction");
         assert!(matches!(parsed.kind, Some(CompletionKind::Function)));
         assert_eq!(parsed.sort_text, Some("11".to_string()));
+    }
+
+    // ── Channel-based transport tests ────────────────────────────────
+
+    /// @ai-generated — tsserver stdin_writer_loop exits on Shutdown message
+    #[tokio::test]
+    async fn tsserver_writer_loop_exits_on_shutdown() {
+        let (client_reader, server_writer) = tokio::io::duplex(4096);
+        let (tx, rx) = mpsc::channel::<TsserverStdinMessage>(16);
+
+        let handle = tokio::spawn(tsserver_stdin_writer_loop(server_writer, rx));
+
+        // Send a frame
+        tx.send(TsserverStdinMessage::Frame(b"test\n".to_vec()))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Send Shutdown
+        tx.send(TsserverStdinMessage::Shutdown).await.unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        assert!(
+            result.is_ok(),
+            "tsserver_stdin_writer_loop should exit after Shutdown"
+        );
+
+        // Verify the frame was written
+        let mut reader = BufReader::new(client_reader);
+        let mut buf = String::new();
+        let n = reader.read_line(&mut buf).await.unwrap();
+        assert!(n > 0, "should have read the frame");
+        assert_eq!(buf.trim(), "test");
+    }
+
+    /// @ai-generated — tsserver shutdown completes within timeout when process is unresponsive
+    #[tokio::test]
+    async fn tsserver_shutdown_completes_within_timeout() {
+        let (stdin_tx, _rx) = mpsc::channel::<TsserverStdinMessage>(16);
+
+        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let transport = Arc::new(TsserverTransport {
+            stdin_tx,
+            pending,
+            next_seq: AtomicI64::new(1),
+        });
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                let _ = transport
+                    .command_no_response("exit", serde_json::json!({}))
+                    .await;
+            })
+            .await;
+            let _ = transport
+                .stdin_tx
+                .send(TsserverStdinMessage::Shutdown)
+                .await;
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Shutdown should complete within 5s even when tsserver is unresponsive"
+        );
     }
 }

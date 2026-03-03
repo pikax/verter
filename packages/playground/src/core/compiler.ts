@@ -102,7 +102,7 @@ interface HostBinding {
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
   getAnalysis?(canonicalOrAlias: string): FileAnalysis | null;
   getIde?(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null;
-  getTsc?(canonicalId: string): HostIdeResponse | null;
+  getPublicApi?(canonicalId: string): HostIdeResponse | null;
   lint?(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
   getCodeActions?(canonicalOrAlias: string, offset: number): HostCodeAction[];
   getLintRuleMetadata?(): HostLintRuleMetadata[];
@@ -383,10 +383,10 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
     applyTsxOutput(file, null);
   }
 
-  // Retrieve TSC output (minimal .d.ts declarations)
-  if (typeof wasmHost!.getTsc === "function") {
+  // Retrieve public API output (minimal .d.ts declarations)
+  if (typeof wasmHost!.getPublicApi === "function") {
     try {
-      const tsc = wasmHost!.getTsc(file.filename);
+      const tsc = wasmHost!.getPublicApi(file.filename);
       file.compiled.tscCode = tsc?.code ?? "";
     } catch {
       file.compiled.tscCode = "";
@@ -508,10 +508,10 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
     applyTsxOutput(file, null);
   }
 
-  // TSC output for TS-only mode
-  if (typeof wasmHost!.getTsc === "function") {
+  // Public API output for TS-only mode
+  if (typeof wasmHost!.getPublicApi === "function") {
     try {
-      const tsc = wasmHost!.getTsc(vueFilename);
+      const tsc = wasmHost!.getPublicApi(vueFilename);
       file.compiled.tscCode = tsc?.code ?? "";
     } catch {
       file.compiled.tscCode = "";

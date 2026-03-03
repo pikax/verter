@@ -126,7 +126,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
         return VERTER_TYPES_STUB;
       }
-      // .vue.d.ts virtual file → read underlying .vue, return getTsc()
+      // .vue.d.ts virtual file → read underlying .vue, return getPublicApi()
       if (fileName.endsWith(".vue.d.ts")) {
         const vuePath = fileName.slice(0, -5); // strip ".d.ts"
         const file = _readFile(vuePath);

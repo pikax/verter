@@ -251,9 +251,22 @@ fn process_v_bind<'alloc>(
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value_expr = &source[vs as usize..ve as usize];
             let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
-            // Replace entire prop with spread
             let prop_end = get_prop_end(prop);
-            out.overwrite(prop.start, prop_end, &format!("{{...{}}}", resolved));
+
+            // When the resolved expression is the original with a prefix prepended
+            // (e.g., "___VERTER___instance." + "$attrs"), split the overwrite to
+            // preserve the original identifier's source map position for TSGO hover.
+            let trimmed = value_expr.trim();
+            if let Some(prefix) = resolved.strip_suffix(trimmed) {
+                let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
+                let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
+                let tvs = vs + leading_ws;
+                let tve = ve - trailing_ws;
+                out.overwrite(prop.start, tvs, &format!("{{...{}", prefix));
+                out.overwrite(tve, prop_end, "}");
+            } else {
+                out.overwrite(prop.start, prop_end, &format!("{{...{}}}", resolved));
+            }
         }
         return;
     }
@@ -310,6 +323,15 @@ fn process_v_bind<'alloc>(
             let tvs = vs + leading_ws as u32;
             let tve = ve - trailing_ws as u32;
             out.overwrite(prop.start, tvs, &format!("{}={{", arg_name));
+            out.overwrite(tve, prop_end, "}");
+        } else if let Some(prefix) = final_expr.strip_suffix(trimmed_expr) {
+            // Prefix-only change (e.g., "___VERTER___instance." + "$attrs").
+            // Split overwrite to preserve the original identifier's source map position.
+            let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
+            let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
+            let tvs = vs + leading_ws;
+            let tve = ve - trailing_ws;
+            out.overwrite(prop.start, tvs, &format!("{}={{{}", arg_name, prefix));
             out.overwrite(tve, prop_end, "}");
         } else {
             out.overwrite(

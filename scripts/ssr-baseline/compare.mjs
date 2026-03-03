@@ -49,7 +49,11 @@ function getArg(name) {
   return idx !== -1 ? args[idx + 1] : null;
 }
 
-const rootDir = getArg("--root") || "D:/dev/";
+const rootDir = getArg("--root");
+if (!rootDir) {
+  console.error("Missing --root argument. Usage: node compare.mjs --root /path/to/projects");
+  process.exit(1);
+}
 const focusPattern = getArg("--focus");
 const limit = getArg("--limit") ? parseInt(getArg("--limit"), 10) : 0;
 const jsonPath = getArg("--json");

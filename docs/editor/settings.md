@@ -63,6 +63,17 @@ These colors are theme-aware and have separate defaults for dark, light, high co
 }
 ```
 
+## MCP Server
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `verter.mcp.enabled` | `boolean` | `true` | Start an HTTP MCP endpoint alongside the LSP, providing Vue analysis tools to AI agents |
+| `verter.mcp.port` | `number` | `6772` | Port for the MCP HTTP endpoint. Set to `0` for auto-assign. |
+| `verter.mcp.lintPreset` | `"essential"` \| `"recommended"` \| `"all"` \| `"performance"` \| `"a11y"` \| `"strict"` | `"recommended"` | Lint preset for the MCP server's diagnostic tools |
+| `verter.mcp.claudeCodeNotification` | `boolean` | `true` | Show a notification when Claude Code is detected with MCP setup instructions |
+
+See [MCP Server](/editor/mcp-server) for details on setup and available tools.
+
 ## Server
 
 | Setting | Type | Default | Description |

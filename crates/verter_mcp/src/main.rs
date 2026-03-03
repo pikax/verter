@@ -10,21 +10,17 @@
 //!   # HTTP transport (for remote agents):
 //!   verter-mcp --transport http --port 6772 --project-root /path/to/project
 
-mod config;
-mod helpers;
-mod scanner;
-mod server;
-mod tools;
-
 use std::sync::Arc;
 
 use clap::Parser;
 use rmcp::ServiceExt;
 
-use config::{Cli, McpServerConfig, Transport};
-use server::VerterMcpServer;
 use verter_diagnostics::Linter;
 use verter_host::{HostConfig, VerterHost};
+use verter_mcp::config::{Cli, McpServerConfig, Transport};
+use verter_mcp::scanner;
+use verter_mcp::tools;
+use verter_mcp::VerterMcpServer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

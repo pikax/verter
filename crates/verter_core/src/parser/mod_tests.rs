@@ -1,4 +1,3 @@
-// Placeholder — WIP test module
 use super::*;
 use crate::ast::types::AstNodeKind;
 use crate::diagnostics::{CompilerErrorCode, SyntaxPluginContext, SyntaxPluginOptions};

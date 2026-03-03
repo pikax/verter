@@ -2,6 +2,7 @@
 ///
 /// These tests use the full pipeline: DocumentRegistry (backed by verter_host) →
 /// LSP feature functions → verify results. They test real Vue SFC content end-to-end.
+use std::sync::Arc;
 use tower_lsp_server::lsp_types::*;
 use verter_host::{HostConfig, VerterHost};
 
@@ -19,7 +20,7 @@ use crate::features::rename::{prepare_rename, rename_at_position};
 
 /// Helper: create a DocumentRegistry and open a Vue SFC.
 fn open_vue_file(source: &str) -> (DocumentRegistry, Uri) {
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
     let uri: Uri = "file:///test/App.vue".parse().unwrap();
     let item = TextDocumentItem {
@@ -35,7 +36,7 @@ fn open_vue_file(source: &str) -> (DocumentRegistry, Uri) {
 /// Helper: create a DocumentRegistry with embedded ambient types and open a Vue SFC.
 /// Simulates the case where `@verter/types` is not installed in the workspace.
 fn open_vue_file_with_ambient(source: &str) -> (DocumentRegistry, Uri) {
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
     registry.set_embed_ambient_types(true);
     let uri: Uri = "file:///test/App.vue".parse().unwrap();
@@ -1184,7 +1185,7 @@ const emit = defineEmits<{
 fn open_multi_file(
     files: &[(&str, &str, &str)], // (uri, language_id, source)
 ) -> (DocumentRegistry, Vec<Uri>) {
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
     let mut uris = Vec::new();
     for (uri_str, lang, source) in files {
@@ -1767,13 +1768,15 @@ fn get_analysis_params_deserializes() {
 /// @ai-generated — VirtualFilesResponse serializes correctly with camelCase fields.
 #[test]
 fn virtual_files_response_serializes() {
-    use crate::server::{TsxBlock, VirtualFileEntry, VirtualFilesResponse};
+    use crate::server::{CodeBlock, VirtualFileEntry, VirtualFilesResponse};
 
     let response = VirtualFilesResponse {
-        tsx: Some(TsxBlock {
+        ide: Some(CodeBlock {
             code: "export default {}".to_string(),
             source_map: Some("{}".to_string()),
+            is_js: false,
         }),
+        api: None,
         virtual_files: vec![VirtualFileEntry {
             kind: "main".to_string(),
             code: "import './style.css'".to_string(),
@@ -1784,8 +1787,10 @@ fn virtual_files_response_serializes() {
     };
 
     let json = serde_json::to_value(&response).unwrap();
-    assert_eq!(json["tsx"]["code"], "export default {}");
-    assert_eq!(json["tsx"]["sourceMap"], "{}");
+    assert_eq!(json["ide"]["code"], "export default {}");
+    assert_eq!(json["ide"]["sourceMap"], "{}");
+    assert_eq!(json["ide"]["isJs"], false);
+    assert!(json["api"].is_null());
     assert_eq!(json["virtualFiles"][0]["kind"], "main");
     assert_eq!(json["virtualFiles"][0]["stale"], false);
     assert!(json["virtualFiles"][0]["sourceMap"].is_null());
@@ -1809,10 +1814,10 @@ const msg = 'hello'
     );
     let vf = virtual_files.unwrap();
 
-    // Should have TSX
-    assert!(vf.tsx.is_some(), "Should have TSX output");
-    let tsx = vf.tsx.unwrap();
-    assert!(!tsx.code.is_empty(), "TSX code should not be empty");
+    // Should have IDE output
+    assert!(vf.ide.is_some(), "Should have IDE output");
+    let ide = vf.ide.unwrap();
+    assert!(!ide.code.is_empty(), "IDE code should not be empty");
 
     // Should have virtual files: main, script, template, style:0
     assert!(
@@ -1957,13 +1962,15 @@ import MyComp from './MyComp.vue'
 /// and that the TypeScript client can safely access all fields.
 #[test]
 fn virtual_files_response_serializes_all_fields() {
-    use crate::server::{TsxBlock, VirtualFileEntry, VirtualFilesResponse};
+    use crate::server::{CodeBlock, VirtualFileEntry, VirtualFilesResponse};
 
     let response = VirtualFilesResponse {
-        tsx: Some(TsxBlock {
+        ide: Some(CodeBlock {
             code: "export default {}".to_string(),
             source_map: None,
+            is_js: false,
         }),
+        api: None,
         virtual_files: vec![VirtualFileEntry {
             kind: "main".to_string(),
             code: "console.log('hi')".to_string(),
@@ -1975,9 +1982,9 @@ fn virtual_files_response_serializes_all_fields() {
 
     let json = serde_json::to_value(&response).unwrap();
 
-    // tsx block
-    assert!(json["tsx"]["code"].is_string());
-    assert!(json["tsx"]["sourceMap"].is_null());
+    // ide block
+    assert!(json["ide"]["code"].is_string());
+    assert!(json["ide"]["sourceMap"].is_null());
 
     // virtualFiles array always present
     assert!(json["virtualFiles"].is_array());
@@ -2167,7 +2174,7 @@ const msg = 'hello'
 </template>
 "#;
 
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
     let uri: Uri = "file:///test/MT.vue".parse().unwrap();
 
@@ -2261,7 +2268,7 @@ const msg = 'hello'
 fn multithread_parallel_did_open_multiple_files() {
     use std::sync::Arc;
 
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
 
     let files: Vec<(String, String)> = (0..8)
@@ -2341,7 +2348,7 @@ const count = 0
 </template>
 "#;
 
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
     let uri: Uri = "file:///test/Interleaved.vue".parse().unwrap();
 
@@ -2434,7 +2441,7 @@ const count = {i}
 fn multithread_concurrent_did_change_different_files() {
     use std::sync::Arc;
 
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
 
     // Open 4 files
@@ -2517,7 +2524,7 @@ fn stress_test_no_deadlock_under_heavy_concurrent_load() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = Arc::new(DocumentRegistry::new(host));
 
     // Pre-open a set of files
@@ -2972,7 +2979,7 @@ const count = 42
 ///   "overlay not found for closed file: file:///...runtime-dom.d.ts.tsx"
 #[test]
 fn get_ide_returns_none_for_typescript_file() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // Open a TypeScript file (non-Vue)
@@ -2994,7 +3001,7 @@ fn get_ide_returns_none_for_typescript_file() {
 
 #[test]
 fn get_ide_returns_none_for_declaration_file() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // Open a .d.ts file (e.g., runtime-dom.d.ts opened by VS Code during go-to-definition)
@@ -3048,7 +3055,7 @@ const msg = 'hello'
 /// The did_close guard (get_ide().is_some()) must prevent close_tsx.
 #[test]
 fn close_non_vue_file_does_not_affect_vue_ide_state() {
-    let host = VerterHost::new(HostConfig::default());
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // Open a Vue file

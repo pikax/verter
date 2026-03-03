@@ -41,6 +41,29 @@ impl ProjectSync {
         self.provider.close_file(tsx_path).await
     }
 
+    /// Open a new DTS file (.d.vue.ts) in the type provider.
+    pub async fn open_dts(
+        &self,
+        dts_path: &str,
+        dts_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.open_file(dts_path, dts_content).await
+    }
+
+    /// Sync a Vue file's DTS representation (.d.vue.ts) to the type provider.
+    pub async fn sync_dts(
+        &self,
+        dts_path: &str,
+        dts_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.update_file(dts_path, dts_content).await
+    }
+
+    /// Close a DTS file in the type provider.
+    pub async fn close_dts(&self, dts_path: &str) -> Result<(), TypeProviderError> {
+        self.provider.close_file(dts_path).await
+    }
+
     /// Sync a non-Vue file to the type provider (only in FullProject mode).
     pub async fn sync_file(&self, path: &str, content: &str) -> Result<(), TypeProviderError> {
         match self.mode {
@@ -124,6 +147,66 @@ mod tests {
         match &calls[0] {
             MockCall::CloseFile { path } => {
                 assert_eq!(path, "App.vue.tsx");
+            }
+            _ => panic!("expected CloseFile"),
+        }
+    }
+
+    /// @ai-generated — open_dts sends open_file
+    #[tokio::test]
+    async fn open_dts_sends_open_file() {
+        let mock = MockTypeProvider::new();
+        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+
+        sync.open_dts("App.d.vue.ts", "export default App;")
+            .await
+            .unwrap();
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            MockCall::OpenFile { path, content } => {
+                assert_eq!(path, "App.d.vue.ts");
+                assert_eq!(content, "export default App;");
+            }
+            _ => panic!("expected OpenFile"),
+        }
+    }
+
+    /// @ai-generated — sync_dts sends update_file
+    #[tokio::test]
+    async fn sync_dts_sends_update_file() {
+        let mock = MockTypeProvider::new();
+        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+
+        sync.sync_dts("App.d.vue.ts", "export default App;")
+            .await
+            .unwrap();
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            MockCall::UpdateFile { path, content } => {
+                assert_eq!(path, "App.d.vue.ts");
+                assert_eq!(content, "export default App;");
+            }
+            _ => panic!("expected UpdateFile"),
+        }
+    }
+
+    /// @ai-generated — close_dts sends close_file
+    #[tokio::test]
+    async fn close_dts_sends_close_file() {
+        let mock = MockTypeProvider::new();
+        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+
+        sync.close_dts("App.d.vue.ts").await.unwrap();
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            MockCall::CloseFile { path } => {
+                assert_eq!(path, "App.d.vue.ts");
             }
             _ => panic!("expected CloseFile"),
         }

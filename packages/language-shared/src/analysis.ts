@@ -247,12 +247,15 @@ export interface VirtualFileEntry {
   stale: boolean;
 }
 
-export interface TsxBlock {
+export interface CodeBlock {
   code: string;
   sourceMap: string | null;
+  /** `true` when the SFC script is JavaScript rather than TypeScript. */
+  isJs: boolean;
 }
 
 export interface VirtualFilesResponse {
-  tsx: TsxBlock | null;
+  ide: CodeBlock | null;
+  api: CodeBlock | null;
   virtualFiles: VirtualFileEntry[];
 }

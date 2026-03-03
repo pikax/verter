@@ -20,10 +20,7 @@ use crate::common::Span;
 use crate::template::code_gen::binding::BindingType;
 
 /// Context for options script parsing
-pub struct OptionsContext {
-    /// Whether we're inside export default
-    in_export_default: bool,
-}
+pub struct OptionsContext;
 
 impl Default for OptionsContext {
     fn default() -> Self {
@@ -33,9 +30,7 @@ impl Default for OptionsContext {
 
 impl OptionsContext {
     pub fn new() -> Self {
-        Self {
-            in_export_default: false,
-        }
+        Self
     }
 }
 

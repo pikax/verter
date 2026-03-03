@@ -72,7 +72,11 @@ function findVueTsc(projectRoot: string): { bin: string; args: string[] } {
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────────
-const TEST_REPOS = 'D:/dev/github/verter-test-repos'
+const TEST_REPOS = process.env.VERTER_TEST_REPOS
+if (!TEST_REPOS) {
+  console.error('Set VERTER_TEST_REPOS env var to the path of verter-test-repos')
+  process.exit(1)
+}
 
 interface Project {
   name: string

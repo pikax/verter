@@ -43,6 +43,7 @@ import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
 import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
 import { restartLanguageServer } from "./restart";
+import { checkClaudeCodeAndNotify, setupMcpForClaudeCode } from "./claudeCodeDetection";
 
 type GetClient = () => PatchClient<LanguageClient>;
 
@@ -439,6 +440,10 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
         log.info("Type provider setting changed, restarting language server...");
         await restartLS(false);
       }
+      if (e.affectsConfiguration("verter.mcp.enabled") || e.affectsConfiguration("verter.mcp.port")) {
+        log.info("MCP setting changed, restarting language server...");
+        await restartLS(false);
+      }
     }),
   );
 
@@ -452,6 +457,16 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
   addNodeModulesChangedListener(getClient);
 
   addVerterAnalysis(getClient, context);
+
+  // Claude Code detection notification
+  checkClaudeCodeAndNotify(context, log);
+
+  // Setup MCP for Claude Code command
+  context.subscriptions.push(
+    commands.registerCommand("verter.setupMcpForClaudeCode", () =>
+      setupMcpForClaudeCode(context, log)
+    )
+  );
 
   return {
     getClient,
@@ -468,10 +483,18 @@ function buildServerOptions(
   const typeProvider = verterConfig.get<string>("typeProvider", "auto");
   const tsdk = verterConfig.get<string>("typescript.tsdk", "");
 
+  const mcpEnabled = verterConfig.get<boolean>("mcp.enabled", true);
+  const mcpPort = verterConfig.get<number>("mcp.port", 6772);
+  const mcpLintPreset = verterConfig.get<string>("mcp.lintPreset", "recommended");
+
   const args: string[] = [];
   args.push(`--type-provider=${typeProvider}`);
   if (tsdk) args.push(`--tsdk=${tsdk}`);
   args.push(`--plugin-path=${join(extensionPath, "node_modules")}`);
+  if (mcpEnabled) {
+    args.push(`--mcp-port=${mcpPort}`);
+    args.push(`--mcp-lint-preset=${mcpLintPreset}`);
+  }
   if (rootPath) args.push(rootPath);
 
   return {

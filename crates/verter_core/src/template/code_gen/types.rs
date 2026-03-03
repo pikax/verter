@@ -690,6 +690,8 @@ pub struct VaporRootElement<'a> {
     pub statements: Vec<&'a str>,
     /// v-once flag: effects are emitted as direct statements (no `_renderEffect` wrapper).
     pub v_once: bool,
+    /// v-memo deps expression: effects are wrapped in `_withMemo(deps, ...)`.
+    pub v_memo_expr: Option<String>,
 }
 
 #[cfg(test)]

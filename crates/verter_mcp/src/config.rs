@@ -42,6 +42,15 @@ pub struct McpServerConfig {
     pub lint_preset: String,
 }
 
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            project_root: None,
+            lint_preset: "recommended".to_string(),
+        }
+    }
+}
+
 impl From<&Cli> for McpServerConfig {
     fn from(cli: &Cli) -> Self {
         Self {

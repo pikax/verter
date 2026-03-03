@@ -50,7 +50,7 @@
 //! ## Shared vs unique logic
 //!
 //! Binding resolution, runtime helper constants, and the DFS walker are shared
-//! with the VDOM and Vapor2 backends (see [`super::binding`], [`super::shared`],
+//! with the VDOM backend (see [`super::binding`], [`super::shared`],
 //! [`super::walker`]). The `needs_quoted_key()` utility is reused from `vdom::props`.
 //! This backend's unique elements are its stacked element state model,
 //! counter-based naming, and root element assembly pattern.
@@ -87,6 +87,23 @@ fn push_prop_key(buf: &mut String, key: &str) {
     } else {
         buf.push_str(key);
     }
+}
+
+/// Extract the v-memo deps expression from an element's props.
+/// Returns `Some("[dep1, dep2]")` if the element has `v-memo="[dep1, dep2]"`.
+fn extract_v_memo_expr(el: &ElementNode, source: &str) -> Option<String> {
+    for prop in &el.props {
+        if !prop.is_directive {
+            continue;
+        }
+        let name = &source[prop.start as usize..prop.name_end as usize];
+        if name == "v-memo" {
+            if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                return Some(source[vs as usize..ve as usize].to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Look up the OXC-parsed expression data for a given prop index.
@@ -177,6 +194,8 @@ pub struct VaporCodeGen<'ast, 'alloc> {
     hoisted_templates: Vec<(u32, String)>,
     /// Pending v-if chain being accumulated across sibling elements.
     pending_vif_chain: Option<VIfChain<'alloc>>,
+    /// Counter for v-memo cache slot allocation.
+    memo_cache_idx: u32,
 }
 
 impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
@@ -199,6 +218,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             delegated_events_set: FxHashSet::default(),
             hoisted_templates: Vec::new(),
             pending_vif_chain: None,
+            memo_cache_idx: 0,
         }
     }
 
@@ -481,6 +501,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             effects: Vec::new(),
             statements: vec![out.alloc_str(&stmt)],
             v_once: false,
+            v_memo_expr: None,
         });
     }
 
@@ -556,6 +577,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 effects: Vec::new(),
                 statements: Vec::new(),
                 v_once: false,
+                v_memo_expr: None,
             };
         };
 
@@ -603,6 +625,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             effects: Vec::new(),
             statements: vec![out.alloc_str(&stmt)],
             v_once: false,
+            v_memo_expr: None,
         }
     }
 
@@ -805,6 +828,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             effects: Vec::new(),
             statements,
             v_once: false,
+            v_memo_expr: None,
         }
     }
 
@@ -1019,6 +1043,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             effects: Vec::new(),
             statements: vec![out.alloc_str(&create_line)],
             v_once: false,
+            v_memo_expr: None,
         }
     }
 
@@ -1103,7 +1128,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 buf.push('\n');
             }
 
-            // Effects — v_once emits directly, otherwise wrap in _renderEffect
+            // Effects — v_once emits directly, v_memo wraps with _withMemo,
+            // otherwise wrap in _renderEffect
             if !root.effects.is_empty() {
                 if root.v_once {
                     // v-once: effects as direct statements (no _renderEffect wrapper)
@@ -1112,6 +1138,22 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                         effect.write_code_into(&mut buf);
                         buf.push('\n');
                     }
+                } else if let Some(ref memo_deps) = root.v_memo_expr {
+                    // v-memo: wrap render effect with _withMemo
+                    buf.push_str("  _renderEffect(() => _withMemo(");
+                    buf.push_str(memo_deps);
+                    buf.push_str(", () => {\n");
+                    for effect in &root.effects {
+                        buf.push_str("    ");
+                        effect.write_code_into(&mut buf);
+                        buf.push('\n');
+                    }
+                    buf.push_str("  }, _cache, ");
+                    push_u32(&mut buf, self.memo_cache_idx);
+                    buf.push_str("))\n");
+                    self.memo_cache_idx += 1;
+                    out.add_vapor_import(VaporHelper::RenderEffect);
+                    out.add_vapor_import(VaporHelper::WithMemo);
                 } else {
                     buf.push_str("  _renderEffect(() => {\n");
                     for effect in &root.effects {
@@ -1374,6 +1416,10 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             // v-once: effects become direct statements (no _renderEffect wrapper)
             if el.v_once.is_some() {
                 root.v_once = true;
+            }
+            // v-memo: effects are wrapped in _withMemo(deps, ...)
+            if let Some(memo_expr) = extract_v_memo_expr(el, source) {
+                root.v_memo_expr = Some(memo_expr);
             }
             self.root_elements.push(root);
         } else {

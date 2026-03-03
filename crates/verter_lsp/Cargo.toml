@@ -11,11 +11,15 @@ verter_analysis = { path = "../verter_analysis" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_span = { path = "../verter_span" }
+verter_mcp = { path = "../verter_mcp" }
 oxc_sourcemap = "6.0.2"
 tower-lsp-server = "0.21"
+rmcp = { version = "0.16", features = ["server", "macros", "transport-streamable-http-server"] }
+axum = "0.8"
+schemars = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "6"

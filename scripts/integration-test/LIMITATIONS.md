@@ -252,12 +252,12 @@ directly into quoted JS string keys without escaping. When a `style` attribute
 contained literal newlines (e.g., multi-line braces in ant-design-vue), the
 output JS had unescaped newlines inside string literals, causing parse errors.
 
-Audited and fixed all codegen paths across VDOM, Vapor, and Vapor2 backends:
+Audited and fixed all codegen paths across VDOM and Vapor backends:
 - `vdom/props.rs`: style object property names
 - `vdom/element.rs`: ref values, prop keys, tag names, dynamic_props, modifiers
 - `vdom/slots.rs`: slot names, dynamic_props arrays
 - `vapor/mod.rs`: prop keys, delegated events
-- `vapor/props.rs`, `vapor2/events.rs`, `vapor2/mod.rs`: modifier/event arrays
+- `vapor/props.rs`: modifier/event arrays
 
 All now use `escape_js_string_into()` for content emitted inside JS string
 literals, matching Vue's official compiler behavior.

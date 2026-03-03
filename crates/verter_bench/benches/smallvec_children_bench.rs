@@ -10,6 +10,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use smallvec::SmallVec;
 use std::hint::black_box;
+use std::path::PathBuf;
 use walkdir::WalkDir;
 
 use verter_core::ast::types::{AstNodeKind, TemplateAst};
@@ -22,18 +23,34 @@ use verter_core::types::NodeId;
 // Helpers
 // ---------------------------------------------------------------------------
 
-const REPOS_DIR: &str = "D:/dev/github/verter-test-repos";
-
 struct VueFile {
     /// Short label: "project/relative_path.vue"
     label: String,
     source: String,
 }
 
+fn find_test_repos_root() -> PathBuf {
+    if let Ok(path) = std::env::var("VERTER_TEST_REPOS") {
+        let p = PathBuf::from(path);
+        if p.is_dir() {
+            return p;
+        }
+    }
+    let workspace_repos = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".integration-tests")
+        .join("repos");
+    if workspace_repos.is_dir() {
+        return workspace_repos;
+    }
+    panic!("Set VERTER_TEST_REPOS env var to the path of verter-test-repos");
+}
+
 /// Collect all .vue files from the integration-test repos directory.
 fn collect_vue_files() -> Vec<VueFile> {
+    let repos_dir = find_test_repos_root();
     let mut files = Vec::new();
-    for entry in WalkDir::new(REPOS_DIR)
+    for entry in WalkDir::new(&repos_dir)
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
@@ -51,7 +68,7 @@ fn collect_vue_files() -> Vec<VueFile> {
                 // Only include files with <template> (skip script-only SFCs)
                 if source.contains("<template") {
                     let rel = path
-                        .strip_prefix(REPOS_DIR)
+                        .strip_prefix(&repos_dir)
                         .unwrap_or(path)
                         .to_string_lossy()
                         .replace('\\', "/");
@@ -101,7 +118,12 @@ fn bench_distribution_analysis(c: &mut Criterion) {
     let files = collect_vue_files();
 
     eprintln!("\n=== Children Count Distribution ===");
-    eprintln!("Scanning {} .vue files from {}", files.len(), REPOS_DIR);
+    let repos_root = find_test_repos_root();
+    eprintln!(
+        "Scanning {} .vue files from {}",
+        files.len(),
+        repos_root.display()
+    );
 
     let mut all_counts: Vec<usize> = Vec::new();
     let mut total_elements: usize = 0;

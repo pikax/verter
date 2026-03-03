@@ -210,10 +210,6 @@ fn bench_fixture(c: &mut Criterion, fixture_name: &str) {
         b.iter(|| template_codegen(black_box(&source), CodeGenMode::Vapor));
     });
 
-    group.bench_function("template_vapor2", |b| {
-        b.iter(|| template_codegen(black_box(&source), CodeGenMode::Vapor2));
-    });
-
     group.finish();
 }
 
@@ -263,14 +259,13 @@ fn find_test_repos_root() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    for candidate in &[
-        "D:/dev/github/verter-test-repos",
-        "../../../verter-test-repos",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.is_dir() {
-            return Some(p);
-        }
+    // Check integration-test repos inside the workspace
+    let workspace_repos = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".integration-tests")
+        .join("repos");
+    if workspace_repos.is_dir() {
+        return Some(workspace_repos);
     }
     None
 }
@@ -378,18 +373,6 @@ fn real_world_per_project(c: &mut Criterion) {
                 });
             },
         );
-
-        group.bench_with_input(
-            BenchmarkId::new("template_vapor2", &project.name),
-            &project,
-            |b, project| {
-                b.iter(|| {
-                    for file in &project.files {
-                        template_codegen(&file.content, CodeGenMode::Vapor2);
-                    }
-                });
-            },
-        );
     }
 
     group.finish();
@@ -440,14 +423,6 @@ fn real_world_aggregate(c: &mut Criterion) {
         b.iter(|| {
             for file in &all_files {
                 template_codegen(&file.content, CodeGenMode::Vapor);
-            }
-        });
-    });
-
-    group.bench_function(format!("template_vapor2/{}_files", all_files.len()), |b| {
-        b.iter(|| {
-            for file in &all_files {
-                template_codegen(&file.content, CodeGenMode::Vapor2);
             }
         });
     });

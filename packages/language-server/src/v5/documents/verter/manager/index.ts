@@ -1,1 +1,0 @@
-export { VerterManager } from "./manager";

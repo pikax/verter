@@ -30,14 +30,20 @@ const _require = createRequire(__filename)
 const CPU_COUNT = availableParallelism()
 
 // ─── Load Vize native ────────────────────────────────────────────────────────
-const VIZE_NATIVE_PATH = 'D:/dev/github/vize/npm/vize-native/index.js'
+const VIZE_PATH = process.env.VIZE_PATH
+if (!VIZE_PATH) {
+  console.error('Set VIZE_PATH env var to the Vize repo root (e.g. /path/to/vize)')
+  console.error('Then build: cd $VIZE_PATH && cargo build -p vize_vitrine --features napi')
+  process.exit(1)
+}
+const VIZE_NATIVE_PATH = join(VIZE_PATH, 'npm/vize-native/index.js')
 let vize: { compileSfc: (src: string, opts: { filename: string }) => { code: string }; compileSfcBatch: (pattern: string, opts?: { threads?: number }) => { success: number; failed: number; timeMs: number; inputBytes: number; outputBytes: number } } | null = null
 try {
   vize = _require(VIZE_NATIVE_PATH)
-  console.log('✅ Vize native loaded')
+  console.log('Vize native loaded')
 } catch (e: any) {
-  console.error(`❌ Could not load Vize native from ${VIZE_NATIVE_PATH}`)
-  console.error(`   Build it with: cd D:/dev/github/vize && cargo build -p vize_vitrine --features napi`)
+  console.error(`Could not load Vize native from ${VIZE_NATIVE_PATH}`)
+  console.error(`Build it with: cd ${VIZE_PATH} && cargo build -p vize_vitrine --features napi`)
   process.exit(1)
 }
 
@@ -65,8 +71,8 @@ const fixtures: Fixture[] = FIXTURE_NAMES.map(filename => {
 })
 
 // ─── Detect Vize build type ─────────────────────────────────────────────────
-const vizeReleasePath = 'D:/dev/github/vize/target/release/vize_vitrine.dll'
-const vizeNodePath = 'D:/dev/github/vize/npm/vize-native/vize-vitrine.win32-x64-msvc.node'
+const vizeReleasePath = join(VIZE_PATH, 'target/release/vize_vitrine.dll')
+const vizeNodePath = join(VIZE_PATH, 'npm/vize-native/vize-vitrine.win32-x64-msvc.node')
 function detectVizeBuildType(): 'release' | 'debug' {
   try {
     if (!existsSync(vizeReleasePath) || !existsSync(vizeNodePath)) return 'debug'
@@ -195,7 +201,7 @@ console.log('═'.repeat(74))
 if (vizeBuildType === 'debug') {
   console.log(' ⚠️  BUILD NOTE: Vize is using a DEBUG build (no optimizations).')
   console.log('     For accurate results, rebuild with:')
-  console.log('       cd D:/dev/github/vize && cargo build -p vize_vitrine --features napi --release')
+  console.log(`       cd ${VIZE_PATH} && cargo build -p vize_vitrine --features napi --release`)
   console.log('       cp target/release/vize_vitrine.dll npm/vize-native/vize-vitrine.win32-x64-msvc.node')
 } else {
   console.log(' ✅ Both Vize and Verter are using RELEASE builds (optimized). Results are accurate.')

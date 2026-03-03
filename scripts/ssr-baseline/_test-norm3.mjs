@@ -11,7 +11,8 @@ const { parse, compileScript, compileTemplate } = require(
 // Find the file numbered "1" in the comparison — need to figure out which file that is
 // from the JSON — but the keys are just numbers. Let me search for a balancer project file
 // that uses BalCard
-const testDir = "D:/dev/github/verter-test-repos";
+const testDir = process.env.VERTER_TEST_REPOS;
+if (!testDir) { console.error('Set VERTER_TEST_REPOS env var'); process.exit(1); }
 const testFiles = [];
 
 function walk(dir, depth = 0) {
@@ -30,7 +31,7 @@ function walk(dir, depth = 0) {
     }
   } catch {}
 }
-walk("D:/dev/github/verter-test-repos/balancer-frontend");
+walk(path.join(testDir, "balancer-frontend"));
 
 if (testFiles.length > 0) {
   const file = testFiles[0];

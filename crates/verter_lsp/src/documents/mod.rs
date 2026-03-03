@@ -13,14 +13,14 @@ use verter_host::{
     StyleOverrideRequest, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
-use crate::server::{TsxBlock, VirtualFileEntry, VirtualFilesResponse};
+use crate::server::{CodeBlock, VirtualFileEntry, VirtualFilesResponse};
 
 use line_index::LineIndex;
 use position_map::PositionMapper;
 
 /// Manages open documents and their relationship to verter_host.
 pub struct DocumentRegistry {
-    pub(crate) host: VerterHost,
+    pub(crate) host: Arc<VerterHost>,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
     /// Default compile profile for TSX generation (LSP mode).
@@ -53,7 +53,7 @@ pub struct DocumentState {
 }
 
 impl DocumentRegistry {
-    pub fn new(host: VerterHost) -> Self {
+    pub fn new(host: Arc<VerterHost>) -> Self {
         Self {
             host,
             documents: DashMap::new(),
@@ -359,14 +359,23 @@ impl DocumentRegistry {
     pub fn get_virtual_files(&self, uri: &Uri) -> Option<VirtualFilesResponse> {
         let canonical_id = self.get_canonical_id(uri)?;
 
-        // Get TSX
-        let tsx = self
+        // Get IDE output (TSX/JSX for template type checking)
+        let ide = self
             .host
             .get_ide(&canonical_id, &self.tsx_profile.read())
-            .map(|t| TsxBlock {
+            .map(|t| CodeBlock {
                 code: t.code.to_string(),
                 source_map: t.source_map.map(|m| m.to_string()),
+                is_js: t.is_jsx,
             });
+
+        // Get API output (declaration for cross-file type resolution)
+        let is_js = ide.as_ref().is_some_and(|b| b.is_js);
+        let api = self.host.get_public_api(&canonical_id).map(|t| CodeBlock {
+            code: t.code.to_string(),
+            source_map: t.source_map.map(|m| m.to_string()),
+            is_js,
+        });
 
         // Get all virtual node kinds
         let node_kinds = self.host.list_virtual_nodes(&canonical_id);
@@ -412,7 +421,11 @@ impl DocumentRegistry {
             }
         }
 
-        Some(VirtualFilesResponse { tsx, virtual_files })
+        Some(VirtualFilesResponse {
+            ide,
+            api,
+            virtual_files,
+        })
     }
 
     /// Get the analysis snapshot as a JSON value.
@@ -463,6 +476,11 @@ impl DocumentRegistry {
     /// Get the underlying verter_host reference.
     pub fn host(&self) -> &VerterHost {
         &self.host
+    }
+
+    /// Get a shared reference to the host (for MCP embedding).
+    pub fn host_arc(&self) -> Arc<VerterHost> {
+        Arc::clone(&self.host)
     }
 }
 

@@ -13,7 +13,9 @@ const { VerterHost } = require(path.join(ROOT, "packages/native/index.js"));
 const host = new VerterHost({ devMode: false, analysisLevel: "none" });
 
 // Use one of the actual mergeProps mismatch files
-const file = "D:/dev/github/verter-test-repos/balancer-frontend-v2/src/components/contextual/pages/vebal/MultiVoting/VoteInput.vue";
+const VERTER_TEST_REPOS = process.env.VERTER_TEST_REPOS;
+if (!VERTER_TEST_REPOS) { console.error('Set VERTER_TEST_REPOS env var'); process.exit(1); }
+const file = path.join(VERTER_TEST_REPOS, "balancer-frontend-v2/src/components/contextual/pages/vebal/MultiVoting/VoteInput.vue");
 if (!fs.existsSync(file)) {
   console.log("File not found:", file);
   process.exit(1);

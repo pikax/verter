@@ -30,13 +30,24 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let host = VerterHost::new(HostConfig {
+    let host = Arc::new(VerterHost::new(HostConfig {
         analysis_level: verter_host::AnalysisLevel::Full,
         ..HostConfig::default()
-    });
+    }));
 
     // Parse CLI arguments
     let args = CliArgs::parse();
+
+    // Optionally start the MCP HTTP server alongside LSP (shares the same VerterHost).
+    if let Some(mcp_port) = args.mcp_port {
+        let mcp_host = Arc::clone(&host);
+        let mcp_lint_preset = args.mcp_lint_preset.clone();
+        tokio::spawn(async move {
+            if let Err(e) = start_mcp_http(mcp_host, mcp_port, &mcp_lint_preset).await {
+                tracing::warn!("MCP HTTP server failed to start: {e}");
+            }
+        });
+    }
 
     // Deferred client cell — populated inside LspService::build, used by
     // ResilientTypeProvider's crash monitor to send user notifications.
@@ -110,6 +121,10 @@ struct CliArgs {
     plugin_path: Option<String>,
     /// Workspace root (positional argument).
     workspace_root: Option<String>,
+    /// MCP HTTP port. When set, starts an HTTP MCP endpoint alongside LSP stdio.
+    mcp_port: Option<u16>,
+    /// Lint preset for the MCP server's diagnostic tools.
+    mcp_lint_preset: String,
 }
 
 impl CliArgs {
@@ -118,6 +133,8 @@ impl CliArgs {
         let mut tsdk = None;
         let mut plugin_path = None;
         let mut workspace_root = None;
+        let mut mcp_port = None;
+        let mut mcp_lint_preset = "recommended".to_string();
 
         for arg in std::env::args().skip(1) {
             if let Some(val) = arg.strip_prefix("--type-provider=") {
@@ -126,6 +143,10 @@ impl CliArgs {
                 tsdk = Some(val.to_string());
             } else if let Some(val) = arg.strip_prefix("--plugin-path=") {
                 plugin_path = Some(val.to_string());
+            } else if let Some(val) = arg.strip_prefix("--mcp-port=") {
+                mcp_port = val.parse().ok();
+            } else if let Some(val) = arg.strip_prefix("--mcp-lint-preset=") {
+                mcp_lint_preset = val.to_string();
             } else if !arg.starts_with("--") {
                 workspace_root = Some(arg);
             }
@@ -136,6 +157,8 @@ impl CliArgs {
             tsdk,
             plugin_path,
             workspace_root,
+            mcp_port,
+            mcp_lint_preset,
         }
     }
 }
@@ -312,4 +335,40 @@ fn path_to_file_uri(path: &str) -> String {
         // Windows: C:/Users/... → file:///C:/Users/...
         format!("file:///{normalized}")
     }
+}
+
+/// Start an HTTP MCP server that shares the LSP's VerterHost.
+async fn start_mcp_http(
+    host: Arc<VerterHost>,
+    port: u16,
+    lint_preset: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpService,
+    };
+    use verter_mcp::{McpServerConfig, VerterMcpServer};
+
+    let lint_config = verter_mcp::tools::diagnostics::make_lint_config(lint_preset);
+    let linter = Arc::new(verter_diagnostics::Linter::new(lint_config));
+    let config = McpServerConfig::default();
+    let server = VerterMcpServer::new(host, linter, config);
+
+    let http_service = StreamableHttpService::new(
+        move || Ok(server.clone()),
+        LocalSessionManager::default().into(),
+        Default::default(),
+    );
+
+    let router = axum::Router::new().nest_service("/mcp", http_service);
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+    let actual_port = listener.local_addr()?.port();
+
+    tracing::info!("MCP HTTP server running at http://127.0.0.1:{actual_port}/mcp");
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+        })
+        .await?;
+    Ok(())
 }

@@ -76,6 +76,27 @@ it("type is correctly inferred", () => {
 
 ## Rust Test Patterns
 
+### Test File Organization
+
+When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a separate sibling file. Two patterns:
+
+**For standalone files** (e.g., `analysis.rs`):
+```rust
+// In analysis.rs — replace the inline #[cfg(test)] mod tests { ... } block:
+#[cfg(test)]
+#[path = "analysis_tests.rs"]
+mod analysis_tests;
+```
+
+**For `mod.rs` files** (e.g., `ide/template/mod.rs`):
+```rust
+// In mod.rs — loads tests.rs from the same directory:
+#[cfg(test)]
+mod tests;
+```
+
+The extracted file contains the module contents directly — `use super::*;`, helpers, and `#[test]` functions. No wrapping `mod tests { }` block.
+
 ### TDD Workflow
 
 1. Write failing tests first

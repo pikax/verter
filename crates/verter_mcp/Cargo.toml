@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+name = "verter_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "verter-mcp"
 path = "src/main.rs"

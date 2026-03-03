@@ -190,19 +190,22 @@ pub struct VirtualFileEntry {
     pub stale: bool,
 }
 
-/// TSX block in the response.
+/// Generated code block in the virtual files response.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TsxBlock {
+pub struct CodeBlock {
     pub code: String,
     pub source_map: Option<String>,
+    /// `true` when the SFC script is JavaScript (JSX/JSDoc) rather than TypeScript (TSX).
+    pub is_js: bool,
 }
 
 /// Response for `$/verter/getVirtualFiles` request.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VirtualFilesResponse {
-    pub tsx: Option<TsxBlock>,
+    pub ide: Option<CodeBlock>,
+    pub api: Option<CodeBlock>,
     pub virtual_files: Vec<VirtualFileEntry>,
 }
 
@@ -310,6 +313,10 @@ pub struct VerterLanguageServer {
     type_provider_kind: crate::TypeProviderKind,
     /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
     suggest_tsgo: bool,
+    /// Generation counter for completion coalescing. During rapid typing, each keystroke
+    /// triggers a completion request. By incrementing this counter, stale requests can
+    /// detect they've been superseded and skip the expensive type provider call.
+    completion_generation: std::sync::atomic::AtomicU64,
 }
 
 impl VerterLanguageServer {
@@ -335,6 +342,7 @@ impl VerterLanguageServer {
             background_synced_files: DashMap::new(),
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
+            completion_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -544,6 +552,23 @@ impl VerterLanguageServer {
         }
     }
 
+    /// Sync the public API (.d.vue.ts) to the type provider for cross-file component resolution.
+    async fn sync_api_to_provider(&self, uri: &Uri) {
+        if let Some(sync) = &self.project_sync {
+            if let Some(dts_path) = self.dts_path_for_uri(uri) {
+                let canonical_id = match self.documents.get_canonical_id(uri) {
+                    Some(id) => id,
+                    None => return,
+                };
+                if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
+                    if let Err(e) = sync.sync_dts(&dts_path, &api.code).await {
+                        tracing::warn!("sync_api: failed for {dts_path}: {e}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Get IDE context for TypeProvider queries: (ide_path, ide_code, position_mapper).
     fn ide_context(&self, uri: &Uri) -> Option<(String, Arc<str>, PositionMapper)> {
         let canonical_id = self.documents.get_canonical_id(uri);
@@ -582,6 +607,15 @@ impl VerterLanguageServer {
             ".tsx"
         };
         format!("{canonical}{ext}")
+    }
+
+    /// Generate the DTS declaration file path (.d.vue.ts) for a given Vue file URI.
+    /// Uses TypeScript 5.0 `allowArbitraryExtensions` naming convention:
+    /// `import('./Comp.vue')` resolves to `./Comp.d.vue.ts`
+    fn dts_path_for_uri(&self, uri: &Uri) -> Option<String> {
+        let canonical = self.documents.get_canonical_id(uri)?;
+        let base = canonical.strip_suffix(".vue")?;
+        Some(format!("{base}.d.vue.ts"))
     }
 
     /// Get IDE content and mapper by IDE path (reverse lookup).
@@ -825,6 +859,12 @@ impl VerterLanguageServer {
                 } else if let Err(e) = result {
                     tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
                 }
+            }
+            // Sync .d.vue.ts for cross-file component type resolution
+            if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+                let base = canonical_id.strip_suffix(".vue").unwrap_or(canonical_id);
+                let dts_path = format!("{base}.d.vue.ts");
+                let _ = sync.sync_dts(&dts_path, &api.code).await;
             }
         }
     }
@@ -1676,6 +1716,12 @@ impl LanguageServer for VerterLanguageServer {
                             synced += 1;
                         }
                     }
+                    // Sync .d.vue.ts for cross-file component type resolution
+                    if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
+                        let base = canonical_id.strip_suffix(".vue").unwrap_or(&canonical_id);
+                        let dts_path = format!("{base}.d.vue.ts");
+                        let _ = sync.open_dts(&dts_path, &api.code).await;
+                    }
                 }
             }
             tracing::info!(
@@ -1740,7 +1786,10 @@ impl LanguageServer for VerterLanguageServer {
                 uri.as_str(),
             );
         }
-        self.sync_ide_to_provider(uri).await;
+        tokio::join!(
+            self.sync_ide_to_provider(uri),
+            self.sync_api_to_provider(uri),
+        );
         self.publish_diagnostics(uri).await;
     }
 
@@ -1779,16 +1828,21 @@ impl LanguageServer for VerterLanguageServer {
         // Push only verter diagnostics; TSGO diagnostics come via pull path.
         let verter_diags = self.compute_verter_diagnostics(&uri);
 
-        // Use timeout to prevent indefinite hangs when TSGO is slow/crashed.
+        // Use timeout to prevent indefinite hangs when the type provider is slow/crashed.
         if !style_only
-            && tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                self.sync_ide_to_provider(&uri),
-            )
+            && tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    self.sync_ide_to_provider(&uri),
+                    self.sync_api_to_provider(&uri),
+                );
+            })
             .await
             .is_err()
         {
-            tracing::warn!("did_change: TSGO sync timed out for {}", uri.as_str());
+            tracing::warn!(
+                "did_change: type provider sync timed out for {}",
+                uri.as_str()
+            );
         }
 
         if tokio::time::timeout(
@@ -1822,8 +1876,14 @@ impl LanguageServer for VerterLanguageServer {
                             "did_close: keeping background-synced file in provider: {}",
                             tsx_path
                         );
-                    } else if let Err(e) = sync.close_tsx(&tsx_path).await {
-                        tracing::warn!("did_close: failed to close TSX in provider: {e}");
+                    } else {
+                        if let Err(e) = sync.close_tsx(&tsx_path).await {
+                            tracing::warn!("did_close: failed to close TSX in provider: {e}");
+                        }
+                        // Also close the .d.vue.ts declaration file
+                        if let Some(dts_path) = self.dts_path_for_uri(uri) {
+                            let _ = sync.close_dts(&dts_path).await;
+                        }
                     }
                 }
             }
@@ -1875,7 +1935,7 @@ impl LanguageServer for VerterLanguageServer {
                 Err(_) => continue,
             };
             let canonical_id = uri_to_canonical_id(&uri);
-            // Close TSX in the type provider
+            // Close TSX and DTS in the type provider
             if let Some(sync) = &self.project_sync {
                 let profile = self.documents.tsx_profile.read().clone();
                 if let Some(ide) = self.documents.host().get_ide(&canonical_id, &profile) {
@@ -1884,6 +1944,10 @@ impl LanguageServer for VerterLanguageServer {
                     let _ = sync.close_tsx(&tsx_path).await;
                     self.background_synced_files.remove(&tsx_path);
                 }
+                // Close the .d.vue.ts declaration file
+                let base = canonical_id.strip_suffix(".vue").unwrap_or(&canonical_id);
+                let dts_path = format!("{base}.d.vue.ts");
+                let _ = sync.close_dts(&dts_path).await;
             }
             self.documents.host().remove(&canonical_id);
             self.cached_verter_diags.remove(uri.as_str());
@@ -2071,6 +2135,10 @@ impl LanguageServer for VerterLanguageServer {
         let _timer = self
             .statistics
             .timer("completion", Some(uri.as_str().to_string()));
+        // Increment the generation counter so stale requests can detect they've been superseded.
+        let completion_gen = self
+            .completion_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let position = &params.text_document_position.position;
         let trigger_character = params
             .context
@@ -2221,6 +2289,24 @@ impl LanguageServer for VerterLanguageServer {
                         );
                     }
                     if let Some(tsx_offset) = tsx_offset {
+                        // Check if a newer completion request has arrived. If so, skip
+                        // the expensive type provider call and return verter-only results.
+                        if self
+                            .completion_generation
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            != completion_gen + 1
+                        {
+                            tracing::debug!(
+                                "completion: skipping stale type provider call (gen {})",
+                                completion_gen
+                            );
+                            return Ok(verter_items.map(|items| {
+                                CompletionResponse::List(CompletionList {
+                                    is_incomplete: true,
+                                    items,
+                                })
+                            }));
+                        }
                         match tp
                             .get_completions(&tsx_path, tsx_offset, trigger_character)
                             .await

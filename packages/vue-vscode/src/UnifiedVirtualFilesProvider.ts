@@ -64,7 +64,7 @@ export class UnifiedVirtualFilesProvider
   }
 
   getTreeItem(element: UnifiedVirtualFileItem): TreeItem {
-    const label = element.isTsx ? "TSX" : element.kind;
+    const label = element.isTsx ? "IDE (TSX)" : element.kind === "api" ? "API (d.vue.ts)" : element.kind;
     const item = new TreeItem(label, TreeItemCollapsibleState.None);
 
     const parts: string[] = [];
@@ -122,15 +122,28 @@ export class UnifiedVirtualFilesProvider
 
       const items: UnifiedVirtualFileItem[] = [];
 
-      // Add TSX entry
-      if (response.tsx) {
+      // Add IDE entry (TSX/JSX for template type checking)
+      if (response.ide) {
         items.push({
-          kind: "tsx",
-          lang: "tsx",
-          code: response.tsx.code,
-          sourceMap: response.tsx.sourceMap,
+          kind: "ide",
+          lang: response.ide.isJs ? "jsx" : "tsx",
+          code: response.ide.code,
+          sourceMap: response.ide.sourceMap,
           stale: false,
-          isTsx: true,
+          isTsx: !response.ide.isJs,
+          sourceUri,
+        });
+      }
+
+      // Add API entry (declaration output for cross-file type resolution)
+      if (response.api) {
+        items.push({
+          kind: "api",
+          lang: response.api.isJs ? "js" : "ts",
+          code: response.api.code,
+          sourceMap: response.api.sourceMap,
+          stale: false,
+          isTsx: false,
           sourceUri,
         });
       }
@@ -165,6 +178,8 @@ export class UnifiedVirtualFilesProvider
   private getIcon(item: UnifiedVirtualFileItem): ThemeIcon {
     if (item.isTsx) return new ThemeIcon("symbol-type-parameter");
     switch (item.kind) {
+      case "api":
+        return new ThemeIcon("symbol-interface");
       case "main":
         return new ThemeIcon("file-code");
       case "script":

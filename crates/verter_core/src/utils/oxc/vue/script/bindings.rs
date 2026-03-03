@@ -6,8 +6,8 @@
 
 use oxc_ast::ast::{
     BindingPattern, CallExpression, Expression, ImportDeclaration, ImportDeclarationSpecifier,
-    ObjectPropertyKind, PropertyKey, Statement, TSSignature, TSType, TSTypeParameterInstantiation,
-    VariableDeclaration, VariableDeclarationKind,
+    ObjectPropertyKind, PropertyKey, Statement, TSTypeParameterInstantiation, VariableDeclaration,
+    VariableDeclarationKind,
 };
 
 use super::resolve_type::{

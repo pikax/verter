@@ -214,6 +214,7 @@ pub fn finalize_root_element<'a>(
         effects: all_effects,
         statements: state.child_statements,
         v_once: false,
+        v_memo_expr: None,
     }
 }
 

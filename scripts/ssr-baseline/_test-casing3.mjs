@@ -46,7 +46,9 @@ function compileVerter(source, filePath) {
   return result?.code;
 }
 
-const file = "D:/dev/github/verter-test-repos/element-plus/packages/components/alert/src/alert.vue";
+const VERTER_TEST_REPOS = process.env.VERTER_TEST_REPOS;
+if (!VERTER_TEST_REPOS) { console.error('Set VERTER_TEST_REPOS env var'); process.exit(1); }
+const file = path.join(VERTER_TEST_REPOS, "element-plus/packages/components/alert/src/alert.vue");
 const source = fs.readFileSync(file, "utf8");
 
 const vueCode = compileVue(source, "alert.vue");

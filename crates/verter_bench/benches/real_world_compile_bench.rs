@@ -19,7 +19,7 @@ struct ProjectFiles {
 }
 
 /// Discover the test repos root directory.
-/// Checks VERTER_TEST_REPOS env var, then falls back to known paths.
+/// Checks VERTER_TEST_REPOS env var, then the workspace .integration-tests/repos directory.
 fn find_test_repos_root() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("VERTER_TEST_REPOS") {
         let p = PathBuf::from(path);
@@ -34,17 +34,6 @@ fn find_test_repos_root() -> Option<PathBuf> {
         .join("repos");
     if project_root_repos.is_dir() {
         return Some(project_root_repos);
-    }
-
-    // Known fallback paths
-    for candidate in &[
-        "D:/dev/github/verter-test-repos",
-        "../../../verter-test-repos",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.is_dir() {
-            return Some(p);
-        }
     }
 
     None
