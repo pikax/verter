@@ -37,7 +37,7 @@ crates/
   verter_core/       # Core template compiler (Rust)
   verter_analysis/   # Static analysis: imports, exports, bindings, type resolution
   verter_host/       # In-memory file host: caching, dependency tracking, multi-file compilation
-  verter_diagnostics/ # Vue SFC diagnostic engine: rule trait, visitor, diagnostics (depends only on verter_analysis)
+  verter_diagnostics/ # Vue SFC diagnostic engine: ~163 lint rules, rule trait, visitor, DiagnosticSet (depends only on verter_analysis)
   verter_actions/    # Code actions engine: quick fixes, refactoring (depends on verter_diagnostics + verter_analysis)
   verter_lsp/        # Rust LSP server binary (stdio, launched by VS Code extension)
   verter_ffi/        # FFI types: shared serializable structs for NAPI/WASM boundaries
@@ -68,9 +68,9 @@ The Rust compiler has **two separate template codegen paths**. Modifying one doe
 | Path | Module | Purpose | Output |
 |------|--------|---------|--------|
 | **VDOM/Vapor** | `template/code_gen/vdom/` | Runtime render functions for bundler output | `_createElementVNode(...)` calls |
-| **TSX** | `tsx/template/` | Valid JSX for LSP/TSGO type checking | `<div prop={expr}>` JSX elements |
+| **IDE** | `ide/template/` | Valid JSX/TSX for LSP/TSGO type checking | `<div prop={expr}>` JSX elements |
 
-The **LSP uses the TSX path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this TSX output. Changes to VDOM codegen do NOT affect LSP hover/completions.
+The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. The IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX), while JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
 
 ### Cached Directive Fields on ElementNode
 
@@ -84,7 +84,7 @@ The parser extracts structural directives from `el.props` via `prop.take()` and 
 | `v_once` | `v-once` | **No** (taken) | Contains the full `NodeProp` |
 | `v_ref` | `ref`, `:ref` | **No** (taken) | Contains the full `NodeProp` |
 
-**Consequence**: Code iterating `el.props` will **never see** these directives. Both codegen paths must handle them explicitly. The TSX module removes `v-if/v-for/v-slot/v-once` attributes (they become JSX wrappers/removals) and converts `ref` to JSX expression syntax (`ref={"name"}`).
+**Consequence**: Code iterating `el.props` will **never see** these directives. Both codegen paths must handle them explicitly. The IDE module removes `v-if/v-for/v-slot/v-once` attributes (they become JSX wrappers/removals) and converts `ref` to JSX expression syntax (`ref={"name"}`).
 
 ### Position Encoding (CRITICAL rules)
 
@@ -157,6 +157,17 @@ Run these after making changes:
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
 ```
+
+### Documentation Updates
+
+After adding, changing, or removing features, check and update relevant documentation:
+
+- **`CLAUDE.md`** — Architecture tables, module paths, key file references
+- **`docs/`** — API docs, guide pages, contributing guides (`docs/contributing/rust-setup.md`, etc.)
+- **`.claude/skills/`** — Skill files referencing affected modules or APIs
+- **Inline doc comments** — Public API rustdoc (`///`) and JSDoc (`/** */`) on changed signatures
+
+Skip this for purely internal refactors that don't change any public behavior, module paths, or APIs.
 
 ### Testing Requirements
 

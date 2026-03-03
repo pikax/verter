@@ -1,13 +1,19 @@
-//! TSX code generation for the Vue SFC compiler.
+//! IDE code generation for the Vue SFC compiler.
 //!
-//! Generates valid `.tsx` output from a parsed SFC for TypeScript type checking.
+//! Generates valid `.tsx` or `.jsx` output from a parsed SFC for type checking.
 //! Unlike the VDOM/Vapor codegen backends (which produce render functions), this
 //! module produces a single file with:
 //!
-//! - **Script block**: preserves TypeScript types, macros, and imports
+//! - **Script block**: preserves types, macros, and imports (TS or JSDoc)
 //! - **Template block**: converts Vue template syntax to valid JSX
 //!
-//! The TSX output is used by the LSP for hover, completions, go-to-definition,
+//! The output mode depends on the SFC's script language:
+//! - **TypeScript** (`<script lang="ts">` or `<script setup lang="ts">`): `.tsx`
+//!   with TypeScript annotations and generics.
+//! - **JavaScript** (`<script>` or `<script lang="js">`): `.jsx` with JSDoc
+//!   annotations instead of TypeScript syntax.
+//!
+//! The IDE output is used by the LSP for hover, completions, go-to-definition,
 //! and diagnostics, and by the playground's "Types" tab.
 //!
 //! ## Architecture
@@ -21,18 +27,18 @@
 //! compile() orchestrator
 //!   ├── generate_script()      → JS/TS script block (existing)
 //!   ├── generate_template()    → render function (existing)
-//!   ├── tsx::script::generate_tsx_script()    → TSX script block (NEW)
-//!   └── tsx::template::generate_tsx_template() → TSX template JSX (NEW)
+//!   ├── ide::script::generate_ide_script()    → IDE script block
+//!   └── ide::template::generate_ide_template() → IDE template JSX
 //! ```
 
 pub mod condition;
 pub mod script;
 pub mod template;
 
-/// Options for TSX script generation.
+/// Options for IDE script generation.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct TsxScriptOptions<'a> {
+pub struct IdeScriptOptions<'a> {
     /// Component name extracted from filename.
     pub component_name: &'a str,
     /// Sanitized JS identifier for the component (e.g., `_123Widget` for `123-widget.vue`).
@@ -52,16 +58,22 @@ pub struct TsxScriptOptions<'a> {
     /// Embed `declare module "@verter/types"` in TSX output.
     /// When `false`, the ambient block is omitted (requires real package).
     pub embed_ambient_types: bool,
+    /// When `true`, emit JavaScript + JSDoc instead of TypeScript.
+    /// `false` → `.tsx` with type annotations and generics.
+    /// `true` → `.jsx` with JSDoc annotations, no TS syntax.
+    pub is_jsx: bool,
 }
 
-/// Options for TSX template generation.
+/// Options for IDE template generation.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct TsxTemplateOptions<'a> {
+pub struct IdeTemplateOptions<'a> {
     /// Self-referencing component name (PascalCase).
     pub self_name: &'a str,
     /// Whether to preserve HTML comments in JSX output.
     pub comments: bool,
+    /// When `true`, emit JavaScript (no TS annotations in template).
+    pub is_jsx: bool,
 }
 
 // ── Generic info ─────────────────────────────────────────────────
@@ -69,14 +81,14 @@ pub struct TsxTemplateOptions<'a> {
 /// Prefix for sanitised generic type parameter names.
 const GENERIC_SANITISE_PREFIX: &str = "__VERTER__TS__";
 
-/// Parsed and processed generic type parameters for TSX emission.
+/// Parsed and processed generic type parameters for IDE emission.
 ///
 /// Built from the raw `generic="..."` attribute, this struct holds the
 /// original source, extracted names, sanitised names (prefixed to avoid
 /// collisions), and a full declaration string for the public API types.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct TsxGenericInfo {
+pub struct IdeGenericInfo {
     /// Original generic source (e.g., `"T extends object"`).
     pub source: String,
     /// Extracted parameter names (e.g., `["T"]`).
@@ -89,7 +101,7 @@ pub struct TsxGenericInfo {
 }
 
 #[allow(dead_code)]
-impl TsxGenericInfo {
+impl IdeGenericInfo {
     /// Build generic info from the raw generic attribute source string.
     ///
     /// Returns `None` if the source is empty or parsing fails.
@@ -147,7 +159,7 @@ impl TsxGenericInfo {
 
         let declaration = declaration_parts.join(", ");
 
-        Some(TsxGenericInfo {
+        Some(IdeGenericInfo {
             source: trimmed.to_string(),
             names,
             sanitised_names,
@@ -234,7 +246,7 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-// ── Shared TSX Helpers ───────────────────────────────────────────
+// ── Shared IDE Helpers ──────────────────────────────────────────
 
 use crate::types::NodeProp;
 
@@ -464,11 +476,11 @@ mod tests {
         assert_eq!(replace_word_boundary("T | T & T", "T", "Y"), "Y | Y & Y");
     }
 
-    // ── TsxGenericInfo tests ─────────────────────────────────────
+    // ── IdeGenericInfo tests ─────────────────────────────────────
 
     #[test]
     fn generic_info_simple_param() {
-        let info = TsxGenericInfo::from_source("T").unwrap();
+        let info = IdeGenericInfo::from_source("T").unwrap();
         assert_eq!(info.names, vec!["T"]);
         assert_eq!(info.sanitised_names, vec!["__VERTER__TS__T"]);
         assert_eq!(info.declaration, "__VERTER__TS__T = any");
@@ -476,20 +488,20 @@ mod tests {
 
     #[test]
     fn generic_info_constraint() {
-        let info = TsxGenericInfo::from_source("T extends string").unwrap();
+        let info = IdeGenericInfo::from_source("T extends string").unwrap();
         assert_eq!(info.names, vec!["T"]);
         assert_eq!(info.declaration, "__VERTER__TS__T extends string = any");
     }
 
     #[test]
     fn generic_info_constraint_and_default() {
-        let info = TsxGenericInfo::from_source("T extends object = {}").unwrap();
+        let info = IdeGenericInfo::from_source("T extends object = {}").unwrap();
         assert_eq!(info.declaration, "__VERTER__TS__T extends object = {}");
     }
 
     #[test]
     fn generic_info_cross_reference_sanitisation() {
-        let info = TsxGenericInfo::from_source("T, U extends Array<T>").unwrap();
+        let info = IdeGenericInfo::from_source("T, U extends Array<T>").unwrap();
         assert_eq!(info.names, vec!["T", "U"]);
         assert_eq!(
             info.declaration,
@@ -499,7 +511,7 @@ mod tests {
 
     #[test]
     fn generic_info_multiple_mixed() {
-        let info = TsxGenericInfo::from_source("K extends string, V").unwrap();
+        let info = IdeGenericInfo::from_source("K extends string, V").unwrap();
         assert_eq!(info.names, vec!["K", "V"]);
         assert_eq!(
             info.declaration,
@@ -509,19 +521,19 @@ mod tests {
 
     #[test]
     fn generic_info_default_type() {
-        let info = TsxGenericInfo::from_source("T = string").unwrap();
+        let info = IdeGenericInfo::from_source("T = string").unwrap();
         assert_eq!(info.declaration, "__VERTER__TS__T = string");
     }
 
     #[test]
     fn generic_info_empty_returns_none() {
-        assert!(TsxGenericInfo::from_source("").is_none());
-        assert!(TsxGenericInfo::from_source("  ").is_none());
+        assert!(IdeGenericInfo::from_source("").is_none());
+        assert!(IdeGenericInfo::from_source("  ").is_none());
     }
 
     #[test]
     fn generic_info_brackets() {
-        let info = TsxGenericInfo::from_source("T extends string").unwrap();
+        let info = IdeGenericInfo::from_source("T extends string").unwrap();
         assert_eq!(info.source_bracket(), "<T extends string>");
         assert_eq!(info.names_bracket(), "<T>");
         assert_eq!(info.sanitised_names_bracket(), "<__VERTER__TS__T>");
@@ -533,7 +545,7 @@ mod tests {
 
     #[test]
     fn generic_info_keyof_cross_ref() {
-        let info = TsxGenericInfo::from_source("T extends object, K extends keyof T").unwrap();
+        let info = IdeGenericInfo::from_source("T extends object, K extends keyof T").unwrap();
         assert_eq!(
             info.declaration,
             "__VERTER__TS__T extends object = any, __VERTER__TS__K extends keyof __VERTER__TS__T = any"

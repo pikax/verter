@@ -175,7 +175,7 @@ When working on specific areas, these are the primary entry points:
 | Template AST | `crates/verter_core/src/ast/types.rs` |
 | VDOM codegen | `crates/verter_core/src/template/code_gen/vdom/` |
 | Vapor codegen | `crates/verter_core/src/template/code_gen/vapor/` |
-| TSX codegen (LSP) | `crates/verter_core/src/tsx/template/mod.rs` |
+| TSX codegen (LSP) | `crates/verter_core/src/ide/template/mod.rs` |
 | Script processing | `crates/verter_core/src/script/process.rs` |
 | CSS processing | `crates/verter_core/src/css/mod.rs` |
 | Static analysis | `crates/verter_analysis/src/lib.rs` |
@@ -189,6 +189,6 @@ The Rust compiler has two separate template codegen paths. Modifying one does NO
 | Path | Module | Purpose | Output |
 |------|--------|---------|--------|
 | VDOM/Vapor | `template/code_gen/vdom/` | Runtime render functions for bundler output | `_createElementVNode(...)` calls |
-| TSX | `tsx/template/` | Valid JSX for LSP/TSGO type checking | `<div prop={expr}>` JSX elements |
+| IDE | `ide/template/` | Valid JSX/TSX for LSP/TSGO type checking | `<div prop={expr}>` JSX elements |
 
 The LSP uses the TSX path. Changes to VDOM codegen do not affect LSP hover, completions, or diagnostics.

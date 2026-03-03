@@ -53,6 +53,11 @@ pub struct CodeGenOutput<'alloc> {
     /// Applied via `ct.move_slice()` after overwrites and prepends.
     moves: Vec<(u32, u32, u32)>,
 
+    /// Deferred wrapped move operations: (start, end, target, prefix, suffix).
+    /// Applied via `ct.move_wrapped()` after overwrites and prepends.
+    /// Preserves sourcemap for the moved content while wrapping it.
+    wrapped_moves: Vec<(u32, u32, u32, &'alloc str, &'alloc str)>,
+
     /// Allocator reference for bump-allocating generated strings.
     alloc: &'alloc Allocator,
 }
@@ -69,6 +74,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
             ssr_imports: SsrHelperFlags::empty(),
             builtin_imports: BuiltinComponentFlags::empty(),
             moves: Vec::new(),
+            wrapped_moves: Vec::new(),
             alloc,
         }
     }
@@ -132,6 +138,19 @@ impl<'alloc> CodeGenOutput<'alloc> {
         self.moves.push((start, end, target));
     }
 
+    /// Push a wrapped move operation: move source range [start, end) to target
+    /// position with unmapped prefix and suffix.
+    ///
+    /// The moved content preserves its sourcemap mapping, while the prefix and
+    /// suffix are unmapped insertions. Used for wrapping type content in
+    /// declarations while preserving fine-grained hover resolution.
+    #[inline]
+    pub fn move_wrapped(&mut self, start: u32, end: u32, target: u32, prefix: &str, suffix: &str) {
+        let p = self.alloc.alloc_str(prefix);
+        let s = self.alloc.alloc_str(suffix);
+        self.wrapped_moves.push((start, end, target, p, s));
+    }
+
     /// Allocate a string in the bump allocator.
     #[inline]
     pub fn alloc_str(&self, s: &str) -> &'alloc str {
@@ -183,6 +202,13 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// Vue helpers go to `vue`, SSR helpers go to `ssr` (from `vue/server-renderer`).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn apply_to(mut self, ct: &mut CodeTransform<'alloc>) -> TemplateImports {
+        // Apply wrapped moves FIRST — they operate on Original chunks and must
+        // run before overwrites replace those chunks. This preserves sourcemap
+        // for moved content (e.g., defineProps type params).
+        for &(start, end, target, prefix, suffix) in &self.wrapped_moves {
+            ct.move_wrapped(start, end, target, prefix, suffix);
+        }
+
         // Sort by start ascending, then by end descending (so that for equal
         // starts, the wider range comes first and the narrower is filtered out).
         self.overwrites

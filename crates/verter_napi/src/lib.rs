@@ -431,11 +431,12 @@ pub struct NapiVirtualFileResponse {
     pub meta: NapiVirtualMeta,
 }
 
-/// TSX output for LSP type checking (dedicated API, not a virtual file).
+/// IDE output for type checking (dedicated API, not a virtual file).
 #[napi(object)]
-pub struct NapiTsxResponse {
+pub struct NapiIdeResponse {
     pub code: String,
     pub sourceMap: Option<String>,
+    pub isJsx: bool,
 }
 
 /// TSC output for TypeScript declaration generation (macro-extraction only).
@@ -1041,25 +1042,26 @@ impl NapiVerterHost {
 
     /// Retrieves the combined TSX output for LSP type checking.
     ///
-    /// This is a dedicated API separate from virtual files. TSX output is
+    /// This is a dedicated API separate from virtual files. IDE output is
     /// only consumed by the LSP, never by bundlers.
     ///
-    /// Returns `{ code, sourceMap? }` or `null` if no TSX output is available.
-    #[napi(js_name = "getTsx")]
-    pub fn get_tsx(
+    /// Returns `{ code, sourceMap?, isJsx }` or `null` if no IDE output is available.
+    #[napi(js_name = "getIde")]
+    pub fn get_ide(
         &self,
         canonical_id: String,
         profile: Option<NapiCompileProfile>,
-    ) -> Result<Option<NapiTsxResponse>> {
+    ) -> Result<Option<NapiIdeResponse>> {
         let ffi_profile: Option<FfiCompileProfile> = profile.map(Into::into);
         let host_profile = ffi_profile_to_host(ffi_profile)
             .map_err(|e| Error::new(Status::InvalidArg, format!("invalid profile: {e}")))?;
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
-            self.inner.get_tsx(&canonical_id, &host_profile)
+            self.inner.get_ide(&canonical_id, &host_profile)
         }))?;
-        Ok(result.map(|r| NapiTsxResponse {
+        Ok(result.map(|r| NapiIdeResponse {
             code: r.code.to_string(),
             sourceMap: r.source_map.map(|s| s.to_string()),
+            isJsx: r.is_jsx,
         }))
     }
 

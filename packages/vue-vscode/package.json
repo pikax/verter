@@ -167,6 +167,32 @@
           ],
           "default": "info",
           "description": "Log level for the Verter language server process. Changing this setting restarts the server."
+        },
+        "verter.lint.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable full lint diagnostics (all severities). When disabled, only error-severity lint diagnostics are shown. Enable this or create a .verterrc.json to see warnings and hints."
+        },
+        "verter.lint.preset": {
+          "type": "string",
+          "enum": [
+            "essential",
+            "recommended",
+            "all",
+            "performance",
+            "a11y",
+            "strict"
+          ],
+          "default": "recommended",
+          "enumDescriptions": [
+            "Vue Essential rules only (prevents runtime errors)",
+            "Essential + Strongly Recommended rules (default)",
+            "All available rules",
+            "Performance-focused rules",
+            "Accessibility rules",
+            "Strictest ruleset"
+          ],
+          "description": "Lint rule preset. Only applies when verter.lint.enabled is true."
         }
       }
     },

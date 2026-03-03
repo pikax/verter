@@ -230,8 +230,10 @@ template/
     ├── vdom/             # VDOM render function output (_createElementVNode, etc.)
     ├── vapor/            # Vapor mode output (_template, _renderEffect, etc.)
     └── vapor2/           # Experimental: alternative Vapor codegen approach
-tsx/                      # TSX template codegen (for LSP/TSGO type checking)
-├── mod.rs                # generate_tsx_template() — Vue template → valid JSX
+ide/                      # IDE codegen: TSX or JSX+JSDoc (for LSP/TSGO type checking)
+├── mod.rs                # generate_ide_template() — Vue template → valid JSX; IdeScriptOptions, IdeTemplateOptions
+├── script.rs             # generate_ide_script() — script block → TS or JS+JSDoc wrapper
+├── condition.rs          # v-if/v-else-if/v-else condition chain codegen
 └── template/
     ├── mod.rs            # walk_element/walk_node, cached directive removal, ref conversion
     ├── directives.rs     # v-if → ternary, v-for → .map(), v-show → style
@@ -517,9 +519,11 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_core/src/template/code_gen/binding.rs` | BindingResolver (_ctx./$setup. prefix resolution) |
 | `crates/verter_core/src/template/code_gen/vdom/` | VDOM render function codegen |
 | `crates/verter_core/src/template/code_gen/vapor/` | Vapor mode codegen |
-| `crates/verter_core/src/tsx/template/mod.rs` | TSX template codegen: Vue → JSX (used by LSP/TSGO) |
-| `crates/verter_core/src/tsx/template/directives.rs` | TSX: v-if → ternary, v-for → .map(), v-show → style |
-| `crates/verter_core/src/tsx/template/props.rs` | TSX: :prop → prop={}, @event → onEvent={} |
+| `crates/verter_core/src/ide/mod.rs` | IDE codegen entry: TSX (TS SFCs) or JSX+JSDoc (JS SFCs) |
+| `crates/verter_core/src/ide/script.rs` | IDE script codegen: TS annotations or JSDoc equivalents |
+| `crates/verter_core/src/ide/template/mod.rs` | IDE template codegen: Vue → JSX (used by LSP/TSGO) |
+| `crates/verter_core/src/ide/template/directives.rs` | IDE: v-if → ternary, v-for → .map(), v-show → style |
+| `crates/verter_core/src/ide/template/props.rs` | IDE: :prop → prop={}, @event → onEvent={} |
 | `crates/verter_core/src/css/` | CSS preprocessing and style transformation |
 | `crates/verter_core/src/code_transform/code_transform.rs` | Chunk-based deferred mutation engine |
 | `crates/verter_analysis/src/lib.rs` | Static analysis entry: imports, exports, bindings |

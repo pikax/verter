@@ -32,9 +32,10 @@
 
 use base64::prelude::*;
 use oxc_allocator::Allocator;
+use oxc_ast::ast::{Expression, Statement};
 use oxc_ast::{Comment, CommentContent};
 use oxc_parser::Parser;
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
 use rustc_hash::FxHashMap;
 
 use crate::common::Span;
@@ -168,8 +169,22 @@ pub fn generate_tsc_output(sfc_source: &str, component_name: &str) -> TscOutput 
         .generic
         .map(|g| sfc_source[g.start as usize..g.end as usize].trim());
 
+    // ── 6b. Extract attrs type ──────────────────────────────────────
+    // Priority: `attrs` attribute > `useAttrs<T>()` > `{}` (default)
+    let explicit_attrs = setup
+        .attrs
+        .map(|a| sfc_source[a.start as usize..a.end as usize].trim())
+        .filter(|s| !s.is_empty());
+    let use_attrs_fallback;
+    let attrs_type = if explicit_attrs.is_some() {
+        explicit_attrs
+    } else {
+        use_attrs_fallback = detect_use_attrs_type_arg_tsc(&program.body, content_str);
+        use_attrs_fallback.as_deref()
+    };
+
     // ── 7. Generate code + source map ────────────────────────────────
-    generate_code(component_name, &state, generic_params)
+    generate_code(component_name, &state, generic_params, attrs_type)
 }
 
 // ── Step 4: collect type imports ─────────────────────────────────────────────
@@ -644,6 +659,7 @@ fn generate_code(
     component_name: &str,
     state: &TscMacroState,
     generic_params: Option<&str>,
+    attrs_type: Option<&str>,
 ) -> TscOutput {
     let mut out = String::with_capacity(512);
 
@@ -721,7 +737,11 @@ fn generate_code(
         out.push_str(&format!("    $slots: {},\n", slots));
     }
     out.push_str("    $data: {},\n");
-    out.push_str("    $attrs: {},\n");
+    if let Some(attrs) = attrs_type {
+        out.push_str(&format!("    $attrs: {},\n", attrs));
+    } else {
+        out.push_str("    $attrs: {},\n");
+    }
     out.push_str("    $refs: {},\n");
     out.push_str("  }\n");
     out.push_str("}\n");
@@ -932,4 +952,44 @@ fn is_valid_identifier(s: &str) -> bool {
 
 fn minimal_source_map() -> String {
     r#"{"version":3,"file":"","sourceRoot":"","sources":[],"names":[],"mappings":""}"#.to_string()
+}
+
+/// Detect `useAttrs<T>()` calls in the script setup body and return the type parameter text.
+///
+/// Used as a fallback for `attrs_type` when no `attrs` attribute is present on the script tag.
+fn detect_use_attrs_type_arg_tsc<'a>(body: &[Statement<'a>], source: &'a str) -> Option<String> {
+    for stmt in body {
+        let call = match stmt {
+            Statement::VariableDeclaration(var_decl) => var_decl
+                .declarations
+                .iter()
+                .find_map(|d| d.init.as_ref())
+                .and_then(|e| match e {
+                    Expression::CallExpression(c) => Some(c.as_ref()),
+                    _ => None,
+                }),
+            Statement::ExpressionStatement(expr_stmt) => match &expr_stmt.expression {
+                Expression::CallExpression(c) => Some(c.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(call) = call {
+            if let Expression::Identifier(ident) = &call.callee {
+                if ident.name == "useAttrs" {
+                    if let Some(tp) = &call.type_arguments {
+                        if let Some(param) = tp.params.first() {
+                            let span: oxc_span::Span = param.span();
+                            let text = &source[span.start as usize..span.end as usize];
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                return Some(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }

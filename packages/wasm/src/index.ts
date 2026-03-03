@@ -68,7 +68,7 @@ export interface CodegenResult {
 export type {
   HostConfig,
   HostCompileProfile,
-  HostTsxResponse,
+  HostIdeResponse,
   HostVirtualNodeKind,
   HostSliceChanges,
   HostDiagnostic,
@@ -99,7 +99,7 @@ export type {
 import type {
   HostConfig,
   HostCompileProfile,
-  HostTsxResponse,
+  HostIdeResponse,
   HostResolvedId,
   HostUpsertRequest,
   HostStyleOverrideRequest,
@@ -132,7 +132,7 @@ type WasmHostApplyBlockOverridesFn = (request: HostBlockOverrideRequest) => Host
 type WasmHostGetVirtualFileFn = (query: HostVirtualQuery) => HostVirtualFileResponse;
 type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[];
 type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
-type WasmHostGetTsxFn = (canonicalId: string, profile?: HostCompileProfile) => HostTsxResponse | null;
+type WasmHostGetIdeFn = (canonicalId: string, profile?: HostCompileProfile) => HostIdeResponse | null;
 type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
 type WasmHostSetImportDependenciesFn = (canonicalOrAlias: string, resolvedDeps: string[]) => void;
 type WasmHostLintFn = (canonicalOrAlias: string, config?: unknown) => HostLintDiagnostic[];
@@ -145,7 +145,7 @@ interface WasmHostBinding {
   upsert: WasmHostUpsertFn;
   applyStyleOverrides: WasmHostApplyOverridesFn;
   applyBlockOverrides: WasmHostApplyBlockOverridesFn;
-  getTsx: WasmHostGetTsxFn;
+  getIde: WasmHostGetIdeFn;
   getVirtualFile: WasmHostGetVirtualFileFn;
   listVirtualFiles: WasmHostListVirtualFilesFn;
   remove: WasmHostRemoveFn;
@@ -283,8 +283,8 @@ export class Host {
     return this.inner.applyBlockOverrides(request);
   }
 
-  getTsx(canonicalId: string, profile?: HostCompileProfile): HostTsxResponse | null {
-    return this.inner.getTsx(canonicalId, profile);
+  getIde(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null {
+    return this.inner.getIde(canonicalId, profile);
   }
 
   getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse {

@@ -136,7 +136,7 @@ export declare function compileBatch(
 export type {
   HostConfig,
   HostCompileProfile,
-  HostTsxResponse,
+  HostIdeResponse,
   HostVirtualNodeKind,
   HostSliceChanges,
   HostDiagnostic,
@@ -213,7 +213,8 @@ export declare class VerterHost {
   /** @deprecated Use `applyBlockOverrides` instead — unified API for all block types. */
   applyStyleOverrides(request: HostStyleOverrideRequest): import("./host-types").HostUpdateResult;
   applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
-  getTsx(canonicalId: string, profile?: import("./host-types").HostCompileProfile): import("./host-types").HostTsxResponse | null;
+  getTsc(canonicalId: string): { code: string; sourceMap?: string } | null;
+  getIde(canonicalId: string, profile?: import("./host-types").HostCompileProfile): import("./host-types").HostIdeResponse | null;
   getVirtualFile(query: import("./host-types").HostVirtualQuery): import("./host-types").HostVirtualFileResponse;
   listVirtualFiles(canonicalId: string): import("./host-types").HostVirtualNodeKind[];
   remove(canonicalOrAlias: string): import("./host-types").HostRemoveResult | null;

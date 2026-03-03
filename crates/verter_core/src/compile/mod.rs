@@ -37,6 +37,7 @@ use crate::css::{process_style, types::ProcessStyleOptions};
 use crate::diagnostics::{
     CompilerErrorCode, Diagnostic, DiagnosticSeverity, SyntaxPluginContext, SyntaxPluginOptions,
 };
+use crate::ide;
 use crate::parser::types::StyleLang;
 use crate::parser::Syntax;
 use crate::script::{generate_script, ScriptCodeGenOptions};
@@ -47,7 +48,6 @@ use crate::template::oxc::parse_template_expressions;
 use crate::template::oxc::types::OxcParsedAst;
 use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
-use crate::tsx;
 
 use helpers::{extract_attrs, extract_block_ranges};
 
@@ -665,12 +665,38 @@ pub fn compile(
         };
 
     // ── 6. TSX codegen (optional) ────────────────────────────────
-    // Produces a single combined `.tsx` file for LSP type checking.
+    // Produces a single combined `.tsx` or `.jsx` file for LSP type checking.
+    // Determines output mode from script lang: JS/JSX SFCs get `.jsx` (JSDoc),
+    // TS/TSX SFCs get `.tsx` (TypeScript).
     let tsx_block = if options.target.needs_tsx() {
         let tsx_start = Instant::now();
         let filename_str = options.filename.as_deref().unwrap_or("App.vue");
-        let js_component_name = tsx::sanitize_js_identifier(filename_str);
-        let tsx_script_opts = tsx::TsxScriptOptions {
+        let js_component_name = ide::sanitize_js_identifier(filename_str);
+
+        // Determine if this is a JS SFC (needs JSX+JSDoc output instead of TSX)
+        let is_jsx = {
+            use crate::cursor::ScriptLanguage;
+            let has_any_script = syntax.script_setup().is_some() || syntax.script().is_some();
+            let lang = syntax
+                .script_setup()
+                .and_then(|s| s.lang)
+                .or_else(|| syntax.script().and_then(|s| s.lang));
+            match lang {
+                // Explicit TS/TSX → TypeScript mode
+                Some(ScriptLanguage::TypeScript | ScriptLanguage::TSX) => false,
+                // Explicit JS/JSX → JavaScript mode
+                Some(ScriptLanguage::JavaScript | ScriptLanguage::JSX) => true,
+                // No lang attribute but has script blocks → JavaScript mode
+                // (e.g. <script setup> without lang="ts")
+                None if has_any_script => true,
+                // No script blocks → default to TS (template-only SFCs)
+                None => false,
+                // Unknown lang → default to TS
+                Some(_) => false,
+            }
+        };
+
+        let tsx_script_opts = ide::IdeScriptOptions {
             component_name: &component_name,
             js_component_name: &js_component_name,
             filename: filename_str,
@@ -683,6 +709,7 @@ pub fn compile(
                 .unwrap_or("@verter/types"),
             is_vapor: use_vapor,
             embed_ambient_types: options.embed_ambient_types,
+            is_jsx,
         };
 
         // Unified single CodeTransform for both script and template.
@@ -702,7 +729,7 @@ pub fn compile(
         });
 
         // Script codegen — emits function wrapper spanning script to template end
-        let tsx_script_result = tsx::script::generate_tsx_script(
+        let tsx_script_result = ide::script::generate_ide_script(
             syntax.script(),
             syntax.script_setup(),
             taken_template_ast.as_ref(),
@@ -742,7 +769,11 @@ pub fn compile(
                     !v.is_empty() && v != "html"
                 });
                 if !is_non_html {
-                    let tsx_source_type = SourceType::tsx();
+                    let tsx_source_type = if is_jsx {
+                        SourceType::jsx()
+                    } else {
+                        SourceType::tsx()
+                    };
                     let tsx_oxc = parse_template_expressions(
                         template_ast,
                         input,
@@ -751,11 +782,12 @@ pub fn compile(
                     );
                     let mut tsx_out =
                         crate::template::code_gen::types::CodeGenOutput::new(&tsx_alloc);
-                    let tsx_t_opts = tsx::TsxTemplateOptions {
+                    let tsx_t_opts = ide::IdeTemplateOptions {
                         self_name: &to_pascal_case(&component_name),
                         comments: options.comments.unwrap_or(!options.is_production),
+                        is_jsx,
                     };
-                    tsx::template::generate_tsx_template(
+                    ide::template::generate_ide_template(
                         template_ast,
                         &tsx_oxc,
                         input,
@@ -799,6 +831,7 @@ pub fn compile(
             code: tsx_code,
             source_map: tsx_sm,
             duration_ms: tsx_dur,
+            is_jsx,
         })
     } else {
         None
@@ -814,6 +847,7 @@ pub fn compile(
             code: tsc_out.code,
             source_map: tsc_out.source_map,
             duration_ms: tsc_dur,
+            is_jsx: false,
         })
     } else {
         None

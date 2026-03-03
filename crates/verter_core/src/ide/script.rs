@@ -58,7 +58,7 @@ use crate::utils::oxc::vue::{
     ScriptMacro, ScriptMode,
 };
 
-use super::{event_to_jsx_name, get_directive_name, TsxGenericInfo, TsxScriptOptions};
+use super::{event_to_jsx_name, get_directive_name, IdeGenericInfo, IdeScriptOptions};
 
 // ── Macro State Types ────────────────────────────────────────────
 
@@ -69,6 +69,8 @@ struct TsxMacroState {
     macro_bindings: Vec<MacroBindingEntry>,
     /// DefineModel entries.
     model_bindings: Vec<ModelBindingEntry>,
+    /// Whether `defineOptions({ inheritAttrs: false })` was detected.
+    has_inherit_attrs_false: bool,
 }
 
 /// Info about a macro binding (defineProps, defineEmits, defineSlots, withDefaults).
@@ -108,10 +110,11 @@ struct MacroSourceCtx<'a, 'alloc> {
     content_str: &'a str,
     content_start: u32,
     out: &'a mut CodeGenOutput<'alloc>,
+    is_jsx: bool,
 }
 
 /// Result of TSX script generation (internal, before building string).
-pub struct TsxScriptGenResult<'alloc> {
+pub struct IdeScriptGenResult<'alloc> {
     /// Binding metadata for template TSX generation.
     pub bindings: FxHashMap<&'alloc str, BindingType>,
     /// Type constructs to append after the combined TSX code (no sourcemap).
@@ -127,16 +130,16 @@ pub struct TsxScriptGenResult<'alloc> {
 ///
 /// Returns the generated code, source map, and bindings for template generation.
 #[allow(clippy::too_many_arguments)]
-pub fn generate_tsx_script<'alloc>(
+pub fn generate_ide_script<'alloc>(
     script: Option<&RootNodeScript>,
     script_setup: Option<&RootNodeScript>,
     template_ast: Option<&TemplateAst>,
     source: &'alloc str,
     ct: &mut CodeTransform<'alloc>,
     alloc: &'alloc Allocator,
-    options: &TsxScriptOptions<'_>,
+    options: &IdeScriptOptions<'_>,
     template_end: Option<u32>,
-) -> TsxScriptGenResult<'alloc> {
+) -> IdeScriptGenResult<'alloc> {
     let mut out = CodeGenOutput::new(alloc);
     let mut bindings = FxHashMap::default();
     let mut type_constructs = String::new();
@@ -176,11 +179,11 @@ pub fn generate_tsx_script<'alloc>(
         (None, None) => {
             // No script blocks — emit minimal wrapper + full type constructs
             return_close = emit_minimal_wrapper(&mut out, options, 0, template_end);
-            emit_helper_imports(&mut out, 0, options, &builtin_components);
+            emit_helper_imports(&mut out, 0, options, &builtin_components, template_ast);
             emit_type_constructs(
                 &mut type_constructs,
-                &None,        // no generics
-                template_ast, // needed for Comp functions
+                &None, // no generics
+                &None, // no attrs
                 source,
                 options,
                 false, // no getCurrentInstance
@@ -191,7 +194,7 @@ pub fn generate_tsx_script<'alloc>(
     // Apply accumulated operations
     out.apply_to(ct);
 
-    TsxScriptGenResult {
+    IdeScriptGenResult {
         bindings,
         type_constructs,
         return_close,
@@ -211,7 +214,7 @@ fn process_tsx_script_setup<'alloc>(
     bindings: &mut FxHashMap<&'alloc str, BindingType>,
     type_constructs: &mut String,
     alloc: &'alloc Allocator,
-    options: &TsxScriptOptions<'_>,
+    options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_end: Option<u32>,
 ) -> Option<String> {
@@ -247,7 +250,10 @@ fn process_tsx_script_setup<'alloc>(
     // Must run BEFORE the error check because angle bracket assertions like `<string>x`
     // cause OXC TSX parse errors (parsed as JSX), but are valid TS. The rewrite uses a
     // separate TS-mode parse and modifies ct directly.
-    rewrite_ts_type_assertions(content_str, content_start, ct);
+    // Skip in JSX mode: JS files don't have angle-bracket type assertions.
+    if !options.is_jsx {
+        rewrite_ts_type_assertions(content_str, content_start, ct);
+    }
 
     // ── Error Recovery: File-Scope Mode ──────────────────────────
     // When OXC has parse errors (e.g. `count.` during typing), it returns
@@ -359,7 +365,7 @@ fn process_tsx_script_setup<'alloc>(
         if trimmed.is_empty() {
             (None, None)
         } else {
-            match TsxGenericInfo::from_source(generic_str) {
+            match IdeGenericInfo::from_source(generic_str) {
                 Some(info) => (Some(info), None),
                 None => (None, Some(trimmed.to_string())),
             }
@@ -368,12 +374,27 @@ fn process_tsx_script_setup<'alloc>(
         (None, None)
     };
 
+    // Extract attrs attribute value for typed $attrs.
+    // Priority: `attrs` attribute > `useAttrs<T>()` > `{}` (default)
+    let attrs_type = setup
+        .attrs
+        .and_then(|span| {
+            let s = &source[span.start as usize..span.end as usize].trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .or_else(|| detect_use_attrs_type_arg(&parser_ret.program.body, content_str));
+
     // Process macros: emit type aliases only (no boxing)
     let mut macro_ctx = MacroSourceCtx {
         source,
         content_str,
         content_start,
         out,
+        is_jsx: options.is_jsx,
     };
     let macro_state = process_macros(&parse_result.items, &mut macro_ctx);
     let out = macro_ctx.out;
@@ -384,11 +405,16 @@ fn process_tsx_script_setup<'alloc>(
     // Build component function wrapper opening
     // Replace <script setup> tag with ___VERTER___TemplateBindingFN function declaration.
     // Use parsed generic if available, otherwise raw fallback for invalid syntax.
-    let generic_bracket = generic_info
-        .as_ref()
-        .map(|g| g.source_bracket())
-        .or_else(|| raw_generic.as_ref().map(|r| format!("<{}>", r)))
-        .unwrap_or_default();
+    // In JSX mode, drop generics (no TypeScript syntax in JS output).
+    let generic_bracket = if options.is_jsx {
+        String::new()
+    } else {
+        generic_info
+            .as_ref()
+            .map(|g| g.source_bracket())
+            .or_else(|| raw_generic.as_ref().map(|r| format!("<{}>", r)))
+            .unwrap_or_default()
+    };
     let async_prefix = if parse_result.is_async { "async " } else { "" };
     let wrapper_start = format!(
         ";export {}function {}TemplateBindingFN{}() {{\n",
@@ -411,7 +437,12 @@ fn process_tsx_script_setup<'alloc>(
         }
 
         // Declare ___VERTER___instance for instance property access in template.
-        wrapper_end.push_str(&instance_declaration(options.filename));
+        let has_template = template_ast.is_some();
+        wrapper_end.push_str(&instance_declaration(
+            options.filename,
+            options.is_jsx,
+            has_template,
+        ));
 
         // Build block scope with shallowUnwrapRef destructuring.
         // Includes ALL setup bindings except Props/PropsAliased (accessed via __props).
@@ -450,7 +481,14 @@ fn process_tsx_script_setup<'alloc>(
                     let jsdoc = binding_source_info
                         .get(name)
                         .and_then(|info| info.jsdoc.as_deref());
-                    if let Some(jsdoc) = jsdoc {
+                    if options.is_jsx {
+                        // JSX mode: plain binding (no TS cast)
+                        if let Some(jsdoc) = jsdoc {
+                            format!("{}\n    {}: {}", jsdoc, name, name)
+                        } else {
+                            format!("{}: {}", name, name)
+                        }
+                    } else if let Some(jsdoc) = jsdoc {
                         format!(
                             "{}\n    {}: {} as unknown as typeof {}",
                             jsdoc, name, name, name
@@ -540,23 +578,52 @@ fn process_tsx_script_setup<'alloc>(
             tail.push_str("\n} // close block scope\n"); // close block scope
 
             // Emit Comp functions + getRootComponent inside templateBindingFN
-            let gs = generic_info
-                .as_ref()
-                .map(|g| g.source_bracket())
-                .unwrap_or_default();
-            let gn = generic_info
-                .as_ref()
-                .map(|g| g.names_bracket())
-                .unwrap_or_default();
-            let (root_comp_offset, all_comp_offsets) =
-                emit_comp_functions_to_string(&mut tail, &gs, &gn, template_ast, source);
-            // Only emit getRootComponent when there are ref elements
-            if !all_comp_offsets.is_empty() {
-                emit_get_root_component_to_string(&mut tail, &gs, &gn, root_comp_offset);
+            // In JSX mode, drop generics (no TypeScript syntax in JS output).
+            let gs = if options.is_jsx {
+                String::new()
+            } else {
+                generic_info
+                    .as_ref()
+                    .map(|g| g.source_bracket())
+                    .unwrap_or_default()
+            };
+            let gn = if options.is_jsx {
+                String::new()
+            } else {
+                generic_info
+                    .as_ref()
+                    .map(|g| g.names_bracket())
+                    .unwrap_or_default()
+            };
+            let (root_comp_offset, root_props_literal, all_comp_offsets) =
+                emit_comp_functions_to_string(
+                    &mut tail,
+                    &gs,
+                    &gn,
+                    template_ast,
+                    source,
+                    options.is_jsx,
+                );
+            // Always emit getRootComponent when there's a template (needed for implicit attrs)
+            if template_ast.is_some() {
+                emit_get_root_component_to_string(
+                    &mut tail,
+                    &gs,
+                    &gn,
+                    root_comp_offset,
+                    root_props_literal.as_deref(),
+                );
+            }
+
+            // Emit RootElement/RootElementProps/Attrs types inside the function scope
+            // (these reference getRootComponent which is function-local)
+            if template_ast.is_some() && !options.is_jsx {
+                let inherit_attrs = !macro_state.has_inherit_attrs_false;
+                emit_attrs_type_aliases(&mut tail, &generic_info, inherit_attrs);
             }
 
             // Emit void references to suppress unused warnings for Comp/getRootComponent
-            if !all_comp_offsets.is_empty() {
+            if template_ast.is_some() {
                 tail.push_str(&format!(
                     "\nvoid {P}getRootComponent; void {P}getRootComponentPassedProps;",
                     P = PREFIX,
@@ -571,7 +638,13 @@ fn process_tsx_script_setup<'alloc>(
             }
 
             // Emit global component fallback consts
-            emit_global_component_fallbacks(&mut tail, template_ast, source, bindings);
+            emit_global_component_fallbacks(
+                &mut tail,
+                template_ast,
+                source,
+                bindings,
+                options.is_jsx,
+            );
 
             // Emit instance completion probe line (LSP uses this for autocomplete)
             tail.push_str(&instance_probe_line());
@@ -587,13 +660,13 @@ fn process_tsx_script_setup<'alloc>(
     }
 
     // Emit helper imports (hoisted before wrapper)
-    emit_helper_imports(out, hoist_pos, options, builtin_components);
+    emit_helper_imports(out, hoist_pos, options, builtin_components, template_ast);
 
     // Emit type constructs (appended after source map, no sourcemap needed)
     emit_type_constructs(
         type_constructs,
         &generic_info,
-        template_ast,
+        &attrs_type,
         source,
         options,
         has_get_current_instance,
@@ -617,7 +690,7 @@ fn process_tsx_script_setup_error_mode(
     source: &str,
     out: &mut CodeGenOutput<'_>,
     type_constructs: &mut String,
-    options: &TsxScriptOptions<'_>,
+    options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_end: Option<u32>,
     hoist_pos: u32,
@@ -632,7 +705,12 @@ fn process_tsx_script_setup_error_mode(
             // Template exists: open the wrapper, defer the close
             let mut wrapper_open = format!("\nexport function {}TemplateBindingFN() {{\n", PREFIX);
             // Declare instance for instance property access in template.
-            wrapper_open.push_str(&instance_declaration(options.filename));
+            // Error mode: no Comp functions, so no $attrs override
+            wrapper_open.push_str(&instance_declaration(
+                options.filename,
+                options.is_jsx,
+                false,
+            ));
             out.overwrite(tag_close.start, tag_close.end, &wrapper_open);
             let mut close = String::from("\n");
             close.push_str(&instance_probe_line());
@@ -647,13 +725,13 @@ fn process_tsx_script_setup_error_mode(
     // Emit helper imports (hoisted before script body).
     // In error mode we still import shallowUnwrapRef — it's harmless and
     // avoids the need for a separate helper-import variant.
-    emit_helper_imports(out, hoist_pos, options, builtin_components);
+    emit_helper_imports(out, hoist_pos, options, builtin_components, None);
 
     // Emit minimal type constructs (instance type for self-import).
     emit_type_constructs(
         type_constructs,
         &None, // no generic info
-        None,  // no template AST for type constructs
+        &None, // no attrs
         source,
         options,
         false, // no getCurrentInstance detection
@@ -2098,7 +2176,7 @@ fn process_tsx_script_only<'alloc>(
     bindings: &mut FxHashMap<&'alloc str, BindingType>,
     type_constructs: &mut String,
     _alloc: &'alloc Allocator,
-    options: &TsxScriptOptions<'_>,
+    options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
 ) {
     let content_span = match &script.content {
@@ -2162,7 +2240,10 @@ fn process_tsx_script_only<'alloc>(
         let mut close = String::with_capacity(128);
         close.push_str("\nexport default __sfc__;\n");
         // Ambient instance declaration for template property access.
-        close.push_str(&instance_declaration_ambient(options.filename));
+        close.push_str(&instance_declaration_ambient(
+            options.filename,
+            options.is_jsx,
+        ));
         out.overwrite(tag_close.start, tag_close.end, &close);
     }
 
@@ -2177,12 +2258,12 @@ fn process_tsx_script_only<'alloc>(
     }
 
     // Emit helper imports + type constructs (same as template-only and setup paths)
-    emit_helper_imports(out, hoist_pos, options, builtin_components);
+    emit_helper_imports(out, hoist_pos, options, builtin_components, template_ast);
 
     emit_type_constructs(
         type_constructs,
         &None, // no generics (Options API can't have them)
-        template_ast,
+        &None, // no attrs (Options API doesn't use script attrs)
         source,
         options,
         false, // no getCurrentInstance detection for Options API
@@ -2283,7 +2364,11 @@ fn process_single_macro(
             span,
             declarator,
             object_arg: _,
+            has_inherit_attrs_false,
         } => {
+            if *has_inherit_attrs_false {
+                state.has_inherit_attrs_false = true;
+            }
             let entry = process_standard_macro(
                 "defineOptions",
                 "options",
@@ -2356,19 +2441,33 @@ fn process_standard_macro(
 
     // Emit type alias for type params
     if let Some(tp) = type_params {
-        let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
-        let needs_prettify = !is_simple_type_reference(type_text);
-
-        let type_decl = if needs_prettify {
-            format!(";type {}={}Prettify<{}>;", type_name_str, PREFIX, type_text)
+        if ctx.is_jsx {
+            // JSX mode: remove the generic type brackets entirely (JS has no generics)
+            ctx.out.overwrite(tp.lt_span.start, tp.gt_span.end, "");
         } else {
-            format!(";type {}={};", type_name_str, type_text)
-        };
-        ctx.out.prepend_alloc(stmt_start, &type_decl);
+            let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
+            let needs_prettify = !is_simple_type_reference(type_text);
 
-        // Replace type arg content with alias name
-        ctx.out
-            .overwrite(tp.type_span.start, tp.type_span.end, &type_name_str);
+            let prefix = if needs_prettify {
+                format!(";type {}={}Prettify<", type_name_str, PREFIX)
+            } else {
+                format!(";type {}=", type_name_str)
+            };
+            let suffix = if needs_prettify { ">;" } else { ";" };
+
+            // Move original type content to stmt_start, wrapped with type declaration.
+            // This preserves fine-grained sourcemap for hover on individual properties.
+            ctx.out.move_wrapped(
+                tp.type_span.start,
+                tp.type_span.end,
+                stmt_start,
+                &prefix,
+                suffix,
+            );
+
+            // Fill the gap left by the move with the type alias name
+            ctx.out.prepend_alloc(tp.type_span.start, &type_name_str);
+        }
     }
 
     // Add variable assignment if no declarator and not a no-return macro
@@ -2430,19 +2529,33 @@ fn process_define_model(
 
     // Emit type alias for type params
     if let Some(tp) = type_params {
-        let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
-        let needs_prettify = !is_simple_type_reference(type_text);
-
-        let type_decl = if needs_prettify {
-            format!(";type {}={}Prettify<{}>;", type_name_str, PREFIX, type_text)
+        if ctx.is_jsx {
+            // JSX mode: remove the generic type brackets entirely (JS has no generics)
+            ctx.out.overwrite(tp.lt_span.start, tp.gt_span.end, "");
         } else {
-            format!(";type {}={};", type_name_str, type_text)
-        };
-        ctx.out.prepend_alloc(stmt_start, &type_decl);
+            let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
+            let needs_prettify = !is_simple_type_reference(type_text);
 
-        // Replace type arg content with alias name
-        ctx.out
-            .overwrite(tp.type_span.start, tp.type_span.end, &type_name_str);
+            let prefix = if needs_prettify {
+                format!(";type {}={}Prettify<", type_name_str, PREFIX)
+            } else {
+                format!(";type {}=", type_name_str)
+            };
+            let suffix = if needs_prettify { ">;" } else { ";" };
+
+            // Move original type content to stmt_start, wrapped with type declaration.
+            // This preserves fine-grained sourcemap for hover on individual properties.
+            ctx.out.move_wrapped(
+                tp.type_span.start,
+                tp.type_span.end,
+                stmt_start,
+                &prefix,
+                suffix,
+            );
+
+            // Fill the gap left by the move with the type alias name
+            ctx.out.prepend_alloc(tp.type_span.start, &type_name_str);
+        }
     }
 
     // Add variable assignment if no declarator
@@ -2487,19 +2600,33 @@ fn process_with_defaults(
 
     // Emit type alias for inner defineProps type params
     if let Some(tp) = define_props_type_params {
-        let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
-        let needs_prettify = !is_simple_type_reference(type_text);
-
-        let type_decl = if needs_prettify {
-            format!(";type {}={}Prettify<{}>;", type_name_str, PREFIX, type_text)
+        if ctx.is_jsx {
+            // JSX mode: remove the generic type brackets entirely (JS has no generics)
+            ctx.out.overwrite(tp.lt_span.start, tp.gt_span.end, "");
         } else {
-            format!(";type {}={};", type_name_str, type_text)
-        };
-        ctx.out.prepend_alloc(stmt_start, &type_decl);
+            let type_text = &ctx.source[tp.type_span.start as usize..tp.type_span.end as usize];
+            let needs_prettify = !is_simple_type_reference(type_text);
 
-        // Replace type arg in the inner defineProps
-        ctx.out
-            .overwrite(tp.type_span.start, tp.type_span.end, &type_name_str);
+            let prefix = if needs_prettify {
+                format!(";type {}={}Prettify<", type_name_str, PREFIX)
+            } else {
+                format!(";type {}=", type_name_str)
+            };
+            let suffix = if needs_prettify { ">;" } else { ";" };
+
+            // Move original type content to stmt_start, wrapped with type declaration.
+            // This preserves fine-grained sourcemap for hover on individual properties.
+            ctx.out.move_wrapped(
+                tp.type_span.start,
+                tp.type_span.end,
+                stmt_start,
+                &prefix,
+                suffix,
+            );
+
+            // Fill the gap left by the move with the type alias name
+            ctx.out.prepend_alloc(tp.type_span.start, &type_name_str);
+        }
     }
 
     // Add variable assignment if no declarator
@@ -2541,6 +2668,53 @@ fn is_simple_type_reference(type_text: &str) -> bool {
             .chars()
             .next()
             .is_some_and(|c| c.is_alphabetic() || c == '_')
+}
+
+/// Detect `useAttrs<T>()` calls in the script setup body and return the type parameter text.
+///
+/// Used as a fallback for `attrs_type` when no `attrs` attribute is present on the script tag.
+/// Priority: `attrs` attribute > `useAttrs<T>()` > `{}`.
+fn detect_use_attrs_type_arg<'a>(body: &[Statement<'a>], source: &'a str) -> Option<String> {
+    for stmt in body {
+        let call = match stmt {
+            Statement::VariableDeclaration(var_decl) => var_decl
+                .declarations
+                .iter()
+                .find_map(|d| d.init.as_ref())
+                .and_then(|e| {
+                    if let Expression::CallExpression(c) = e {
+                        Some(c.as_ref())
+                    } else {
+                        None
+                    }
+                }),
+            Statement::ExpressionStatement(expr_stmt) => {
+                if let Expression::CallExpression(c) = &expr_stmt.expression {
+                    Some(c.as_ref())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(call) = call {
+            if let Some(name) = callee_identifier_name(&call.callee) {
+                if name == "useAttrs" {
+                    if let Some(tp) = &call.type_arguments {
+                        if let Some(param) = tp.params.first() {
+                            let span: oxc_span::Span = param.span();
+                            let text = &source[span.start as usize..span.end as usize];
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                return Some(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Detect if script setup body contains a `getCurrentInstance()` call.
@@ -2651,6 +2825,7 @@ fn emit_global_component_fallbacks(
     template_ast: Option<&TemplateAst>,
     source: &str,
     bindings: &FxHashMap<&str, BindingType>,
+    is_jsx: bool,
 ) {
     let ast = match template_ast {
         Some(a) => a,
@@ -2686,12 +2861,21 @@ fn emit_global_component_fallbacks(
 
             if seen.insert(pascal.clone()) {
                 use std::fmt::Write;
-                write!(
-                    buf,
-                    "\nconst {pascal} = {{}} as import('vue').GlobalComponents extends {{ {pascal}: infer C }} ? C : unknown;",
-                    pascal = pascal,
-                )
-                .expect("write to String is infallible");
+                if is_jsx {
+                    write!(
+                        buf,
+                        "\nconst {pascal} = /** @type {{unknown}} */ ({{}});",
+                        pascal = pascal,
+                    )
+                    .expect("write to String is infallible");
+                } else {
+                    write!(
+                        buf,
+                        "\nconst {pascal} = {{}} as import('vue').GlobalComponents extends {{ {pascal}: infer C }} ? C : unknown;",
+                        pascal = pascal,
+                    )
+                    .expect("write to String is infallible");
+                }
             }
         }
     }
@@ -2729,7 +2913,7 @@ fn to_pascal_case(tag: &str) -> String {
 
 fn emit_minimal_wrapper(
     out: &mut CodeGenOutput<'_>,
-    options: &TsxScriptOptions<'_>,
+    options: &IdeScriptOptions<'_>,
     pos: u32,
     template_end: Option<u32>,
 ) -> Option<String> {
@@ -2737,7 +2921,12 @@ fn emit_minimal_wrapper(
         // Unified CT: function start at pos, close deferred
         let mut start = format!("export function {}TemplateBindingFN() {{\n", PREFIX);
         // Declare instance for instance property access in template.
-        start.push_str(&instance_declaration(options.filename));
+        // Minimal wrapper: no Comp functions, so no $attrs override
+        start.push_str(&instance_declaration(
+            options.filename,
+            options.is_jsx,
+            false,
+        ));
         out.prepend_alloc(pos, &start);
         let mut close = String::from("\n");
         close.push_str(&instance_probe_line());
@@ -2759,24 +2948,45 @@ const PREFIX: &str = "___VERTER___";
 /// Uses `import()` type expression to get the full component instance type from the
 /// `.vue.d.ts` default export, providing type checking for `$slots`, `$emit`, `$props`,
 /// `$attrs`, and any custom global properties (e.g., `$t`, `$router`).
-fn instance_declaration(filename: &str) -> String {
-    format!(
-        "\n// @ts-ignore\nlet {P}instance!: InstanceType<import('./{filename}')['default']>;\nvoid {P}instance;\n",
-        P = PREFIX,
-        filename = filename,
-    )
+fn instance_declaration(filename: &str, is_jsx: bool, override_attrs: bool) -> String {
+    if is_jsx {
+        format!(
+            "\n/** @type {{any}} */\nvar {P}instance = /** @type {{any}} */ (null);\nvoid {P}instance;\n",
+            P = PREFIX,
+        )
+    } else if override_attrs {
+        // With Comp functions + attrs type aliases: override $attrs with composed type
+        format!(
+            "\n// @ts-ignore\nlet {P}instance!: Omit<InstanceType<import('./{filename}')['default']>, '$attrs'> & {{ $attrs: {P}Attrs }};\nvoid {P}instance;\n",
+            P = PREFIX,
+            filename = filename,
+        )
+    } else {
+        format!(
+            "\n// @ts-ignore\nlet {P}instance!: InstanceType<import('./{filename}')['default']>;\nvoid {P}instance;\n",
+            P = PREFIX,
+            filename = filename,
+        )
+    }
 }
 
 /// Ambient variant for Options API (file scope, no TDZ issues).
 ///
 /// Uses `declare let` so the declaration is available regardless of position in file.
 /// Needed because template JSX may appear before the script block.
-fn instance_declaration_ambient(filename: &str) -> String {
-    format!(
-        "\n// @ts-ignore\ndeclare let {P}instance: InstanceType<import('./{filename}')['default']>;\n",
-        P = PREFIX,
-        filename = filename,
-    )
+fn instance_declaration_ambient(filename: &str, is_jsx: bool) -> String {
+    if is_jsx {
+        format!(
+            "\n/** @type {{any}} */\nvar {P}instance = /** @type {{any}} */ (null);\n",
+            P = PREFIX,
+        )
+    } else {
+        format!(
+            "\n// @ts-ignore\ndeclare let {P}instance: InstanceType<import('./{filename}')['default']>;\n",
+            P = PREFIX,
+            filename = filename,
+        )
+    }
 }
 
 /// Emit the instance completion probe line.
@@ -2889,6 +3099,10 @@ declare module "@verter/types" {
   export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
   export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
   export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
+  export type ExtractRenderComponent<T> = T extends { new (): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
+  export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
+  export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
+  export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
 }
 "#;
 
@@ -2908,6 +3122,10 @@ pub const VERTER_TYPES_STANDALONE_DTS: &str = r#"// Auto-generated by verter-lsp
 export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
 export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
 export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
+export type ExtractRenderComponent<T> = T extends { new (): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
+export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
+export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
+export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
 "#;
 
 /// Collect Vue built-in component names used in the template AST.
@@ -2960,35 +3178,78 @@ fn collect_builtin_components(
 fn emit_helper_imports(
     out: &mut CodeGenOutput<'_>,
     pos: u32,
-    options: &TsxScriptOptions<'_>,
+    options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
+    template_ast: Option<&crate::ast::types::TemplateAst>,
 ) {
     use std::fmt::Write;
 
     let mut imports = String::with_capacity(512);
 
-    // Type imports from @verter/types
-    writeln!(
-        imports,
-        "import type {{ Prettify as {P}Prettify }} from \"{}\";",
-        options.types_module_name,
-        P = PREFIX,
-    )
-    .expect("write to String is infallible");
+    // Type imports from @verter/types (TS mode only — JSDoc mode doesn't need import type)
+    if !options.is_jsx {
+        if template_ast.is_some() {
+            writeln!(
+                imports,
+                "import type {{ Prettify as {P}Prettify, ExtractComponentProps as {P}ExtractComponentProps }} from \"{}\";",
+                options.types_module_name,
+                P = PREFIX,
+            )
+            .expect("write to String is infallible");
+        } else {
+            writeln!(
+                imports,
+                "import type {{ Prettify as {P}Prettify }} from \"{}\";",
+                options.types_module_name,
+                P = PREFIX,
+            )
+            .expect("write to String is infallible");
+        }
+    }
 
     // Runtime imports from @verter/types
     writeln!(
         imports,
-        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps }} from \"{}\";",
+        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent }} from \"{}\";",
         options.types_module_name,
         P = PREFIX,
     )
     .expect("write to String is infallible");
 
-    // Import built-in components without prefix — template JSX references them by bare name
-    if !builtin_components.is_empty() {
-        let builtin_str = builtin_components.join(", ");
-        writeln!(imports, "import {{ {} }} from \"vue\";", builtin_str)
+    // Collect vue imports: built-in components + template helpers (normalizeClass, normalizeStyle)
+    let mut vue_imports: Vec<&str> = Vec::new();
+    for &name in builtin_components {
+        vue_imports.push(name);
+    }
+
+    // Check if template needs normalizeClass/normalizeStyle for class/style merging
+    if let Some(ast) = template_ast {
+        let mut need_class = false;
+        let mut need_style = false;
+        for node in &ast.nodes {
+            if let crate::ast::types::AstNodeKind::Element(ref el) = node.kind {
+                if !need_class && el.needs_class_merge() {
+                    need_class = true;
+                }
+                if !need_style && el.needs_style_merge() {
+                    need_style = true;
+                }
+                if need_class && need_style {
+                    break;
+                }
+            }
+        }
+        if need_class {
+            vue_imports.push("normalizeClass as ___VERTER___normalizeClass");
+        }
+        if need_style {
+            vue_imports.push("normalizeStyle as ___VERTER___normalizeStyle");
+        }
+    }
+
+    if !vue_imports.is_empty() {
+        let imports_str = vue_imports.join(", ");
+        writeln!(imports, "import {{ {} }} from \"vue\";", imports_str)
             .expect("write to String is infallible");
     }
 
@@ -2998,30 +3259,111 @@ fn emit_helper_imports(
 /// Emit all type constructs to the `buf` string (no sourcemap).
 fn emit_type_constructs(
     buf: &mut String,
-    _generic_info: &Option<TsxGenericInfo>,
-    _template_ast: Option<&TemplateAst>,
+    generic_info: &Option<IdeGenericInfo>,
+    attrs_type: &Option<String>,
     _source: &str,
-    options: &TsxScriptOptions<'_>,
+    options: &IdeScriptOptions<'_>,
     _has_get_current_instance: bool,
 ) {
-    // Append ambient module declaration
-    if options.embed_ambient_types {
+    // Emit ___VERTER___attributes type alias
+    if options.is_jsx {
+        // JS mode: JSDoc @typedef
+        if let Some(ref attrs) = attrs_type {
+            buf.push_str(&format!(
+                "\n/** @typedef {{{}}} {P}attributes */\n",
+                attrs,
+                P = PREFIX,
+            ));
+        } else {
+            buf.push_str(&format!(
+                "\n/** @typedef {{{{}}}} {P}attributes */\n",
+                P = PREFIX,
+            ));
+        }
+    } else {
+        // TS mode: type alias
+        let generic_suffix = generic_info
+            .as_ref()
+            .map(|g| g.source_bracket())
+            .unwrap_or_default();
+        if let Some(ref attrs) = attrs_type {
+            buf.push_str(&format!(
+                "\ntype {P}attributes{gs} = {attrs};\n",
+                P = PREFIX,
+                gs = generic_suffix,
+                attrs = attrs,
+            ));
+        } else {
+            buf.push_str(&format!("\ntype {P}attributes = {{}};\n", P = PREFIX,));
+        }
+    }
+
+    // Append ambient module declaration (TS mode only — declare module is TS syntax)
+    if options.embed_ambient_types && !options.is_jsx {
         buf.push_str(VERTER_TYPES_AMBIENT_MODULE);
+    }
+}
+
+/// Emit RootElement, RootElementProps, and Attrs type aliases inside the function scope.
+///
+/// These must be inside `templateBindingFN` because they reference `getRootComponent`
+/// and `getRootComponentPassedProps` which are function-local.
+fn emit_attrs_type_aliases(
+    buf: &mut String,
+    generic_info: &Option<IdeGenericInfo>,
+    inherit_attrs: bool,
+) {
+    let gs = generic_info
+        .as_ref()
+        .map(|g| g.source_bracket())
+        .unwrap_or_default();
+    let gn = generic_info
+        .as_ref()
+        .map(|g| g.names_bracket())
+        .unwrap_or_default();
+
+    buf.push_str(&format!(
+        "\ntype {P}RootElement{gs} = ReturnType<typeof {P}getRootComponent{gn}>;\
+         \ntype {P}RootElementProps{gs} = {P}Prettify<Omit<\
+         \n  {P}ExtractComponentProps<{P}RootElement{gn}>,\
+         \n  keyof ReturnType<typeof {P}getRootComponentPassedProps{gn}>\
+         \n>>;\n",
+        P = PREFIX,
+        gs = gs,
+        gn = gn,
+    ));
+
+    if inherit_attrs {
+        buf.push_str(&format!(
+            "\ntype {P}Attrs{gs} = {P}attributes{gn} & {P}RootElementProps{gn};\n",
+            P = PREFIX,
+            gs = gs,
+            gn = gn,
+        ));
+    } else {
+        buf.push_str(&format!(
+            "\ntype {P}Attrs{gs} = {P}attributes{gn};\n",
+            P = PREFIX,
+            gs = gs,
+            gn = gn,
+        ));
     }
 }
 
 /// Emit Comp{offset} functions to a string buffer (inside templateBindingFN).
 /// Returns (root_comp_offset, all_emitted_comp_offsets).
+/// Returns (root_comp_offset, root_props_literal, all_comp_offsets).
 fn emit_comp_functions_to_string(
     buf: &mut String,
     gs: &str,
     gn: &str,
     template_ast: Option<&TemplateAst>,
     source: &str,
-) -> (Option<u32>, Vec<u32>) {
+    is_jsx: bool,
+) -> (Option<u32>, Option<String>, Vec<u32>) {
     let ast = match template_ast {
         Some(a) => a,
-        None => return (None, vec![]),
+        None => return (None, None, vec![]),
     };
 
     let root_children = ast
@@ -3032,6 +3374,7 @@ fn emit_comp_functions_to_string(
         .unwrap_or(&[]);
 
     let mut root_comp_offset: Option<u32> = None;
+    let mut root_props_literal: Option<String> = None;
     let mut all_comp_offsets: Vec<u32> = Vec::new();
 
     walk_children_for_comp(
@@ -3043,11 +3386,13 @@ fn emit_comp_functions_to_string(
         root_children,
         &[],
         &mut root_comp_offset,
+        &mut root_props_literal,
         &mut all_comp_offsets,
         true,
+        is_jsx,
     );
 
-    (root_comp_offset, all_comp_offsets)
+    (root_comp_offset, root_props_literal, all_comp_offsets)
 }
 
 /// Emit getRootComponent + getRootComponentPassedProps to a string buffer.
@@ -3056,18 +3401,22 @@ fn emit_get_root_component_to_string(
     gs: &str,
     gn: &str,
     root_comp_offset: Option<u32>,
+    root_props_literal: Option<&str>,
 ) {
     use std::fmt::Write;
+
+    let props = root_props_literal.unwrap_or("{}");
 
     if let Some(offset) = root_comp_offset {
         write!(
             buf,
             "\nfunction {P}getRootComponent{gs}() {{ return {P}Comp{offset}{gn}(); }}\
-             \nfunction {P}getRootComponentPassedProps{gs}() {{ return {{}}; }}",
+             \nfunction {P}getRootComponentPassedProps{gs}() {{ return {props}; }}",
             P = PREFIX,
             gs = gs,
             gn = gn,
             offset = offset,
+            props = props,
         )
         .expect("write to String is infallible");
     } else {
@@ -3094,8 +3443,10 @@ fn walk_children_for_comp(
     children: &[crate::types::NodeId],
     parent_scopes: &[super::condition::ConditionScope],
     root_comp_offset: &mut Option<u32>,
+    root_props_literal: &mut Option<String>,
     all_comp_offsets: &mut Vec<u32>,
     is_root: bool,
+    is_jsx: bool,
 ) {
     for &child_id in children {
         let node = &ast.nodes[child_id.0];
@@ -3107,14 +3458,22 @@ fn walk_children_for_comp(
                 scopes.push(scope);
             }
 
-            // Emit Comp function (skip Slot/Template, only for elements with ref)
-            if !matches!(el.tag_type, TagType::SlotOutlet | TagType::Template) && el.v_ref.is_some()
-            {
+            // Emit Comp function for:
+            // - elements with ref (always, for template ref typing)
+            // - the first root element (for implicit attrs / getRootComponent)
+            let is_eligible = !matches!(el.tag_type, TagType::SlotOutlet | TagType::Template);
+            let is_first_root = is_root && root_comp_offset.is_none();
+            let needs_comp = is_eligible && (el.v_ref.is_some() || is_first_root);
+            if needs_comp {
                 let offset = el.tag_open.start;
-                emit_comp_function_for_element(buf, gs, gn, el, source, offset, &scopes);
+                let props_lit = serialize_element_props(el, source);
+                emit_comp_function_for_element(
+                    buf, gs, gn, el, source, offset, &scopes, is_jsx, &props_lit,
+                );
                 all_comp_offsets.push(offset);
-                if is_root && root_comp_offset.is_none() {
+                if is_first_root {
                     *root_comp_offset = Some(offset);
+                    *root_props_literal = Some(props_lit);
                 }
             }
 
@@ -3129,8 +3488,10 @@ fn walk_children_for_comp(
                     &content.children,
                     &scopes,
                     root_comp_offset,
+                    root_props_literal,
                     all_comp_offsets,
                     false,
+                    is_jsx,
                 );
             }
         }
@@ -3216,7 +3577,91 @@ fn collect_sibling_negations_raw(
     negations
 }
 
+/// Serialize an element's template props as a TS object literal string.
+///
+/// Iterates `el.props` to produce `{"id": "app", "onClick": handler}`.
+/// Skips `class` and `style` (Vue handles these specially).
+/// Structural directives (v-if, v-for, etc.) are already taken out of `el.props`.
+fn serialize_element_props(el: &ElementNode, source: &str) -> String {
+    let mut entries: Vec<String> = Vec::new();
+
+    for prop in &el.props {
+        let name = &source[prop.start as usize..prop.name_end as usize];
+
+        if !prop.is_directive {
+            // Static attribute: name="value" or boolean attribute
+            // Skip class and style (Vue handles these specially)
+            if name.eq_ignore_ascii_case("class") || name.eq_ignore_ascii_case("style") {
+                continue;
+            }
+            if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                let value = &source[vs as usize..ve as usize];
+                // JSON-stringify the value
+                let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+                entries.push(format!("\"{}\": \"{}\"", name, escaped));
+            } else {
+                // Boolean attribute (no value)
+                entries.push(format!("\"{}\": true", name));
+            }
+        } else {
+            // Directive
+            let (arg_start, arg_end) = match (prop.arg_start, prop.arg_end) {
+                (Some(s), Some(e)) => (s, e),
+                _ => continue, // no argument (e.g., v-show with no arg → skip for props)
+            };
+
+            if name == ":" || name == "v-bind" {
+                // Dynamic bind: :name="expr" → "name": expr
+                let arg_name = &source[arg_start as usize..arg_end as usize];
+                // Skip class and style
+                if arg_name.eq_ignore_ascii_case("class") || arg_name.eq_ignore_ascii_case("style")
+                {
+                    continue;
+                }
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    let expr = &source[vs as usize..ve as usize];
+                    entries.push(format!("\"{}\": {}", arg_name, expr));
+                }
+            } else if name == "@" || name == "v-on" {
+                // Event handler: @name="expr" → "onName": () => {}
+                // We use a placeholder function since only the key matters for
+                // getRootComponentPassedProps (used in Omit for $attrs typing).
+                let arg_name = &source[arg_start as usize..arg_end as usize];
+                let on_name = camelize_event(arg_name);
+                entries.push(format!("\"{}\": () => {{}}", on_name));
+            }
+            // Other directives (v-show, v-model, etc.) are not included in props
+        }
+    }
+
+    if entries.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{{}}}", entries.join(", "))
+    }
+}
+
+/// Convert an event name to `onXxx` format.
+/// e.g., "click" → "onClick", "my-event" → "onMyEvent"
+fn camelize_event(name: &str) -> String {
+    let mut result = String::with_capacity(name.len() + 2);
+    result.push_str("on");
+    let mut capitalize_next = true;
+    for ch in name.chars() {
+        if ch == '-' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.extend(ch.to_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 /// Emit a single Comp{offset} function for an element, with optional condition guards.
+#[allow(clippy::too_many_arguments)]
 fn emit_comp_function_for_element(
     buf: &mut String,
     gs: &str,
@@ -3225,6 +3670,8 @@ fn emit_comp_function_for_element(
     source: &str,
     offset: u32,
     condition_scopes: &[super::condition::ConditionScope],
+    is_jsx: bool,
+    props_literal: &str,
 ) {
     use std::fmt::Write;
 
@@ -3237,30 +3684,48 @@ fn emit_comp_function_for_element(
 
     match el.tag_type {
         TagType::Element => {
-            write!(
-                buf,
-                "\nfunction {P}Comp{offset}{gs}() {{{guard}\
-                 \n  return {P}enhanceElementWithProps({{}} as HTMLElementTagNameMap[\"{tag}\"], {{}});\
-                 \n}}",
-                P = PREFIX,
-                offset = offset,
-                gs = gs,
-                guard = guard,
-                tag = tag_name,
-            )
-            .expect("write to String is infallible");
+            if is_jsx {
+                write!(
+                    buf,
+                    "\nfunction {P}Comp{offset}{gs}() {{{guard}\
+                     \n  return {P}enhanceElementWithProps(/** @type {{HTMLElementTagNameMap[\"{tag}\"]}} */ ({{}}), {props});\
+                     \n}}",
+                    P = PREFIX,
+                    offset = offset,
+                    gs = gs,
+                    guard = guard,
+                    tag = tag_name,
+                    props = props_literal,
+                )
+                .expect("write to String is infallible");
+            } else {
+                write!(
+                    buf,
+                    "\nfunction {P}Comp{offset}{gs}() {{{guard}\
+                     \n  return {P}enhanceElementWithProps({{}} as HTMLElementTagNameMap[\"{tag}\"], {props});\
+                     \n}}",
+                    P = PREFIX,
+                    offset = offset,
+                    gs = gs,
+                    guard = guard,
+                    tag = tag_name,
+                    props = props_literal,
+                )
+                .expect("write to String is infallible");
+            }
         }
         TagType::Component => {
             write!(
                 buf,
                 "\nfunction {P}Comp{offset}{gs}() {{{guard}\
-                 \n  return new {tag}({{}});\
+                 \n  return new {tag}({props});\
                  \n}}",
                 P = PREFIX,
                 offset = offset,
                 gs = gs,
                 guard = guard,
                 tag = tag_name,
+                props = props_literal,
             )
             .expect("write to String is infallible");
         }
@@ -3295,7 +3760,7 @@ mod tests {
             )
         });
 
-        let options = TsxScriptOptions {
+        let options = IdeScriptOptions {
             component_name: "App",
             js_component_name: "App",
             filename: "App.vue",
@@ -3305,6 +3770,7 @@ mod tests {
             types_module_name: "@verter/types",
             is_vapor: false,
             embed_ambient_types: true,
+            is_jsx: false,
         };
 
         // Use unified CT mode: pass template_end so comp functions are emitted in code
@@ -3316,7 +3782,7 @@ mod tests {
                 .unwrap_or(tpl.root.tag_open.end)
         });
 
-        let result = generate_tsx_script(
+        let result = generate_ide_script(
             syntax.script(),
             syntax.script_setup(),
             syntax.template_ast(),
@@ -4531,7 +4997,7 @@ const el2 = ref<HTMLSpanElement>()
     /// Generate TSX script with custom options and return (code, bindings, type_constructs).
     fn gen_tsx_script_full_with_options(
         source: &str,
-        options: TsxScriptOptions<'_>,
+        options: IdeScriptOptions<'_>,
     ) -> (String, FxHashMap<String, BindingType>, String) {
         let alloc = Allocator::new();
         let mut ct = CodeTransform::new(source, &alloc);
@@ -4559,7 +5025,7 @@ const el2 = ref<HTMLSpanElement>()
                 .unwrap_or(tpl.root.tag_open.end)
         });
 
-        let result = generate_tsx_script(
+        let result = generate_ide_script(
             syntax.script(),
             syntax.script_setup(),
             syntax.template_ast(),
@@ -4625,7 +5091,7 @@ const el2 = ref<HTMLSpanElement>()
     fn types_module_custom_override() {
         let (code, _, _) = gen_tsx_script_full_with_options(
             r#"<script setup lang="ts">const x = 1</script><template><div/></template>"#,
-            TsxScriptOptions {
+            IdeScriptOptions {
                 component_name: "App",
                 js_component_name: "App",
                 filename: "App.vue",
@@ -4635,6 +5101,7 @@ const el2 = ref<HTMLSpanElement>()
                 types_module_name: "@custom/types",
                 is_vapor: false,
                 embed_ambient_types: true,
+                is_jsx: false,
             },
         );
         assert!(
@@ -5207,7 +5674,7 @@ export default { props: ['msg'] }
 const props = defineProps<{ msg: string }>()
 </script>
 <template><div>{{ props.msg }}</div></template>"#,
-            TsxScriptOptions {
+            IdeScriptOptions {
                 component_name: "App",
                 js_component_name: "App",
                 filename: "App.vue",
@@ -5217,6 +5684,7 @@ const props = defineProps<{ msg: string }>()
                 types_module_name: "@verter/types",
                 is_vapor: false,
                 embed_ambient_types: false,
+                is_jsx: false,
             },
         );
 
@@ -6219,5 +6687,554 @@ count.
                 code
             );
         }
+    }
+
+    // =========================================================================
+    // JSX mode tests — verify JS SFCs produce JavaScript + JSDoc, not TypeScript
+    // =========================================================================
+
+    /// Helper: generate IDE script output with `is_jsx: true`.
+    fn gen_jsx_script(source: &str) -> (String, String) {
+        let alloc = Allocator::new();
+        let mut ct = CodeTransform::new(source, &alloc);
+
+        let bytes = source.as_bytes();
+        let mut syntax = crate::parser::Syntax::new(false);
+        crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+            syntax.handle(
+                &e,
+                &crate::diagnostics::SyntaxPluginContext {
+                    input: source,
+                    bytes,
+                    options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                    diagnostics: Vec::new(),
+                },
+            )
+        });
+
+        let options = IdeScriptOptions {
+            component_name: "App",
+            js_component_name: "App",
+            filename: "App.vue",
+            scope_id: "data-v-abc123",
+            has_scoped_style: false,
+            runtime_module_name: "vue",
+            types_module_name: "@verter/types",
+            is_vapor: false,
+            embed_ambient_types: true,
+            is_jsx: true,
+        };
+
+        let template_end = syntax.template_ast().map(|tpl| {
+            tpl.root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(tpl.root.tag_open.end)
+        });
+
+        let result = generate_ide_script(
+            syntax.script(),
+            syntax.script_setup(),
+            syntax.template_ast(),
+            source,
+            &mut ct,
+            &alloc,
+            &options,
+            template_end,
+        );
+
+        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
+            ct.prepend_left(tpl_end, return_close);
+        }
+
+        if let Some(tpl) = syntax.template_ast() {
+            let start = tpl.root.tag_open.start;
+            let end = tpl
+                .root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(tpl.root.tag_open.end);
+            ct.remove(start, end);
+        }
+        for style_node in syntax.style_nodes() {
+            let start = style_node.tag_open.start;
+            let end = style_node
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(style_node.tag_open.end);
+            ct.remove(start, end);
+        }
+
+        let code = ct.build_string();
+        (code, result.type_constructs)
+    }
+
+    #[test]
+    fn jsx_mode_no_prettify_import() {
+        let (code, type_constructs) = gen_jsx_script(
+            r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>"#,
+        );
+        // Positive: should still have the vue import
+        assert!(
+            code.contains("import { ref } from 'vue'"),
+            "vue import should be preserved:\n{}",
+            code
+        );
+        // Negative: no TS-only Prettify import
+        assert!(
+            !code.contains("Prettify"),
+            "JSX mode must not import Prettify:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("import type"),
+            "JSX mode must not have import type:\n{}",
+            code
+        );
+        // Negative: no ambient module in type_constructs
+        assert!(
+            !type_constructs.contains("declare module"),
+            "JSX mode must not have declare module in type_constructs:\n{}",
+            type_constructs
+        );
+    }
+
+    #[test]
+    fn jsx_mode_no_as_unknown_cast() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        // Negative: no `as unknown as typeof`
+        assert!(
+            !code.contains("as unknown as typeof"),
+            "JSX mode must not have 'as unknown as typeof' cast:\n{}",
+            code
+        );
+        // Negative: no `as unknown`
+        assert!(
+            !code.contains("as unknown"),
+            "JSX mode must not have any 'as unknown' cast:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_mode_no_type_alias() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+const props = defineProps<{ msg: string }>()
+</script>"#,
+        );
+        // Negative: no `;type` alias
+        assert!(
+            !code.contains(";type "),
+            "JSX mode must not have type aliases:\n{}",
+            code
+        );
+        // Negative: generic brackets should be removed from defineProps<...>
+        assert!(
+            !code.contains("defineProps<"),
+            "JSX mode must remove generic brackets from defineProps:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_mode_no_generic_on_wrapper() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+const props = defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        );
+        // Negative: no generic on TemplateBindingFN
+        assert!(
+            !code.contains("TemplateBindingFN<"),
+            "JSX mode must not have generics on TemplateBindingFN:\n{}",
+            code
+        );
+        // Positive: should still have the function
+        assert!(
+            code.contains("TemplateBindingFN"),
+            "should still have TemplateBindingFN:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_mode_no_ambient_module() {
+        let (_, type_constructs) = gen_jsx_script(
+            r#"<script setup>
+const count = ref(0)
+</script>"#,
+        );
+        // Negative: no ambient module declaration
+        assert!(
+            !type_constructs.contains("declare module"),
+            "JSX mode must not have 'declare module' in type_constructs:\n{}",
+            type_constructs
+        );
+        assert!(
+            !type_constructs.contains("@verter/types"),
+            "JSX mode must not reference @verter/types module:\n{}",
+            type_constructs
+        );
+    }
+
+    #[test]
+    fn jsx_mode_instance_declaration_no_ts_syntax() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        // Negative: no TS instance declaration syntax
+        assert!(
+            !code.contains("!:"),
+            "JSX mode must not have definite assignment assertion '!:':\n{}",
+            code
+        );
+        assert!(
+            !code.contains("InstanceType<"),
+            "JSX mode must not have InstanceType<>:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("declare let"),
+            "JSX mode must not have 'declare let':\n{}",
+            code
+        );
+        // Positive: should have JSDoc-style instance declaration
+        assert!(
+            code.contains("/** @type {any} */"),
+            "JSX mode should use JSDoc @type for instance:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_mode_global_component_no_conditional_type() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+</script>
+<template><RouterView /></template>"#,
+        );
+        // Negative: no TS conditional type for global components
+        assert!(
+            !code.contains("infer C"),
+            "JSX mode must not have 'infer C' conditional type:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("import('vue').GlobalComponents"),
+            "JSX mode must not reference GlobalComponents type:\n{}",
+            code
+        );
+        // Positive: should have JSDoc unknown assertion
+        assert!(
+            code.contains("/** @type {unknown} */"),
+            "JSX mode should use /** @type {{unknown}} */ for global components:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_mode_comp_function_no_ts_assertion() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+</script>
+<template><div>hello</div></template>"#,
+        );
+        // Negative: no TS `as` cast for native elements
+        assert!(
+            !code.contains("{} as HTMLElementTagNameMap"),
+            "JSX mode must not have '{{}} as HTMLElementTagNameMap':\n{}",
+            code
+        );
+        // Positive: should use JSDoc for element type
+        if code.contains("HTMLElementTagNameMap") {
+            assert!(
+                code.contains("/** @type"),
+                "JSX mode should use JSDoc @type for element types:\n{}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn jsx_mode_no_angle_bracket_rewrite() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+const x = (foo as Bar)
+</script>"#,
+        );
+        // For JSX mode, TS type assertions should not be rewritten
+        // (they're already not valid JS, but we skip the rewrite)
+        assert!(
+            !code.contains("( as "),
+            "JSX mode should not rewrite angle bracket casts:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_mode_with_defaults() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+const props = withDefaults(defineProps<{ msg?: string }>(), {
+  msg: 'hello'
+})
+</script>"#,
+        );
+        // Negative: no type alias
+        assert!(
+            !code.contains(";type "),
+            "JSX mode withDefaults must not have type aliases:\n{}",
+            code
+        );
+        // Negative: no Prettify
+        assert!(
+            !code.contains("Prettify"),
+            "JSX mode withDefaults must not have Prettify:\n{}",
+            code
+        );
+        // Negative: no generic brackets on defineProps
+        assert!(
+            !code.contains("defineProps<"),
+            "JSX mode must remove generic brackets from defineProps:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_mode_define_emits() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+const emit = defineEmits<{
+  (e: 'update', value: string): void
+}>()
+</script>"#,
+        );
+        // Negative: no type alias
+        assert!(
+            !code.contains(";type "),
+            "JSX mode defineEmits must not have type aliases:\n{}",
+            code
+        );
+        // Negative: no Prettify
+        assert!(
+            !code.contains("Prettify"),
+            "JSX mode defineEmits must not have Prettify:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_mode_define_model() {
+        let (code, _) = gen_jsx_script(
+            r#"<script setup>
+const modelValue = defineModel<string>()
+</script>"#,
+        );
+        // Negative: no type alias
+        assert!(
+            !code.contains(";type "),
+            "JSX mode defineModel must not have type aliases:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_mode_options_api_no_declare_let() {
+        let (code, _) = gen_jsx_script(
+            r#"<script>
+export default {
+  data() { return { count: 0 } }
+}
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        // Negative: no TS-only syntax
+        assert!(
+            !code.contains("declare let"),
+            "JSX options API must not have 'declare let':\n{}",
+            code
+        );
+        assert!(
+            !code.contains("!:"),
+            "JSX options API must not have definite assignment:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn tsx_mode_still_has_ts_constructs() {
+        // Contrast test: TSX mode (is_jsx = false) should still have TS constructs
+        let (code, _, type_constructs) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const props = defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        );
+        // Positive: TSX mode should have TS constructs
+        assert!(
+            code.contains("Prettify") || code.contains("import type"),
+            "TSX mode should have Prettify import:\n{}",
+            code
+        );
+        assert!(
+            code.contains("as unknown as typeof") || code.contains("TemplateBindingFN<"),
+            "TSX mode should have TS casts or generics:\n{}",
+            code
+        );
+        // Positive: type_constructs should have ambient module
+        assert!(
+            type_constructs.contains("declare module") || type_constructs.contains("@verter/types"),
+            "TSX mode should have ambient module:\n{}",
+            type_constructs
+        );
+    }
+
+    // ── Bug 4: defineProps type parameter output structure ──
+
+    #[test]
+    fn define_props_type_param_output_structure() {
+        let (code, _, _) = gen_tsx_script_full(
+            r#"<script setup lang="ts">const props = defineProps<{ foo: string, bar: number }>()</script><template><div/></template>"#,
+        );
+
+        // Positive: type alias should be created
+        assert!(
+            code.contains("___VERTER___defineProps_Type"),
+            "should create type alias: {code}"
+        );
+        // Positive: type alias should contain the original type content
+        assert!(
+            code.contains("{ foo: string, bar: number }"),
+            "type alias should contain original type: {code}"
+        );
+        // Positive: defineProps call should reference the type alias
+        assert!(
+            code.contains("defineProps<___VERTER___defineProps_Type>()"),
+            "defineProps should use type alias: {code}"
+        );
+    }
+
+    #[test]
+    fn define_emits_type_param_output_structure() {
+        let (code, _, _) = gen_tsx_script_full(
+            r#"<script setup lang="ts">const emit = defineEmits<{ click: [e: MouseEvent] }>()</script><template><div/></template>"#,
+        );
+
+        // Positive: type alias should be created
+        assert!(
+            code.contains("___VERTER___defineEmits_Type"),
+            "should create emits type alias: {code}"
+        );
+        // Positive: defineEmits should use the type alias
+        assert!(
+            code.contains("defineEmits<___VERTER___defineEmits_Type>()"),
+            "defineEmits should use type alias: {code}"
+        );
+    }
+
+    #[test]
+    fn define_props_type_content_is_source_mapped() {
+        // Verify that individual properties inside defineProps<{ foo: string }>
+        // have sourcemap coverage via move_wrapped.
+        let source = r#"<script setup lang="ts">const props = defineProps<{ foo: string, bar: number }>()</script><template><div/></template>"#;
+        let alloc = Allocator::new();
+        let mut ct = CodeTransform::new(source, &alloc);
+
+        let bytes = source.as_bytes();
+        let mut syntax = crate::parser::Syntax::new(false);
+        crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+            syntax.handle(
+                &e,
+                &crate::diagnostics::SyntaxPluginContext {
+                    input: source,
+                    bytes,
+                    options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                    diagnostics: Vec::new(),
+                },
+            )
+        });
+
+        let options = IdeScriptOptions {
+            component_name: "App",
+            js_component_name: "App",
+            filename: "App.vue",
+            scope_id: "data-v-abc123",
+            has_scoped_style: false,
+            runtime_module_name: "vue",
+            types_module_name: "@verter/types",
+            is_vapor: false,
+            embed_ambient_types: true,
+            is_jsx: false,
+        };
+
+        let template_end = syntax.template_ast().map(|tpl| {
+            tpl.root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(tpl.root.tag_open.end)
+        });
+
+        let result = generate_ide_script(
+            syntax.script(),
+            syntax.script_setup(),
+            syntax.template_ast(),
+            source,
+            &mut ct,
+            &alloc,
+            &options,
+            template_end,
+        );
+
+        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
+            ct.prepend_left(tpl_end, return_close);
+        }
+
+        // Generate the sourcemap
+        let map =
+            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("App.vue"));
+
+        let output = ct.build_string();
+
+        // Find the position of the type block in the original source
+        let type_block_start = source.find("{ foo:").unwrap() as u32;
+        let type_block_end = source.find("}>()").unwrap() as u32;
+
+        // Check that there's a sourcemap token covering the type block.
+        // The move_wrapped operation preserves Original chunks, so there should
+        // be a token at or near the start of the type block.
+        let tokens: Vec<_> = map.get_tokens().collect();
+        let has_type_coverage = tokens.iter().any(|t| {
+            let src = t.get_src_col();
+            src >= type_block_start && src < type_block_end
+        });
+        assert!(
+            has_type_coverage,
+            "type block [{}..{}) should have sourcemap coverage.\nOutput: {}\nTokens: {:?}",
+            type_block_start, type_block_end, output, tokens
+        );
+
+        // Verify the type content appears in the output in the type alias
+        assert!(
+            output.contains("Prettify<{ foo: string, bar: number }>"),
+            "type content should be in the Prettify wrapper: {output}"
+        );
     }
 }

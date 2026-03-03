@@ -7716,12 +7716,10 @@ const ok = true
 </script>
 <template><div :style="{ color: 'red' }" style="color: blue" :class="{ active: ok }" class="btn" /></template>"#,
             &[
-                r#"style={{ color: 'red' }}"#,
-                r#"style="color: blue""#,
-                r#"class={{ active: ok }}"#,
-                r#"class="btn""#,
+                r#"normalizeStyle([{ color: 'red' },"color: blue"])"#,
+                r#"normalizeClass([{ active: ok },"btn"])"#,
             ],
-            &["_ctx."],
+            &["_ctx.", r#"style="color: blue""#, r#"class="btn""#],
         ),
     ];
 
@@ -8815,8 +8813,15 @@ fn tsx_component_dynamic_is_literal_string_rewrites_to_target_tag() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("<div ></div>") || tsx.code.contains("<div></div>"),
-        "Dynamic :is with literal string should rewrite to static tag, got:\n{}",
+        tsx.code
+            .contains("___VERTER___extractRenderComponent('div')"),
+        "Dynamic :is with literal string should use extractRenderComponent, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code
+            .contains("<___VERTER___component_render ></___VERTER___component_render>"),
+        "Dynamic :is should rewrite tag to ___VERTER___component_render, got:\n{}",
         tsx.code
     );
 }
@@ -8832,13 +8837,14 @@ const as = 'div'
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("const __verter_component_render_"),
-        "Dynamic :is expression should emit temp component binding, got:\n{}",
+        tsx.code
+            .contains("const ___VERTER___component_render=___VERTER___extractRenderComponent("),
+        "Dynamic :is expression should emit extractRenderComponent binding, got:\n{}",
         tsx.code
     );
     assert!(
-        tsx.code.contains("<__verter_component_render_"),
-        "Dynamic :is expression should rewrite element tag to temp component binding, got:\n{}",
+        tsx.code.contains("<___VERTER___component_render "),
+        "Dynamic :is expression should rewrite element tag to ___VERTER___component_render, got:\n{}",
         tsx.code
     );
 }
@@ -10957,7 +10963,7 @@ const el = ref<HTMLDivElement>()
 }
 
 #[test]
-fn tsx_comp_not_emitted_without_ref() {
+fn tsx_comp_emitted_for_root_element_without_ref() {
     let result = compile_tsx(
         r#"<script setup lang="ts">
 const msg = 'hello'
@@ -10966,17 +10972,24 @@ const msg = 'hello'
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
-    // Negative: no Comp functions when no ref (check for function declarations, not ___VERTER___Component)
+    // Positive: Comp function emitted for root element (for implicit attrs)
     assert!(
-        !tsx.code.contains("function ___VERTER___Comp"),
-        "Should have no Comp function without ref, got:\n{}",
+        tsx.code.contains("function ___VERTER___Comp"),
+        "Should have Comp function for root element, got:\n{}",
         tsx.code
     );
-    // Negative: no getRootComponent when no ref
+    // Positive: getRootComponent emitted when template present
     assert!(
-        !tsx.code.contains("___VERTER___getRootComponent"),
-        "Should have no getRootComponent without ref, got:\n{}",
+        tsx.code.contains("___VERTER___getRootComponent"),
+        "Should have getRootComponent with template, got:\n{}",
         tsx.code
+    );
+    // Negative: only ONE Comp function (root element only, no ref elements)
+    let comp_count = tsx.code.matches("function ___VERTER___Comp").count();
+    assert_eq!(
+        comp_count, 1,
+        "Should have exactly 1 Comp function (root only), got {} in:\n{}",
+        comp_count, tsx.code
     );
 }
 
@@ -11127,6 +11140,63 @@ fn assert_tsx_parses(source: &str, label: &str) {
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>(),
+        tsx.code
+    );
+}
+
+/// Verify that a JS SFC (no lang attribute) produces valid JSX (JavaScript) output,
+/// with `is_jsx: true` on the tsx block, and no TypeScript syntax.
+fn assert_jsx_parses(source: &str, label: &str) {
+    let result = compile_tsx(source);
+    assert!(
+        result.errors.is_empty(),
+        "[{}] compile errors: {:?}",
+        label,
+        result.errors
+    );
+    let tsx = result
+        .tsx
+        .as_ref()
+        .unwrap_or_else(|| panic!("[{}] no tsx block", label));
+    // Positive: JS SFC must set is_jsx = true
+    assert!(tsx.is_jsx, "[{}] is_jsx should be true for JS SFC", label);
+    // Verify the output is valid JSX (JavaScript) — no TypeScript parse errors
+    let alloc = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::jsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "[{}] OXC parse errors (should be valid JS):\n{:?}\n--- JSX output ---\n{}",
+        label,
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tsx.code
+    );
+    // Negative: no TypeScript syntax in output
+    assert!(
+        !tsx.code.contains("as unknown"),
+        "[{}] JSX output must not contain 'as unknown':\n{}",
+        label,
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("import type"),
+        "[{}] JSX output must not contain 'import type':\n{}",
+        label,
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("declare let"),
+        "[{}] JSX output must not contain 'declare let':\n{}",
+        label,
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("!:"),
+        "[{}] JSX output must not contain definite assignment '!:':\n{}",
+        label,
         tsx.code
     );
 }
@@ -11556,5 +11626,609 @@ function onMouseUp() {}
   <div v-on="{ mousedown: onMouseDown, mouseup: onMouseUp }">drag me</div>
 </template>"#,
         "v-on object syntax",
+    );
+}
+
+// =============================================================================
+// JSX mode compile tests — JS SFCs produce valid JavaScript + JSDoc output
+// =============================================================================
+
+#[test]
+fn jsx_compile_basic_script_setup() {
+    assert_jsx_parses(
+        r#"<script setup>
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        "basic JS script setup",
+    );
+}
+
+#[test]
+fn jsx_compile_define_props() {
+    assert_jsx_parses(
+        r#"<script setup>
+const props = defineProps({
+  msg: String
+})
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        "JS defineProps (runtime)",
+    );
+}
+
+#[test]
+fn jsx_compile_lang_js_explicit() {
+    assert_jsx_parses(
+        r#"<script setup lang="js">
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        "explicit lang=js",
+    );
+}
+
+#[test]
+fn jsx_compile_options_api() {
+    assert_jsx_parses(
+        r#"<script>
+export default {
+  data() { return { count: 0 } }
+}
+</script>
+<template><div>{{ count }}</div></template>"#,
+        "options API JS",
+    );
+}
+
+#[test]
+fn jsx_compile_template_only() {
+    // Template-only SFCs should default to TSX (not JSX)
+    let result = compile_tsx(r#"<template><div>hello</div></template>"#);
+    let tsx = result.tsx.as_ref().expect("should have tsx block");
+    assert!(
+        !tsx.is_jsx,
+        "template-only SFC should default to TSX (is_jsx = false):\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn jsx_compile_ts_sfc_stays_tsx() {
+    // TypeScript SFCs should still produce TSX (is_jsx = false)
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const props = defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    let tsx = result.tsx.as_ref().expect("should have tsx block");
+    assert!(
+        !tsx.is_jsx,
+        "TS SFC should produce TSX (is_jsx = false):\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn jsx_compile_global_components() {
+    assert_jsx_parses(
+        r#"<script setup>
+</script>
+<template><RouterView /><Transition><div>x</div></Transition></template>"#,
+        "JS SFC with global components",
+    );
+}
+
+#[test]
+fn jsx_compile_v_model() {
+    assert_jsx_parses(
+        r#"<script setup>
+import { ref } from 'vue'
+const text = ref('')
+</script>
+<template><input v-model="text" /></template>"#,
+        "JS SFC with v-model",
+    );
+}
+
+#[test]
+fn jsx_compile_v_if_v_for() {
+    assert_jsx_parses(
+        r#"<script setup>
+import { ref } from 'vue'
+const show = ref(true)
+const items = ref([1, 2, 3])
+</script>
+<template>
+  <div v-if="show">shown</div>
+  <ul><li v-for="item in items" :key="item">{{ item }}</li></ul>
+</template>"#,
+        "JS SFC with v-if and v-for",
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── attrs attribute on <script setup> — IDE codegen ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn tsx_attrs_explicit_type() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts" attrs="{ class?: string; id?: string }">
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: explicit attrs type emitted
+    assert!(
+        tsx.code.contains("___VERTER___attributes"),
+        "should emit ___VERTER___attributes type alias, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("{ class?: string; id?: string }"),
+        "should contain the attrs type value, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: should not contain the raw attrs= attribute in TSX output
+    assert!(
+        !tsx.code.contains(r#"attrs="{ class"#),
+        "raw attrs attribute should not appear in output, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_attrs_default_empty() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: default empty attrs type emitted
+    assert!(
+        tsx.code.contains("type ___VERTER___attributes = {}"),
+        "should emit empty ___VERTER___attributes type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_attrs_with_generic() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts" generic="T" attrs="{ value: T }">
+defineProps<{ items: T[] }>()
+</script>
+<template><div /></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: attrs type with generic parameter
+    assert!(
+        tsx.code.contains("___VERTER___attributes<T>"),
+        "should emit generic attrs type, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("{ value: T }"),
+        "should contain generic type value, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_attrs_alias_attributes() {
+    // Also accept 'attributes' as alias for 'attrs'
+    let result = compile_tsx(
+        r#"<script setup lang="ts" attributes="{ role?: string }">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: attributes alias works the same as attrs
+    assert!(
+        tsx.code.contains("{ role?: string }"),
+        "'attributes' alias should produce the same type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn jsx_attrs_explicit_type() {
+    let result = compile_tsx_with_force_js(
+        r#"<script setup attrs="{ class?: string }">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        true,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: JSDoc typedef for attrs
+    assert!(
+        tsx.code.contains("@typedef"),
+        "JS mode should use JSDoc @typedef, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("{ class?: string }"),
+        "should contain the attrs type in JSDoc, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("___VERTER___attributes"),
+        "should reference ___VERTER___attributes, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn jsx_attrs_default_empty() {
+    let result = compile_tsx_with_force_js(
+        r#"<script setup>
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        true,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: default empty attrs typedef
+    assert!(
+        tsx.code.contains("@typedef {{}} ___VERTER___attributes"),
+        "JS mode should emit empty attrs typedef, got:\n{}",
+        tsx.code
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── Root element prop capture — IDE codegen ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn tsx_root_element_props_captured() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const handler = () => {}
+</script>
+<template><div id="app" :title="'hello'" @click="handler">content</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: Comp function emitted for root element
+    assert!(
+        tsx.code.contains("function ___VERTER___Comp"),
+        "should emit Comp for root element, got:\n{}",
+        tsx.code
+    );
+    // Positive: enhanceElementWithProps receives actual props
+    assert!(
+        tsx.code.contains(r#""id": "app""#),
+        "should have static id prop in Comp, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains(r#""title": 'hello'"#),
+        "should have dynamic title bind in Comp, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains(r#""onClick": () => {}"#),
+        "should have onClick event in Comp, got:\n{}",
+        tsx.code
+    );
+    // Positive: getRootComponentPassedProps returns actual props
+    assert!(
+        tsx.code.contains("getRootComponentPassedProps"),
+        "should emit getRootComponentPassedProps, got:\n{}",
+        tsx.code
+    );
+    // Negative: class/style should be excluded from props
+    assert!(
+        !tsx.code.contains(r#""class""#) || !tsx.code.contains("getRootComponentPassedProps"),
+        "class should not appear in serialized props"
+    );
+}
+
+#[test]
+fn tsx_root_element_skips_class_and_style() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+</script>
+<template><div class="foo" style="color: red" id="bar">content</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: id is captured
+    assert!(
+        tsx.code.contains(r#""id": "bar""#),
+        "should have id in props, got:\n{}",
+        tsx.code
+    );
+    // Negative: class and style are excluded
+    let comp_fn = tsx
+        .code
+        .split("function ___VERTER___Comp")
+        .nth(1)
+        .unwrap_or("");
+    assert!(
+        !comp_fn.contains(r#""class""#),
+        "class should be excluded from Comp props, got:\n{}",
+        comp_fn
+    );
+    assert!(
+        !comp_fn.contains(r#""style""#),
+        "style should be excluded from Comp props, got:\n{}",
+        comp_fn
+    );
+}
+
+#[test]
+fn tsx_root_component_props_captured() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import { ref } from 'vue'
+const el = ref()
+</script>
+<template><MyComp ref="el" :title="'hello'" /></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: component Comp function has title prop
+    assert!(
+        tsx.code.contains(r#""title": 'hello'"#),
+        "should have title prop in Comp, got:\n{}",
+        tsx.code
+    );
+    // Positive: getRootComponentPassedProps returns actual props
+    assert!(
+        tsx.code.contains("getRootComponentPassedProps")
+            && tsx.code.contains(r#""title": 'hello'"#),
+        "getRootComponentPassedProps should return actual props, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_root_element_no_props_empty_object() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+</script>
+<template><div>hello</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: Comp emitted even for root with no props
+    assert!(
+        tsx.code.contains("function ___VERTER___Comp"),
+        "should emit Comp for root element, got:\n{}",
+        tsx.code
+    );
+    // Positive: getRootComponentPassedProps returns empty object
+    assert!(
+        tsx.code
+            .contains("getRootComponentPassedProps() { return {}; }"),
+        "should return empty object when no props, got:\n{}",
+        tsx.code
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── Implicit attrs type composition — IDE codegen ───────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn tsx_implicit_attrs_root_element_types() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+</script>
+<template><div id="app">hello</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: RootElement type alias
+    assert!(
+        tsx.code.contains("___VERTER___RootElement"),
+        "should emit RootElement type, got:\n{}",
+        tsx.code
+    );
+    // Positive: RootElementProps type alias using ExtractComponentProps
+    assert!(
+        tsx.code.contains("___VERTER___RootElementProps"),
+        "should emit RootElementProps type, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("___VERTER___ExtractComponentProps"),
+        "should use ExtractComponentProps, got:\n{}",
+        tsx.code
+    );
+    // Positive: Attrs combines explicit + implicit
+    assert!(
+        tsx.code.contains("___VERTER___Attrs")
+            && tsx.code.contains("___VERTER___attributes")
+            && tsx.code.contains("___VERTER___RootElementProps"),
+        "Attrs should combine attributes + RootElementProps, got:\n{}",
+        tsx.code
+    );
+    // Positive: instance declaration overrides $attrs
+    assert!(
+        tsx.code.contains("$attrs: ___VERTER___Attrs"),
+        "instance should override $attrs, got:\n{}",
+        tsx.code
+    );
+    // Negative: Omit should be used on the instance
+    assert!(
+        tsx.code.contains("Omit<InstanceType<"),
+        "should Omit $attrs from base instance type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_inherit_attrs_false_omits_root_element_props() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+</script>
+<template><div>hello</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: Attrs type should only be explicit attrs (no RootElementProps)
+    assert!(
+        tsx.code
+            .contains("type ___VERTER___Attrs = ___VERTER___attributes;"),
+        "inheritAttrs: false should exclude RootElementProps from Attrs, got:\n{}",
+        tsx.code
+    );
+    // Negative: RootElementProps should NOT be in the Attrs union
+    let attrs_line = tsx
+        .code
+        .lines()
+        .find(|l| l.contains("type ___VERTER___Attrs"))
+        .unwrap_or("");
+    assert!(
+        !attrs_line.contains("RootElementProps"),
+        "Attrs should not include RootElementProps when inheritAttrs: false, got:\n{}",
+        attrs_line
+    );
+}
+
+#[test]
+fn tsx_no_template_no_root_element_types() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Negative: no RootElement types without template
+    assert!(
+        !tsx.code.contains("___VERTER___RootElement"),
+        "should not emit RootElement without template, got:\n{}",
+        tsx.code
+    );
+    // Negative: no Attrs override without template
+    assert!(
+        !tsx.code.contains("type ___VERTER___Attrs"),
+        "should not emit Attrs type without template, got:\n{}",
+        tsx.code
+    );
+    // Negative: instance should not use Omit
+    assert!(
+        !tsx.code.contains("Omit<InstanceType"),
+        "instance should not use Omit without template, got:\n{}",
+        tsx.code
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── useAttrs<T>() fallback for attrs type — IDE codegen ─────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn tsx_use_attrs_type_arg_fallback() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { useAttrs } from 'vue'
+const attrs = useAttrs<{ class?: string; id?: string }>()
+</script>
+<template><div>hello</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: attrs type from useAttrs<T>() used as fallback
+    assert!(
+        tsx.code.contains("{ class?: string; id?: string }"),
+        "should use useAttrs type parameter as attrs type, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("___VERTER___attributes"),
+        "should emit ___VERTER___attributes type alias, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: should not have empty attrs type
+    assert!(
+        !tsx.code.contains("type ___VERTER___attributes = {};"),
+        "should not emit empty attrs when useAttrs<T> provides type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_attrs_attribute_takes_priority_over_use_attrs() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts" attrs="{ role?: string }">
+import { useAttrs } from 'vue'
+const attrs = useAttrs<{ class?: string }>()
+</script>
+<template><div>hello</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: attrs attribute value takes priority
+    assert!(
+        tsx.code
+            .contains("___VERTER___attributes = { role?: string }"),
+        "attrs attribute should take priority in type alias, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: useAttrs type should NOT be in the type alias
+    assert!(
+        !tsx.code
+            .contains("___VERTER___attributes = { class?: string }"),
+        "useAttrs type should not be used in type alias when attrs attribute present, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_use_attrs_without_type_arg_no_effect() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { useAttrs } from 'vue'
+const attrs = useAttrs()
+</script>
+<template><div>hello</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: plain useAttrs() without type param → default empty attrs
+    assert!(
+        tsx.code.contains("type ___VERTER___attributes = {}"),
+        "useAttrs() without type param should produce empty attrs type, got:\n{}",
+        tsx.code
     );
 }

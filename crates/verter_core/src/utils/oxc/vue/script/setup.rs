@@ -689,10 +689,12 @@ pub fn parse_macro_call<'a>(
         }
         VueMacroKind::DefineOptions => {
             let object_arg = extract_object_arg_from_call(call, 0, ctx);
+            let has_inherit_attrs_false = detect_inherit_attrs_false(call);
             Some(ScriptMacro::DefineOptions {
                 span,
                 declarator,
                 object_arg,
+                has_inherit_attrs_false,
             })
         }
         VueMacroKind::DefineModel => {
@@ -842,6 +844,31 @@ fn extract_arg_spans<'a>(
 }
 
 /// Extract an object argument from a call at a specific index
+/// Check if a `defineOptions()` call has `inheritAttrs: false` in its first object argument.
+fn detect_inherit_attrs_false(call: &CallExpression<'_>) -> bool {
+    let Some(first_arg) = call.arguments.first() else {
+        return false;
+    };
+    let Some(Expression::ObjectExpression(obj)) = first_arg.as_expression() else {
+        return false;
+    };
+    for prop in &obj.properties {
+        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+            let is_inherit_attrs = match &p.key {
+                PropertyKey::StaticIdentifier(id) => id.name == "inheritAttrs",
+                PropertyKey::StringLiteral(lit) => lit.value == "inheritAttrs",
+                _ => false,
+            };
+            if is_inherit_attrs {
+                if let Expression::BooleanLiteral(b) = &p.value {
+                    return !b.value; // inheritAttrs: false → true
+                }
+            }
+        }
+    }
+    false
+}
+
 fn extract_object_arg_from_call<'a>(
     call: &CallExpression<'a>,
     index: usize,
@@ -1442,11 +1469,25 @@ fn collect_template_util_usage<'a>(
         None
     };
 
+    // Extract type parameter span for useAttrs<T>()
+    // Type annotation spans are NOT adjusted by adjust_program_spans, so we add content_offset
+    let type_arg_span = if kind == VueApiKind::UseAttrs {
+        call.type_arguments.as_ref().and_then(|tp| {
+            tp.params.first().map(|param: &oxc_ast::ast::TSType<'_>| {
+                let s = param.span();
+                Span::new(ctx.content_offset + s.start, ctx.content_offset + s.end)
+            })
+        })
+    } else {
+        None
+    };
+
     usage_ctx.record_template_util(TemplateUtilUsage {
         span,
         kind,
         binding_span,
         ref_name_span,
+        type_arg_span,
     });
 }
 

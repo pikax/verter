@@ -28,40 +28,40 @@ use crate::ast::types::{
     AstNodeKind, CommentNode, ElementNode, ElementNodeConditionKind, InterpolationNode, TagType,
     TextNode,
 };
+use crate::ide::condition::{self, ConditionScope};
 use crate::template::code_gen::binding::{BindingResolver, BindingType};
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::oxc::types::{OxcNodeData, OxcParsedAst, OxcParsedElement};
-use crate::tsx::condition::{self, ConditionScope};
 use crate::types::NodeId;
 
-use super::TsxTemplateOptions;
+use super::IdeTemplateOptions;
 
 /// Shared context for TSX template walker functions.
 ///
 /// Groups the 7 parameters that are threaded identically through
 /// `walk_node`, `walk_element`, and `walk_children_with_iife_tracking`.
-struct TsxTemplateCtx<'a, 'alloc> {
+struct IdeTemplateCtx<'a, 'alloc> {
     ast: &'a crate::ast::types::TemplateAst,
     oxc_ast: &'a OxcParsedAst<'alloc>,
     source: &'alloc str,
     out: &'a mut CodeGenOutput<'alloc>,
     alloc: &'alloc Allocator,
     resolver: &'a BindingResolver<'alloc>,
-    options: &'a TsxTemplateOptions<'a>,
+    options: &'a IdeTemplateOptions<'a>,
 }
 
 /// Generate TSX template (JSX) from the template AST.
 ///
 /// Walks the AST and produces JSX output by overwriting Vue-specific syntax
 /// with JSX equivalents. Uses `CodeGenOutput` for deferred batch operations.
-pub fn generate_tsx_template<'alloc>(
+pub fn generate_ide_template<'alloc>(
     ast: &crate::ast::types::TemplateAst,
     oxc_ast: &OxcParsedAst<'alloc>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     alloc: &'alloc Allocator,
     bindings: &FxHashMap<&'alloc str, BindingType>,
-    options: &TsxTemplateOptions<'_>,
+    options: &IdeTemplateOptions<'_>,
 ) {
     let mut resolver = BindingResolver::new(bindings.clone(), true);
     resolver.set_tsx(true);
@@ -96,7 +96,7 @@ pub fn generate_tsx_template<'alloc>(
         out.prepend_alloc(content.start, "<>");
     }
 
-    let mut ctx = TsxTemplateCtx {
+    let mut ctx = IdeTemplateCtx {
         ast,
         oxc_ast,
         source,
@@ -115,7 +115,7 @@ pub fn generate_tsx_template<'alloc>(
 /// Walk a single AST node and generate JSX output.
 fn walk_node<'a, 'alloc>(
     id: NodeId,
-    ctx: &mut TsxTemplateCtx<'a, 'alloc>,
+    ctx: &mut IdeTemplateCtx<'a, 'alloc>,
     condition_scopes: &[ConditionScope],
 ) {
     let node = &ctx.ast.nodes[id.0];
@@ -150,7 +150,7 @@ fn walk_element<'a, 'alloc>(
     id: NodeId,
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
-    ctx: &mut TsxTemplateCtx<'a, 'alloc>,
+    ctx: &mut IdeTemplateCtx<'a, 'alloc>,
     parent_condition_scopes: &[ConditionScope],
 ) {
     // Handle structural directives first
@@ -368,6 +368,7 @@ fn walk_element<'a, 'alloc>(
         ctx.alloc,
         ctx.resolver,
         guard_text.as_deref(),
+        ctx.options.is_jsx,
     );
 
     // Process v-show
@@ -452,7 +453,7 @@ fn next_sibling_continues_v_if_chain(
 /// is needed after them.
 fn walk_children_with_iife_tracking<'a, 'alloc>(
     children: &[NodeId],
-    ctx: &mut TsxTemplateCtx<'a, 'alloc>,
+    ctx: &mut IdeTemplateCtx<'a, 'alloc>,
     parent_condition_scopes: &[ConditionScope],
 ) {
     let mut pending_iife_close_pos: Option<u32> = None;
@@ -841,36 +842,32 @@ fn rewrite_component_is<'alloc>(
         return;
     }
 
-    if let Some(literal_tag) = parse_string_literal(value_expr) {
-        rewrite_component_tag_name(el, literal_tag, out);
-    } else {
-        // Resolve binding prefixes (e.g., _ctx. for Data bindings)
-        let oxc_prop =
-            oxc_el.and_then(|el| el.props.iter().find(|p| p.prop_index == bind_is_index));
-        let resolved_expr = if let Some(oxc_p) = oxc_prop {
-            if let Some(ref exp) = oxc_p.exp {
-                use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
-                build_prefixed_expr(value_expr, value_start, exp, resolver, &[])
-            } else {
-                resolver.resolve_simple_expr(value_expr)
-            }
+    // All dynamic :is expressions use extractRenderComponent wrapper.
+    // Resolve binding prefixes (e.g., _ctx. for Data bindings)
+    let oxc_prop = oxc_el.and_then(|el| el.props.iter().find(|p| p.prop_index == bind_is_index));
+    let resolved_expr = if let Some(oxc_p) = oxc_prop {
+        if let Some(ref exp) = oxc_p.exp {
+            use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
+            build_prefixed_expr(value_expr, value_start, exp, resolver, &[])
         } else {
             resolver.resolve_simple_expr(value_expr)
-        };
+        }
+    } else {
+        resolver.resolve_simple_expr(value_expr)
+    };
 
-        let temp_name = format!("__verter_component_render_{}", el.tag_open.start);
-        let prefix = format!("const {} = (", temp_name);
-        let content = format!("{}{});\n", prefix, resolved_expr);
-        // Use mapped emission so the expression gets a source map token.
-        // This allows TSGO to map hover positions back to the Vue template.
-        out.prepend_alloc_mapped_with_offset(
-            el.tag_open.start,
-            value_start,
-            prefix.len() as u32,
-            &content,
-        );
-        rewrite_component_tag_name(el, &temp_name, out);
-    }
+    let temp_name = "___VERTER___component_render";
+    let prefix = format!("const {}=___VERTER___extractRenderComponent(", temp_name);
+    let content = format!("{}{});\n", prefix, resolved_expr);
+    // Use mapped emission so the expression gets a source map token.
+    // This allows TSGO to map hover positions back to the Vue template.
+    out.prepend_alloc_mapped_with_offset(
+        el.tag_open.start,
+        value_start,
+        prefix.len() as u32,
+        &content,
+    );
+    rewrite_component_tag_name(el, temp_name, out);
 
     // Remove `:is="..."`
     let prop_end = props::get_prop_end(bind_is_prop);
@@ -912,19 +909,6 @@ fn directive_name<'a>(prop: &crate::types::NodeProp, source: &'a str) -> &'a str
         return "slot";
     }
     name.strip_prefix("v-").unwrap_or(name)
-}
-
-fn parse_string_literal(value_expr: &str) -> Option<&str> {
-    let bytes = value_expr.as_bytes();
-    if bytes.len() < 2 {
-        return None;
-    }
-    let first = bytes[0];
-    let last = bytes[bytes.len() - 1];
-    if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
-        return Some(&value_expr[1..value_expr.len() - 1]);
-    }
-    None
 }
 
 /// Extract the slot name from a `<slot>` element's attributes.
@@ -1083,7 +1067,7 @@ fn visit_interpolation<'alloc>(
 fn visit_comment(
     comment: &CommentNode,
     out: &mut CodeGenOutput<'_>,
-    options: &TsxTemplateOptions<'_>,
+    options: &IdeTemplateOptions<'_>,
 ) {
     if !options.comments {
         // Strip comment entirely
@@ -1142,12 +1126,13 @@ mod tests {
         let mut tpl_ct = CodeTransform::new(source, &tpl_alloc);
         let mut out = CodeGenOutput::new(&tpl_alloc);
         let bindings = FxHashMap::default();
-        let options = TsxTemplateOptions {
+        let options = IdeTemplateOptions {
             self_name: "App",
             comments: true,
+            is_jsx: false,
         };
 
-        generate_tsx_template(
+        generate_ide_template(
             &template_ast,
             &oxc_ast,
             source,
@@ -1211,12 +1196,13 @@ mod tests {
             binding_map.insert(tpl_alloc.alloc_str(name), bt);
         }
 
-        let options = TsxTemplateOptions {
+        let options = IdeTemplateOptions {
             self_name: "App",
             comments: true,
+            is_jsx: false,
         };
 
-        generate_tsx_template(
+        generate_ide_template(
             &template_ast,
             &oxc_ast,
             source,
@@ -2828,12 +2814,13 @@ mod tests {
         let mut tpl_ct = CodeTransform::new(source, &tpl_alloc);
         let mut out = CodeGenOutput::new(&tpl_alloc);
         let binding_map: FxHashMap<&str, BindingType> = bindings.iter().copied().collect();
-        let options = TsxTemplateOptions {
+        let options = IdeTemplateOptions {
             self_name: "App",
             comments: true,
+            is_jsx: false,
         };
 
-        generate_tsx_template(
+        generate_ide_template(
             &template_ast,
             &oxc_ast,
             source,
@@ -3053,6 +3040,208 @@ mod tests {
             has_expr_token,
             "inline expression should have source map token at src col {}. Tokens: {:?}",
             expr_src_offset, tokens
+        );
+    }
+
+    // ── Bug 1: Dynamic <component :is> uses extractRenderComponent ──
+
+    #[test]
+    fn component_dynamic_is_uses_extract_render_component() {
+        let source = r#"<template><component :is="'div'"></component></template>"#;
+        let output = gen_tsx_template(source);
+
+        assert!(
+            output.contains("___VERTER___extractRenderComponent"),
+            "should use extractRenderComponent wrapper: {output}"
+        );
+        assert!(
+            output.contains("___VERTER___component_render"),
+            "should use ___VERTER___component_render temp name: {output}"
+        );
+        assert!(
+            output
+                .contains("const ___VERTER___component_render=___VERTER___extractRenderComponent("),
+            "should declare const with extractRenderComponent wrapper: {output}"
+        );
+        // Negative: old format should not appear
+        assert!(
+            !output.contains("__verter_component_render"),
+            "old format __verter_component_render should not appear: {output}"
+        );
+        assert!(
+            !output.contains("<component"),
+            "<component tag should be rewritten: {output}"
+        );
+    }
+
+    #[test]
+    fn component_dynamic_is_expression() {
+        let source = r#"<template><component :is="as || 'div'"></component></template>"#;
+        let output = gen_tsx_template_with_bindings(source, &[("as", BindingType::SetupRef)]);
+
+        assert!(
+            output.contains("___VERTER___extractRenderComponent("),
+            "should use extractRenderComponent: {output}"
+        );
+        assert!(
+            output.contains("<___VERTER___component_render"),
+            "should rewrite opening tag: {output}"
+        );
+        assert!(
+            output.contains("</___VERTER___component_render>"),
+            "should rewrite closing tag: {output}"
+        );
+    }
+
+    #[test]
+    fn component_static_is_unchanged() {
+        let source = r#"<template><component is="div" tabindex="1"></component></template>"#;
+        let output = gen_tsx_template(source);
+
+        assert!(
+            output.contains("<div"),
+            "static is should rewrite to target tag: {output}"
+        );
+        assert!(
+            !output.contains("extractRenderComponent"),
+            "static is should not use extractRenderComponent: {output}"
+        );
+        assert!(
+            !output.contains("<component"),
+            "<component tag should be rewritten: {output}"
+        );
+    }
+
+    #[test]
+    fn component_dynamic_is_removes_is_directive() {
+        let source = r#"<template><component :is="tag" class="foo"></component></template>"#;
+        let output = gen_tsx_template_with_bindings(source, &[("tag", BindingType::SetupRef)]);
+
+        assert!(
+            output.contains("class=\"foo\""),
+            "class attribute should be preserved: {output}"
+        );
+        assert!(
+            !output.contains(":is="),
+            ":is= directive should be removed: {output}"
+        );
+    }
+
+    // ── Bug 2: Class/Style merge ──
+
+    #[test]
+    fn class_merge_static_and_dynamic() {
+        let source = r#"<template><div class="foo" :class="{bar: true}"/></template>"#;
+        let output = gen_tsx_template(source);
+
+        assert!(
+            output.contains("normalizeClass"),
+            "should use normalizeClass: {output}"
+        );
+        assert!(
+            output.contains("{bar: true}") && output.contains("\"foo\""),
+            "should contain both class expressions: {output}"
+        );
+        // Count class= occurrences — should be exactly 1
+        let class_count = output.matches("class=").count();
+        assert_eq!(
+            class_count, 1,
+            "should have exactly 1 class= attribute, got {class_count}: {output}"
+        );
+    }
+
+    #[test]
+    fn class_merge_with_prop_in_between() {
+        let source =
+            r#"<template><div class="foo" my-random-prop="true" :class="{bar: true}"/></template>"#;
+        let output = gen_tsx_template(source);
+
+        assert!(
+            output.contains("normalizeClass"),
+            "should use normalizeClass: {output}"
+        );
+        assert!(
+            output.contains("my-random-prop"),
+            "should preserve other props: {output}"
+        );
+        let class_count = output.matches("class=").count();
+        assert_eq!(
+            class_count, 1,
+            "should have exactly 1 class= attribute, got {class_count}: {output}"
+        );
+    }
+
+    #[test]
+    fn style_merge_static_and_dynamic() {
+        let source = r#"<template><div style="color:red" :style="{ bg: 'blue' }"/></template>"#;
+        let output = gen_tsx_template(source);
+
+        assert!(
+            output.contains("normalizeStyle"),
+            "should use normalizeStyle: {output}"
+        );
+        let style_count = output.matches("style=").count();
+        assert_eq!(
+            style_count, 1,
+            "should have exactly 1 style= attribute, got {style_count}: {output}"
+        );
+    }
+
+    #[test]
+    fn class_and_style_merge_combined() {
+        let source = r#"<template><div class="a" :class="b" style="c" :style="d"/></template>"#;
+        let output = gen_tsx_template_with_bindings(
+            source,
+            &[("b", BindingType::SetupRef), ("d", BindingType::SetupRef)],
+        );
+
+        assert!(
+            output.contains("normalizeClass"),
+            "should use normalizeClass: {output}"
+        );
+        assert!(
+            output.contains("normalizeStyle"),
+            "should use normalizeStyle: {output}"
+        );
+        let class_count = output.matches("class=").count();
+        assert_eq!(
+            class_count, 1,
+            "should have exactly 1 class= attribute: {output}"
+        );
+        let style_count = output.matches("style=").count();
+        assert_eq!(
+            style_count, 1,
+            "should have exactly 1 style= attribute: {output}"
+        );
+    }
+
+    #[test]
+    fn class_only_static_no_merge() {
+        let source = r#"<template><div class="foo"/></template>"#;
+        let output = gen_tsx_template(source);
+
+        assert!(
+            output.contains("class=\"foo\""),
+            "static class should be unchanged: {output}"
+        );
+        assert!(
+            !output.contains("normalizeClass"),
+            "should not use normalizeClass for static-only: {output}"
+        );
+    }
+
+    #[test]
+    fn class_only_dynamic_no_merge() {
+        let source = r#"<template><div :class="{bar: true}"/></template>"#;
+        let output = gen_tsx_template(source);
+
+        assert!(
+            output.contains("class={{bar: true}}"),
+            "dynamic-only class should be simple binding: {output}"
+        );
+        assert!(
+            !output.contains("normalizeClass"),
+            "should not use normalizeClass for dynamic-only: {output}"
         );
     }
 }

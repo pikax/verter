@@ -1196,3 +1196,138 @@ defineProps<{ title: string }>()
         r
     );
 }
+
+// ── attrs attribute on <script setup> ────────────────────────────────────────
+
+#[test]
+fn tsc_codegen_attrs_explicit_type() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" attrs="{ class?: string; id?: string }">
+defineProps<{ title: string }>()
+</script><template/>"#,
+    );
+
+    // Positive: $attrs should contain the explicit type
+    assert!(
+        r.contains("$attrs: { class?: string; id?: string }"),
+        "should emit explicit attrs type in $attrs: got {}",
+        r
+    );
+    // Negative: should not be empty
+    assert!(
+        !r.contains("$attrs: {}"),
+        "should not have empty $attrs with explicit attrs: got {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_attrs_default_empty() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineProps<{ title: string }>()
+</script><template/>"#,
+    );
+
+    // Positive: $attrs should default to empty
+    assert!(
+        r.contains("$attrs: {}"),
+        "should emit empty $attrs by default: got {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_attrs_alias_attributes() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" attributes="{ role?: string }">
+defineProps<{ title: string }>()
+</script><template/>"#,
+    );
+
+    // Positive: 'attributes' alias should work
+    assert!(
+        r.contains("$attrs: { role?: string }"),
+        "'attributes' alias should produce typed $attrs: got {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_attrs_with_generic() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" generic="T" attrs="{ value: T }">
+defineProps<{ items: T[] }>()
+</script><template/>"#,
+    );
+
+    // Positive: $attrs should contain the generic type
+    assert!(
+        r.contains("$attrs: { value: T }"),
+        "should emit generic attrs type in $attrs: got {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_use_attrs_type_arg_fallback() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { useAttrs } from 'vue'
+const attrs = useAttrs<{ class?: string; id?: string }>()
+</script><template/>"#,
+    );
+
+    // Positive: useAttrs<T>() type parameter used as $attrs type
+    assert!(
+        r.contains("$attrs: { class?: string; id?: string }"),
+        "should use useAttrs type param as $attrs type, got:\n{}",
+        r
+    );
+    // Negative: should not have empty $attrs
+    assert!(
+        !r.contains("$attrs: {},"),
+        "should not have empty $attrs when useAttrs<T> provides type, got:\n{}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_attrs_attribute_priority_over_use_attrs() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" attrs="{ role?: string }">
+import { useAttrs } from 'vue'
+const attrs = useAttrs<{ class?: string }>()
+</script><template/>"#,
+    );
+
+    // Positive: attrs attribute takes priority
+    assert!(
+        r.contains("$attrs: { role?: string }"),
+        "attrs attribute should take priority over useAttrs<T>, got:\n{}",
+        r
+    );
+    // Negative: useAttrs type should not appear in $attrs
+    assert!(
+        !r.contains("class?: string"),
+        "useAttrs type param should not override attrs attribute, got:\n{}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_use_attrs_without_type_no_effect() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { useAttrs } from 'vue'
+const attrs = useAttrs()
+</script><template/>"#,
+    );
+
+    // Positive: plain useAttrs() → default empty $attrs
+    assert!(
+        r.contains("$attrs: {},"),
+        "useAttrs() without type param should produce empty $attrs, got:\n{}",
+        r
+    );
+}

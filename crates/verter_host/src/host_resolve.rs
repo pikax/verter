@@ -66,7 +66,7 @@ impl VerterHost {
     ///
     /// Unlike [`get_virtual_file`](Self::get_virtual_file), this does not require
     /// specifying a `VirtualNodeKind`. It simply ensures the compilation cache is
-    /// populated so that subsequent `get_tsx()`, `get_analysis()`, or
+    /// populated so that subsequent `get_ide()`, `get_analysis()`, or
     /// `get_virtual_file()` calls hit the cache.
     ///
     /// Returns `Ok(())` on success (cache hit or successful compilation).
@@ -355,25 +355,26 @@ impl VerterHost {
 
     /// Retrieve the combined TSX output for LSP type checking.
     ///
-    /// Returns the TSX code and optional source map for the given file and profile.
-    /// This is a dedicated API separate from the virtual file system, since TSX
+    /// Returns the IDE code (TSX or JSX) and optional source map for the given file and profile.
+    /// This is a dedicated API separate from the virtual file system, since IDE
     /// output is only consumed by the LSP and playground, never by bundlers.
-    pub fn get_tsx(&self, canonical_id: &str, profile: &CompileProfile) -> Option<TsxResponse> {
+    pub fn get_ide(&self, canonical_id: &str, profile: &CompileProfile) -> Option<IdeResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = compile_profile_hash(profile);
         let files = read_lock(&self.files);
         let entry = files.get(&canonical)?;
         let slot = entry.compile_slots.get(&profile_hash)?;
         let tsx = slot.tsx.as_ref()?;
-        Some(TsxResponse {
+        Some(IdeResponse {
             code: tsx.code.clone(),
             source_map: tsx.source_map.clone(),
+            is_jsx: tsx.is_jsx,
         })
     }
 
     /// Generate TSC output for a Vue SFC — minimal TypeScript declarations.
     ///
-    /// Unlike [`get_tsx`](Self::get_tsx), this does NOT require a prior
+    /// Unlike [`get_ide`](Self::get_ide), this does NOT require a prior
     /// [`get_virtual_file`](Self::get_virtual_file) call. It performs
     /// macro-only extraction (OXC parse → defineProps/Emits/Model/Options)
     /// and generates a `ComponentPublicInstance`-based declaration.
@@ -691,7 +692,7 @@ impl VerterHost {
             );
         }
 
-        // Combined TSX output for LSP type checking — stored separately, not as virtual file
+        // Combined IDE output (TSX/JSX) for LSP type checking — stored separately, not as virtual file
         let cached_tsx = compiled.tsx.map(|tsx| CachedTsx {
             code: Arc::from(tsx.code),
             source_map: if tsx.source_map.is_empty() {
@@ -699,6 +700,7 @@ impl VerterHost {
             } else {
                 Some(Arc::from(tsx.source_map))
             },
+            is_jsx: tsx.is_jsx,
         });
 
         // Convert raw template data into analysis types when available

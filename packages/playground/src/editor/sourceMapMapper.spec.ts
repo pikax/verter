@@ -51,9 +51,9 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
     compileProfile: profile,
   });
 
-  const tsx = host.getTsx("App.vue", profile);
+  const tsx = host.getIde("App.vue", profile);
   if (!tsx?.code || !tsx?.sourceMap) {
-    throw new Error("expected host.getTsx() to return code + sourceMap");
+    throw new Error("expected host.getIde() to return code + sourceMap");
   }
 
   return { code: tsx.code, sourceMap: tsx.sourceMap };

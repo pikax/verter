@@ -13,17 +13,18 @@ use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 
 use crate::ast::types::{ElementNode, TagType};
+use crate::ide::{event_to_jsx_name, get_directive_name};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedProp};
-use crate::tsx::{event_to_jsx_name, get_directive_name};
 use crate::types::NodeProp;
 
 /// Process all props on an element, converting to JSX syntax.
 ///
 /// `condition_guard` is the accumulated condition text from v-if scopes
 /// (parent + own), used for type narrowing guards in arrow function props.
+#[allow(clippy::too_many_arguments)]
 pub fn process_element_props<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
@@ -32,8 +33,40 @@ pub fn process_element_props<'alloc>(
     alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
     condition_guard: Option<&str>,
+    is_jsx: bool,
 ) {
     let v_if_guard = condition_guard;
+
+    // Pre-scan for class/style merge: when both static and dynamic exist,
+    // we merge them into a single normalizeClass/normalizeStyle call.
+    let merge_class = el.needs_class_merge();
+    let merge_style = el.needs_style_merge();
+
+    // Find static class/style prop indices and values for merging
+    let mut static_class_idx: Option<usize> = None;
+    let mut static_style_idx: Option<usize> = None;
+    let mut static_class_value: Option<&str> = None;
+    let mut static_style_value: Option<&str> = None;
+
+    if merge_class || merge_style {
+        for (i, prop) in el.props.iter().enumerate() {
+            if prop.is_directive {
+                continue;
+            }
+            let name = &source[prop.start as usize..prop.name_end as usize];
+            if merge_class && name == "class" {
+                static_class_idx = Some(i);
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    static_class_value = Some(&source[vs as usize..ve as usize]);
+                }
+            } else if merge_style && name == "style" {
+                static_style_idx = Some(i);
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    static_style_value = Some(&source[vs as usize..ve as usize]);
+                }
+            }
+        }
+    }
 
     for (i, prop) in el.props.iter().enumerate() {
         // Find corresponding OXC data for this prop
@@ -53,11 +86,23 @@ pub fn process_element_props<'alloc>(
 
         // v-model expansion: convert to modelValue/onUpdate:modelValue prop pair
         if is_builtin_directive(prop, source, "model") {
-            process_v_model(prop, oxc_prop, el, source, out, resolver);
+            process_v_model(prop, oxc_prop, el, source, out, resolver, is_jsx);
             continue;
         }
 
         if !prop.is_directive {
+            // Static class/style props that need merging: remove from output
+            // (they'll be merged into the dynamic binding's normalizeClass/normalizeStyle)
+            if static_class_idx == Some(i) {
+                let prop_end = get_prop_end(prop);
+                out.overwrite(prop.start, prop_end, "");
+                continue;
+            }
+            if static_style_idx == Some(i) {
+                let prop_end = get_prop_end(prop);
+                out.overwrite(prop.start, prop_end, "");
+                continue;
+            }
             // Static attribute — pass through
             continue;
         }
@@ -79,6 +124,43 @@ pub fn process_element_props<'alloc>(
             }
         }
 
+        // Check if this is a :class or :style that needs merging
+        if dir_name == "bind" && prop.is_dynamic != Some(true) {
+            if let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) {
+                let arg_name = &source[arg_start as usize..arg_end as usize];
+                if merge_class && arg_name == "class" {
+                    if let Some(static_val) = static_class_value {
+                        process_merged_class_or_style(
+                            prop,
+                            oxc_prop,
+                            source,
+                            out,
+                            resolver,
+                            "class",
+                            "___VERTER___normalizeClass",
+                            static_val,
+                        );
+                        continue;
+                    }
+                }
+                if merge_style && arg_name == "style" {
+                    if let Some(static_val) = static_style_value {
+                        process_merged_class_or_style(
+                            prop,
+                            oxc_prop,
+                            source,
+                            out,
+                            resolver,
+                            "style",
+                            "___VERTER___normalizeStyle",
+                            static_val,
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+
         match dir_name {
             "bind" => process_v_bind(prop, oxc_prop, source, out, alloc, resolver, v_if_guard),
             "on" => process_v_on(prop, oxc_prop, source, out, alloc, resolver, v_if_guard),
@@ -89,6 +171,41 @@ pub fn process_element_props<'alloc>(
                 remove_prop(prop, source, out);
             }
         }
+    }
+}
+
+/// Merge a static class/style value with a dynamic binding into a single
+/// `normalizeClass([dynamic, "static"])` or `normalizeStyle([dynamic, "static"])` call.
+#[allow(clippy::too_many_arguments)]
+fn process_merged_class_or_style<'alloc>(
+    prop: &NodeProp,
+    oxc_prop: Option<&OxcParsedProp<'alloc>>,
+    source: &'alloc str,
+    out: &mut CodeGenOutput<'alloc>,
+    resolver: &BindingResolver<'alloc>,
+    attr_name: &str,
+    helper_name: &str,
+    static_value: &str,
+) {
+    let prop_end = get_prop_end(prop);
+    if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+        let value_expr = &source[vs as usize..ve as usize];
+        let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+        out.overwrite(
+            prop.start,
+            prop_end,
+            &format!(
+                "{}={{{}([{},\"{}\"])}}",
+                attr_name, helper_name, resolved, static_value
+            ),
+        );
+    } else {
+        // No dynamic value — shouldn't happen if merge flag is set, but handle gracefully
+        out.overwrite(
+            prop.start,
+            prop_end,
+            &format!("{}=\"{}\"", attr_name, static_value),
+        );
     }
 }
 
@@ -411,6 +528,7 @@ fn process_v_model<'alloc>(
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
+    is_jsx: bool,
 ) {
     let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) else {
         // v-model with no value — remove
@@ -468,25 +586,27 @@ fn process_v_model<'alloc>(
     // (since "onUpdate:modelValue" is not a valid JSX attribute name).
     let is_native = el.tag_type.is_element();
 
+    let event_param = if is_jsx { "$event" } else { "$event: any" };
+
     let mut replacement = if is_dynamic_arg {
         // Dynamic: always use spread syntax for computed prop names
         format!(
-            "{{...{{{}:{}, \"{}\":($event: any) => (({}) = $event)}}}}",
-            value_prop, resolved, update_event, resolved
+            "{{...{{{}:{}, \"{}\":({}) => (({}) = $event)}}}}",
+            value_prop, resolved, update_event, event_param, resolved
         )
     } else if is_native {
         // Native element: use DOM property + native event handler
         let tag = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
         let (dom_prop, event_name) = native_vmodel_prop_and_event(el, source, tag);
         format!(
-            "{}={{{}}} {}={{($event: any) => (({}) = $event)}}",
-            dom_prop, resolved, event_name, resolved
+            "{}={{{}}} {}={{({}) => (({}) = $event)}}",
+            dom_prop, resolved, event_name, event_param, resolved
         )
     } else {
         // Component: modelValue + spread for event handler
         format!(
-            "{}={{{}}} {{...{{\"{}\":($event: any) => (({}) = $event)}}}}",
-            value_prop, resolved, update_event, resolved
+            "{}={{{}}} {{...{{\"{}\":({}) => (({}) = $event)}}}}",
+            value_prop, resolved, update_event, event_param, resolved
         )
     };
 
@@ -578,7 +698,7 @@ fn process_v_text<'alloc>(
 
 // ── Helpers ───────────────────────────────────────────────────────
 
-// get_directive_name is imported from crate::tsx (tsx/mod.rs)
+// get_directive_name is imported from crate::ide (tsx/mod.rs)
 
 /// Check if a prop is a structural directive (v-if, v-else-if, v-else, v-for, v-slot).
 fn is_structural_directive(prop: &NodeProp, source: &str) -> bool {
@@ -622,7 +742,7 @@ pub(crate) fn get_prop_end(prop: &NodeProp) -> u32 {
     }
 }
 
-// event_to_jsx_name is imported from crate::tsx (tsx/mod.rs)
+// event_to_jsx_name is imported from crate::ide (tsx/mod.rs)
 
 fn rewrite_v_on_object_literal_expr(expr: &str) -> String {
     let trimmed = expr.trim();
@@ -749,7 +869,7 @@ fn inject_function_guard(
                     .unwrap_or(after_arrow);
                 let mut result = String::with_capacity(resolved.len() + guard.len() + 30);
                 result.push_str(&resolved[..body_start]);
-                result.push_str(&crate::tsx::condition::build_ternary_guard(guard));
+                result.push_str(&crate::ide::condition::build_ternary_guard(guard));
                 result.push_str(&resolved[body_start..]);
                 Some(result)
             } else {
@@ -759,7 +879,7 @@ fn inject_function_guard(
                 let brace_pos = after_arrow + brace_offset;
                 let mut result = String::with_capacity(resolved.len() + guard.len() + 30);
                 result.push_str(&resolved[..=brace_pos]);
-                result.push_str(&crate::tsx::condition::build_block_guard(guard));
+                result.push_str(&crate::ide::condition::build_block_guard(guard));
                 result.push_str(&resolved[brace_pos + 1..]);
                 Some(result)
             }
@@ -788,7 +908,7 @@ fn inject_function_guard(
             let brace_pos = paren_close + brace_offset;
             let mut result = String::with_capacity(resolved.len() + guard.len() + 30);
             result.push_str(&resolved[..=brace_pos]);
-            result.push_str(&crate::tsx::condition::build_block_guard(guard));
+            result.push_str(&crate::ide::condition::build_block_guard(guard));
             result.push_str(&resolved[brace_pos + 1..]);
             Some(result)
         }

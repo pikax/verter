@@ -141,7 +141,10 @@ mod tests {
 
     #[test]
     fn linter_with_empty_analysis_returns_empty() {
-        let linter = Linter::new(LintConfig::default());
+        let mut config = LintConfig::default();
+        // Disable valid-template-root since an empty snapshot has no elements
+        config.rules.insert("valid-template-root".to_string(), None);
+        let linter = Linter::new(config);
         let template = TemplateAnalysisSnapshot::default();
         let set = linter.lint(None, Some(&template), &[]);
         assert!(set.is_empty());

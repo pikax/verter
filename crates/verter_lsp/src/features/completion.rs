@@ -5,7 +5,9 @@ use tower_lsp_server::lsp_types::*;
 use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
+use crate::documents::sfc_scanner::{
+    classify_cursor, parse_opening_tag, SfcBlock, SfcCursorContext,
+};
 
 /// Result from completion, including an `is_incomplete` flag for re-query behavior.
 pub struct CompletionResult {
@@ -44,8 +46,28 @@ pub fn completions_at_position(
     workspace_components: Option<&[WorkspaceComponent]>,
     doc_uri: Option<&str>,
 ) -> Option<CompletionResult> {
+    let offset = line_index.position_to_offset(position)?;
+
+    // Check SFC structural context BEFORE requiring analysis data.
+    match classify_cursor(offset, blocks) {
+        SfcCursorContext::RootLevel => {
+            return Some(CompletionResult {
+                items: sfc_root_completions(source, blocks),
+                is_incomplete: false,
+            });
+        }
+        SfcCursorContext::OpeningTag { block_index } => {
+            return Some(CompletionResult {
+                items: sfc_attribute_completions(source, &blocks[block_index]),
+                is_incomplete: false,
+            });
+        }
+        SfcCursorContext::ClosingTag { .. } => return None,
+        SfcCursorContext::BlockContent { .. } => {} // fall through
+    }
+
     let analysis = analysis?;
-    let offset = line_index.position_to_offset(position)? as usize;
+    let offset = offset as usize;
 
     // Determine which block the cursor is in
     let block = blocks.iter().find(|b| {
@@ -90,6 +112,188 @@ pub fn completions_at_position(
             )
         }
         _ => None,
+    }
+}
+
+// =============================================================================
+// SFC Root & Attribute Completions
+// =============================================================================
+
+/// Completions at root level (outside all blocks): tag snippets + scaffold snippets.
+fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    let has_template = blocks.iter().any(|b| b.tag_name == "template");
+    let has_script = blocks.iter().any(|b| b.tag_name == "script");
+    let has_style = blocks.iter().any(|b| b.tag_name == "style");
+    let is_empty = source.trim().is_empty();
+
+    // Tag snippets (filtered by existing blocks)
+    if !has_template {
+        items.push(snippet_item(
+            "template",
+            "<template>\n\t$0\n</template>",
+            "Add <template> block",
+            1,
+        ));
+    }
+    if !has_script {
+        items.push(snippet_item(
+            "script setup",
+            "<script setup lang=\"ts\">\n$0\n</script>",
+            "Add <script setup> block",
+            2,
+        ));
+        items.push(snippet_item(
+            "script",
+            "<script lang=\"ts\">\n$0\n</script>",
+            "Add <script> block",
+            3,
+        ));
+    }
+    if !has_style {
+        items.push(snippet_item(
+            "style scoped",
+            "<style scoped>\n$0\n</style>",
+            "Add <style scoped> block",
+            4,
+        ));
+        items.push(snippet_item(
+            "style",
+            "<style>\n$0\n</style>",
+            "Add <style> block",
+            5,
+        ));
+    }
+
+    // Scaffold snippets (only when file is mostly empty)
+    if is_empty {
+        items.push(snippet_item(
+            "vue-ts",
+            "<script setup lang=\"ts\">\n$0\n</script>\n\n<template>\n\t\n</template>",
+            "Vue SFC scaffold (TypeScript)",
+            0,
+        ));
+        items.push(snippet_item(
+            "vue",
+            "<script setup>\n$0\n</script>\n\n<template>\n\t\n</template>",
+            "Vue SFC scaffold (JavaScript)",
+            0,
+        ));
+        items.push(snippet_item(
+            "vue-options",
+            "<script lang=\"ts\">\nimport { defineComponent } from 'vue'\n\nexport default defineComponent({\n\t$0\n})\n</script>\n\n<template>\n\t\n</template>",
+            "Vue SFC scaffold (Options API)",
+            0,
+        ));
+    }
+
+    // Custom block snippets
+    items.push(snippet_item(
+        "i18n",
+        "<i18n lang=\"${1:json}\">\n$0\n</i18n>",
+        "Add <i18n> block",
+        6,
+    ));
+
+    items
+}
+
+/// Completions inside an SFC opening tag: context-sensitive attributes.
+fn sfc_attribute_completions(source: &str, block: &SfcBlock) -> Vec<CompletionItem> {
+    let ctx = parse_opening_tag(source, block);
+    let existing: Vec<&str> = ctx.attrs.iter().map(|a| a.name.as_str()).collect();
+    let mut items = Vec::new();
+
+    match ctx.tag_name.as_str() {
+        "script" => {
+            if !existing.contains(&"setup") {
+                items.push(attr_item("setup", None, "Enable <script setup> syntax"));
+            }
+            if !existing.contains(&"lang") {
+                items.push(attr_item(
+                    "lang",
+                    Some("\"${1:ts}\""),
+                    "Script language (ts, tsx, jsx)",
+                ));
+            }
+            if !existing.contains(&"generic") && existing.contains(&"setup") {
+                items.push(attr_item(
+                    "generic",
+                    Some("\"$1\""),
+                    "Generic type parameters",
+                ));
+            }
+            if !existing.contains(&"attrs") && !existing.contains(&"attributes") {
+                items.push(attr_item(
+                    "attrs",
+                    Some("\"$1\""),
+                    "Typed $attrs declaration",
+                ));
+            }
+            if !existing.contains(&"src") {
+                items.push(attr_item("src", Some("\"$1\""), "External script source"));
+            }
+        }
+        "template" => {
+            if !existing.contains(&"lang") {
+                items.push(attr_item("lang", Some("\"${1:pug}\""), "Template language"));
+            }
+        }
+        "style" => {
+            if !existing.contains(&"scoped") {
+                items.push(attr_item("scoped", None, "Component-scoped CSS"));
+            }
+            if !existing.contains(&"module") {
+                items.push(attr_item("module", None, "CSS Modules"));
+            }
+            if !existing.contains(&"lang") {
+                items.push(attr_item(
+                    "lang",
+                    Some("\"${1:scss}\""),
+                    "Style language (scss, less, stylus)",
+                ));
+            }
+        }
+        _ => {
+            if !existing.contains(&"lang") {
+                items.push(attr_item("lang", Some("\"$1\""), "Block language"));
+            }
+        }
+    }
+
+    items
+}
+
+fn snippet_item(
+    label: &str,
+    insert_text: &str,
+    detail: &str,
+    sort_priority: u32,
+) -> CompletionItem {
+    CompletionItem {
+        label: label.to_string(),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some(detail.to_string()),
+        insert_text: Some(insert_text.to_string()),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        sort_text: Some(format!("{:04}", sort_priority)),
+        ..Default::default()
+    }
+}
+
+fn attr_item(name: &str, value_snippet: Option<&str>, detail: &str) -> CompletionItem {
+    let (insert_text, format) = if let Some(val) = value_snippet {
+        (format!("{}={}", name, val), InsertTextFormat::SNIPPET)
+    } else {
+        (name.to_string(), InsertTextFormat::PLAIN_TEXT)
+    };
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(CompletionItemKind::PROPERTY),
+        detail: Some(detail.to_string()),
+        insert_text: Some(insert_text),
+        insert_text_format: Some(format),
+        ..Default::default()
     }
 }
 
@@ -893,7 +1097,8 @@ mod tests {
 
     #[test]
     fn test_filters_internal_symbols() {
-        let source = "<script setup>\n</script>\n";
+        // Use a source with actual content so the cursor is inside the block, not on the closing tag
+        let source = "<script setup>\n\n</script>\n";
         let blocks = scan_sfc_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
@@ -911,6 +1116,7 @@ mod tests {
             vec![],
         );
 
+        // Position on the empty line (line 1) which is block content
         let position = Position {
             line: 1,
             character: 0,
@@ -1517,5 +1723,173 @@ mod tests {
             None,
             content_start,
         )
+    }
+
+    // ========================================================================
+    // SFC root completions (A3)
+    // ========================================================================
+
+    #[test]
+    fn test_root_completions_empty_file() {
+        let source = "";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let pos = Position {
+            line: 0,
+            character: 0,
+        };
+        let result =
+            completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+        assert!(result.is_some(), "should provide completions at root level");
+        let items = result.unwrap().items;
+
+        // Should have scaffold snippets since file is empty
+        assert!(
+            items.iter().any(|i| i.label == "vue-ts"),
+            "should have vue-ts scaffold: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        assert!(
+            items.iter().any(|i| i.label == "vue"),
+            "should have vue scaffold"
+        );
+        assert!(
+            items.iter().any(|i| i.label == "template"),
+            "should have template snippet"
+        );
+        assert!(
+            items.iter().any(|i| i.label == "script setup"),
+            "should have script setup snippet"
+        );
+    }
+
+    #[test]
+    fn test_root_completions_with_existing_blocks() {
+        let source = "<template>\n  <div/>\n</template>\n\n";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        // Position after </template> — at root level
+        let pos = line_index
+            .offset_to_position(blocks[0].close_tag_end)
+            .unwrap();
+        let result =
+            completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+        assert!(result.is_some());
+        let items = result.unwrap().items;
+
+        // Template already exists — should NOT offer template snippet
+        assert!(
+            !items.iter().any(|i| i.label == "template"),
+            "should not offer template when already exists"
+        );
+        // Should still offer script
+        assert!(
+            items.iter().any(|i| i.label == "script setup"),
+            "should offer script setup: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        // Should not have scaffold snippets (file is not empty)
+        assert!(
+            !items.iter().any(|i| i.label == "vue-ts"),
+            "should not have scaffolds when file has content"
+        );
+    }
+
+    #[test]
+    fn test_attribute_completions_script() {
+        let source = "<script >\nconst x = 1;\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        // Position inside opening tag (on the space after "script")
+        let pos = line_index.offset_to_position(8).unwrap(); // after "<script " before ">"
+        let result =
+            completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+        assert!(result.is_some());
+        let items = result.unwrap().items;
+
+        assert!(
+            items.iter().any(|i| i.label == "setup"),
+            "should offer setup: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        assert!(items.iter().any(|i| i.label == "lang"), "should offer lang");
+        assert!(
+            items.iter().any(|i| i.label == "attrs"),
+            "should offer attrs"
+        );
+    }
+
+    #[test]
+    fn test_attribute_completions_script_existing_attrs_filtered() {
+        let source = "<script setup lang=\"ts\">\nconst x = 1;\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        // Position inside opening tag
+        let pos = line_index.offset_to_position(22).unwrap(); // before ">"
+        let result =
+            completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+        assert!(result.is_some());
+        let items = result.unwrap().items;
+
+        // setup and lang already exist — should NOT be offered
+        assert!(
+            !items.iter().any(|i| i.label == "setup"),
+            "should not offer setup when already present"
+        );
+        assert!(
+            !items.iter().any(|i| i.label == "lang"),
+            "should not offer lang when already present"
+        );
+        // generic should be offered when setup is present
+        assert!(
+            items.iter().any(|i| i.label == "generic"),
+            "should offer generic when setup is present: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_attribute_completions_style() {
+        let source = "<style >\n.foo {}\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let pos = line_index.offset_to_position(7).unwrap(); // space before ">"
+        let result =
+            completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+        assert!(result.is_some());
+        let items = result.unwrap().items;
+
+        assert!(
+            items.iter().any(|i| i.label == "scoped"),
+            "should offer scoped: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        assert!(
+            items.iter().any(|i| i.label == "module"),
+            "should offer module"
+        );
+        assert!(items.iter().any(|i| i.label == "lang"), "should offer lang");
+    }
+
+    #[test]
+    fn test_no_completions_on_closing_tag() {
+        let source = "<script setup>\nconst x = 1;\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let pos = line_index
+            .offset_to_position(blocks[0].close_tag_start + 2)
+            .unwrap();
+        let result =
+            completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+        assert!(
+            result.is_none(),
+            "should not offer completions on closing tag"
+        );
     }
 }

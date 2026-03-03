@@ -775,6 +775,10 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let lang_id = if path.ends_with(".tsx") {
             "typescriptreact"
+        } else if path.ends_with(".jsx") {
+            "javascriptreact"
+        } else if path.ends_with(".js") {
+            "javascript"
         } else {
             "typescript"
         };
@@ -811,6 +815,10 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let lang_id = if path.ends_with(".tsx") {
             "typescriptreact"
+        } else if path.ends_with(".jsx") {
+            "javascriptreact"
+        } else if path.ends_with(".js") {
+            "javascript"
         } else {
             "typescript"
         };
@@ -2247,7 +2255,7 @@ const count: number = 42;
             .expect("compilation should succeed");
 
         let tsx = host
-            .get_tsx("App.vue", &profile)
+            .get_ide("App.vue", &profile)
             .expect("should have cached TSX after compilation");
 
         eprintln!(
@@ -2541,7 +2549,7 @@ const count: number = 42;
             })
             .expect("compilation should succeed");
         let tsx = host
-            .get_tsx(&file_id, &profile)
+            .get_ide(&file_id, &profile)
             .expect("should have cached TSX");
 
         eprintln!(
@@ -2605,7 +2613,7 @@ const count: number = 42;
             })
             .expect("compilation should succeed");
         let tsx = host
-            .get_tsx(&file_id, &profile)
+            .get_ide(&file_id, &profile)
             .expect("should have cached TSX");
         (
             tsx.code.to_string(),

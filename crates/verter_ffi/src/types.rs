@@ -241,12 +241,13 @@ pub struct FfiVirtualFileResponse {
     pub meta: FfiVirtualMeta,
 }
 
-/// TSX output for LSP type checking (dedicated API, not a virtual file).
+/// IDE output for type checking (TSX or JSX, dedicated API, not a virtual file).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FfiTsxResponse {
+pub struct FfiIdeResponse {
     pub code: String,
     pub source_map: Option<String>,
+    pub is_jsx: bool,
 }
 
 /// Result of removing a file from the host.

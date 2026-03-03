@@ -269,15 +269,15 @@ impl WasmVerterHost {
         to_wasm_value(&output)
     }
 
-    /// Retrieves the combined TSX output for LSP type checking.
+    /// Retrieves the combined IDE output (TSX or JSX) for type checking.
     ///
-    /// This is a dedicated API separate from virtual files. TSX output is
+    /// This is a dedicated API separate from virtual files. IDE output is
     /// only consumed by the LSP and playground, never by bundlers.
     ///
-    /// Returns `{ code: string, sourceMap?: string }` or `null` if no TSX
+    /// Returns `{ code: string, sourceMap?: string, isJsx: boolean }` or `null` if no IDE
     /// output is available for the given file and profile.
-    #[wasm_bindgen(js_name = getTsx)]
-    pub fn get_tsx(&self, canonical_id: &str, profile: JsValue) -> Result<JsValue, JsValue> {
+    #[wasm_bindgen(js_name = getIde)]
+    pub fn get_ide(&self, canonical_id: &str, profile: JsValue) -> Result<JsValue, JsValue> {
         let ffi_profile: Option<FfiCompileProfile> = if profile.is_undefined() || profile.is_null()
         {
             None
@@ -285,25 +285,27 @@ impl WasmVerterHost {
             Some(parse_wasm_input(profile)?)
         };
         let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
-        let result = catch_panic(|| self.inner.get_tsx(canonical_id, &host_profile))?;
-        to_wasm_value(&result.map(|r| FfiTsxResponse {
+        let result = catch_panic(|| self.inner.get_ide(canonical_id, &host_profile))?;
+        to_wasm_value(&result.map(|r| FfiIdeResponse {
             code: r.code.to_string(),
             source_map: r.source_map.map(|s| s.to_string()),
+            is_jsx: r.is_jsx,
         }))
     }
 
     /// Retrieve TSC declaration output for a file.
     ///
     /// Generates a minimal TypeScript declaration file for a Vue SFC.
-    /// Unlike `getTsx`, this does NOT require a prior compilation pass.
+    /// Unlike `getIde`, this does NOT require a prior compilation pass.
     ///
-    /// Returns `{ code: string, sourceMap?: string }` or `null`.
+    /// Returns `{ code: string, sourceMap?: string, isJsx: boolean }` or `null`.
     #[wasm_bindgen(js_name = getTsc)]
     pub fn get_tsc(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
         let result = catch_panic(|| self.inner.get_tsc(canonical_id))?;
-        to_wasm_value(&result.map(|r| FfiTsxResponse {
+        to_wasm_value(&result.map(|r| FfiIdeResponse {
             code: r.code.to_string(),
             source_map: r.source_map.map(|s| s.to_string()),
+            is_jsx: false,
         }))
     }
 

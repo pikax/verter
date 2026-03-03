@@ -684,7 +684,7 @@ const msg = 'hello'
     let (registry, uri) = open_vue_file(source);
 
     // After opening a .vue file, TSX + source map should be available
-    let tsx = registry.get_tsx(&uri);
+    let tsx = registry.get_ide(&uri);
     assert!(tsx.is_some(), "TSX should be generated after open");
     let tsx = tsx.unwrap();
     assert!(!tsx.code.is_empty(), "TSX code should not be empty");
@@ -714,7 +714,7 @@ const msg = 'hello'
     let (registry, uri) = open_vue_file(source);
     let doc = registry.get(&uri).unwrap();
     let mapper = doc.position_mapper.as_ref().expect("mapper should exist");
-    let tsx = registry.get_tsx(&uri).expect("tsx should exist");
+    let tsx = registry.get_ide(&uri).expect("tsx should exist");
 
     // Find "msg" in the original source (script block)
     let msg_offset = source.find("msg = ").unwrap();
@@ -774,7 +774,7 @@ const count = 0
         .position_mapper
         .as_ref()
         .expect("mapper should exist after compilation");
-    let tsx = registry.get_tsx(&uri).expect("tsx should exist");
+    let tsx = registry.get_ide(&uri).expect("tsx should exist");
 
     // Find "count" in the template (last occurrence)
     let template_count_offset = source.rfind("count").unwrap();
@@ -902,7 +902,7 @@ const count = 42
     let (registry, uri) = open_vue_file(source);
     let doc = registry.get(&uri).unwrap();
     let mapper = doc.position_mapper.as_ref().expect("mapper should exist");
-    let tsx = registry.get_tsx(&uri).expect("tsx should exist");
+    let tsx = registry.get_ide(&uri).expect("tsx should exist");
     let tsx_code = tsx.code.as_ref();
     let tsx_lines: Vec<&str> = tsx_code.lines().collect();
 
@@ -960,7 +960,7 @@ fn integration_utf16_source_map_with_multibyte_chars() {
         .position_mapper
         .as_ref()
         .expect("mapper should exist for SFC with non-ASCII chars");
-    let tsx = registry.get_tsx(&uri).expect("tsx should exist");
+    let tsx = registry.get_ide(&uri).expect("tsx should exist");
     let tsx_code = tsx.code.as_ref();
 
     // Find "café" in the template (last occurrence)
@@ -1268,7 +1268,7 @@ const name = 'world'
         ("file:///project/src/Parent.vue", "vue", parent_source),
     ]);
 
-    let child_tsx = registry.get_tsx(&uris[0]);
+    let child_tsx = registry.get_ide(&uris[0]);
     assert!(child_tsx.is_some(), "Child should have TSX output");
     let child_tsx = child_tsx.unwrap();
     assert!(
@@ -1276,7 +1276,7 @@ const name = 'world'
         "Child TSX should reference 'value'"
     );
 
-    let parent_tsx = registry.get_tsx(&uris[1]);
+    let parent_tsx = registry.get_ide(&uris[1]);
     assert!(parent_tsx.is_some(), "Parent should have TSX output");
     let parent_tsx = parent_tsx.unwrap();
     assert!(
@@ -1374,7 +1374,7 @@ const name = 'hello'
     let (registry, uri) = open_vue_file(source);
 
     // Should not panic — TSX generation must handle mixed span coordinates
-    let tsx = registry.get_tsx(&uri);
+    let tsx = registry.get_ide(&uri);
     assert!(
         tsx.is_some(),
         "Should produce TSX output for lang=ts with defineProps"
@@ -1442,16 +1442,16 @@ fn compiled_code_response_serializes() {
     assert!(json["css"]["map"].is_null());
 }
 
-/// @ai-generated — get_tsx returns compiled output for an opened Vue file.
+/// @ai-generated — get_ide returns compiled output for an opened Vue file.
 #[test]
-fn get_tsx_returns_compiled_output_for_opened_file() {
+fn get_ide_returns_compiled_output_for_opened_file() {
     let source = r#"<script setup>
 const msg = 'hello'
 </script>
 <template><div>{{ msg }}</div></template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let tsx = registry.get_tsx(&uri);
+    let tsx = registry.get_ide(&uri);
     assert!(tsx.is_some(), "TSX should be available after did_open");
     let tsx = tsx.unwrap();
     assert!(tsx.code.contains("msg"), "TSX should contain 'msg' binding");
@@ -1492,7 +1492,7 @@ const count = 0
 "#;
     let (registry, uri) = open_vue_file(source);
     let doc = registry.get(&uri).unwrap();
-    let tsx = registry.get_tsx(&uri).expect("TSX should be available");
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
         .expect("mapper should exist");
@@ -1567,7 +1567,7 @@ const msg = 'hello'
 "#;
     let (registry, uri) = open_vue_file(source);
     let doc = registry.get(&uri).unwrap();
-    let tsx = registry.get_tsx(&uri).expect("TSX should be available");
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
         .expect("mapper should exist");
@@ -1613,7 +1613,7 @@ function handleClick() {}
 "#;
     let (registry, uri) = open_vue_file(source);
     let doc = registry.get(&uri).unwrap();
-    let tsx = registry.get_tsx(&uri).expect("TSX should be available");
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
         .expect("mapper should exist");
@@ -1659,7 +1659,7 @@ const show = true
 "#;
     let (registry, uri) = open_vue_file(source);
     let doc = registry.get(&uri).unwrap();
-    let tsx = registry.get_tsx(&uri).expect("TSX should be available");
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
         .expect("mapper should exist");
@@ -1705,7 +1705,7 @@ const items = [1, 2, 3]
 "#;
     let (registry, uri) = open_vue_file(source);
     let doc = registry.get(&uri).unwrap();
-    let tsx = registry.get_tsx(&uri).expect("TSX should be available");
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
         .expect("mapper should exist");
@@ -2041,7 +2041,7 @@ const msg = 'hello'
     let (registry, uri) = open_vue_file(source);
 
     // Verify initial state
-    let tsx_before = registry.get_tsx(&uri);
+    let tsx_before = registry.get_ide(&uri);
     assert!(tsx_before.is_some(), "TSX should exist after did_open");
     let tsx_code_before = tsx_before.unwrap().code.to_string();
     assert!(
@@ -2080,7 +2080,7 @@ const msg = 'hello'
     );
 
     // Verify TSX was recompiled with new content
-    let tsx_after = registry.get_tsx(&uri);
+    let tsx_after = registry.get_ide(&uri);
     assert!(tsx_after.is_some(), "TSX should exist after did_change");
 
     // Verify position mapper exists
@@ -2139,7 +2139,7 @@ const count = {}
     );
 
     // TSX and analysis should still be available
-    let tsx = registry.get_tsx(&uri);
+    let tsx = registry.get_ide(&uri);
     assert!(tsx.is_some(), "TSX should exist after rapid edits");
     let analysis = registry.get_analysis(&uri);
     assert!(
@@ -2151,7 +2151,7 @@ const count = {}
 /// @ai-generated — Multi-threaded E2E: parallel `did_change` + read requests.
 ///
 /// Simulates the real LSP multi-thread runtime where `did_change` (upsert + compile)
-/// runs on one worker thread while concurrent read requests (get_tsx, get_analysis,
+/// runs on one worker thread while concurrent read requests (get_ide, get_analysis,
 /// get_diagnostics) execute on other threads. All operations must complete without
 /// deadlock.
 #[test]
@@ -2206,7 +2206,7 @@ const msg = 'hello'
     let bar2 = Arc::clone(&barrier);
     let reader_tsx = std::thread::spawn(move || {
         bar2.wait();
-        reg2.get_tsx(&uri2)
+        reg2.get_ide(&uri2)
     });
 
     // Thread 3: read analysis (read path: read_lock on host files)
@@ -2244,7 +2244,7 @@ const msg = 'hello'
 
     // After all threads complete, verify data is consistent and accessible.
     assert!(
-        registry.get_tsx(&uri).is_some(),
+        registry.get_ide(&uri).is_some(),
         "TSX should be available after concurrent write settles"
     );
     assert!(
@@ -2313,7 +2313,7 @@ const value{i} = {i}
             "file {uri_str} should be accessible after parallel did_open"
         );
         assert!(
-            registry.get_tsx(&uri).is_some(),
+            registry.get_ide(&uri).is_some(),
             "TSX for {uri_str} should exist after parallel did_open"
         );
         assert!(
@@ -2361,7 +2361,7 @@ const count = 0
     let reader1 = std::thread::spawn(move || {
         let mut read_count = 0u32;
         while !done_r1.load(Ordering::Relaxed) {
-            let _ = reg_r1.get_tsx(&uri_r1);
+            let _ = reg_r1.get_ide(&uri_r1);
             read_count += 1;
         }
         read_count
@@ -2421,7 +2421,7 @@ const count = {i}
         "source should have final value"
     );
 
-    let tsx = registry.get_tsx(&uri);
+    let tsx = registry.get_ide(&uri);
     assert!(tsx.is_some(), "TSX should be available after all edits");
 }
 
@@ -2510,7 +2510,7 @@ const val{i} = 'original'
 /// This is the most aggressive concurrency test — it exercises:
 /// - Multiple writers competing for host write_lock(files)
 /// - Multiple readers competing for host read_lock(files)
-/// - did_open (upsert + compile), did_change (upsert + recompile), get_tsx, get_analysis
+/// - did_open (upsert + compile), did_change (upsert + recompile), get_ide, get_analysis
 /// - All happening on the same VerterHost simultaneously
 #[test]
 fn stress_test_no_deadlock_under_heavy_concurrent_load() {
@@ -2582,7 +2582,7 @@ const stress{i} = 'v{version}'
         handles.push(std::thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
                 for uri in &uris {
-                    let _ = reg.get_tsx(uri);
+                    let _ = reg.get_ide(uri);
                     let _ = reg.get_analysis(uri);
                     let _ = reg.get_diagnostics(uri);
                 }
@@ -2664,7 +2664,7 @@ const props = defineProps<{ title: string }>();
 </script>
 <template><div>{{ props.title }}</div></template>"#;
     let (registry, uri) = open_vue_file_with_ambient(source);
-    let tsx = registry.get_tsx(&uri).expect("TSX should be generated");
+    let tsx = registry.get_ide(&uri).expect("TSX should be generated");
 
     assert!(
         tsx.code.contains(r#"from "@verter/types""#),
@@ -2690,7 +2690,7 @@ const emit = defineEmits<{ change: [v: string] }>();
 </script>
 <template><div>{{ props.msg }}</div></template>"#;
     let (registry, uri) = open_vue_file_with_ambient(source);
-    let tsx = registry.get_tsx(&uri).expect("TSX should be generated");
+    let tsx = registry.get_ide(&uri).expect("TSX should be generated");
 
     // All type helpers must come from @verter/types
     assert!(tsx.code.contains("___VERTER___Prettify"));
@@ -2709,7 +2709,7 @@ export default { props: ['msg'] }
 </script>
 <template><div>{{ msg }}</div></template>"#;
     let (registry, uri) = open_vue_file_with_ambient(source);
-    let tsx = registry.get_tsx(&uri).expect("TSX should be generated");
+    let tsx = registry.get_ide(&uri).expect("TSX should be generated");
 
     assert!(tsx.code.contains(r#"from "@verter/types""#));
     assert!(!tsx.code.contains(r#"from "$verter/types$""#));
@@ -2723,7 +2723,7 @@ export default { props: ['msg'] }
 fn tsx_types_imports_present_for_template_only() {
     let source = r#"<template><div>hello</div></template>"#;
     let (registry, uri) = open_vue_file_with_ambient(source);
-    let tsx = registry.get_tsx(&uri).expect("TSX should be generated");
+    let tsx = registry.get_ide(&uri).expect("TSX should be generated");
 
     assert!(tsx.code.contains(r#"from "@verter/types""#));
     assert!(!tsx.code.contains(r#"from "$verter/types$""#));
@@ -2862,7 +2862,7 @@ const count = 42
     );
 
     // Step 2: get TSX + mapper
-    let tsx_response = registry.get_tsx(&uri).expect("TSX should be generated");
+    let tsx_response = registry.get_ide(&uri).expect("TSX should be generated");
     let mapper = registry
         .get_position_mapper(&uri)
         .expect("position mapper should exist");
@@ -2958,5 +2958,138 @@ const count = 42
     assert!(
         !text.contains("const count: 42"),
         "verter-only hover must NOT contain TSGO type signature"
+    );
+}
+
+// ─── TSGO sync guard tests (did_close non-Vue file regression) ───
+
+/// Regression: get_ide() must return None for non-Vue files (.ts, .d.ts, .js).
+///
+/// The server's did_close handler uses `get_ide(uri).is_some()` to guard
+/// close_tsx calls to TSGO. If get_ide() returned Some for a non-Vue file,
+/// TSGO would receive a close for a file it never opened (the .tsx suffix
+/// is only for Vue SFCs), causing a panic:
+///   "overlay not found for closed file: file:///...runtime-dom.d.ts.tsx"
+#[test]
+fn get_ide_returns_none_for_typescript_file() {
+    let host = VerterHost::new(HostConfig::default());
+    let registry = DocumentRegistry::new(host);
+
+    // Open a TypeScript file (non-Vue)
+    let ts_uri: Uri = "file:///test/utils.ts".parse().unwrap();
+    let ts_item = TextDocumentItem {
+        uri: ts_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const x = 1;".to_string(),
+    };
+    registry.did_open(&ts_item);
+
+    // get_ide must return None — this is the guard that prevents TSGO close crashes
+    assert!(
+        registry.get_ide(&ts_uri).is_none(),
+        "get_ide() must return None for .ts files"
+    );
+}
+
+#[test]
+fn get_ide_returns_none_for_declaration_file() {
+    let host = VerterHost::new(HostConfig::default());
+    let registry = DocumentRegistry::new(host);
+
+    // Open a .d.ts file (e.g., runtime-dom.d.ts opened by VS Code during go-to-definition)
+    let dts_uri: Uri = "file:///node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts"
+        .parse()
+        .unwrap();
+    let dts_item = TextDocumentItem {
+        uri: dts_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export interface HTMLAttributes { class?: any; }".to_string(),
+    };
+    registry.did_open(&dts_item);
+
+    // get_ide must return None — non-Vue files must never trigger TSGO sync
+    assert!(
+        registry.get_ide(&dts_uri).is_none(),
+        "get_ide() must return None for .d.ts files"
+    );
+
+    // Negative: is_jsx must also be false (it delegates to get_ide internally)
+    assert!(
+        !registry.is_jsx(&dts_uri),
+        "is_jsx() must return false for .d.ts files"
+    );
+}
+
+#[test]
+fn get_ide_returns_some_for_vue_file() {
+    let source = r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+
+    // get_ide must return Some for Vue SFCs — this file SHOULD be synced to TSGO
+    assert!(
+        registry.get_ide(&uri).is_some(),
+        "get_ide() must return Some for .vue files"
+    );
+}
+
+/// Regression: closing a non-Vue file must not affect TSGO state.
+///
+/// Simulates the crash scenario: user CTRL+CLICKs on a binding, TSGO
+/// resolves to runtime-dom.d.ts, VS Code opens then immediately closes it.
+/// The did_close guard (get_ide().is_some()) must prevent close_tsx.
+#[test]
+fn close_non_vue_file_does_not_affect_vue_ide_state() {
+    let host = VerterHost::new(HostConfig::default());
+    let registry = DocumentRegistry::new(host);
+
+    // Open a Vue file
+    let vue_uri: Uri = "file:///test/App.vue".parse().unwrap();
+    let vue_item = TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#
+        .to_string(),
+    };
+    registry.did_open(&vue_item);
+    assert!(
+        registry.get_ide(&vue_uri).is_some(),
+        "Vue file should have IDE output"
+    );
+
+    // Open then close a .d.ts file (simulates go-to-definition navigation)
+    let dts_uri: Uri = "file:///node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts"
+        .parse()
+        .unwrap();
+    let dts_item = TextDocumentItem {
+        uri: dts_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export interface HTMLAttributes { class?: any; }".to_string(),
+    };
+    registry.did_open(&dts_item);
+    assert!(
+        registry.get_ide(&dts_uri).is_none(),
+        "d.ts file must not have IDE output"
+    );
+    registry.did_close(&dts_uri);
+
+    // Vue file's IDE output must still be intact after closing the .d.ts file
+    assert!(
+        registry.get_ide(&vue_uri).is_some(),
+        "Vue IDE output must survive non-Vue file close"
     );
 }

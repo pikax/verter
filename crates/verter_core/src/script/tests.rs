@@ -32,6 +32,7 @@ fn make_script(source: &str, tag_open_str: &str, is_setup: bool) -> (RootNodeScr
         lang: None,
         src: None,
         generic: None,
+        attrs: None,
         attributes: Vec::new(),
         content: Some(crate::common::Span::new(content_start, content_end)),
     };
@@ -1689,6 +1690,7 @@ fn external_type_props_dont_conflict_with_companion_types() {
         lang: None,
         src: None,
         generic: None,
+        attrs: None,
         attributes: Vec::new(),
         content: Some(crate::common::Span::new(
             companion_content_start,
@@ -1711,6 +1713,7 @@ fn external_type_props_dont_conflict_with_companion_types() {
         lang: None,
         src: None,
         generic: None,
+        attrs: None,
         attributes: Vec::new(),
         content: Some(crate::common::Span::new(
             setup_content_start,

@@ -285,8 +285,8 @@ pub struct VerterCompileResult {
     pub errors: Vec<CompileDiagnostic>,
     pub parse_duration_ms: f64,
     pub total_duration_ms: f64,
-    /// Combined TSX output for IDE type checking. Present when `CompileTarget::TSX` is set.
-    /// Contains both script types and template JSX in a single `.tsx` file.
+    /// Combined IDE output for type checking. Present when `CompileTarget::TSX` is set.
+    /// Contains both script types and template JSX in a single `.tsx` (TS) or `.jsx` (JS) file.
     pub tsx: Option<VerterTsxBlock>,
     /// TSC declaration output for type checking (vue-tsc replacement).
     /// Present when `CompileTarget::TSC` is set.
@@ -333,12 +333,14 @@ pub struct VerterCustomBlock {
     pub attrs: Vec<(String, String)>,
 }
 
-/// Generated TSX block for IDE type checking (script or template).
+/// Generated IDE block for type checking (TSX or JSX).
 pub struct VerterTsxBlock {
-    /// The generated TSX code.
+    /// The generated TSX/JSX code.
     pub code: String,
     /// JSON source map string (empty if source maps disabled).
     pub source_map: String,
     /// Duration of generation in milliseconds.
     pub duration_ms: f64,
+    /// `true` for JavaScript SFCs (.jsx output), `false` for TypeScript (.tsx output).
+    pub is_jsx: bool,
 }

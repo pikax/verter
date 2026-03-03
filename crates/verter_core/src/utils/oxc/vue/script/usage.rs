@@ -541,6 +541,8 @@ pub struct TemplateUtilUsage {
     pub binding_span: Option<Span>,
     /// For useTemplateRef: the ref name argument span
     pub ref_name_span: Option<Span>,
+    /// For useAttrs<T>(): the type parameter span (points to `T` inside `<T>`)
+    pub type_arg_span: Option<Span>,
 }
 
 // =============================================================================

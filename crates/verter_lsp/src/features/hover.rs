@@ -5,15 +5,16 @@ use tower_lsp_server::lsp_types::*;
 use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
+use crate::documents::sfc_scanner::{
+    classify_cursor, parse_opening_tag, SfcBlock, SfcCursorContext,
+};
 
 /// Attempt to provide hover information at a given position.
 ///
 /// Strategy:
-/// 1. Find which SFC block the position is in
-/// 2. Extract the word at the cursor position
-/// 3. Look up that word in the analysis data (bindings, imports, macros)
-/// 4. Format hover content as markdown with binding kind, reactivity, type info
+/// 1. Classify cursor context (opening tag, closing tag, content, root level)
+/// 2. For SFC tags: show documentation for tag names and attributes
+/// 3. For block content: look up bindings, imports, macros from analysis
 pub fn hover_at_position(
     position: &Position,
     source: &str,
@@ -21,8 +22,23 @@ pub fn hover_at_position(
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Option<Hover> {
+    let offset = line_index.position_to_offset(position)?;
+
+    // Check SFC structural context BEFORE requiring analysis data.
+    // This allows hover on tags even when analysis hasn't completed.
+    match classify_cursor(offset, blocks) {
+        SfcCursorContext::OpeningTag { block_index } => {
+            return sfc_tag_hover(source, &blocks[block_index], offset);
+        }
+        SfcCursorContext::ClosingTag { block_index } => {
+            return sfc_tag_name_hover(&blocks[block_index].tag_name);
+        }
+        SfcCursorContext::RootLevel => return None,
+        SfcCursorContext::BlockContent { .. } => {} // fall through to analysis-based hover
+    }
+
     let analysis = analysis?;
-    let offset = line_index.position_to_offset(position)? as usize;
+    let offset = offset as usize;
 
     // Determine which block the cursor is in
     let block = blocks.iter().find(|b| {
@@ -35,6 +51,75 @@ pub fn hover_at_position(
         "template" => hover_in_template(offset, source, analysis),
         "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index),
         _ => None,
+    }
+}
+
+// ── SFC Tag Hover ────────────────────────────────────────────────────────────
+
+/// Hover on an SFC opening tag — dispatches to tag name or attribute hover.
+fn sfc_tag_hover(source: &str, block: &SfcBlock, offset: u32) -> Option<Hover> {
+    let ctx = parse_opening_tag(source, block);
+
+    // Check if cursor is on the tag name
+    if offset >= ctx.tag_name_start && offset < ctx.tag_name_end {
+        return sfc_tag_name_hover(&ctx.tag_name);
+    }
+
+    // Check if cursor is on an attribute name or value
+    for attr in &ctx.attrs {
+        if offset >= attr.name_start && offset < attr.name_end {
+            return sfc_attr_hover(&ctx.tag_name, &attr.name);
+        }
+        if let (Some(vs), Some(ve)) = (attr.value_start, attr.value_end) {
+            if offset >= vs && offset < ve {
+                return sfc_attr_hover(&ctx.tag_name, &attr.name);
+            }
+        }
+    }
+
+    None
+}
+
+/// Hover documentation for SFC tag names.
+fn sfc_tag_name_hover(tag_name: &str) -> Option<Hover> {
+    let doc = match tag_name {
+        "script" => "**`<script>`** — JavaScript/TypeScript logic block.\n\nContains component logic, imports, and exports. Use `setup` attribute for Composition API.",
+        "template" => "**`<template>`** — HTML template block.\n\nContains the component's template markup with Vue directives and expressions.",
+        "style" => "**`<style>`** — CSS style block.\n\nContains component styles. Use `scoped` for component-scoped CSS, `module` for CSS modules.",
+        _ => return Some(make_hover(format!("**`<{tag_name}>`** — Custom block."))),
+    };
+    Some(make_hover(doc.to_string()))
+}
+
+/// Hover documentation for SFC tag attributes.
+fn sfc_attr_hover(tag_name: &str, attr_name: &str) -> Option<Hover> {
+    let doc = match (tag_name, attr_name) {
+        // script attributes
+        ("script", "setup") => "**`setup`** — Enables `<script setup>` syntax.\n\nAll top-level bindings are automatically exposed to the template. Compiler macros like `defineProps()` and `defineEmits()` are available.",
+        ("script", "lang") => "**`lang`** — Script language.\n\nValues: `ts` (TypeScript), `tsx`, `jsx`. Defaults to JavaScript.",
+        ("script", "generic") => "**`generic`** — Generic type parameters for `<script setup>`.\n\nDefines component-level generics: `<script setup generic=\"T extends object\">`.",
+        ("script", "attrs" | "attributes") => "**`attrs`** — Typed `$attrs` declaration.\n\nDefines the type of `$attrs` / `useAttrs()` return value:\n```vue\n<script setup attrs=\"{ class?: string }\">\n```",
+        ("script", "src") => "**`src`** — External script source.\n\nLoad script content from an external file: `<script src=\"./script.ts\">`.",
+        // template attributes
+        ("template", "lang") => "**`lang`** — Template language.\n\nValues: `pug`. Defaults to HTML.",
+        // style attributes
+        ("style", "scoped") => "**`scoped`** — Component-scoped CSS.\n\nStyles only apply to the current component via automatically added data attributes.",
+        ("style", "module") => "**`module`** — CSS Modules.\n\nCSS classes are exposed as `$style` object. Named modules: `<style module=\"classes\">`.",
+        ("style", "lang") => "**`lang`** — Style language.\n\nValues: `scss`, `sass`, `less`, `stylus`. Defaults to CSS.",
+        // common
+        (_, "lang") => "**`lang`** — Block language preprocessor.",
+        _ => return None,
+    };
+    Some(make_hover(doc.to_string()))
+}
+
+fn make_hover(value: String) -> Hover {
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: None,
     }
 }
 
@@ -822,5 +907,181 @@ mod tests {
         );
         assert!(contents.contains(".foo"), "should list .foo selector");
         assert!(contents.contains("div"), "should list div selector");
+    }
+
+    // ========================================================================
+    // SFC tag hover (A2)
+    // ========================================================================
+
+    #[test]
+    fn test_hover_on_script_tag_name() {
+        let source = "<script setup lang=\"ts\">\nconst x = 1;\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        // Hover on "script" in opening tag (offset 1 = 's')
+        let pos = line_index.offset_to_position(1).unwrap();
+        let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+        assert!(hover.is_some(), "should hover on script tag name");
+        let contents = match hover.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(contents.contains("<script>"), "should describe script tag");
+        assert!(
+            !contents.contains("<template>"),
+            "should not describe template"
+        );
+    }
+
+    #[test]
+    fn test_hover_on_template_tag_name() {
+        let source = "<template>\n  <div/>\n</template>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let pos = line_index.offset_to_position(1).unwrap();
+        let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+        assert!(hover.is_some(), "should hover on template tag name");
+        let contents = match hover.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(
+            contents.contains("<template>"),
+            "should describe template tag"
+        );
+    }
+
+    #[test]
+    fn test_hover_on_setup_attr() {
+        let source = "<script setup lang=\"ts\">\nconst x = 1;\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        // "setup" starts at offset 8 in "<script setup lang=\"ts\">"
+        let setup_offset = source.find("setup").unwrap();
+        let pos = line_index.offset_to_position(setup_offset as u32).unwrap();
+        let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+        assert!(hover.is_some(), "should hover on setup attribute");
+        let contents = match hover.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(
+            contents.contains("setup"),
+            "should describe setup attribute"
+        );
+        assert!(
+            contents.contains("defineProps"),
+            "should mention defineProps"
+        );
+    }
+
+    #[test]
+    fn test_hover_on_lang_attr() {
+        let source = "<script setup lang=\"ts\">\nconst x = 1;\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let lang_offset = source.find("lang").unwrap();
+        let pos = line_index.offset_to_position(lang_offset as u32).unwrap();
+        let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+        assert!(hover.is_some(), "should hover on lang attribute");
+        let contents = match hover.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(contents.contains("lang"), "should describe lang attribute");
+    }
+
+    #[test]
+    fn test_hover_on_scoped_attr() {
+        let source = "<style scoped>\n.foo {}\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let scoped_offset = source.find("scoped").unwrap();
+        let pos = line_index.offset_to_position(scoped_offset as u32).unwrap();
+        let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+        assert!(hover.is_some(), "should hover on scoped attribute");
+        let contents = match hover.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(
+            contents.contains("scoped"),
+            "should describe scoped attribute"
+        );
+    }
+
+    #[test]
+    fn test_hover_on_closing_tag() {
+        let source = "<script setup>\nconst x = 1;\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        // Closing tag: "</script>" — hover on it
+        let close_offset = blocks[0].close_tag_start + 2; // skip "</"
+        let pos = line_index.offset_to_position(close_offset).unwrap();
+        let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+        assert!(hover.is_some(), "should hover on closing tag");
+        let contents = match hover.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(contents.contains("<script>"), "should describe script tag");
+    }
+
+    #[test]
+    fn test_no_hover_at_root_level() {
+        let source = "<template>\n  <div/>\n</template>\n\n<script setup>\nconst x = 1;\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        // Between blocks — root level
+        let between = blocks[0].close_tag_end;
+        let pos = line_index.offset_to_position(between).unwrap();
+        let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+        assert!(hover.is_none(), "should not hover at root level");
+    }
+
+    #[test]
+    fn test_hover_on_attrs_attribute() {
+        let source =
+            "<script setup attrs=\"{ class?: string }\" lang=\"ts\">\nconst x = 1;\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let attrs_offset = source.find("attrs").unwrap();
+        let pos = line_index.offset_to_position(attrs_offset as u32).unwrap();
+        let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+        assert!(hover.is_some(), "should hover on attrs attribute");
+        let contents = match hover.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(contents.contains("attrs"), "should describe attrs");
+        assert!(contents.contains("$attrs"), "should mention $attrs");
+    }
+
+    #[test]
+    fn test_hover_on_custom_block_tag() {
+        let source = "<i18n lang=\"json\">\n{\"en\": {}}\n</i18n>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let pos = line_index.offset_to_position(1).unwrap();
+        let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+        assert!(hover.is_some(), "should hover on custom block tag");
+        let contents = match hover.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(
+            contents.contains("Custom block"),
+            "should describe as custom block"
+        );
+        assert!(!contents.contains("<script>"), "should not describe script");
     }
 }

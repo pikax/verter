@@ -136,6 +136,8 @@ pub enum ScriptMacro<'a> {
         span: Span,
         declarator: Option<MacroDeclarator<'a>>,
         object_arg: Option<MacroObjectArg<'a>>,
+        /// Whether `inheritAttrs: false` is present in the options object.
+        has_inherit_attrs_false: bool,
     },
 
     /// defineModel<T>(name?, options?)

@@ -101,6 +101,8 @@ pub struct Syntax {
     prop_src: Option<Span>,
     /// Root-level `generic="..."` attribute value span (script only).
     prop_generic: Option<Span>,
+    /// Root-level `attrs="..."` or `attributes="..."` attribute value span (script only).
+    prop_attrs: Option<Span>,
     /// Root-level `setup` attribute was present (script only).
     prop_setup: bool,
     /// Root-level `scoped` attribute was present (style only).
@@ -181,6 +183,7 @@ impl Syntax {
             prop_lang: None,
             prop_src: None,
             prop_generic: None,
+            prop_attrs: None,
             prop_setup: false,
             prop_scoped: false,
             prop_module: false,
@@ -777,6 +780,7 @@ impl Syntax {
             is_setup: self.prop_setup,
             src: self.prop_src.take(),
             generic: self.prop_generic.take(),
+            attrs: self.prop_attrs.take(),
             lang: self.prop_lang.take().map(|lang| {
                 ScriptLanguage::from_bytes(&ctx.bytes[lang.start as usize..lang.end as usize])
             }),
@@ -859,6 +863,7 @@ impl Syntax {
         self.prop_lang = None;
         self.prop_src = None;
         self.prop_generic = None;
+        self.prop_attrs = None;
         self.prop_setup = false;
         self.prop_scoped = false;
         self.prop_module = false;
@@ -974,6 +979,9 @@ impl Syntax {
                 b"setup" if root_kind == RootNodeKind::Script => self.prop_setup = true,
                 b"src" if root_kind == RootNodeKind::Script => self.prop_src = value_span,
                 b"generic" if root_kind == RootNodeKind::Script => self.prop_generic = value_span,
+                b"attrs" | b"attributes" if root_kind == RootNodeKind::Script => {
+                    self.prop_attrs = value_span
+                }
                 // style-only
                 b"scoped" if root_kind == RootNodeKind::Style => self.prop_scoped = true,
                 b"module" if root_kind == RootNodeKind::Style => self.prop_module = true,

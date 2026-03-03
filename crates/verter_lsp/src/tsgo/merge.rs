@@ -117,13 +117,11 @@ pub fn merge_hover(
             // to avoid duplicate fenced blocks in the merged hover.
             let verter_text = extract_hover_text(&verter);
             let context = strip_leading_code_block(&verter_text);
+            let type_block = wrap_type_block(&type_info.contents);
             let merged = if context.trim().is_empty() {
-                format!("```typescript\n{}\n```", type_info.contents)
+                type_block
             } else {
-                format!(
-                    "```typescript\n{}\n```\n---\n{}",
-                    type_info.contents, context
-                )
+                format!("{}\n---\n{}", type_block, context)
             };
             Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
@@ -137,11 +135,24 @@ pub fn merge_hover(
         (None, Some(type_info)) => Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("```typescript\n{}\n```", type_info.contents),
+                value: wrap_type_block(&type_info.contents),
             }),
             range: None,
         }),
         (None, None) => None,
+    }
+}
+
+/// Wrap type content in a code fence if not already Markdown-formatted.
+///
+/// TSGO may return content that's already wrapped in a code fence with
+/// documentation after the closing fence. In that case, use it as-is
+/// to avoid double-fencing.
+fn wrap_type_block(contents: &str) -> String {
+    if contents.starts_with("```") {
+        contents.to_string()
+    } else {
+        format!("```typescript\n{}\n```", contents)
     }
 }
 
@@ -1486,6 +1497,57 @@ mod tests {
         assert!(result.is_some());
     }
 
+    /// Regression: when verter resolves to a same-file import and TSGO resolves
+    /// to an external file (e.g., runtime-dom.d.ts), TSGO's cross-file result
+    /// must win — verter's same-file import is just an intermediate step.
+    #[test]
+    fn merge_definitions_tsgo_external_overrides_verter_same_file() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        // Verter found the import statement (same file — uses SAME_FILE_URI sentinel)
+        let verter_def = Some(GotoDefinitionResponse::Scalar(Location {
+            uri: crate::features::definition::SAME_FILE_URI.parse().unwrap(),
+            range: Range {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 20,
+                },
+            },
+        }));
+
+        // TSGO resolved to an external .d.ts file
+        let type_defs = vec![TypeLocation {
+            path: "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts".to_string(),
+            start: 100,
+            end: 120,
+        }];
+
+        let result = merge_definitions(verter_def, type_defs, &tsx_li, &mapper, &vue_li);
+        assert!(result.is_some(), "should return TSGO's external definition");
+
+        match result.unwrap() {
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert!(
+                    loc.uri.as_str().contains("runtime-dom.d.ts"),
+                    "should navigate to external .d.ts file, got: {}",
+                    loc.uri.as_str()
+                );
+                // Negative: must NOT be the same-file sentinel URI
+                assert!(
+                    !loc.uri
+                        .as_str()
+                        .contains(crate::features::definition::SAME_FILE_URI),
+                    "must not return same-file sentinel when TSGO has external target"
+                );
+            }
+            _ => panic!("Expected scalar definition for single external target"),
+        }
+    }
+
     /// @ai-generated — merge_definitions prefers verter when type_defs is empty
     #[test]
     fn merge_definitions_verter_preferred_when_no_type_defs() {
@@ -1595,5 +1657,144 @@ mod tests {
 
         // Only TSGO type block, no "---" separator since verter had nothing extra
         assert_eq!(text, "```typescript\nconst x: string\n```");
+    }
+
+    // ── Bug 3: TSGO already-markdown hover tests ─────────────────
+
+    #[test]
+    fn merge_hover_tsgo_already_markdown_no_double_fence() {
+        let (mapper, _, tsx_li) = make_mapper_and_indexes();
+        let vue_li = LineIndex::new_utf16("");
+
+        let tsgo = Some(HoverInfo {
+            range_start: None,
+            range_end: None,
+            contents: "```typescript\n(property) msg: string\n```\nThe message.".to_string(),
+        });
+
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        assert!(result.is_some());
+
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+
+        // Should start with the type signature in a code fence
+        assert!(
+            text.starts_with("```typescript\n(property) msg: string\n```"),
+            "should start with original code fence: {text}"
+        );
+        // Documentation should appear OUTSIDE the code fence
+        assert!(
+            text.contains("The message."),
+            "documentation should be present: {text}"
+        );
+        // Count code fence openings — should be exactly 1
+        assert_eq!(
+            text.matches("```typescript").count(),
+            1,
+            "should not double-fence: {text}"
+        );
+    }
+
+    #[test]
+    fn merge_hover_tsgo_plain_text_gets_wrapped() {
+        let (mapper, _, tsx_li) = make_mapper_and_indexes();
+        let vue_li = LineIndex::new_utf16("");
+
+        let tsgo = Some(HoverInfo {
+            range_start: None,
+            range_end: None,
+            contents: "(property) msg: string".to_string(),
+        });
+
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        assert!(result.is_some());
+
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+
+        assert_eq!(text, "```typescript\n(property) msg: string\n```");
+    }
+
+    #[test]
+    fn merge_hover_tsgo_with_jsdoc_newlines_preserved() {
+        let (mapper, _, tsx_li) = make_mapper_and_indexes();
+        let vue_li = LineIndex::new_utf16("");
+
+        let tsgo = Some(HoverInfo {
+            range_start: None,
+            range_end: None,
+            contents: "```typescript\n(property) select: (action: Action) => true\n```\nEmitted when selected.\n当选择时触发。".to_string(),
+        });
+
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        assert!(result.is_some());
+
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+
+        assert!(
+            text.contains("Emitted when selected."),
+            "documentation should be preserved: {text}"
+        );
+        assert!(
+            text.contains("当选择时触发。"),
+            "CJK documentation should be preserved: {text}"
+        );
+        // Doc should be outside code fence
+        assert_eq!(
+            text.matches("```typescript").count(),
+            1,
+            "should not double-fence: {text}"
+        );
+    }
+
+    #[test]
+    fn merge_hover_verter_and_tsgo_combined_markdown() {
+        let (mapper, _, tsx_li) = make_mapper_and_indexes();
+        let vue_li = LineIndex::new_utf16("");
+
+        let verter = Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "```typescript\nconst count\n```\n*(reactive)*".to_string(),
+            }),
+            range: None,
+        });
+        let tsgo = Some(HoverInfo {
+            range_start: None,
+            range_end: None,
+            contents: "```typescript\nconst count: Ref<number>\n```\nA counter.".to_string(),
+        });
+
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li);
+        assert!(result.is_some());
+
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+
+        // TSGO signature should be present (not double-fenced)
+        assert!(
+            text.contains("const count: Ref<number>"),
+            "should have TSGO signature: {text}"
+        );
+        assert!(
+            text.contains("*(reactive)*"),
+            "should have verter context: {text}"
+        );
+        // Only 1 typescript code fence
+        assert_eq!(
+            text.matches("```typescript").count(),
+            1,
+            "should not double-fence: {text}"
+        );
     }
 }

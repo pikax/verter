@@ -829,13 +829,13 @@ impl VerterMcpServer {
         // Ensure compilation populates the TSX cache
         let _ = self.host.ensure_compiled(&canonical, &profile);
 
-        let tsx = self
+        let ide = self
             .host
-            .get_tsx(&canonical, &profile)
-            .ok_or_else(|| mcp_err(format!("Cannot generate TSX for {}", canonical)))?;
+            .get_ide(&canonical, &profile)
+            .ok_or_else(|| mcp_err(format!("Cannot generate IDE output for {}", canonical)))?;
 
         Ok(CallToolResult::success(vec![Content::text(
-            tsx.code.as_ref().to_string(),
+            ide.code.as_ref().to_string(),
         )]))
     }
 

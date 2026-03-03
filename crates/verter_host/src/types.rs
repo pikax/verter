@@ -738,20 +738,23 @@ pub(crate) struct CachedVirtualFile {
     pub(crate) meta: VirtualMeta,
 }
 
-/// Cached TSX output for LSP type checking, stored separately from virtual files.
+/// Cached IDE output for LSP type checking, stored separately from virtual files.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedTsx {
     pub(crate) code: Arc<str>,
     pub(crate) source_map: Option<Arc<str>>,
+    pub(crate) is_jsx: bool,
 }
 
-/// Response from [`VerterHost::get_tsx`].
+/// Response from [`VerterHost::get_ide`].
 #[derive(Debug, Clone)]
-pub struct TsxResponse {
-    /// The generated TSX code.
+pub struct IdeResponse {
+    /// The generated TSX/JSX code.
     pub code: Arc<str>,
     /// JSON source map (if available).
     pub source_map: Option<Arc<str>>,
+    /// `true` for JavaScript SFCs (.jsx output), `false` for TypeScript (.tsx output).
+    pub is_jsx: bool,
 }
 
 /// Response from [`VerterHost::get_tsc`].

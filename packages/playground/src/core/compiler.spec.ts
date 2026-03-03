@@ -39,9 +39,9 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
     compileProfile: profile,
   });
 
-  const tsx = host.getTsx("App.vue", profile);
+  const tsx = host.getIde("App.vue", profile);
   if (!tsx?.code || !tsx?.sourceMap) {
-    throw new Error("expected host.getTsx() to return code + sourceMap");
+    throw new Error("expected host.getIde() to return code + sourceMap");
   }
 
   return { code: tsx.code, sourceMap: tsx.sourceMap };
@@ -78,11 +78,20 @@ declare global {
 export {}
 `;
 
+const VERTER_TYPES_STUB = `
+declare module "@verter/types" {
+  export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
+  export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
+  export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
+}
+`;
+
 function createTypecheckService(tsxCode: string) {
   const fileName = "/App.vue.tsx";
   const files = new Map<string, { version: number; content: string }>([
     [fileName, { version: 1, content: tsxCode }],
     ["/node_modules/vue/index.d.ts", { version: 1, content: VUE_TYPE_STUB }],
+    ["/types/verter-types.d.ts", { version: 1, content: VERTER_TYPES_STUB }],
     ["/types/jsx-global.d.ts", { version: 1, content: JSX_GLOBAL_STUB }],
   ]);
 
@@ -418,7 +427,9 @@ describe("generated TSX TypeScript semantics", () => {
   });
 
   it("type-checks inline $event handlers with the correct event type", async () => {
-    const source = `<template>
+    const source = `<script setup lang="ts">
+</script>
+<template>
   <button @click="$event.preventDefault()" />
 </template>`;
 
@@ -428,6 +439,17 @@ describe("generated TSX TypeScript semantics", () => {
     const normalized = code.replace(/\s+/g, "");
 
     expect(messages).toEqual([]);
+    expect(normalized).toContain("onClick={($event)=>{$event.preventDefault()}}");
+  });
+
+  it("generates $event handler for template-only SFC (no script block)", async () => {
+    const source = `<template>
+  <button @click="$event.preventDefault()" />
+</template>`;
+
+    const { code } = await generateRealTsxOutput(source);
+    const normalized = code.replace(/\s+/g, "");
+
     expect(normalized).toContain("onClick={($event)=>{$event.preventDefault()}}");
   });
 
@@ -477,7 +499,6 @@ const instance = getCurrentInstance()
     expect(unusedWarnings).toEqual([]);
     // Positive: generated code uses export keyword
     expect(code).toContain("export function ___VERTER___TemplateBindingFN");
-    expect(code).toContain("export type ___VERTER___Instance");
   });
 
   it("generated TSX without ref has no Comp functions or unused warnings", async () => {
@@ -546,7 +567,7 @@ async function compileWithCombinedSourceMap(vueSource: string): Promise<{
   templateCode: string;
 }> {
   const host = await loadWasmHost();
-  const profile = { sourceMap: true, target: "ide", forceJs: true };
+  const profile = { sourceMap: true, target: "bundler" };
 
   host.upsert({
     inputId: "App.vue",

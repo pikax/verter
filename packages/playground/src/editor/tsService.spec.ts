@@ -35,9 +35,9 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
     compileProfile: profile,
   });
 
-  const tsx = host.getTsx("App.vue", profile);
+  const tsx = host.getIde("App.vue", profile);
   if (!tsx?.code || !tsx?.sourceMap) {
-    throw new Error("expected host.getTsx() to return code + sourceMap");
+    throw new Error("expected host.getIde() to return code + sourceMap");
   }
 
   return { code: tsx.code, sourceMap: tsx.sourceMap };
@@ -404,9 +404,12 @@ const count = ref(0)
     // Mapper that always fails TSX→Vue (forces offset comment fallback)
     service.currentMapper = { tsxOffsetToVueOffset: () => null };
 
-    // Find the count identifier in the destructuring block (after "{ const {")
+    // Find the count identifier in the destructuring block (after "let {" or "const {")
+    const letBrace = tsxCode.indexOf("let {");
     const constBrace = tsxCode.indexOf("{ const {");
-    const destructuringCountOffset = tsxCode.indexOf("count", constBrace + 9);
+    const braceStart = letBrace >= 0 ? letBrace : constBrace;
+    expect(braceStart).toBeGreaterThanOrEqual(0);
+    const destructuringCountOffset = tsxCode.indexOf("count", braceStart + 4);
 
     const mapped = service.mapTsxSpanToVueSpan({
       fileName: "/App.vue.tsx",

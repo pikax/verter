@@ -193,11 +193,40 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(vue::NoChildContent));
     registry.register(Box::new(vue::ValidVOnce));
     registry.register(Box::new(vue::ValidVPre));
+    registry.register(Box::new(vue::ValidVHtml));
+    registry.register(Box::new(vue::ValidVText));
+    registry.register(Box::new(vue::ValidVCloak));
+    registry.register(Box::new(vue::ValidVMemo));
+    registry.register(Box::new(vue::ValidVSlot));
+    registry.register(Box::new(vue::ValidVIs));
     registry.register(Box::new(vue::NoDeprecatedVOnNativeModifier));
     registry.register(Box::new(vue::NoDeprecatedScopeAttribute));
     registry.register(Box::new(vue::NoDeprecatedSlotAttribute));
     registry.register(Box::new(vue::NoDeprecatedVBindSync));
     registry.register(Box::new(vue::NoDeprecatedVOnNumberModifiers));
+    registry.register(Box::new(vue::NoDeprecatedDataObjectDeclaration));
+    registry.register(Box::new(vue::NoDeprecatedDeleteSet));
+    registry.register(Box::new(vue::NoDeprecatedDestroyedLifecycle));
+    registry.register(Box::new(vue::NoDeprecatedDollarListenersApi));
+    registry.register(Box::new(vue::NoDeprecatedDollarScopedslotsApi));
+    registry.register(Box::new(vue::NoDeprecatedEventsApi));
+    registry.register(Box::new(vue::NoDeprecatedFilter));
+    registry.register(Box::new(vue::NoDeprecatedFunctionalTemplate));
+    registry.register(Box::new(vue::NoDeprecatedHtmlElementIs));
+    registry.register(Box::new(vue::NoDeprecatedInlineTemplate));
+    registry.register(Box::new(vue::NoDeprecatedModelDefinition));
+    registry.register(Box::new(vue::NoDeprecatedPropsDefaultThis));
+    registry.register(Box::new(vue::NoDeprecatedRouterLinkTagProp));
+    registry.register(Box::new(vue::NoDeprecatedVIs));
+    registry.register(Box::new(vue::NoDeprecatedVueConfigKeycodes));
+    registry.register(Box::new(vue::ValidTemplateRoot));
+    registry.register(Box::new(vue::NoRootVIf));
+    registry.register(Box::new(vue::RequireToggleInsideTransition));
+    registry.register(Box::new(vue::UseVOnExact));
+    registry.register(Box::new(vue::NoMultipleSlotArgs));
+    registry.register(Box::new(vue::NoMutatingProps));
+    registry.register(Box::new(vue::NoUnusedVars));
+    registry.register(Box::new(vue::NoUndefComponents));
     // Vue Recommended
     registry.register(Box::new(vue::NoUnusedComponents));
     registry.register(Box::new(vue::NoUnusedProps));
@@ -212,6 +241,34 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(vue::NoTemplateTargetBlank));
     registry.register(Box::new(vue::NoVForIndexAsKey));
     registry.register(Box::new(vue::NoConstantCondition));
+    registry.register(Box::new(vue::NoLoneTemplate));
+    registry.register(Box::new(vue::NoUselessMustaches));
+    registry.register(Box::new(vue::NoUselessVBind));
+    registry.register(Box::new(vue::ThisInTemplate));
+    registry.register(Box::new(vue::NoStaticInlineStyles));
+    registry.register(Box::new(vue::NoVForTemplateKeyOnChild));
+    registry.register(Box::new(vue::NoTemplateShadow));
+    registry.register(Box::new(vue::NoNegatedVIfCondition));
+    registry.register(Box::new(vue::AttributeHyphenation));
+    registry.register(Box::new(vue::VOnEventHyphenation));
+    registry.register(Box::new(vue::BlockOrder));
+    registry.register(Box::new(vue::MatchComponentFileName));
+    registry.register(Box::new(vue::NoBareStringsInTemplate));
+    registry.register(Box::new(vue::NoDuplicateAttrInheritance));
+    registry.register(Box::new(vue::NoMultipleObjectsInClass));
+    registry.register(Box::new(vue::NoUndefProperties));
+    registry.register(Box::new(vue::PreferSeparateStaticClass));
+    registry.register(Box::new(vue::SlotNameCasing));
+    registry.register(Box::new(vue::VForDelimiterStyle));
+    registry.register(Box::new(vue::VOnHandlerStyle));
+    registry.register(Box::new(vue::BlockLang));
+    registry.register(Box::new(vue::ComponentNameInTemplateCasing));
+    registry.register(Box::new(vue::CustomEventNameCasing));
+    registry.register(Box::new(vue::EnforceStyleAttribute));
+    registry.register(Box::new(vue::HtmlButtonHasType));
+    registry.register(Box::new(vue::NoEmptyComponentBlock));
+    registry.register(Box::new(vue::NoUnusedRefs));
+    registry.register(Box::new(vue::NoVTextDirective));
     // Accessibility
     registry.register(Box::new(a11y::AltText));
     registry.register(Box::new(a11y::AnchorHasContent));
@@ -250,6 +307,33 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(script::DefineMacrosOrder));
     registry.register(Box::new(script::RequireDefaultProp));
     registry.register(Box::new(script::NoUnusedEmitDeclarations));
+    registry.register(Box::new(script::ValidDefineEmits));
+    registry.register(Box::new(script::ValidDefineProps));
+    registry.register(Box::new(script::NoExportInScriptSetup));
+    registry.register(Box::new(script::NoExposeAfterAwait));
+    registry.register(Box::new(script::NoReservedKeys));
+    registry.register(Box::new(script::NoReservedProps));
+    registry.register(Box::new(script::PreferImportFromVue));
+    registry.register(Box::new(script::NoArrowFunctionsInWatch));
+    registry.register(Box::new(script::RequireExplicitEmits));
+    registry.register(Box::new(script::RequirePropTypes));
+    registry.register(Box::new(script::NoRequiredPropWithDefault));
+    registry.register(Box::new(script::DefineEmitsDeclaration));
+    registry.register(Box::new(script::DefinePropsDeclaration));
+    registry.register(Box::new(script::RequireEmitValidator));
+    registry.register(Box::new(script::ComponentDefinitionNameCasing));
+    registry.register(Box::new(script::PropNameCasing));
+    registry.register(Box::new(script::OneComponentPerFile));
+    registry.register(Box::new(script::OrderInComponents));
+    registry.register(Box::new(script::NoSideEffectsInComputed));
+    registry.register(Box::new(script::ComponentApiStyle));
+    registry.register(Box::new(script::NextTickStyle));
+    registry.register(Box::new(script::NoPotentialComponentOptionTypo));
+    registry.register(Box::new(script::NoBooleanDefault));
+    registry.register(Box::new(script::NoImportCompilerMacros));
+    registry.register(Box::new(script::PreferDefineOptions));
+    registry.register(Box::new(script::RequireTypedRef));
+    registry.register(Box::new(script::PreferScriptAttrs));
     // Vapor (only active when vapor_mode is enabled in config)
     registry.register(Box::new(vapor::NoSuspense));
     registry.register(Box::new(vapor::NoVueLifecycleEvents));
@@ -285,6 +369,6 @@ mod tests {
     #[test]
     fn builtin_registry_has_rules() {
         let registry = RuleRegistry::builtin();
-        assert!(registry.rules().len() >= 75);
+        assert!(registry.rules().len() >= 138);
     }
 }

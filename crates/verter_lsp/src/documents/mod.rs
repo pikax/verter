@@ -9,8 +9,8 @@ use parking_lot::RwLock;
 use dashmap::DashMap;
 use tower_lsp_server::lsp_types::*;
 use verter_host::{
-    CompileProfile, FileKind, HostUpdateResult, StyleOverrideEntry, StyleOverrideRequest,
-    TsxResponse, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileProfile, FileKind, HostUpdateResult, IdeResponse, StyleOverrideEntry,
+    StyleOverrideRequest, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
 use crate::server::{TsxBlock, VirtualFileEntry, VirtualFilesResponse};
@@ -26,7 +26,7 @@ pub struct DocumentRegistry {
     /// Default compile profile for TSX generation (LSP mode).
     /// Wrapped in `RwLock` so `set_embed_ambient_types()` can update it
     /// after `initialized()` determines whether `@verter/types` is installed.
-    tsx_profile: RwLock<CompileProfile>,
+    pub(crate) tsx_profile: RwLock<CompileProfile>,
     /// Negotiated position encoding from the client (LSP 3.17).
     /// Set once during `initialize()`, before any documents are opened.
     encoding: RwLock<PositionEncodingKind>,
@@ -134,7 +134,7 @@ impl DocumentRegistry {
         // need the mapper for hover/definition/diagnostics.
         let position_mapper = if file_kind == FileKind::VueSfc {
             self.host
-                .get_tsx(&canonical_id, &self.tsx_profile.read())
+                .get_ide(&canonical_id, &self.tsx_profile.read())
                 .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
         } else {
             None
@@ -210,7 +210,7 @@ impl DocumentRegistry {
             Ok(update) if update.changed => {
                 let new_mapper = self
                     .host
-                    .get_tsx(&canonical_id, &self.tsx_profile.read())
+                    .get_ide(&canonical_id, &self.tsx_profile.read())
                     .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok());
                 // Keep old mapper if new compilation failed (Bug 3 fix)
                 new_mapper.or_else(|| {
@@ -324,10 +324,22 @@ impl DocumentRegistry {
         None
     }
 
-    /// Get the TSX output for a document.
-    pub fn get_tsx(&self, uri: &Uri) -> Option<TsxResponse> {
+    /// Get the IDE output (TSX or JSX) for a document.
+    pub fn get_ide(&self, uri: &Uri) -> Option<IdeResponse> {
         let canonical_id = self.get_canonical_id(uri)?;
-        self.host.get_tsx(&canonical_id, &self.tsx_profile.read())
+        self.host.get_ide(&canonical_id, &self.tsx_profile.read())
+    }
+
+    /// Check if a document's IDE output is JavaScript (JSX) rather than TypeScript (TSX).
+    pub fn is_jsx(&self, uri: &Uri) -> bool {
+        let canonical_id = match self.get_canonical_id(uri) {
+            Some(id) => id,
+            None => return false,
+        };
+        self.host
+            .get_ide(&canonical_id, &self.tsx_profile.read())
+            .map(|r| r.is_jsx)
+            .unwrap_or(false)
     }
 
     /// Get the analysis snapshot for a document.
@@ -350,7 +362,7 @@ impl DocumentRegistry {
         // Get TSX
         let tsx = self
             .host
-            .get_tsx(&canonical_id, &self.tsx_profile.read())
+            .get_ide(&canonical_id, &self.tsx_profile.read())
             .map(|t| TsxBlock {
                 code: t.code.to_string(),
                 source_map: t.source_map.map(|m| m.to_string()),

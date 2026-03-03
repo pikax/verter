@@ -64,7 +64,7 @@ interface HostVirtualNodeKind {
   index?: number;
 }
 
-interface HostTsxResponse {
+interface HostIdeResponse {
   code: string;
   sourceMap?: string;
 }
@@ -101,8 +101,8 @@ interface HostBinding {
   }): HostVirtualFileResponse;
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
   getAnalysis?(canonicalOrAlias: string): FileAnalysis | null;
-  getTsx?(canonicalId: string, profile?: HostCompileProfile): HostTsxResponse | null;
-  getTsc?(canonicalId: string): HostTsxResponse | null;
+  getIde?(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null;
+  getTsc?(canonicalId: string): HostIdeResponse | null;
   lint?(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
   getCodeActions?(canonicalOrAlias: string, offset: number): HostCodeAction[];
   getLintRuleMetadata?(): HostLintRuleMetadata[];
@@ -256,7 +256,7 @@ export function mergeRenderIntoComponent(code: string): string {
 }
 
 /** Apply TSX output and keep its source map isolated from template source maps. */
-export function applyTsxOutput(file: File, tsx: HostTsxResponse | null | undefined): void {
+export function applyTsxOutput(file: File, tsx: HostIdeResponse | null | undefined): void {
   file.compiled.types = tsx?.code ?? "";
   file.compiled.typesSourceMap = tsx?.sourceMap ?? "";
 }
@@ -371,10 +371,10 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
     file.compiled.lintDiagnostics = [];
   }
 
-  // Retrieve TSX types output via dedicated API (backward compat: older WASM may lack getTsx)
-  if (typeof wasmHost!.getTsx === "function") {
+  // Retrieve TSX types output via dedicated API (backward compat: older WASM may lack getIde)
+  if (typeof wasmHost!.getIde === "function") {
     try {
-      const tsx = wasmHost!.getTsx(file.filename, profile);
+      const tsx = wasmHost!.getIde(file.filename, profile);
       applyTsxOutput(file, tsx);
     } catch {
       applyTsxOutput(file, null);
@@ -497,9 +497,9 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
   }
 
   // Retrieve TSX types output via dedicated API
-  if (typeof wasmHost!.getTsx === "function") {
+  if (typeof wasmHost!.getIde === "function") {
     try {
-      const tsx = wasmHost!.getTsx(vueFilename, profile);
+      const tsx = wasmHost!.getIde(vueFilename, profile);
       applyTsxOutput(file, tsx);
     } catch {
       applyTsxOutput(file, null);

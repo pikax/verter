@@ -34,7 +34,7 @@ pub fn emit_v_if_open<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
-    parent_condition_scopes: &[crate::tsx::condition::ConditionScope],
+    parent_condition_scopes: &[crate::ide::condition::ConditionScope],
 ) {
     let condition = match &el.v_condition {
         Some(c) => c,
@@ -47,8 +47,8 @@ pub fn emit_v_if_open<'alloc>(
             if let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end) {
                 // For nested v-if, emit block guard from parent scopes
                 let parent_guard =
-                    crate::tsx::condition::generate_condition_text(parent_condition_scopes)
-                        .map(|text| crate::tsx::condition::build_block_guard(&text))
+                    crate::ide::condition::generate_condition_text(parent_condition_scopes)
+                        .map(|text| crate::ide::condition::build_block_guard(&text))
                         .unwrap_or_default();
 
                 let prefix = format!("{{()=>{{{}if(", parent_guard);

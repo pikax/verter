@@ -36,9 +36,10 @@ export interface HostCompileProfile {
   target?: "bundler" | "ide" | "analysis";
 }
 
-export interface HostTsxResponse {
+export interface HostIdeResponse {
   code: string;
   sourceMap?: string;
+  isJsx: boolean;
 }
 
 export interface HostVirtualNodeKind {

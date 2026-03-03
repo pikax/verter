@@ -271,13 +271,25 @@ pub struct VerterLanguageServer {
     /// Initialized during `initialized()` when a workspace root is available.
     path_resolver: parking_lot::RwLock<Option<crate::config::TsConfigPathResolver>>,
     /// Diagnostics engine — runs all lint rules to produce a DiagnosticSet.
-    linter: verter_diagnostics::Linter,
+    /// Wrapped in RwLock because config is resolved during `initialized()`.
+    linter: parking_lot::RwLock<verter_diagnostics::Linter>,
     /// Action engine — produces quick fixes and refactoring code actions.
     action_engine: verter_actions::ActionEngine,
+    /// Whether linting was explicitly configured via .verterrc.json, eslint, or VS Code.
+    /// When false, only error-severity diagnostics are shown.
+    lint_explicitly_configured: std::sync::atomic::AtomicBool,
+    /// Lint options from initializationOptions, stored during initialize() for use in initialized().
+    init_lint_options: tokio::sync::Mutex<Option<serde_json::Value>>,
     /// Cached verter diagnostics per document: URI → (version, diagnostics).
     /// Avoids re-running the linter when both push and pull paths request diagnostics
     /// for the same document version.
     cached_verter_diags: DashMap<String, (i32, Vec<Diagnostic>)>,
+    /// Set of TSX paths (e.g., "C:/project/src/Foo.vue.tsx") that were synced to the
+    /// type provider as background files during workspace scan.  When `did_open()` is
+    /// called for one of these files, we use `sync_tsx()` (update) instead of
+    /// `open_tsx()` to avoid "already open" errors.  When `did_close()` fires, we keep
+    /// the file alive in the provider instead of closing it.
+    background_synced_files: DashMap<String, ()>,
 }
 
 impl VerterLanguageServer {
@@ -295,9 +307,12 @@ impl VerterLanguageServer {
             statistics: Arc::new(Statistics::new(500)),
             position_encoding: tokio::sync::Mutex::new(PositionEncodingKind::UTF16),
             path_resolver: parking_lot::RwLock::new(None),
-            linter: verter_diagnostics::Linter::default(),
+            linter: parking_lot::RwLock::new(verter_diagnostics::Linter::default()),
             action_engine: verter_actions::ActionEngine::default(),
+            lint_explicitly_configured: std::sync::atomic::AtomicBool::new(false),
+            init_lint_options: tokio::sync::Mutex::new(None),
             cached_verter_diags: DashMap::new(),
+            background_synced_files: DashMap::new(),
         }
     }
 
@@ -328,8 +343,9 @@ impl VerterLanguageServer {
         // Run the diagnostics engine (lint rules: CSS, template, a11y, etc.)
         if let Some(doc) = self.documents.get(uri) {
             if let Some(analysis) = self.documents.get_analysis(uri) {
+                let linter = self.linter.read();
                 diags.extend(crate::features::diagnostics_bridge::run_linter(
-                    &self.linter,
+                    &linter,
                     &analysis,
                     &doc.source,
                     &doc.line_index,
@@ -344,6 +360,14 @@ impl VerterLanguageServer {
                     ),
                 );
             }
+        }
+
+        // When lint is not explicitly configured, filter to errors-only to avoid noise.
+        if !self
+            .lint_explicitly_configured
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            diags.retain(|d| d.severity == Some(DiagnosticSeverity::ERROR));
         }
 
         // Cache the result
@@ -455,76 +479,104 @@ impl VerterLanguageServer {
         let mut count = 0u32;
         scan_vue_files_recursive(&root_path, &self.documents.host, &mut count);
         tracing::info!("scan_workspace: indexed {} .vue files", count);
+
+        // When a type provider is connected, compile all scanned files to TSX
+        // so that TSGO can resolve imports of non-open .vue files.
+        if self.type_provider.is_some() {
+            let profile = self.documents.tsx_profile.read().clone();
+            let mut compiled = 0u32;
+            for (canonical_id, kind) in self.documents.host.list_files() {
+                if kind == verter_host::FileKind::VueSfc
+                    && self
+                        .documents
+                        .host
+                        .ensure_compiled(&canonical_id, &profile)
+                        .is_ok()
+                {
+                    compiled += 1;
+                }
+            }
+            tracing::info!(
+                "scan_workspace: compiled {} .vue files for type provider",
+                compiled
+            );
+        }
     }
 
-    async fn sync_tsx_to_provider(&self, uri: &Uri) {
+    async fn sync_ide_to_provider(&self, uri: &Uri) {
         let _timer = self
             .statistics
-            .timer("tsx_sync", Some(uri.as_str().to_string()));
+            .timer("ide_sync", Some(uri.as_str().to_string()));
         if let Some(sync) = &self.project_sync {
-            if let Some(tsx) = self.documents.get_tsx(uri) {
-                let tsx_path = self.tsx_path_for_uri(uri);
-                tracing::info!("sync_tsx: {} ({} bytes)", tsx_path, tsx.code.len());
-                if let Err(e) = sync.sync_tsx(&tsx_path, &tsx.code).await {
-                    tracing::warn!("sync_tsx: failed for {tsx_path}: {e}");
+            if let Some(ide) = self.documents.get_ide(uri) {
+                let ide_path = self.ide_path_for_uri(uri);
+                tracing::info!("sync_ide: {} ({} bytes)", ide_path, ide.code.len());
+                if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
+                    tracing::warn!("sync_ide: failed for {ide_path}: {e}");
                 } else {
-                    tracing::info!("sync_tsx: ok for {}", tsx_path);
+                    tracing::info!("sync_ide: ok for {}", ide_path);
                 }
             } else {
-                tracing::info!("sync_tsx: no TSX available for {}", uri.as_str());
+                tracing::info!("sync_ide: no IDE output available for {}", uri.as_str());
             }
         }
     }
 
-    /// Get TSX context for TypeProvider queries: (tsx_path, tsx_code, position_mapper).
-    fn tsx_context(&self, uri: &Uri) -> Option<(String, Arc<str>, PositionMapper)> {
+    /// Get IDE context for TypeProvider queries: (ide_path, ide_code, position_mapper).
+    fn ide_context(&self, uri: &Uri) -> Option<(String, Arc<str>, PositionMapper)> {
         let canonical_id = self.documents.get_canonical_id(uri);
         if canonical_id.is_none() {
-            tracing::info!("tsx_context: no canonical_id for {}", uri.as_str());
+            tracing::info!("ide_context: no canonical_id for {}", uri.as_str());
             return None;
         }
-        let tsx = self.documents.get_tsx(uri);
-        if tsx.is_none() {
+        let ide = self.documents.get_ide(uri);
+        if ide.is_none() {
             tracing::info!(
-                "tsx_context: no TSX for {} (canonical={})",
+                "ide_context: no IDE output for {} (canonical={})",
                 uri.as_str(),
                 canonical_id.as_deref().unwrap_or("?")
             );
             return None;
         }
-        let tsx = tsx.unwrap();
+        let ide = ide.unwrap();
         let mapper = self.documents.get_position_mapper(uri);
         if mapper.is_none() {
-            tracing::info!("tsx_context: no position mapper for {}", uri.as_str());
+            tracing::info!("ide_context: no position mapper for {}", uri.as_str());
             return None;
         }
-        let tsx_path = self.tsx_path_for_uri(uri);
-        Some((tsx_path, tsx.code, mapper.unwrap()))
+        let ide_path = self.ide_path_for_uri(uri);
+        Some((ide_path, ide.code, mapper.unwrap()))
     }
 
-    /// Generate the TSX file path for a given Vue file URI.
-    fn tsx_path_for_uri(&self, uri: &Uri) -> String {
+    /// Generate the IDE file path (.tsx or .jsx) for a given Vue file URI.
+    fn ide_path_for_uri(&self, uri: &Uri) -> String {
         let canonical = self
             .documents
             .get_canonical_id(uri)
             .unwrap_or_else(|| uri.as_str().to_string());
-        format!("{canonical}.tsx")
+        let ext = if self.documents.is_jsx(uri) {
+            ".jsx"
+        } else {
+            ".tsx"
+        };
+        format!("{canonical}{ext}")
     }
 
-    /// Get TSX content and mapper by TSX path (reverse lookup).
-    fn tsx_context_by_tsx_path(
-        &self,
-        tsx_path: &str,
-    ) -> Option<(String, Arc<str>, PositionMapper)> {
-        // TSX path is "{canonical_id}.tsx" — strip the .tsx suffix to get the canonical_id
-        let canonical_id = tsx_path.strip_suffix(".tsx")?;
+    /// Get IDE content and mapper by IDE path (reverse lookup).
+    fn ide_context_by_path(&self, ide_path: &str) -> Option<(String, Arc<str>, PositionMapper)> {
+        // IDE path is "{canonical_id}.tsx" or "{canonical_id}.jsx"
+        let canonical_id = ide_path
+            .strip_suffix(".tsx")
+            .or_else(|| ide_path.strip_suffix(".jsx"))?;
         let uri = self.documents.canonical_id_to_uri(canonical_id)?;
-        self.tsx_context(&uri)
+        self.ide_context(&uri)
     }
 
-    /// Find the Vue URI corresponding to a TSX path.
-    fn vue_uri_from_tsx_path(&self, tsx_path: &str) -> Option<Uri> {
-        let canonical_id = tsx_path.strip_suffix(".tsx")?;
+    /// Find the Vue URI corresponding to an IDE path.
+    fn vue_uri_from_ide_path(&self, ide_path: &str) -> Option<Uri> {
+        let canonical_id = ide_path
+            .strip_suffix(".tsx")
+            .or_else(|| ide_path.strip_suffix(".jsx"))?;
         self.documents.canonical_id_to_uri(canonical_id)
     }
 
@@ -620,7 +672,7 @@ impl VerterLanguageServer {
         let source_uri: Uri = source_uri_str.parse().ok()?;
 
         // Get the TSX path from the source .vue file
-        let tsx_path = self.tsx_path_for_uri(&source_uri);
+        let tsx_path = self.ide_path_for_uri(&source_uri);
 
         // Build LineIndex from the virtual file's content (for offset conversion)
         let doc = self.documents.get(uri)?;
@@ -639,7 +691,7 @@ impl VerterLanguageServer {
         tracing::debug!("$/onDidChangeTsOrJsFile: {}", params.uri);
 
         // Skip .vue files — they are synced to the type provider via TSX compilation
-        // in sync_tsx_to_provider(). Sending raw Vue SFC source to TSGO (which
+        // in sync_ide_to_provider(). Sending raw Vue SFC source to TSGO (which
         // expects TypeScript) corrupts its internal state.
         if params.uri.ends_with(".vue") {
             return;
@@ -670,7 +722,89 @@ impl VerterLanguageServer {
     /// Called when `node_modules` files are created, updated, or deleted.
     pub async fn on_file_changed(&self, params: OnFileChangedParams) {
         tracing::debug!("$/onFileChanged: {} ({})", params.uri, params.change_type);
+
+        // Handle .vue file changes from the file watcher.
+        // These are files not open in the editor — re-sync to type provider.
+        if params.uri.ends_with(".vue") {
+            let canonical_id = if let Ok(uri) = params.uri.parse::<Uri>() {
+                uri_to_canonical_id(&uri)
+            } else {
+                crate::documents::uri_to_canonical_id_from_str(&params.uri)
+            };
+
+            match params.change_type.as_str() {
+                "create" | "update" => {
+                    self.resync_background_vue_file(&canonical_id).await;
+                }
+                "delete" => {
+                    // Close TSX in the type provider and clean up.
+                    if let Some(sync) = &self.project_sync {
+                        let profile = self.documents.tsx_profile.read().clone();
+                        if let Some(ide) = self.documents.host.get_ide(&canonical_id, &profile) {
+                            let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
+                            let tsx_path = format!("{canonical_id}{ext}");
+                            let _ = sync.close_tsx(&tsx_path).await;
+                            self.background_synced_files.remove(&tsx_path);
+                        }
+                    }
+                    self.documents.host.remove(&canonical_id);
+                }
+                _ => {}
+            }
+        }
+
         // Future: invalidate module resolution caches, trigger re-analysis
+    }
+
+    /// Re-read a non-open .vue file from disk, upsert, compile, and sync to TSGO.
+    async fn resync_background_vue_file(&self, canonical_id: &str) {
+        // Read file from disk
+        let source = match std::fs::read_to_string(canonical_id) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("resync_background: can't read {canonical_id}: {e}");
+                return;
+            }
+        };
+
+        // Upsert into host
+        let _ = self.documents.host.upsert(verter_host::UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::from(source.as_str()),
+            file_kind: verter_host::FileKind::VueSfc,
+            aliases: Vec::new(),
+        });
+
+        // Compile
+        let profile = self.documents.tsx_profile.read().clone();
+        if self
+            .documents
+            .host
+            .ensure_compiled(canonical_id, &profile)
+            .is_err()
+        {
+            return;
+        }
+
+        // Sync to type provider
+        if let Some(sync) = &self.project_sync {
+            if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
+                let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
+                let tsx_path = format!("{canonical_id}{ext}");
+                let is_bg = self.background_synced_files.contains_key(&tsx_path);
+                let result = if is_bg {
+                    sync.sync_tsx(&tsx_path, &ide.code).await
+                } else {
+                    sync.open_tsx(&tsx_path, &ide.code).await
+                };
+                if result.is_ok() {
+                    self.background_synced_files.insert(tsx_path, ());
+                } else if let Err(e) = result {
+                    tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
+                }
+            }
+        }
     }
 
     /// Handle `$/getCompiledCode` request.
@@ -688,7 +822,7 @@ impl VerterLanguageServer {
             Err(_) => return Ok(None),
         };
 
-        let tsx = self.documents.get_tsx(&parsed_uri);
+        let tsx = self.documents.get_ide(&parsed_uri);
 
         Ok(tsx.map(|tsx| CompiledCodeResponse {
             js: CompiledBlock {
@@ -995,7 +1129,7 @@ impl VerterLanguageServer {
         let Some(tp) = &self.type_provider else {
             return Ok(serde_json::Value::Object(result));
         };
-        let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(&parsed_uri) else {
+        let Some((tsx_path, tsx_content, mapper)) = self.ide_context(&parsed_uri) else {
             return Ok(serde_json::Value::Object(result));
         };
 
@@ -1351,7 +1485,7 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
-        // Parse initialization options (statistics config, etc.)
+        // Parse initialization options (statistics config, lint config, etc.)
         if let Some(opts) = &params.initialization_options {
             tracing::debug!("initialization options: {opts}");
             if let Some(stats_enabled) = opts
@@ -1364,6 +1498,10 @@ impl LanguageServer for VerterLanguageServer {
                     "statistics: {}",
                     if stats_enabled { "enabled" } else { "disabled" }
                 );
+            }
+            // Store lint options for use in initialized()
+            if opts.get("lint").is_some() {
+                *self.init_lint_options.lock().await = Some(opts.clone());
             }
         }
 
@@ -1423,6 +1561,34 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
+        // Discover project lint configuration (.verterrc.json, eslint, VS Code settings)
+        {
+            let root = self.workspace_root.lock().await;
+            let mut resolved = if let Some(root_uri) = root.as_ref() {
+                let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
+                let root_path = std::path::PathBuf::from(&canonical);
+                crate::config::discover_lint_config(&root_path)
+            } else {
+                crate::config::ResolvedLintConfig::default()
+            };
+
+            // Merge VS Code initializationOptions (overrides file-based config)
+            if let Some(init_opts) = self.init_lint_options.lock().await.take() {
+                crate::config::merge_init_options(&mut resolved, &init_opts);
+            }
+
+            self.lint_explicitly_configured.store(
+                resolved.explicitly_configured,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            *self.linter.write() = verter_diagnostics::Linter::new(resolved.config);
+
+            tracing::info!(
+                "lint config: explicitly_configured={}",
+                resolved.explicitly_configured,
+            );
+        }
+
         // Ensure @verter/types is available for TSGO module resolution.
         // If the package is not installed, materialise a minimal version in
         // node_modules so that `import { ... } from "@verter/types"` resolves.
@@ -1477,6 +1643,29 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
+        // Batch-sync all compiled .vue files to the type provider.
+        // This makes TSGO see proper types for ALL .vue files, not just open ones.
+        if let Some(sync) = &self.project_sync {
+            let profile = self.documents.tsx_profile.read().clone();
+            let mut synced = 0u32;
+            for (canonical_id, kind) in self.documents.host.list_files() {
+                if kind == verter_host::FileKind::VueSfc {
+                    if let Some(ide) = self.documents.host.get_ide(&canonical_id, &profile) {
+                        let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
+                        let tsx_path = format!("{canonical_id}{ext}");
+                        if sync.open_tsx(&tsx_path, &ide.code).await.is_ok() {
+                            self.background_synced_files.insert(tsx_path, ());
+                            synced += 1;
+                        }
+                    }
+                }
+            }
+            tracing::info!(
+                "scan_workspace: synced {} .vue files to type provider",
+                synced
+            );
+        }
+
         // Notify the extension of the TSGO child PID for orphan cleanup.
         if let Some(tp) = &self.type_provider {
             if let Some(pid) = tp.child_pid() {
@@ -1513,7 +1702,7 @@ impl LanguageServer for VerterLanguageServer {
                 uri.as_str(),
             );
         }
-        self.sync_tsx_to_provider(uri).await;
+        self.sync_ide_to_provider(uri).await;
         self.publish_diagnostics(uri).await;
     }
 
@@ -1556,7 +1745,7 @@ impl LanguageServer for VerterLanguageServer {
         if !style_only
             && tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                self.sync_tsx_to_provider(&uri),
+                self.sync_ide_to_provider(&uri),
             )
             .await
             .is_err()
@@ -1584,9 +1773,20 @@ impl LanguageServer for VerterLanguageServer {
         // Virtual files don't have TSX in the provider
         if self.documents.get_virtual_source_uri(uri).is_none() {
             if let Some(sync) = &self.project_sync {
-                let tsx_path = self.tsx_path_for_uri(uri);
-                if let Err(e) = sync.close_tsx(&tsx_path).await {
-                    tracing::warn!("did_close: failed to close TSX in provider: {e}");
+                // Only close in TSGO if this was a Vue SFC with IDE output
+                // (only .vue files get the .tsx/.jsx suffix and are synced to TSGO)
+                if self.documents.get_ide(uri).is_some() {
+                    let tsx_path = self.ide_path_for_uri(uri);
+                    // If this file was background-synced, keep it alive in the
+                    // provider — it's still needed for cross-file type resolution.
+                    if self.background_synced_files.contains_key(&tsx_path) {
+                        tracing::debug!(
+                            "did_close: keeping background-synced file in provider: {}",
+                            tsx_path
+                        );
+                    } else if let Err(e) = sync.close_tsx(&tsx_path).await {
+                        tracing::warn!("did_close: failed to close TSX in provider: {e}");
+                    }
                 }
             }
         }
@@ -1614,13 +1814,15 @@ impl LanguageServer for VerterLanguageServer {
                 std::fs::read_to_string(uri.path().as_str().trim_start_matches('/'))
             {
                 let _ = self.documents.host().upsert(verter_host::UpsertRequest {
-                    canonical_id: Some(canonical_id),
+                    canonical_id: Some(canonical_id.clone()),
                     input_id: file.uri.clone(),
                     source: Arc::from(content.as_str()),
                     file_kind: verter_host::FileKind::VueSfc,
                     aliases: vec![],
                 });
             }
+            // Compile and sync to type provider for cross-file type resolution
+            self.resync_background_vue_file(&canonical_id).await;
             tracing::debug!("did_create_files: indexed {}", file.uri);
         }
     }
@@ -1635,6 +1837,16 @@ impl LanguageServer for VerterLanguageServer {
                 Err(_) => continue,
             };
             let canonical_id = uri_to_canonical_id(&uri);
+            // Close TSX in the type provider
+            if let Some(sync) = &self.project_sync {
+                let profile = self.documents.tsx_profile.read().clone();
+                if let Some(ide) = self.documents.host().get_ide(&canonical_id, &profile) {
+                    let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
+                    let tsx_path = format!("{canonical_id}{ext}");
+                    let _ = sync.close_tsx(&tsx_path).await;
+                    self.background_synced_files.remove(&tsx_path);
+                }
+            }
             self.documents.host().remove(&canonical_id);
             self.cached_verter_diags.remove(uri.as_str());
             tracing::debug!("did_delete_files: removed {}", file.uri);
@@ -1651,7 +1863,7 @@ impl LanguageServer for VerterLanguageServer {
         let verter_diags = self.compute_verter_diagnostics(uri);
 
         let diagnostics = if let Some(tp) = &self.type_provider {
-            match self.tsx_context(uri) {
+            match self.ide_context(uri) {
                 Some((tsx_path, tsx_content, mapper)) => {
                     let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                     let vue_li = self.documents.get(uri).map(|d| d.line_index.clone());
@@ -1749,7 +1961,7 @@ impl LanguageServer for VerterLanguageServer {
 
         // Enhance with TypeProvider if available
         if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(uri) {
+            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                 if let Some(doc) = self.documents.get(uri) {
                     // Use validated mapping to avoid querying TSGO at synthetic TSX
@@ -1807,7 +2019,7 @@ impl LanguageServer for VerterLanguageServer {
                     tracing::info!("hover: no document state for {}", uri.as_str());
                 }
             } else {
-                tracing::info!("hover: no tsx_context for {}", uri.as_str());
+                tracing::info!("hover: no ide_context for {}", uri.as_str());
             }
         } else {
             tracing::info!("hover: no type_provider");
@@ -1949,9 +2161,9 @@ impl LanguageServer for VerterLanguageServer {
 
         // Enhance with TypeProvider if available
         if let Some(tp) = &self.type_provider {
-            let tsx_ctx = self.tsx_context(uri);
+            let tsx_ctx = self.ide_context(uri);
             if tsx_ctx.is_none() {
-                tracing::debug!("completion: no tsx_context for {}", uri.as_str());
+                tracing::debug!("completion: no ide_context for {}", uri.as_str());
             }
             if let Some((tsx_path, tsx_content, mapper)) = tsx_ctx {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
@@ -2049,12 +2261,12 @@ impl LanguageServer for VerterLanguageServer {
                                 if !resolve_result.additional_text_edits.is_empty() {
                                     // Map TSX positions to Vue positions
                                     if let Some((_, tsx_content, mapper)) =
-                                        self.tsx_context_by_tsx_path(tsx_path)
+                                        self.ide_context_by_path(tsx_path)
                                     {
                                         let tsx_li =
                                             LineIndex::new(&tsx_content, self.documents.encoding());
                                         // Find the Vue URI from tsx_path
-                                        if let Some(vue_uri) = self.vue_uri_from_tsx_path(tsx_path)
+                                        if let Some(vue_uri) = self.vue_uri_from_ide_path(tsx_path)
                                         {
                                             if let Some(doc) = self.documents.get(&vue_uri) {
                                                 let edits: Vec<TextEdit> = resolve_result
@@ -2192,7 +2404,7 @@ impl LanguageServer for VerterLanguageServer {
 
         // Enhance with TypeProvider for cross-file definitions
         if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(uri) {
+            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                 if let Some(doc) = self.documents.get(uri) {
                     // Use validated mapping to avoid querying TSGO at synthetic TSX
@@ -2323,7 +2535,7 @@ impl LanguageServer for VerterLanguageServer {
 
         // Enhance with TypeProvider if available
         if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(uri) {
+            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                 if let Some(doc) = self.documents.get(uri) {
                     if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
@@ -2431,7 +2643,7 @@ impl LanguageServer for VerterLanguageServer {
 
         // Enhance with TypeProvider for cross-file renames
         if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(uri) {
+            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                 if let Some(doc) = self.documents.get(uri) {
                     if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
@@ -2628,7 +2840,7 @@ impl LanguageServer for VerterLanguageServer {
 
         // Enhance with TypeProvider if available
         if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(uri) {
+            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                 if let Some(doc) = self.documents.get(uri) {
                     if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
@@ -2673,7 +2885,7 @@ impl LanguageServer for VerterLanguageServer {
         }
 
         if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(uri) {
+            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                 if let Some(doc) = self.documents.get(uri) {
                     if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
@@ -2759,36 +2971,39 @@ impl LanguageServer for VerterLanguageServer {
                 all_actions.extend(event_actions);
 
                 // Action engine quick fixes (e.g., remove unused CSS selector)
-                all_actions.extend(crate::features::diagnostics_bridge::action_engine_fixes(
-                    &self.action_engine,
-                    analysis,
-                    &doc.source,
-                    &doc.line_index,
-                    &self.linter,
-                    &params.context.diagnostics,
-                    uri,
-                ));
+                {
+                    let linter = self.linter.read();
+                    all_actions.extend(crate::features::diagnostics_bridge::action_engine_fixes(
+                        &self.action_engine,
+                        analysis,
+                        &doc.source,
+                        &doc.line_index,
+                        &linter,
+                        &params.context.diagnostics,
+                        uri,
+                    ));
 
-                // Action engine position-based refactorings (e.g., expand v-bind shorthand)
-                if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
-                    all_actions.extend(
-                        crate::features::diagnostics_bridge::action_engine_refactorings(
-                            &self.action_engine,
-                            analysis,
-                            &doc.source,
-                            &doc.line_index,
-                            &self.linter,
-                            offset,
-                            uri,
-                        ),
-                    );
+                    // Action engine position-based refactorings (e.g., expand v-bind shorthand)
+                    if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
+                        all_actions.extend(
+                            crate::features::diagnostics_bridge::action_engine_refactorings(
+                                &self.action_engine,
+                                analysis,
+                                &doc.source,
+                                &doc.line_index,
+                                &linter,
+                                offset,
+                                uri,
+                            ),
+                        );
+                    }
                 }
             }
         }
 
         // TypeProvider code actions (TSGO quick fixes, refactorings)
         if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(uri) {
+            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                 if let Some(doc) = self.documents.get(uri) {
                     let start_offset = merge::vue_position_to_tsx_offset_validated(
@@ -2832,7 +3047,7 @@ impl LanguageServer for VerterLanguageServer {
         let uri = &params.text_document.uri;
 
         if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(uri) {
+            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                 if let Some(doc) = self.documents.get(uri) {
                     if let Ok(type_tokens) = tp.get_semantic_tokens(&tsx_path).await {
@@ -2930,7 +3145,7 @@ impl LanguageServer for VerterLanguageServer {
 
         // Standard .vue file: merge with TSGO type hints when available
         if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.tsx_context(uri) {
+            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
                 let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
                 if let Some(doc) = self.documents.get(uri) {
                     let start_offset = merge::vue_position_to_tsx_offset_validated(

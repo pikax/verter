@@ -67,14 +67,14 @@ pub mod template;
 #[cfg(not(feature = "bench"))]
 pub(crate) mod template;
 
-// TSX code generation for IDE type checking
-pub(crate) mod tsx;
+// IDE code generation (TSX for TS projects, JSX+JSDoc for JS projects)
+pub(crate) mod ide;
 
 // TSC code generation (vue-tsc replacement)
 pub mod tsc;
 
 // Re-export the standalone @verter/types declaration for the LSP
-pub use tsx::script::VERTER_TYPES_STANDALONE_DTS;
+pub use ide::script::VERTER_TYPES_STANDALONE_DTS;
 
 pub mod types;
 

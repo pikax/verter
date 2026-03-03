@@ -54,6 +54,8 @@ pub struct RootNodeScript {
     pub src: Option<Span>,
     /// `generic="..."` attribute value span (generic type parameters for `<script setup>`).
     pub generic: Option<Span>,
+    /// `attrs="..."` or `attributes="..."` attribute value span (typed `$attrs`).
+    pub attrs: Option<Span>,
 
     /// All attributes on the tag (including already-parsed special ones).
     pub attributes: Vec<NodeProp>,

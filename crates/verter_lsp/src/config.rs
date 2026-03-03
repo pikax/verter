@@ -347,6 +347,12 @@ fn strip_json_comments(input: &str) -> String {
     result
 }
 
+impl Default for TsConfigDiscovery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TsConfigDiscovery {
     pub fn new() -> Self {
         Self {
@@ -417,9 +423,330 @@ impl TsConfigDiscovery {
     }
 }
 
-impl Default for TsConfigDiscovery {
-    fn default() -> Self {
-        Self::new()
+// ═══════════════════════════════════════════════════════════════════════════
+// Project Lint Configuration (.verterrc.json + ESLint migration)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Project-level lint configuration read from `.verterrc.json`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerterProjectConfig {
+    pub lint: Option<ProjectLintConfig>,
+}
+
+/// Lint section of `.verterrc.json`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLintConfig {
+    /// Whether linting is enabled (default: true when config exists).
+    pub enabled: Option<bool>,
+    /// Preset name: "essential", "recommended", "all", etc.
+    pub preset: Option<String>,
+    /// Per-rule overrides: "off" | "warn" | "error" or [severity, options].
+    pub rules: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+/// Resolved lint configuration from all sources.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedLintConfig {
+    /// Whether linting was explicitly configured (via .verterrc.json, eslint, or VS Code).
+    pub explicitly_configured: bool,
+    /// The resolved lint config to pass to the Linter.
+    pub config: verter_diagnostics::LintConfig,
+}
+
+/// Discover and load project lint configuration.
+///
+/// Priority: `.verterrc.json` > VS Code initializationOptions > eslint config
+pub fn discover_lint_config(workspace_root: &Path) -> ResolvedLintConfig {
+    // 1. Try .verterrc.json
+    if let Some(config) = load_verterrc(workspace_root) {
+        return config;
+    }
+
+    // 2. Try eslint config migration
+    if let Some(config) = load_eslint_config(workspace_root) {
+        return config;
+    }
+
+    // No config found — use defaults (not explicitly configured)
+    ResolvedLintConfig::default()
+}
+
+/// Load `.verterrc.json` from workspace root.
+fn load_verterrc(workspace_root: &Path) -> Option<ResolvedLintConfig> {
+    let config_path = workspace_root.join(".verterrc.json");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let cleaned = strip_json_comments(&content);
+    let project_config: VerterProjectConfig = serde_json::from_str(&cleaned).ok()?;
+
+    let lint = project_config.lint?;
+    let mut config = verter_diagnostics::LintConfig::default();
+
+    // Apply preset
+    if let Some(preset_str) = &lint.preset {
+        config.preset = match preset_str.as_str() {
+            "essential" => verter_diagnostics::LintPreset::Essential,
+            "recommended" => verter_diagnostics::LintPreset::Recommended,
+            "all" => verter_diagnostics::LintPreset::All,
+            "performance" => verter_diagnostics::LintPreset::Performance,
+            "a11y" => verter_diagnostics::LintPreset::A11y,
+            "strict" => verter_diagnostics::LintPreset::Strict,
+            _ => verter_diagnostics::LintPreset::Recommended,
+        };
+    }
+
+    // Apply per-rule overrides
+    if let Some(rules) = &lint.rules {
+        for (name, value) in rules {
+            let severity = parse_rule_severity(value);
+            config.rules.insert(name.clone(), severity);
+        }
+    }
+
+    let enabled = lint.enabled.unwrap_or(true);
+
+    Some(ResolvedLintConfig {
+        explicitly_configured: enabled,
+        config,
+    })
+}
+
+/// Load and migrate eslint-plugin-vue config.
+fn load_eslint_config(workspace_root: &Path) -> Option<ResolvedLintConfig> {
+    // Try .eslintrc.json first, then .eslintrc.js (as JSON fallback), then package.json
+    let eslint_json = workspace_root.join(".eslintrc.json");
+    let package_json = workspace_root.join("package.json");
+
+    let json: serde_json::Value = if eslint_json.exists() {
+        let content = std::fs::read_to_string(&eslint_json).ok()?;
+        let cleaned = strip_json_comments(&content);
+        serde_json::from_str(&cleaned).ok()?
+    } else if package_json.exists() {
+        let content = std::fs::read_to_string(&package_json).ok()?;
+        let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
+        pkg.get("eslintConfig")?.clone()
+    } else {
+        return None;
+    };
+
+    let mut config = verter_diagnostics::LintConfig::default();
+
+    // Extract preset from extends
+    if let Some(extends) = json.get("extends") {
+        let extends_list: Vec<&str> = match extends {
+            serde_json::Value::String(s) => vec![s.as_str()],
+            serde_json::Value::Array(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
+            _ => vec![],
+        };
+
+        for ext in extends_list {
+            match ext {
+                "plugin:vue/vue3-essential" | "plugin:vue/essential" => {
+                    config.preset = verter_diagnostics::LintPreset::Essential;
+                }
+                "plugin:vue/vue3-strongly-recommended" | "plugin:vue/strongly-recommended" => {
+                    config.preset = verter_diagnostics::LintPreset::Recommended;
+                }
+                "plugin:vue/vue3-recommended" | "plugin:vue/recommended" => {
+                    config.preset = verter_diagnostics::LintPreset::Recommended;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Extract per-rule overrides
+    if let Some(rules) = json.get("rules").and_then(|r| r.as_object()) {
+        let mut has_vue_rules = false;
+        for (name, value) in rules {
+            // Only migrate vue/ prefixed rules
+            if let Some(rule_name) = name.strip_prefix("vue/") {
+                has_vue_rules = true;
+                let severity = parse_rule_severity(value);
+                config.rules.insert(rule_name.to_string(), severity);
+            }
+        }
+        if !has_vue_rules {
+            return None; // No vue rules found, skip eslint migration
+        }
+    }
+
+    Some(ResolvedLintConfig {
+        explicitly_configured: true,
+        config,
+    })
+}
+
+/// Parse a rule severity from JSON value.
+///
+/// Supports: `"off"` / `0`, `"warn"` / `1`, `"error"` / `2`,
+/// or `["error", { options }]` array form.
+fn parse_rule_severity(value: &serde_json::Value) -> Option<verter_diagnostics::Severity> {
+    use verter_diagnostics::Severity;
+
+    match value {
+        serde_json::Value::String(s) => match s.as_str() {
+            "off" => None,
+            "warn" => Some(Severity::Warning),
+            "error" => Some(Severity::Error),
+            _ => Some(Severity::Warning),
+        },
+        serde_json::Value::Number(n) => match n.as_u64() {
+            Some(0) => None,
+            Some(1) => Some(Severity::Warning),
+            Some(2) => Some(Severity::Error),
+            _ => Some(Severity::Warning),
+        },
+        serde_json::Value::Array(arr) => {
+            // [severity, options] — extract severity from first element
+            arr.first().and_then(parse_rule_severity)
+        }
+        _ => Some(Severity::Warning),
+    }
+}
+
+/// Merge VS Code initialization options into a resolved lint config.
+pub fn merge_init_options(resolved: &mut ResolvedLintConfig, init_options: &serde_json::Value) {
+    if let Some(lint) = init_options.get("lint") {
+        if let Some(enabled) = lint.get("enabled").and_then(|v| v.as_bool()) {
+            resolved.explicitly_configured = enabled;
+        }
+        if let Some(preset) = lint.get("preset").and_then(|v| v.as_str()) {
+            resolved.config.preset = match preset {
+                "essential" => verter_diagnostics::LintPreset::Essential,
+                "recommended" => verter_diagnostics::LintPreset::Recommended,
+                "all" => verter_diagnostics::LintPreset::All,
+                "performance" => verter_diagnostics::LintPreset::Performance,
+                "a11y" => verter_diagnostics::LintPreset::A11y,
+                "strict" => verter_diagnostics::LintPreset::Strict,
+                _ => resolved.config.preset,
+            };
+        }
+    }
+}
+
+#[cfg(test)]
+mod config_migration_tests {
+    use super::*;
+
+    #[test]
+    fn parse_severity_string() {
+        assert_eq!(parse_rule_severity(&serde_json::json!("off")), None);
+        assert_eq!(
+            parse_rule_severity(&serde_json::json!("warn")),
+            Some(verter_diagnostics::Severity::Warning)
+        );
+        assert_eq!(
+            parse_rule_severity(&serde_json::json!("error")),
+            Some(verter_diagnostics::Severity::Error)
+        );
+    }
+
+    #[test]
+    fn parse_severity_number() {
+        assert_eq!(parse_rule_severity(&serde_json::json!(0)), None);
+        assert_eq!(
+            parse_rule_severity(&serde_json::json!(1)),
+            Some(verter_diagnostics::Severity::Warning)
+        );
+        assert_eq!(
+            parse_rule_severity(&serde_json::json!(2)),
+            Some(verter_diagnostics::Severity::Error)
+        );
+    }
+
+    #[test]
+    fn parse_severity_array() {
+        assert_eq!(
+            parse_rule_severity(&serde_json::json!(["error", {}])),
+            Some(verter_diagnostics::Severity::Error)
+        );
+        assert_eq!(parse_rule_severity(&serde_json::json!(["off"])), None);
+    }
+
+    #[test]
+    fn verterrc_json_roundtrip() {
+        let json = r#"{"lint":{"enabled":true,"preset":"strict","rules":{"no-v-html":"error","unused-css-selector":"off"}}}"#;
+        let config: VerterProjectConfig = serde_json::from_str(json).unwrap();
+        let lint = config.lint.unwrap();
+        assert_eq!(lint.enabled, Some(true));
+        assert_eq!(lint.preset.as_deref(), Some("strict"));
+        assert!(lint.rules.is_some());
+        let rules = lint.rules.unwrap();
+        assert_eq!(rules.get("no-v-html").unwrap(), "error");
+        assert_eq!(rules.get("unused-css-selector").unwrap(), "off");
+    }
+
+    #[test]
+    fn merge_init_options_applies_preset() {
+        let mut resolved = ResolvedLintConfig::default();
+        let opts = serde_json::json!({
+            "lint": {
+                "enabled": true,
+                "preset": "strict"
+            }
+        });
+        merge_init_options(&mut resolved, &opts);
+        assert!(resolved.explicitly_configured);
+        assert_eq!(
+            resolved.config.preset,
+            verter_diagnostics::LintPreset::Strict
+        );
+    }
+
+    #[test]
+    fn discover_no_config_returns_default() {
+        let tmp = std::env::temp_dir().join("verter_test_no_config");
+        let _ = std::fs::create_dir_all(&tmp);
+        let result = discover_lint_config(&tmp);
+        assert!(!result.explicitly_configured);
+        assert_eq!(
+            result.config.preset,
+            verter_diagnostics::LintPreset::Recommended
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_verterrc_json() {
+        let tmp = std::env::temp_dir().join("verter_test_verterrc");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(
+            tmp.join(".verterrc.json"),
+            r#"{"lint":{"preset":"essential","rules":{"no-v-html":"off"}}}"#,
+        )
+        .unwrap();
+        let result = discover_lint_config(&tmp);
+        assert!(result.explicitly_configured);
+        assert_eq!(
+            result.config.preset,
+            verter_diagnostics::LintPreset::Essential
+        );
+        assert_eq!(result.config.rules.get("no-v-html"), Some(&None));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_eslintrc_json() {
+        let tmp = std::env::temp_dir().join("verter_test_eslintrc");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(
+            tmp.join(".eslintrc.json"),
+            r#"{"extends":["plugin:vue/vue3-recommended"],"rules":{"vue/no-v-html":"error"}}"#,
+        )
+        .unwrap();
+        let result = discover_lint_config(&tmp);
+        assert!(result.explicitly_configured);
+        assert_eq!(
+            result.config.preset,
+            verter_diagnostics::LintPreset::Recommended
+        );
+        assert_eq!(
+            result.config.rules.get("no-v-html"),
+            Some(&Some(verter_diagnostics::Severity::Error))
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 

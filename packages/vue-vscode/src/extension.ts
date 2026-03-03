@@ -152,6 +152,10 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
         html: workspace.getConfiguration("html"),
       },
       statistics: getStatisticsInitialization(rootPath),
+      lint: {
+        enabled: workspace.getConfiguration("verter").get<boolean>("lint.enabled", false),
+        preset: workspace.getConfiguration("verter").get<string>("lint.preset", "recommended"),
+      },
     },
     outputChannel: log,
     traceOutputChannel: log,

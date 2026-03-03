@@ -1,8 +1,8 @@
 use oxc_sourcemap::SourceMap;
 
-/// Bidirectional position mapper between Vue source positions and generated TSX positions.
+/// Bidirectional position mapper between Vue source positions and generated IDE positions.
 ///
-/// Consumes an `oxc_sourcemap::SourceMap` (from `verter_host.get_tsx()`) and provides
+/// Consumes an `oxc_sourcemap::SourceMap` (from `verter_host.get_ide()`) and provides
 /// lookups in both directions:
 /// - `tsx_to_vue`: Generated TSX position -> Original Vue position (via `lookup_token`)
 /// - `vue_to_tsx`: Original Vue position -> Generated TSX position (via sorted token scan)
