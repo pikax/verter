@@ -12,6 +12,7 @@
   "homepage": "https://verterjs.dev/",
   "files": [
     "index.js",
+    "host-types.ts",
     "dist"
   ],
   "main": "index.js",
@@ -22,7 +23,7 @@
       "default": "./index.js"
     },
     "./host-types": {
-      "types": "./dist/host-types.d.ts"
+      "types": "./host-types.ts"
     }
   },
   "scripts": {

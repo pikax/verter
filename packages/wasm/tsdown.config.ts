@@ -6,5 +6,6 @@ export default defineConfig({
   outDir: "dist",
   dts: {
     resolve: ["@verter/native"],
+    eager: true,
   },
 });
