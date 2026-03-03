@@ -910,8 +910,8 @@ impl Default for ComponentDiagnosticsConfig {
 
 impl DiagnosticSeverityConfig {
     /// Convert to LSP severity, or None if Off.
-    pub fn to_lsp(self) -> Option<tower_lsp_server::lsp_types::DiagnosticSeverity> {
-        use tower_lsp_server::lsp_types::DiagnosticSeverity;
+    pub fn to_lsp(self) -> Option<tower_lsp_server::ls_types::DiagnosticSeverity> {
+        use tower_lsp_server::ls_types::DiagnosticSeverity;
         match self {
             Self::Error => Some(DiagnosticSeverity::ERROR),
             Self::Warning => Some(DiagnosticSeverity::WARNING),
@@ -1219,7 +1219,7 @@ mod tests {
 
     #[test]
     fn severity_to_lsp_maps_correctly() {
-        use tower_lsp_server::lsp_types::DiagnosticSeverity;
+        use tower_lsp_server::ls_types::DiagnosticSeverity;
         assert_eq!(
             DiagnosticSeverityConfig::Error.to_lsp(),
             Some(DiagnosticSeverity::ERROR)

@@ -1,7 +1,7 @@
 // Phase 2: Diagnostics — parse errors, macro validation from verter_host.
 // Phase 3: Enhanced with type errors, unused variables, strict null checks from TypeProvider.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_host::{DiagnosticsSnapshot, HostDiagnostic, HostSeverity};
 
 use crate::documents::line_index::LineIndex;

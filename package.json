@@ -45,9 +45,9 @@
     "profile:hotpath:full:mcp": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp"
   },
   "dependencies": {
-    "@vue/compiler-core": "^3.6.0-beta.6",
-    "@vue/compiler-sfc": "^3.6.0-beta.6",
-    "oxfmt": "^0.28.0"
+    "@vue/compiler-core": "3.6.0-beta.7",
+    "@vue/compiler-sfc": "3.6.0-beta.7",
+    "oxfmt": "^0.36.0"
   },
   "devDependencies": {
     "@hyrious/esbuild-plugin-commonjs": "^0.2.6",
@@ -55,7 +55,7 @@
     "esbuild": "^0.27.3",
     "esbuild-plugin-alias": "^0.2.1",
     "esbuild-plugin-alias-path": "^2.0.2",
-    "glob": "^13.0.1",
+    "glob": "^13.0.6",
     "json-diff": "^1.0.6",
     "vitest": "^4.0.18"
   },

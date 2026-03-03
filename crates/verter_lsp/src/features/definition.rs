@@ -8,7 +8,7 @@
 // - Import source strings → resolved files
 // - DOM query selector strings → matching template elements (with CSS rule fallback)
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_analysis::types::{DomQueryCallSite, DomQueryKind};
 use verter_analysis::{match_selector, MatchResult};
 use verter_host::FileAnalysisSnapshot;

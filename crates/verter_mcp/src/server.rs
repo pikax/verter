@@ -2085,20 +2085,13 @@ impl VerterMcpServer {
 #[tool_handler]
 impl ServerHandler for VerterMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
-                "Verter Vue compiler MCP server. Provides deep analysis, diagnostics, \
-                 compilation, CSS matching, and cross-file analysis for Vue Single File Components. \
-                 Use scan_project first to load a Vue project, then use get_component_summary \
-                 for a complete overview of any component, or get_project_stats for project-wide \
-                 insights. For detailed analysis, use analyze_file, lint_file, get_component_api, etc."
-                    .to_string(),
-            ),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "Verter Vue compiler MCP server. Provides deep analysis, diagnostics, \
+             compilation, CSS matching, and cross-file analysis for Vue Single File Components. \
+             Use scan_project first to load a Vue project, then use get_component_summary \
+             for a complete overview of any component, or get_project_stats for project-wide \
+             insights. For detailed analysis, use analyze_file, lint_file, get_component_api, etc."
+                .to_string(),
+        )
     }
 }

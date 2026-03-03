@@ -1,7 +1,7 @@
 // Phase 2: References — find all occurrences of a binding across script/template blocks.
 // Phase 3: Enhanced with cross-file references from TypeProvider.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;

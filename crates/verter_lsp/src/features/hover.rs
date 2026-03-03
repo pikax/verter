@@ -1,7 +1,7 @@
 // Phase 2: Hover — binding name, kind, source location from verter_host analysis.
 // Phase 3: Enhanced with full resolved type signature, JSDoc from TypeProvider.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;

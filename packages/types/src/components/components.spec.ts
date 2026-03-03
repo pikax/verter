@@ -872,7 +872,7 @@ describe("components helpers", () => {
 
       // Also includes base HTMLAttributes
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
 
       // @ts-expect-error - Result is not any/unknown/never
       assertType<Result>({} as { unrelated: true });
@@ -895,7 +895,7 @@ describe("components helpers", () => {
 
       // Also includes base HTMLAttributes
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
 
       // @ts-expect-error - Result is not any/unknown/never
       assertType<Result>({} as { unrelated: true });
@@ -919,7 +919,7 @@ describe("components helpers", () => {
 
       // Also includes base HTMLAttributes
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
 
       // @ts-expect-error - Result is not any/unknown/never
       assertType<Result>({} as { unrelated: true });
@@ -941,7 +941,7 @@ describe("components helpers", () => {
 
       // Also includes base HTMLAttributes
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
 
       // @ts-expect-error - Result is not any/unknown/never
       assertType<Result>({} as { unrelated: true });
@@ -961,7 +961,7 @@ describe("components helpers", () => {
 
       // Also includes base HTMLAttributes
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
 
       // @ts-expect-error - Result is not any/unknown/never
       assertType<Result>({} as { unrelated: true });
@@ -980,7 +980,7 @@ describe("components helpers", () => {
 
       // Also includes base HTMLAttributes
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
 
       // @ts-expect-error - Result is not any/unknown/never
       assertType<Result>({} as { unrelated: true });
@@ -1002,7 +1002,7 @@ describe("components helpers", () => {
 
       // Also includes base HTMLAttributes
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
 
       // @ts-expect-error - Result is not any/unknown/never
       assertType<Result>({} as { unrelated: true });
@@ -1023,7 +1023,7 @@ describe("components helpers", () => {
 
       // Also includes base HTMLAttributes
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
 
       // @ts-expect-error - Result is not any/unknown/never
       assertType<Result>({} as { unrelated: true });
@@ -1046,7 +1046,7 @@ describe("components helpers", () => {
 
       // Also includes base HTMLAttributes
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
 
       // @ts-expect-error - Result is not any/unknown/never
       assertType<Result>({} as { unrelated: true });
@@ -1060,7 +1060,7 @@ describe("components helpers", () => {
 
       // Base HTMLAttributes properties
       assertType<string | undefined>(result.id);
-      assertType<string | undefined>(result.class);
+      assertType<import("vue").ClassValue | undefined>(result.class);
       assertType<import("vue").StyleValue | undefined>(result.style);
       assertType<string | number | undefined>(result.tabindex);
       assertType<string | undefined>(result.title);

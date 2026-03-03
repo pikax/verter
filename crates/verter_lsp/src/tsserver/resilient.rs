@@ -83,7 +83,7 @@ fn spawn_crash_monitor(state: Arc<CrashMonitorState>, crash_notify: Arc<Notify>)
 
         if let Some(c) = state.client.get() {
             c.show_message(
-                tower_lsp_server::lsp_types::MessageType::WARNING,
+                tower_lsp_server::ls_types::MessageType::WARNING,
                 "TypeScript server (tsserver) crashed. Restarting...",
             )
             .await;
@@ -101,7 +101,7 @@ fn spawn_crash_monitor(state: Arc<CrashMonitorState>, crash_notify: Arc<Notify>)
             );
             if let Some(c) = state.client.get() {
                 c.show_message(
-                    tower_lsp_server::lsp_types::MessageType::ERROR,
+                    tower_lsp_server::ls_types::MessageType::ERROR,
                     format!(
                         "TypeScript server (tsserver) crashed {} times. \
                          Running in verter-only mode for the rest of this session.",
@@ -148,7 +148,7 @@ fn spawn_crash_monitor(state: Arc<CrashMonitorState>, crash_notify: Arc<Notify>)
                 tracing::info!("tsserver restarted successfully (attempt {attempt})");
                 if let Some(c) = state.client.get() {
                     c.show_message(
-                        tower_lsp_server::lsp_types::MessageType::INFO,
+                        tower_lsp_server::ls_types::MessageType::INFO,
                         "TypeScript server restarted successfully.",
                     )
                     .await;
@@ -161,7 +161,7 @@ fn spawn_crash_monitor(state: Arc<CrashMonitorState>, crash_notify: Arc<Notify>)
                 tracing::error!("Failed to restart tsserver: {e}");
                 if let Some(c) = state.client.get() {
                     c.show_message(
-                        tower_lsp_server::lsp_types::MessageType::ERROR,
+                        tower_lsp_server::ls_types::MessageType::ERROR,
                         format!("Failed to restart TypeScript server: {e}"),
                     )
                     .await;

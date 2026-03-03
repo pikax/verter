@@ -1,6 +1,6 @@
 //! Bridge: convert `verter_diagnostics` types into LSP protocol types.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
 use verter_diagnostics::{
     DiagnosticSet, DiagnosticTag as LintDiagnosticTag, LintDiagnostic, Severity,
@@ -182,7 +182,7 @@ fn map_code_action_to_lsp(
     let mut changes = std::collections::HashMap::new();
     changes.insert(uri.clone(), text_edits);
 
-    CodeActionOrCommand::CodeAction(tower_lsp_server::lsp_types::CodeAction {
+    CodeActionOrCommand::CodeAction(tower_lsp_server::ls_types::CodeAction {
         title: action.title.clone(),
         kind: Some(kind),
         diagnostics: Some(vec![lsp_diag.clone()]),
@@ -273,7 +273,7 @@ fn map_refactoring_action_to_lsp(
     let mut changes = std::collections::HashMap::new();
     changes.insert(uri.clone(), text_edits);
 
-    CodeActionOrCommand::CodeAction(tower_lsp_server::lsp_types::CodeAction {
+    CodeActionOrCommand::CodeAction(tower_lsp_server::ls_types::CodeAction {
         title: action.title.clone(),
         kind: Some(kind),
         diagnostics: None,

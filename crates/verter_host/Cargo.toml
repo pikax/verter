@@ -30,7 +30,7 @@ web-time = "1"
 
 [dev-dependencies]
 smallvec = "1.13"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "host_bench"

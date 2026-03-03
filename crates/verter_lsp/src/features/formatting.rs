@@ -5,7 +5,7 @@
 // - Ensure consistent newlines between SFC blocks
 // - Normalize block-level indentation
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;

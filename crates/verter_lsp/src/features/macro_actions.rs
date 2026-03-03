@@ -1,6 +1,6 @@
 // Macro code actions: generate/augment defineSlots and defineEmits from template usage.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_analysis::types::{AnalysisFlags, AnalyzedMacroKind};
 use verter_host::FileAnalysisSnapshot;
 

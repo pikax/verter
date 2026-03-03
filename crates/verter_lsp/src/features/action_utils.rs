@@ -4,7 +4,7 @@
 // These helpers are used by all code action modules: macro_actions, organize_imports,
 // component_actions, event_type_hints, etc.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::sfc_scanner::SfcBlock;

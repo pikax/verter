@@ -1,7 +1,7 @@
 // Document drop edit: when a .vue file is dropped into a template,
 // insert a component tag and auto-import it.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;

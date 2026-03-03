@@ -1,6 +1,6 @@
 // Color information: extract CSS colors from style blocks for color picker.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;

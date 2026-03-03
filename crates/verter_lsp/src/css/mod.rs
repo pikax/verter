@@ -1,7 +1,7 @@
 // CSS language features for <style> blocks.
 // Completions, hover, selector matching, and Vue-specific CSS intelligence.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_analysis::{match_selector, MatchResult};
 use verter_host::FileAnalysisSnapshot;
 

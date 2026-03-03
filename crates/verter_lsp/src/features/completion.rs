@@ -1,7 +1,7 @@
 // Phase 2: Completion — template bindings, component names, props from verter_host analysis.
 // Phase 3: Enhanced with typed member access, generic inference from TypeProvider.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;

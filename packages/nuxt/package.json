@@ -26,11 +26,11 @@
     "dev": "tsdown src/module.ts --format esm,cjs --dts --unbundle --watch"
   },
   "dependencies": {
-    "@verter/unplugin": "workspace:*",
-    "@nuxt/kit": "^4.0.0"
+    "@nuxt/kit": "^4.3.1",
+    "@verter/unplugin": "workspace:*"
   },
   "devDependencies": {
-    "tsdown": "^0.12.4",
+    "tsdown": "^0.20.3",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {

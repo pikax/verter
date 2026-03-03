@@ -4,7 +4,7 @@
 //! producing enhanced output. All functions handle the case where either
 //! source may be absent (graceful fallback).
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
@@ -739,9 +739,9 @@ pub fn merge_document_highlights(
 /// No verter equivalent exists; this is a direct conversion from protocol types.
 pub fn merge_signature_help(
     type_sig: Option<protocol::SignatureHelp>,
-) -> Option<tower_lsp_server::lsp_types::SignatureHelp> {
+) -> Option<tower_lsp_server::ls_types::SignatureHelp> {
     let sig = type_sig?;
-    Some(tower_lsp_server::lsp_types::SignatureHelp {
+    Some(tower_lsp_server::ls_types::SignatureHelp {
         signatures: sig
             .signatures
             .into_iter()
@@ -856,7 +856,7 @@ pub fn merge_semantic_tokens(
     tsx_line_index: &LineIndex,
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
-) -> Vec<tower_lsp_server::lsp_types::SemanticToken> {
+) -> Vec<tower_lsp_server::ls_types::SemanticToken> {
     // Map each token from TSX to Vue positions, filtering unmapped ones
     let mut mapped: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // (line, char, length, type, mods)
 
@@ -901,7 +901,7 @@ pub fn merge_semantic_tokens(
             character - prev_start
         };
 
-        result.push(tower_lsp_server::lsp_types::SemanticToken {
+        result.push(tower_lsp_server::ls_types::SemanticToken {
             delta_line,
             delta_start,
             length,
@@ -928,7 +928,7 @@ pub fn merge_inlay_hints(
     tsx_line_index: &LineIndex,
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
-) -> Vec<tower_lsp_server::lsp_types::InlayHint> {
+) -> Vec<tower_lsp_server::ls_types::InlayHint> {
     let mut result = Vec::with_capacity(type_hints.len());
 
     for hint in type_hints {
@@ -953,13 +953,13 @@ pub fn merge_inlay_hints(
         }
 
         let kind = hint.kind.map(|k| match k {
-            InlayHintKind::Type => tower_lsp_server::lsp_types::InlayHintKind::TYPE,
-            InlayHintKind::Parameter => tower_lsp_server::lsp_types::InlayHintKind::PARAMETER,
+            InlayHintKind::Type => tower_lsp_server::ls_types::InlayHintKind::TYPE,
+            InlayHintKind::Parameter => tower_lsp_server::ls_types::InlayHintKind::PARAMETER,
         });
 
-        result.push(tower_lsp_server::lsp_types::InlayHint {
+        result.push(tower_lsp_server::ls_types::InlayHint {
             position: vue_pos,
-            label: tower_lsp_server::lsp_types::InlayHintLabel::String(hint.label),
+            label: tower_lsp_server::ls_types::InlayHintLabel::String(hint.label),
             kind,
             text_edits: None,
             tooltip: None,

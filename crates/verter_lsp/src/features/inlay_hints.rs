@@ -8,7 +8,7 @@
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
-use tower_lsp_server::lsp_types::{InlayHint, InlayHintLabel};
+use tower_lsp_server::ls_types::{InlayHint, InlayHintLabel};
 use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 use verter_analysis::types::{
     DomQueryCallSite, DomQueryKind, VueApiCallSite, VueApiClassification,
@@ -240,7 +240,7 @@ mod tests {
     fn make_line_index(source: &str) -> LineIndex {
         LineIndex::new(
             source,
-            tower_lsp_server::lsp_types::PositionEncodingKind::UTF16,
+            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
         )
     }
 

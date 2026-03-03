@@ -19,7 +19,7 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
 [dependencies]
 verter_span = { path = "../verter_span" }
-hotpath = { version = "0.10", optional = true }
+hotpath = { version = "0.13", optional = true }
 bitflags = "2"
 memchr = "2.7.6"
 rustc-hash = { workspace = true }
@@ -29,7 +29,7 @@ oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
-oxc_diagnostics = "0.114.0"
+oxc_diagnostics = "0.116.0"
 bumpalo = { version = "3.15.0", features = ["collections"] }
 serde = { workspace = true }
 serde_repr = "0.1"

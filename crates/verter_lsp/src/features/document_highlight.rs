@@ -1,7 +1,7 @@
 // Phase 2: Document highlights — highlight all occurrences of a binding in the current file.
 // Phase 3: Enhanced with type-aware highlights from TypeProvider.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;

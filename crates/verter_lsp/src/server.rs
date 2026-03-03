@@ -3,7 +3,7 @@ use std::sync::Arc;
 use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use tower_lsp_server::jsonrpc::Result;
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::capabilities::server_capabilities;
@@ -83,7 +83,7 @@ impl Drop for HandlerGuard {
 /// The extension tracks this PID to kill orphaned TSGO processes on restart.
 pub enum TsgoStarted {}
 
-impl tower_lsp_server::lsp_types::notification::Notification for TsgoStarted {
+impl tower_lsp_server::ls_types::notification::Notification for TsgoStarted {
     type Params = TsgoStartedParams;
     const METHOD: &'static str = "$/verter/tsgoStarted";
 }
@@ -98,7 +98,7 @@ pub struct TsgoStartedParams {
 /// can track both TSGO and tsserver processes.
 pub enum TypeProviderStarted {}
 
-impl tower_lsp_server::lsp_types::notification::Notification for TypeProviderStarted {
+impl tower_lsp_server::ls_types::notification::Notification for TypeProviderStarted {
     type Params = TypeProviderStartedParams;
     const METHOD: &'static str = "$/verter/typeProviderStarted";
 }
@@ -114,7 +114,7 @@ pub struct TypeProviderStartedParams {
 /// If the extension doesn't receive a heartbeat for 30 seconds, it restarts the server.
 pub enum Heartbeat {}
 
-impl tower_lsp_server::lsp_types::notification::Notification for Heartbeat {
+impl tower_lsp_server::ls_types::notification::Notification for Heartbeat {
     type Params = HeartbeatParams;
     const METHOD: &'static str = "$/verter/heartbeat";
 }
@@ -3827,13 +3827,13 @@ impl LanguageServer for VerterLanguageServer {
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
-    ) -> Result<Option<Vec<SymbolInformation>>> {
+    ) -> Result<Option<WorkspaceSymbolResponse>> {
         let _hg = HandlerGuard::new("workspace_symbol");
         let symbols = workspace_symbols(&self.documents.host, &params.query);
         Ok(if symbols.is_empty() {
             None
         } else {
-            Some(symbols)
+            Some(symbols.into())
         })
     }
 

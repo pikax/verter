@@ -4,7 +4,7 @@
 // generates code actions to wrap with a typed parameter:
 //   @click="handler" → @click="(e: MouseEvent) => handler(e)"
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_analysis::template::TemplateEventHandler;
 use verter_host::FileAnalysisSnapshot;
 

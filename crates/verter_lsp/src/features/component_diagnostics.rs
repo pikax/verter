@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_analysis::template::{TemplateComponentUsage, TemplatePropUsage};
 use verter_analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
 use verter_host::FileAnalysisSnapshot;

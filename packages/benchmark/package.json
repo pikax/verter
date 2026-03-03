@@ -15,13 +15,13 @@
   "dependencies": {
     "@verter/native": "workspace:*",
     "@verter/wasm": "workspace:*",
-    "@vue/compiler-sfc": "^3.5.27",
+    "@vue/compiler-sfc": "^3.5.29",
     "magic-string": "^0.30.21",
-    "tinybench": "^2.9.0"
+    "tinybench": "^6.0.0"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "@types/node": "^25.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
   }
 }

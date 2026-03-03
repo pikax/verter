@@ -2197,7 +2197,7 @@ import utils from './utils'"#;
     #[test]
     fn test_uri_to_canonical_id_then_path_to_uri_roundtrip() {
         use crate::documents::uri_to_canonical_id;
-        use tower_lsp_server::lsp_types::Uri;
+        use tower_lsp_server::ls_types::Uri;
 
         // Windows URI → canonical path → correct TSGO URI
         let win_uri: Uri = "file:///d:/dev/project/src/utils.ts".parse().unwrap();
@@ -3982,7 +3982,7 @@ const name: string = "hello";
         use crate::documents::line_index::LineIndex;
         use crate::documents::position_map::PositionMapper;
         use crate::tsgo::merge::tsx_range_to_vue_range;
-        use tower_lsp_server::lsp_types::PositionEncodingKind;
+        use tower_lsp_server::ls_types::PositionEncodingKind;
 
         let source_map = source_map_json.expect("source map must be present for mapping");
         let mapper = PositionMapper::from_json(&source_map).expect("valid source map");
@@ -4011,11 +4011,11 @@ const name: string = "hello";
                 let vue_end = mapper.tsx_to_vue(ep.line, ep.character);
                 eprintln!("    → Vue pos {:?}..{:?}", vue_start, vue_end);
                 if let (Some(vs), Some(ve)) = (&vue_start, &vue_end) {
-                    let start_lsp = tower_lsp_server::lsp_types::Position {
+                    let start_lsp = tower_lsp_server::ls_types::Position {
                         line: vs.line,
                         character: vs.column,
                     };
-                    let end_lsp = tower_lsp_server::lsp_types::Position {
+                    let end_lsp = tower_lsp_server::ls_types::Position {
                         line: ve.line,
                         character: ve.column,
                     };

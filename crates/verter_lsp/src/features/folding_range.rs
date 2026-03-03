@@ -1,6 +1,6 @@
 // Folding ranges from SFC block boundaries + template elements.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;

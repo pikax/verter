@@ -13,10 +13,10 @@ verter_actions = { path = "../verter_actions" }
 verter_span = { path = "../verter_span" }
 verter_mcp = { path = "../verter_mcp" }
 oxc_sourcemap = "6.0.2"
-tower-lsp-server = "0.21"
-rmcp = { version = "0.16", features = ["server", "macros", "transport-streamable-http-server"] }
+tower-lsp-server = "0.23"
+rmcp = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }
 axum = "0.8"
-schemars = "0.8"
+schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net", "signal"] }

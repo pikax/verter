@@ -1,4 +1,4 @@
-use tower_lsp_server::lsp_types::{Position, PositionEncodingKind};
+use tower_lsp_server::ls_types::{Position, PositionEncodingKind};
 
 /// Precomputed line start offsets for fast byte-offset ↔ LSP Position conversion.
 ///

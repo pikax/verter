@@ -1,6 +1,6 @@
 // Workspace symbols: aggregate symbols across all indexed Vue files.
 
-use tower_lsp_server::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use verter_host::VerterHost;
 
 /// Search for workspace symbols matching a query string.
