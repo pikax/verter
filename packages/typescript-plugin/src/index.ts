@@ -11,13 +11,6 @@ function normalizePath(p: string): string {
 
 const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   const create = (info: tsModule.server.PluginCreateInfo) => {
-    const languageServiceHost = {} as Partial<tsModule.LanguageServiceHost>;
-    const languageServiceHostProxy = new Proxy(info.languageServiceHost, {
-      get(target, key: keyof tsModule.LanguageServiceHost) {
-        return languageServiceHost[key] ? languageServiceHost[key] : target[key];
-      },
-    });
-
     const logger = info.project.projectService.logger;
     const directory = info.project.getCurrentDirectory();
 
@@ -36,14 +29,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       logger.info("[Verter] @verter/types not installed, will serve virtual stub");
     }
 
-    const languageService = ts.createLanguageService(languageServiceHostProxy);
-
+    // Patch module resolution on the existing host (no Proxy, no new language service).
+    // This is the standard TypeScript plugin pattern that works across TS 5.x/5.8/5.9.
     if (info.languageServiceHost.resolveModuleNameLiterals) {
       const _resolveModuleNameLiterals = info.languageServiceHost.resolveModuleNameLiterals.bind(
         info.languageServiceHost,
       );
 
-      languageServiceHost.resolveModuleNameLiterals = (moduleNames, containingFile, ...rest) => {
+      info.languageServiceHost.resolveModuleNameLiterals = (moduleNames, containingFile, ...rest) => {
         const resolvedModules = _resolveModuleNameLiterals(moduleNames, containingFile, ...rest);
 
         const moduleResolver = createModuleResolver(containingFile);
@@ -121,6 +114,18 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         };
       };
 
+    // Override jsx to "preserve" — with react-jsx, TypeScript maps JSX children
+    // to a 'children' prop that Vue's HTMLAttributes doesn't include (TS2322).
+    // "preserve" mode avoids this while still loading JSX types via jsxImportSource.
+    const _getCompilationSettings = info.languageServiceHost.getCompilationSettings.bind(
+      info.languageServiceHost,
+    );
+    info.languageServiceHost.getCompilationSettings = () => {
+      const settings = _getCompilationSettings();
+      return { ...settings, jsx: ts.JsxEmit.Preserve };
+    };
+
+    // Patch file system on the shared server host for virtual file support.
     const _readFile = info.serverHost.readFile.bind(info.serverHost);
     info.serverHost.readFile = (fileName: string) => {
       if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
@@ -151,6 +156,54 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         return _fileExists(fileName.slice(0, -5)); // check if .vue exists
       }
       return _fileExists(fileName);
+    };
+
+    // Wrap the existing language service — standard plugin pattern.
+    // Do NOT create a new ts.createLanguageService() — that breaks TS 5.8+
+    // because the standalone LS's internal project lacks a resolutionCache.
+    const languageService = info.languageService;
+
+    // Fix go-to-definition: .vue.d.ts → .vue so Ctrl+Click opens the real .vue file
+    const _getDefinitionAndBoundSpan =
+      languageService.getDefinitionAndBoundSpan.bind(languageService);
+    languageService.getDefinitionAndBoundSpan = (fileName, position) => {
+      const result = _getDefinitionAndBoundSpan(fileName, position);
+      if (result?.definitions) {
+        for (const def of result.definitions) {
+          if (def.fileName.endsWith(".vue.d.ts")) {
+            def.fileName = def.fileName.slice(0, -5); // strip ".d.ts"
+          }
+        }
+      }
+      return result;
+    };
+
+    const _getDefinitionAtPosition =
+      languageService.getDefinitionAtPosition.bind(languageService);
+    languageService.getDefinitionAtPosition = (fileName, position) => {
+      const result = _getDefinitionAtPosition(fileName, position);
+      if (result) {
+        for (const def of result) {
+          if (def.fileName.endsWith(".vue.d.ts")) {
+            def.fileName = def.fileName.slice(0, -5);
+          }
+        }
+      }
+      return result;
+    };
+
+    const _getTypeDefinitionAtPosition =
+      languageService.getTypeDefinitionAtPosition.bind(languageService);
+    languageService.getTypeDefinitionAtPosition = (fileName, position) => {
+      const result = _getTypeDefinitionAtPosition(fileName, position);
+      if (result) {
+        for (const def of result) {
+          if (def.fileName.endsWith(".vue.d.ts")) {
+            def.fileName = def.fileName.slice(0, -5);
+          }
+        }
+      }
+      return result;
     };
 
     // Fix auto-import paths: .vue.d.ts → .vue in all completion-related surfaces

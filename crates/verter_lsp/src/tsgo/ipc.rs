@@ -28,21 +28,42 @@ enum StdinMessage {
 /// This eliminates Mutex contention between `request()`/`notify()` callers and the
 /// `read_loop` (which needs to reply to server→client requests).
 ///
+/// Batches pending frames: when multiple messages are queued (e.g., during background
+/// file sync), writes them all in a single `write_all` + `flush` instead of flushing
+/// after each frame. This prevents per-message backpressure from the child process.
+///
 /// Generic over the writer type to support both `ChildStdin` and test `DuplexStream`.
 async fn stdin_writer_loop(
     mut stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
     mut rx: mpsc::Receiver<StdinMessage>,
 ) {
+    let mut buffer = Vec::new();
     while let Some(msg) = rx.recv().await {
         match msg {
             StdinMessage::Frame(data) => {
-                if stdin.write_all(&data).await.is_err() {
-                    break;
-                }
-                let _ = stdin.flush().await;
+                buffer.extend_from_slice(&data);
             }
             StdinMessage::Shutdown => break,
         }
+        // Drain any additional queued messages to batch them together.
+        loop {
+            match rx.try_recv() {
+                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                Ok(StdinMessage::Shutdown) => {
+                    // Flush remaining data before shutting down.
+                    let _ = stdin.write_all(&buffer).await;
+                    let _ = stdin.flush().await;
+                    return;
+                }
+                Err(_) => break,
+            }
+        }
+        // Write all accumulated frames in one batch.
+        if stdin.write_all(&buffer).await.is_err() {
+            break;
+        }
+        let _ = stdin.flush().await;
+        buffer.clear();
     }
 }
 
@@ -727,7 +748,8 @@ impl TsgoTypeProvider {
         // Use a channel + dedicated writer task instead of Arc<Mutex<ChildStdin>>
         // to prevent the deadlock where read_loop blocks on stdin while request()/notify()
         // also hold it.
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
+        // Buffer 1024 messages to accommodate background file sync bursts without backpressure.
+        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(1024);
         tokio::spawn(stdin_writer_loop(stdin, stdin_rx));
 
         let transport = Arc::new(LspTransport {
@@ -856,6 +878,26 @@ impl TypeProvider for TsgoTypeProvider {
                     }),
                 )
                 .await
+        })
+    }
+
+    /// Cache file content for import resolution without sending `didOpen`.
+    ///
+    /// Unlike `open_file`, this does NOT notify TSGO — avoiding diagnostic computation
+    /// for background-synced files. The content is stored locally so that when the file
+    /// IS eventually opened (user navigates to it), `update_file` can send `didOpen`
+    /// with the cached content.
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        tracing::debug!("TSGO load_file: {} ({} bytes)", path, content.len());
+        let path_owned = path.to_string();
+        let content_owned = content.to_string();
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            contents_cache
+                .lock()
+                .await
+                .insert(path_owned, content_owned);
+            Ok(())
         })
     }
 
@@ -1054,9 +1096,44 @@ impl TypeProvider for TsgoTypeProvider {
                 return Ok(None);
             }
 
-            // Parse hover result: { contents: { kind, value } | string }
+            tracing::debug!("TSGO hover raw response: {result}");
+
+            // Parse hover result — handles all LSP content formats:
+            //   MarkupContent: { kind, value }
+            //   MarkedString:  { language, value } | string
+            //   MarkedString[]: array of MarkedString
             let contents = if let Some(c) = result.get("contents") {
-                if let Some(value) = c.get("value").and_then(|v| v.as_str()) {
+                if let Some(arr) = c.as_array() {
+                    // MarkedString[] — language blocks become fenced code,
+                    // plain strings become documentation outside the fence.
+                    let mut code_parts = Vec::new();
+                    let mut doc_parts = Vec::new();
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            doc_parts.push(s.to_string());
+                        } else if let Some(lang) =
+                            item.get("language").and_then(|l| l.as_str())
+                        {
+                            let val = item
+                                .get("value")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            code_parts.push(format!("```{lang}\n{val}\n```"));
+                        } else if let Some(val) =
+                            item.get("value").and_then(|v| v.as_str())
+                        {
+                            code_parts.push(val.to_string());
+                        }
+                    }
+                    let mut result = code_parts.join("\n");
+                    if !doc_parts.is_empty() {
+                        if !result.is_empty() {
+                            result.push_str("\n\n");
+                        }
+                        result.push_str(&doc_parts.join("\n\n"));
+                    }
+                    result
+                } else if let Some(value) = c.get("value").and_then(|v| v.as_str()) {
                     value.to_string()
                 } else if let Some(s) = c.as_str() {
                     s.to_string()

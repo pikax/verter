@@ -50,7 +50,7 @@ fn parse_expression<'alloc>(
             // Bindings get file-relative positions via base_offset.
             // Dynamism is computed incrementally during extraction.
             let binding_ctx = BindingContext::with_ignored(span.start, ignored.iter().copied());
-            let bindings = extract_bindings_from_expression(&expr, input, binding_ctx);
+            let bindings = extract_bindings_from_expression(&expr, source_slice, binding_ctx);
 
             OxcParsedExpression {
                 offset: span.start,

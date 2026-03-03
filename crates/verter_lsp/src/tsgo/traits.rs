@@ -19,7 +19,16 @@ pub type ProviderFuture<'a, T> =
 ///
 /// Uses boxed futures instead of `async fn` to allow `dyn TypeProvider` usage.
 pub trait TypeProvider: Send + Sync {
+    /// Open a file in the type provider (marks it as "editor-open" — triggers diagnostics).
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()>;
+
+    /// Load a file into the type provider for import resolution only.
+    /// Unlike `open_file`, this does NOT mark the file as editor-open and
+    /// does NOT trigger diagnostics. Used for background-synced .vue files.
+    /// Default: falls back to `open_file` (providers that don't distinguish).
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file(path, content)
+    }
 
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()>;
 
@@ -91,6 +100,19 @@ pub trait TypeProvider: Send + Sync {
     /// For TSGO, this sends the LSP `shutdown` request followed by `exit` notification.
     /// Default implementation is a no-op for providers that don't need cleanup.
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Update the inferred project compiler options with path mappings.
+    ///
+    /// Called after workspace initialization when tsconfig paths are discovered.
+    /// For tsserver, sends updated `compilerOptionsForInferredProjects`.
+    /// For TSGO, this is a no-op (TSGO reads tsconfig directly via rootUri).
+    fn configure_paths(
+        &self,
+        _base_url: &str,
+        _paths: serde_json::Value,
+    ) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
 

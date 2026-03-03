@@ -20,7 +20,7 @@ impl LintRule for NoRootVIf {
     }
 
     fn default_severity(&self) -> Severity {
-        Severity::Error
+        Severity::Warning
     }
 
     fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {

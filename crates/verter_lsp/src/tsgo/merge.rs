@@ -145,15 +145,42 @@ pub fn merge_hover(
 
 /// Wrap type content in a code fence if not already Markdown-formatted.
 ///
-/// TSGO may return content that's already wrapped in a code fence with
-/// documentation after the closing fence. In that case, use it as-is
-/// to avoid double-fencing.
+/// TSGO may return content in several forms:
+/// - Already wrapped in a code fence with documentation after the closing fence
+///   → use as-is to avoid double-fencing
+/// - Plain text with type signature and documentation separated by a blank line
+///   → wrap only the type part in a fence, keep doc outside
+/// - Plain text with type and doc on consecutive lines (single `\n`)
+///   → wrap the first line in a fence, keep rest as doc
+/// - Plain text with no newlines
+///   → wrap everything in a fence (can't reliably split type from doc)
 fn wrap_type_block(contents: &str) -> String {
     if contents.starts_with("```") {
-        contents.to_string()
-    } else {
-        format!("```typescript\n{}\n```", contents)
+        return contents.to_string();
     }
+
+    // Split at first blank line (\n\n) — type signature before, documentation after
+    if let Some(idx) = contents.find("\n\n") {
+        let type_part = &contents[..idx];
+        let doc_part = contents[idx + 2..].trim();
+        return if doc_part.is_empty() {
+            format!("```typescript\n{type_part}\n```")
+        } else {
+            format!("```typescript\n{type_part}\n```\n\n{doc_part}")
+        };
+    }
+
+    // Split at first \n — first line is the type signature, rest is documentation.
+    // Type signatures in hover are typically single-line (e.g., "(property) name: Type").
+    if let Some(idx) = contents.find('\n') {
+        let type_part = &contents[..idx];
+        let doc_part = contents[idx + 1..].trim();
+        if !doc_part.is_empty() {
+            return format!("```typescript\n{type_part}\n```\n\n{doc_part}");
+        }
+    }
+
+    format!("```typescript\n{contents}\n```")
 }
 
 fn extract_hover_text(hover: &Hover) -> String {
@@ -384,14 +411,11 @@ pub fn merge_definitions(
             .into_iter()
             .filter_map(|loc| {
                 // TypeProvider returns paths; convert to URIs
-                // For .vue files, the path is the TSX path; strip the .tsx suffix
-                let file_path = if loc.path.ends_with(".vue.tsx") {
-                    loc.path.trim_end_matches(".tsx").to_string()
-                } else {
-                    loc.path.clone()
-                };
-                let uri = path_to_uri(&file_path)?;
-                // Map TSX byte offsets back to Vue positions for .vue targets
+                // For .vue files, strip virtual suffixes (.tsx or .d.ts)
+                let file_path = normalize_vue_path(&loc.path);
+                let uri = path_to_uri(file_path)?;
+                // Map TSX byte offsets back to Vue positions for .vue.tsx targets
+                // (.vue.d.ts targets use Range::default — no position mapping available)
                 let range = if loc.path.ends_with(".vue.tsx") {
                     tsx_range_to_vue_range(
                         loc.start,
@@ -420,6 +444,20 @@ pub fn merge_definitions(
     }
 
     verter_def
+}
+
+/// Normalize a TypeProvider path back to the original Vue file path.
+///
+/// Strips `.tsx` from `.vue.tsx` (Verter-generated virtual files) and
+/// `.d.ts` from `.vue.d.ts` (published type declarations).
+fn normalize_vue_path(path: &str) -> &str {
+    if path.ends_with(".vue.tsx") {
+        path.trim_end_matches(".tsx")
+    } else if path.ends_with(".vue.d.ts") {
+        path.trim_end_matches(".d.ts")
+    } else {
+        path
+    }
 }
 
 /// Convert a file path to a `file://` URI.
@@ -478,6 +516,15 @@ pub fn merge_references(
                         result.push(Location { uri, range });
                     }
                 }
+            }
+        } else if loc.path.ends_with(".vue.d.ts") {
+            // Published .vue.d.ts declarations: strip suffix, use default range
+            let vue_path = loc.path.trim_end_matches(".d.ts");
+            if let Some(uri) = path_to_uri(vue_path) {
+                result.push(Location {
+                    uri,
+                    range: Range::default(),
+                });
             }
         } else {
             // Cross-file .ts/.js targets: pass through
@@ -539,6 +586,16 @@ pub fn merge_rename_locations(
                         });
                     }
                 }
+            }
+        } else if loc.path.ends_with(".vue.d.ts") {
+            // Published .vue.d.ts declarations: strip suffix, use default range
+            let vue_path = loc.path.trim_end_matches(".d.ts");
+            if let Some(uri) = path_to_uri(vue_path) {
+                let edits = changes.entry(uri).or_default();
+                edits.push(TextEdit {
+                    range: Range::default(),
+                    new_text: new_name.to_string(),
+                });
             }
         } else if let Some(uri) = path_to_uri(&loc.path) {
             let edits = changes.entry(uri).or_default();
@@ -677,6 +734,15 @@ pub fn merge_code_actions(
                                 new_text: edit.new_text,
                             });
                         }
+                    }
+                } else if edit.path.ends_with(".vue.d.ts") {
+                    // Published .vue.d.ts declarations: strip suffix, use default range
+                    let vue_path = edit.path.trim_end_matches(".d.ts");
+                    if let Some(uri) = path_to_uri(vue_path) {
+                        changes.entry(uri).or_default().push(TextEdit {
+                            range: Range::default(),
+                            new_text: edit.new_text,
+                        });
                     }
                 } else if let Some(uri) = path_to_uri(&edit.path) {
                     changes.entry(uri).or_default().push(TextEdit {
@@ -1580,7 +1646,122 @@ mod tests {
 
     // ── Hover merge tests ──────────────────────────────────────────
 
-    /// @ai-generated — strip_leading_code_block removes leading fenced block
+    // ── normalize_vue_path tests ────────────────────────────────────
+
+    #[test]
+    fn normalize_vue_path_strips_tsx() {
+        assert_eq!(normalize_vue_path("/src/App.vue.tsx"), "/src/App.vue");
+    }
+
+    #[test]
+    fn normalize_vue_path_strips_dts() {
+        assert_eq!(
+            normalize_vue_path("/node_modules/lib/Comp.vue.d.ts"),
+            "/node_modules/lib/Comp.vue"
+        );
+    }
+
+    #[test]
+    fn normalize_vue_path_passthrough_ts() {
+        assert_eq!(normalize_vue_path("/src/utils.ts"), "/src/utils.ts");
+    }
+
+    #[test]
+    fn normalize_vue_path_passthrough_plain_dts() {
+        // Non-.vue .d.ts files should NOT be stripped
+        assert_eq!(
+            normalize_vue_path("/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts"),
+            "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts"
+        );
+    }
+
+    // ── .vue.d.ts definition tests ──────────────────────────────────
+
+    /// TypeProvider returning .vue.d.ts should navigate to .vue
+    #[test]
+    fn merge_definitions_vue_dts_maps_to_vue() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let type_defs = vec![TypeLocation {
+            path: "/node_modules/my-lib/dist/Button.vue.d.ts".to_string(),
+            start: 0,
+            end: 10,
+        }];
+
+        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li);
+        assert!(result.is_some());
+        match result.unwrap() {
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert!(
+                    loc.uri.as_str().ends_with("Button.vue"),
+                    "should navigate to .vue, got: {}",
+                    loc.uri.as_str()
+                );
+                // Negative: must NOT contain .d.ts
+                assert!(
+                    !loc.uri.as_str().contains(".d.ts"),
+                    "URI must not contain .d.ts suffix"
+                );
+            }
+            _ => panic!("Expected scalar definition"),
+        }
+    }
+
+    /// .vue.d.ts references should map to .vue
+    #[test]
+    fn merge_references_vue_dts_maps_to_vue() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let type_refs = vec![TypeLocation {
+            path: "/node_modules/my-lib/dist/Button.vue.d.ts".to_string(),
+            start: 0,
+            end: 10,
+        }];
+
+        let result = merge_references(None, type_refs, &tsx_li, &mapper, &vue_li);
+        assert!(result.is_some());
+        let locs = result.unwrap();
+        assert_eq!(locs.len(), 1);
+        assert!(
+            locs[0].uri.as_str().ends_with("Button.vue"),
+            "should reference .vue, got: {}",
+            locs[0].uri.as_str()
+        );
+        assert!(
+            !locs[0].uri.as_str().contains(".d.ts"),
+            "URI must not contain .d.ts suffix"
+        );
+    }
+
+    /// .vue.d.ts rename locations should map to .vue
+    #[test]
+    fn merge_rename_vue_dts_maps_to_vue() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let type_locations = vec![RenameLocation {
+            path: "/node_modules/my-lib/dist/Button.vue.d.ts".to_string(),
+            start: 0,
+            end: 10,
+        }];
+
+        let result =
+            merge_rename_locations(None, type_locations, "NewName", &tsx_li, &mapper, &vue_li);
+        assert!(result.is_some());
+        let edit = result.unwrap();
+        let changes = edit.changes.unwrap();
+        let uris: Vec<String> = changes.keys().map(|u| u.as_str().to_string()).collect();
+        assert!(
+            uris.iter().any(|u| u.ends_with("Button.vue")),
+            "should rename in .vue file, got: {:?}",
+            uris
+        );
+        assert!(
+            !uris.iter().any(|u| u.contains(".d.ts")),
+            "URI must not contain .d.ts suffix"
+        );
+    }
+
+    // ── Hover merge tests ──────────────────────────────────────────
     #[test]
     fn strip_leading_code_block_removes_fence() {
         let text = "```typescript\nconst count: number\n```\n*(reactive)*";
@@ -1796,5 +1977,97 @@ mod tests {
             1,
             "should not double-fence: {text}"
         );
+    }
+
+    #[test]
+    fn wrap_type_block_plain_text_with_blank_line_separator() {
+        let (mapper, _, tsx_li) = make_mapper_and_indexes();
+        let vue_li = LineIndex::new_utf16("");
+
+        // TSGO returns plain text with type and doc separated by blank line
+        let tsgo = Some(HoverInfo {
+            range_start: None,
+            range_end: None,
+            contents: "(property) GameItemProps.game: GameVo | ProfilePlayedVo\n\n游戏数据"
+                .to_string(),
+        });
+
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+
+        // Type should be inside fence
+        assert!(
+            text.starts_with("```typescript\n(property) GameItemProps.game: GameVo | ProfilePlayedVo\n```"),
+            "type should be in code fence: {text}"
+        );
+        // Doc should be outside fence
+        assert!(
+            text.contains("游戏数据"),
+            "documentation should be preserved: {text}"
+        );
+        // Doc must not be inside the code fence
+        let fence_end = text.find("\n```").unwrap();
+        let doc_pos = text.find("游戏数据").unwrap();
+        assert!(
+            doc_pos > fence_end,
+            "documentation should be outside the code fence: {text}"
+        );
+    }
+
+    #[test]
+    fn wrap_type_block_plain_text_with_single_newline_separator() {
+        let (mapper, _, tsx_li) = make_mapper_and_indexes();
+        let vue_li = LineIndex::new_utf16("");
+
+        // TSGO returns plain text with type and doc separated by single newline
+        let tsgo = Some(HoverInfo {
+            range_start: None,
+            range_end: None,
+            contents: "(property) game: GameVo\nThe game data.".to_string(),
+        });
+
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+
+        // Type should be inside fence
+        assert!(
+            text.starts_with("```typescript\n(property) game: GameVo\n```"),
+            "type should be in code fence: {text}"
+        );
+        // Doc should be outside fence
+        let fence_end = text.find("\n```").unwrap();
+        let doc_pos = text.find("The game data.").unwrap();
+        assert!(
+            doc_pos > fence_end,
+            "documentation should be outside the code fence: {text}"
+        );
+    }
+
+    #[test]
+    fn wrap_type_block_plain_text_no_newline() {
+        // When there's no newline separator, everything goes in the fence
+        // (can't reliably split type from doc without a separator)
+        let (mapper, _, tsx_li) = make_mapper_and_indexes();
+        let vue_li = LineIndex::new_utf16("");
+
+        let tsgo = Some(HoverInfo {
+            range_start: None,
+            range_end: None,
+            contents: "(property) msg: string".to_string(),
+        });
+
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+
+        assert_eq!(text, "```typescript\n(property) msg: string\n```");
     }
 }

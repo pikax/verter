@@ -746,7 +746,9 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         if end > self.source_bytes.len() {
             eprintln!(
                 "[verter] BUG: OXC literal span {}..{} exceeds source length {}, skipping",
-                start, end, self.source_bytes.len(),
+                start,
+                end,
+                self.source_bytes.len(),
             );
             return;
         }

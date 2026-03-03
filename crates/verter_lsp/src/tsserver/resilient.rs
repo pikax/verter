@@ -186,6 +186,20 @@ impl TypeProvider for ResilientTsserverProvider {
         })
     }
 
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        let content_owned = content.to_string();
+        Box::pin(async move {
+            self.state
+                .file_cache
+                .write()
+                .await
+                .insert(path_owned.clone(), content_owned.clone());
+            let provider = self.get_inner().await?;
+            provider.load_file(&path_owned, &content_owned).await
+        })
+    }
+
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let path_owned = path.to_string();
         let content_owned = content.to_string();
@@ -346,5 +360,13 @@ impl TypeProvider for ResilientTsserverProvider {
             .try_read()
             .ok()
             .and_then(|guard| guard.as_ref().and_then(|tp| tp.child_pid()))
+    }
+
+    fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
+        let base_url = base_url.to_string();
+        Box::pin(async move {
+            let provider = self.get_inner().await?;
+            provider.configure_paths(&base_url, paths).await
+        })
     }
 }

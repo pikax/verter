@@ -7,7 +7,7 @@
 //! Response: `{"seq":N,"type":"response","command":"...","request_seq":N,"success":true,"body":{...}}\n`
 //! Event:    `{"seq":N,"type":"event","event":"...","body":{...}}\n`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -375,8 +375,14 @@ pub struct TsserverTypeProvider {
     child: Child,
     /// Cached file contents for position conversion.
     contents: Arc<Mutex<HashMap<String, String>>>,
+    /// Files that have been sent to tsserver via `open` command.
+    /// Used by `update_file` to decide between `open` vs `updateOpen`.
+    /// `load_file` adds to `contents` but NOT to `opened_files`.
+    opened_files: Arc<Mutex<HashSet<String>>>,
     /// Cached diagnostics from event notifications.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+    /// Workspace root path (forward slashes) for `projectRootPath` in open commands.
+    workspace_root: String,
 }
 
 impl Drop for TsserverTypeProvider {
@@ -497,7 +503,8 @@ impl TsserverTypeProvider {
             )
             .await?;
 
-        // Send compilerOptions open for the workspace
+        // Send compilerOptions for inferred projects (fallback when no tsconfig.json matches).
+        // These should be generous enough to handle Vue TSX without errors.
         let _ = transport
             .request(
                 "compilerOptionsForInferredProjects",
@@ -507,6 +514,7 @@ impl TsserverTypeProvider {
                         "target": "esnext",
                         "moduleResolution": "bundler",
                         "jsx": "preserve",
+                        "jsxImportSource": "vue",
                         "allowJs": true,
                         "strict": true,
                         "allowArbitraryExtensions": true,
@@ -520,7 +528,9 @@ impl TsserverTypeProvider {
             transport,
             child,
             contents: contents_cache,
+            opened_files: Arc::new(Mutex::new(HashSet::new())),
             diagnostics_cache,
+            workspace_root: ws_root,
         })
     }
 
@@ -536,12 +546,16 @@ impl TypeProvider for TsserverTypeProvider {
         let content = content.to_string();
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let opened_files = Arc::clone(&self.opened_files);
+        let ws_root = self.workspace_root.clone();
         Box::pin(async move {
             contents_cache
                 .lock()
                 .await
                 .insert(file.clone(), content.clone());
-            // tsserver `open` command doesn't return a response
+            opened_files.lock().await.insert(file.clone());
+            // tsserver `open` command doesn't return a response.
+            // projectRootPath tells tsserver where to find tsconfig.json.
             transport
                 .command_no_response(
                     "open",
@@ -552,9 +566,26 @@ impl TypeProvider for TsserverTypeProvider {
                             else if file.ends_with(".jsx") { "JSX" }
                             else if file.ends_with(".js") { "JS" }
                             else { "TS" },
+                        "projectRootPath": ws_root,
                     }),
                 )
                 .await
+        })
+    }
+
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        // For tsserver, load_file only caches the content locally — it does NOT
+        // send an `open` command. Sending 500+ `open` commands during background
+        // sync overwhelms tsserver and blocks user requests for 15-20 seconds.
+        // The TypeScript plugin (@verter/typescript-plugin) handles .vue import
+        // resolution lazily inside tsserver's process. When the user actually opens
+        // a file, `open_file` will be called and tsserver will receive the content.
+        let file = Self::normalize_path(path);
+        let content = content.to_string();
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            contents_cache.lock().await.insert(file, content);
+            Ok(())
         })
     }
 
@@ -563,14 +594,18 @@ impl TypeProvider for TsserverTypeProvider {
         let content = content.to_string();
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let opened_files = Arc::clone(&self.opened_files);
+        let ws_root = self.workspace_root.clone();
         Box::pin(async move {
-            let was_open = contents_cache.lock().await.contains_key(&file);
             contents_cache
                 .lock()
                 .await
                 .insert(file.clone(), content.clone());
 
-            if was_open {
+            let mut opened = opened_files.lock().await;
+            if opened.contains(&file) {
+                drop(opened);
+                tracing::debug!("tsserver update_file: updateOpen for {file}");
                 // Use updateOpen for already-open files (atomic open+close+open)
                 transport
                     .command_no_response(
@@ -588,7 +623,13 @@ impl TypeProvider for TsserverTypeProvider {
                     )
                     .await
             } else {
-                // File not open yet — open it
+                // File not open yet — open it and track
+                opened.insert(file.clone());
+                drop(opened);
+                tracing::info!(
+                    "tsserver update_file: first open for {file} ({} bytes)",
+                    content.len()
+                );
                 transport
                     .command_no_response(
                         "open",
@@ -599,6 +640,7 @@ impl TypeProvider for TsserverTypeProvider {
                                 else if file.ends_with(".jsx") { "JSX" }
                                 else if file.ends_with(".js") { "JS" }
                                 else { "TS" },
+                            "projectRootPath": ws_root,
                         }),
                     )
                     .await
@@ -610,8 +652,10 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let opened_files = Arc::clone(&self.opened_files);
         Box::pin(async move {
             contents_cache.lock().await.remove(&file);
+            opened_files.lock().await.remove(&file);
             transport
                 .command_no_response("close", serde_json::json!({ "file": file }))
                 .await
@@ -709,6 +753,9 @@ impl TypeProvider for TsserverTypeProvider {
                         .unwrap_or_default();
 
                     if display.is_empty() {
+                        tracing::debug!(
+                            "tsserver quickinfo: empty displayString for {file} at {line}:{col}"
+                        );
                         return Ok(None);
                     }
 
@@ -724,7 +771,10 @@ impl TypeProvider for TsserverTypeProvider {
                         range_end: None,
                     }))
                 }
-                Err(_) => Ok(None),
+                Err(e) => {
+                    tracing::warn!("tsserver quickinfo error for {file}: {e}");
+                    Ok(None)
+                }
             }
         })
     }
@@ -1309,6 +1359,36 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn child_pid(&self) -> Option<u32> {
         self.child.id()
+    }
+
+    fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
+        let transport = Arc::clone(&self.transport);
+        let base_url = base_url.to_string();
+        Box::pin(async move {
+            let mut options = serde_json::json!({
+                "module": "esnext",
+                "target": "esnext",
+                "moduleResolution": "bundler",
+                "jsx": "preserve",
+                "jsxImportSource": "vue",
+                "allowJs": true,
+                "strict": true,
+                "allowArbitraryExtensions": true,
+                "baseUrl": base_url,
+                "paths": paths,
+            });
+            // Remove null paths (shouldn't happen but be safe)
+            if options.get("paths").is_some_and(|v| v.is_null()) {
+                options.as_object_mut().unwrap().remove("paths");
+            }
+            let _ = transport
+                .request(
+                    "compilerOptionsForInferredProjects",
+                    serde_json::json!({ "options": options }),
+                )
+                .await;
+            Ok(())
+        })
     }
 }
 

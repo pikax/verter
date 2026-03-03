@@ -209,6 +209,20 @@ impl TypeProvider for ResilientTypeProvider {
         })
     }
 
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        let content_owned = content.to_string();
+        Box::pin(async move {
+            self.state
+                .file_cache
+                .write()
+                .await
+                .insert(path_owned.clone(), content_owned.clone());
+            let provider = self.get_inner().await?;
+            provider.load_file(&path_owned, &content_owned).await
+        })
+    }
+
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let path_owned = path.to_string();
         let content_owned = content.to_string();

@@ -93,68 +93,82 @@ impl TsConfigPathResolver {
             }
         }
 
-        let compiler_options = match json.get("compilerOptions") {
-            Some(co) => co,
-            None => return resolver,
-        };
+        // Build aliases from this config's own compilerOptions.paths (overrides extends)
+        if let Some(compiler_options) = json.get("compilerOptions") {
+            let base_url = compiler_options
+                .get("baseUrl")
+                .and_then(|v| v.as_str())
+                .map(|b| tsconfig_dir.join(b))
+                .unwrap_or_else(|| tsconfig_dir.to_path_buf());
 
-        // Extract baseUrl (defaults to tsconfig directory)
-        let base_url = compiler_options
-            .get("baseUrl")
-            .and_then(|v| v.as_str())
-            .map(|b| tsconfig_dir.join(b))
-            .unwrap_or_else(|| tsconfig_dir.to_path_buf());
+            if let Some(paths) = compiler_options.get("paths").and_then(|v| v.as_object()) {
+                resolver.aliases.clear();
+                for (pattern, targets) in paths {
+                    let targets: Vec<String> = match targets.as_array() {
+                        Some(arr) => arr
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect(),
+                        None => continue,
+                    };
 
-        let paths = match compiler_options.get("paths").and_then(|v| v.as_object()) {
-            Some(p) => p,
-            None => return resolver,
-        };
+                    let (prefix, suffix) = if let Some(star_pos) = pattern.find('*') {
+                        (
+                            pattern[..star_pos].to_string(),
+                            pattern[star_pos + 1..].to_string(),
+                        )
+                    } else {
+                        (pattern.clone(), String::new())
+                    };
 
-        // Build aliases from paths entries
-        for (pattern, targets) in paths {
-            let targets: Vec<String> = match targets.as_array() {
-                Some(arr) => arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect(),
-                None => continue,
-            };
+                    let mut replacements = Vec::new();
+                    for target in &targets {
+                        let (rep_prefix, rep_suffix) = if let Some(star_pos) = target.find('*') {
+                            (
+                                target[..star_pos].to_string(),
+                                target[star_pos + 1..].to_string(),
+                            )
+                        } else {
+                            (target.clone(), String::new())
+                        };
 
-            let (prefix, suffix) = if let Some(star_pos) = pattern.find('*') {
-                (
-                    pattern[..star_pos].to_string(),
-                    pattern[star_pos + 1..].to_string(),
-                )
-            } else {
-                (pattern.clone(), String::new())
-            };
+                        let abs_prefix = base_url.join(&rep_prefix);
+                        let abs_str = abs_prefix.to_string_lossy().replace('\\', "/");
 
-            let mut replacements = Vec::new();
-            for target in &targets {
-                let (rep_prefix, rep_suffix) = if let Some(star_pos) = target.find('*') {
-                    (
-                        target[..star_pos].to_string(),
-                        target[star_pos + 1..].to_string(),
-                    )
-                } else {
-                    (target.clone(), String::new())
-                };
+                        replacements.push(PathAliasReplacement {
+                            prefix: abs_str,
+                            suffix: rep_suffix,
+                        });
+                    }
 
-                // Resolve replacement prefix to absolute path
-                let abs_prefix = base_url.join(&rep_prefix);
-                let abs_str = abs_prefix.to_string_lossy().replace('\\', "/");
-
-                replacements.push(PathAliasReplacement {
-                    prefix: abs_str,
-                    suffix: rep_suffix,
-                });
+                    resolver.aliases.push(PathAlias {
+                        prefix,
+                        suffix,
+                        replacements,
+                    });
+                }
             }
+        }
 
-            resolver.aliases.push(PathAlias {
-                prefix,
-                suffix,
-                replacements,
-            });
+        // If still no aliases, follow `references` (solution-style tsconfigs).
+        // The root config typically has `"files": [], "references": [...]` with paths
+        // defined in the referenced configs like tsconfig.app.json.
+        if resolver.is_empty() {
+            if let Some(refs) = json.get("references").and_then(|v| v.as_array()) {
+                for ref_entry in refs {
+                    if let Some(ref_path) = ref_entry.get("path").and_then(|v| v.as_str()) {
+                        if let Some(ref_tsconfig) =
+                            resolve_tsconfig_reference(tsconfig_dir, ref_path)
+                        {
+                            let ref_resolver = Self::from_tsconfig(&ref_tsconfig);
+                            if !ref_resolver.is_empty() {
+                                resolver.aliases = ref_resolver.aliases;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Sort: longer prefixes first (more specific matches take priority)
@@ -213,6 +227,75 @@ impl TsConfigPathResolver {
     /// Check if the resolver has any aliases configured.
     pub fn is_empty(&self) -> bool {
         self.aliases.is_empty()
+    }
+
+    /// Extract the raw `baseUrl` and `paths` JSON from a tsconfig for passing to tsserver.
+    ///
+    /// Follows `extends` and `references` to find the effective paths.
+    /// Returns `(baseUrl, paths)` as raw JSON values, or `None` if no paths found.
+    pub fn raw_paths_json(tsconfig_path: &Path) -> Option<(String, serde_json::Value)> {
+        Self::raw_paths_json_inner(tsconfig_path, 0)
+    }
+
+    fn raw_paths_json_inner(
+        tsconfig_path: &Path,
+        depth: u8,
+    ) -> Option<(String, serde_json::Value)> {
+        if depth > 5 {
+            return None;
+        }
+
+        let tsconfig_dir = tsconfig_path.parent()?;
+        let content = std::fs::read_to_string(tsconfig_path).ok()?;
+        let cleaned = strip_json_comments(&content);
+        let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+
+        // Check extends first
+        if let Some(extends) = json.get("extends").and_then(|v| v.as_str()) {
+            if let Some(base_path) = resolve_tsconfig_extends(tsconfig_dir, extends) {
+                if let Some(result) = Self::raw_paths_json_inner(&base_path, depth + 1) {
+                    // If base has paths, use them (current config may override)
+                    let base_result = Some(result);
+                    // Check if current config overrides
+                    if let Some(co) = json.get("compilerOptions") {
+                        if co.get("paths").is_some() {
+                            // Current config overrides base
+                        } else {
+                            return base_result;
+                        }
+                    } else {
+                        return base_result;
+                    }
+                }
+            }
+        }
+
+        // Check this config's own compilerOptions.paths
+        if let Some(co) = json.get("compilerOptions") {
+            if let Some(paths) = co.get("paths") {
+                let base_url = co
+                    .get("baseUrl")
+                    .and_then(|v| v.as_str())
+                    .map(|b| tsconfig_dir.join(b).to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|| tsconfig_dir.to_string_lossy().replace('\\', "/"));
+                return Some((base_url, paths.clone()));
+            }
+        }
+
+        // Follow references
+        if let Some(refs) = json.get("references").and_then(|v| v.as_array()) {
+            for ref_entry in refs {
+                if let Some(ref_path) = ref_entry.get("path").and_then(|v| v.as_str()) {
+                    if let Some(ref_tsconfig) = resolve_tsconfig_reference(tsconfig_dir, ref_path) {
+                        if let Some(result) = Self::raw_paths_json_inner(&ref_tsconfig, depth + 1) {
+                            return Some(result);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -281,6 +364,39 @@ fn resolve_tsconfig_extends(tsconfig_dir: &Path, extends: &str) -> Option<PathBu
             }
         }
     }
+    None
+}
+
+/// Resolve a `references[].path` entry to the actual tsconfig file path.
+///
+/// Handles both file references (`"./tsconfig.app.json"`) and directory references
+/// (`"./packages/app"` → looks for `tsconfig.json` inside).
+fn resolve_tsconfig_reference(tsconfig_dir: &Path, ref_path: &str) -> Option<PathBuf> {
+    let resolved = tsconfig_dir.join(ref_path);
+
+    // Direct file reference
+    if resolved.is_file() {
+        return Some(resolved);
+    }
+
+    // Directory reference → look for tsconfig.json inside
+    if resolved.is_dir() {
+        let tsconfig = resolved.join("tsconfig.json");
+        if tsconfig.exists() {
+            return Some(tsconfig);
+        }
+    }
+
+    // Try with .json extension
+    let with_json = if resolved.extension().is_none() {
+        resolved.with_extension("json")
+    } else {
+        return None;
+    };
+    if with_json.exists() {
+        return Some(with_json);
+    }
+
     None
 }
 
@@ -360,39 +476,49 @@ impl TsConfigDiscovery {
         }
     }
 
-    /// Discover all tsconfig.json files under the given workspace root.
+    /// Discover all tsconfig files under the given workspace root.
     ///
-    /// Searches recursively, excluding `node_modules` and dot-directories.
+    /// Finds both `tsconfig.json` and variant files like `tsconfig.app.json`,
+    /// `tsconfig.node.json`, etc. Excludes `node_modules` and dot-directories.
     pub fn discover(&mut self, root: &Path) {
-        let pattern = root.join("**/tsconfig.json").to_string_lossy().to_string();
-        let pattern = pattern.replace('\\', "/");
+        let root_str = root.to_string_lossy().replace('\\', "/");
+        // Glob for tsconfig.json AND tsconfig.*.json (e.g. tsconfig.app.json)
+        for glob_pattern in &[
+            format!("{root_str}/**/tsconfig.json"),
+            format!("{root_str}/**/tsconfig.*.json"),
+        ] {
+            match glob::glob(glob_pattern) {
+                Ok(paths) => {
+                    for entry in paths.flatten() {
+                        // Skip node_modules
+                        if entry.components().any(|c| c.as_os_str() == "node_modules") {
+                            continue;
+                        }
+                        // Skip dot-directories
+                        if entry
+                            .components()
+                            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+                        {
+                            continue;
+                        }
+                        // Skip duplicates (tsconfig.json matches both patterns)
+                        if self.configs.iter().any(|e| e.config_path == entry) {
+                            continue;
+                        }
 
-        match glob::glob(&pattern) {
-            Ok(paths) => {
-                for entry in paths.flatten() {
-                    // Skip node_modules
-                    if entry.components().any(|c| c.as_os_str() == "node_modules") {
-                        continue;
-                    }
-                    // Skip dot-directories
-                    if entry
-                        .components()
-                        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-                    {
-                        continue;
-                    }
-
-                    if let Some(dir) = entry.parent() {
-                        let coverage = format!("{}/**", dir.to_string_lossy().replace('\\', "/"));
-                        self.configs.push(TsConfigEntry {
-                            config_path: entry,
-                            pattern: coverage,
-                        });
+                        if let Some(dir) = entry.parent() {
+                            let coverage =
+                                format!("{}/**", dir.to_string_lossy().replace('\\', "/"));
+                            self.configs.push(TsConfigEntry {
+                                config_path: entry,
+                                pattern: coverage,
+                            });
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                tracing::warn!("failed to glob for tsconfig.json: {}", e);
+                Err(e) => {
+                    tracing::warn!("failed to glob for tsconfig files: {}", e);
+                }
             }
         }
     }

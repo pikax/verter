@@ -12265,7 +12265,8 @@ const count = ref(0)
 
     // Negative: must NOT have JSDoc `any` instance declaration
     assert!(
-        !tsx.code.contains("/** @type {any} */\nvar ___VERTER___instance"),
+        !tsx.code
+            .contains("/** @type {any} */\nvar ___VERTER___instance"),
         "TS SFC must NOT use JSDoc @type {{any}} for instance, got:\n{}",
         tsx.code
     );
@@ -12358,7 +12359,8 @@ export default {
 
     // Negative: must NOT have JSDoc `any`
     assert!(
-        !tsx.code.contains("/** @type {any} */\nvar ___VERTER___instance"),
+        !tsx.code
+            .contains("/** @type {any} */\nvar ___VERTER___instance"),
         "TS Options API must NOT use JSDoc @type {{any}} for instance, got:\n{}",
         tsx.code
     );
@@ -12415,7 +12417,8 @@ fn tsx_instance_declaration_template_only_uses_instance_type() {
 
     // Negative: must NOT be `any`
     assert!(
-        !tsx.code.contains("/** @type {any} */\nvar ___VERTER___instance"),
+        !tsx.code
+            .contains("/** @type {any} */\nvar ___VERTER___instance"),
         "Template-only SFC must NOT use JSDoc @type {{any}} for instance, got:\n{}",
         tsx.code
     );

@@ -308,7 +308,7 @@ pub struct VerterLanguageServer {
     /// called for one of these files, we use `sync_tsx()` (update) instead of
     /// `open_tsx()` to avoid "already open" errors.  When `did_close()` fires, we keep
     /// the file alive in the provider instead of closing it.
-    background_synced_files: DashMap<String, ()>,
+    background_synced_files: Arc<DashMap<String, ()>>,
     /// Which type provider backend is active (TSGO, tsserver, or none).
     type_provider_kind: crate::TypeProviderKind,
     /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
@@ -339,7 +339,7 @@ impl VerterLanguageServer {
             lint_explicitly_configured: std::sync::atomic::AtomicBool::new(false),
             init_lint_options: tokio::sync::Mutex::new(None),
             cached_verter_diags: DashMap::new(),
-            background_synced_files: DashMap::new(),
+            background_synced_files: Arc::new(DashMap::new()),
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
             completion_generation: std::sync::atomic::AtomicU64::new(0),
@@ -392,12 +392,17 @@ impl VerterLanguageServer {
             }
         }
 
-        // When lint is not explicitly configured, filter to errors-only to avoid noise.
+        // When lint is not explicitly configured, suppress all lint diagnostics.
+        // Lint diagnostics have codes like "verter/rule-name"; host diagnostics use
+        // plain codes like "PARSE_ERROR". This keeps host errors while hiding lint noise.
         if !self
             .lint_explicitly_configured
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            diags.retain(|d| d.severity == Some(DiagnosticSeverity::ERROR));
+            diags.retain(|d| match &d.code {
+                Some(NumberOrString::String(code)) => !code.starts_with("verter/"),
+                _ => true,
+            });
         }
 
         // Cache the result
@@ -1597,25 +1602,48 @@ impl LanguageServer for VerterLanguageServer {
                 let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
                 let root_path = std::path::PathBuf::from(&canonical);
 
-                // Discover tsconfig.json files
+                // Discover tsconfig.json files (including tsconfig.app.json, etc.)
                 let mut discovery = crate::config::TsConfigDiscovery::new();
                 discovery.discover(&root_path);
 
-                // Use the root tsconfig.json (most common case)
-                if let Some(entry) = discovery
-                    .find_config_for(&root_path.join("src/dummy.ts"))
-                    .or_else(|| discovery.configs().first())
-                {
+                // Try to find a tsconfig with path aliases.
+                // First try the most specific config for src/, then fall back to any discovered config.
+                let mut best_entry = None;
+                let candidates = [
+                    discovery.find_config_for(&root_path.join("src/dummy.ts")),
+                    discovery.configs().first(),
+                ];
+                for candidate in candidates.into_iter().flatten() {
                     let resolver =
-                        crate::config::TsConfigPathResolver::from_tsconfig(&entry.config_path);
+                        crate::config::TsConfigPathResolver::from_tsconfig(&candidate.config_path);
                     if !resolver.is_empty() {
-                        tracing::info!(
-                            "path resolver: loaded {} aliases from {}",
-                            "tsconfig",
-                            entry.config_path.display()
-                        );
-                        *self.path_resolver.write() = Some(resolver);
+                        best_entry = Some((candidate.config_path.clone(), resolver));
+                        break;
                     }
+                }
+
+                if let Some((config_path, resolver)) = best_entry {
+                    tracing::info!(
+                        "path resolver: loaded aliases from {}",
+                        config_path.display()
+                    );
+
+                    // Send discovered paths to tsserver for inferred project fallback
+                    if let Some(tp) = &self.type_provider {
+                        if let Some((base_url, paths)) =
+                            crate::config::TsConfigPathResolver::raw_paths_json(&config_path)
+                        {
+                            tracing::info!(
+                                "configuring tsserver inferred project paths (baseUrl: {})",
+                                base_url
+                            );
+                            if let Err(e) = tp.configure_paths(&base_url, paths).await {
+                                tracing::warn!("failed to configure tsserver paths: {e}");
+                            }
+                        }
+                    }
+
+                    *self.path_resolver.write() = Some(resolver);
                 }
             }
         }
@@ -1702,33 +1730,45 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
-        // Batch-sync all compiled .vue files to the type provider.
-        // This makes TSGO see proper types for ALL .vue files, not just open ones.
+        // Batch-sync all compiled .vue files to the type provider in the background.
+        // This makes the type provider see proper types for ALL .vue files, not just open ones.
+        // Collect data synchronously (fast — already compiled), then spawn async sync.
         if let Some(sync) = &self.project_sync {
             let profile = self.documents.tsx_profile.read().clone();
-            let mut synced = 0u32;
+            let mut tsx_files: Vec<(String, String)> = Vec::new();
+            let mut dts_files: Vec<(String, String)> = Vec::new();
             for (canonical_id, kind) in self.documents.host.list_files() {
                 if kind == verter_host::FileKind::VueSfc {
                     if let Some(ide) = self.documents.host.get_ide(&canonical_id, &profile) {
                         let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
                         let tsx_path = format!("{canonical_id}{ext}");
-                        if sync.open_tsx(&tsx_path, &ide.code).await.is_ok() {
-                            self.background_synced_files.insert(tsx_path, ());
-                            synced += 1;
-                        }
+                        tsx_files.push((tsx_path, ide.code.to_string()));
                     }
-                    // Sync .d.vue.ts for cross-file component type resolution
                     if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
                         let base = canonical_id.strip_suffix(".vue").unwrap_or(&canonical_id);
                         let dts_path = format!("{base}.d.vue.ts");
-                        let _ = sync.open_dts(&dts_path, &api.code).await;
+                        dts_files.push((dts_path, api.code.to_string()));
                     }
                 }
             }
-            tracing::info!(
-                "scan_workspace: synced {} .vue files to type provider",
-                synced
-            );
+            let sync = sync.clone();
+            let bg_files = Arc::clone(&self.background_synced_files);
+            tokio::spawn(async move {
+                let mut synced = 0u32;
+                for (tsx_path, code) in &tsx_files {
+                    if sync.load_tsx(tsx_path, code).await.is_ok() {
+                        bg_files.insert(tsx_path.clone(), ());
+                        synced += 1;
+                    }
+                }
+                for (dts_path, code) in &dts_files {
+                    let _ = sync.load_dts(dts_path, code).await;
+                }
+                tracing::info!(
+                    "scan_workspace: synced {} .vue files to type provider (background)",
+                    synced
+                );
+            });
         }
 
         // Notify the extension of the type provider child PID for orphan cleanup.
@@ -2451,9 +2491,11 @@ impl LanguageServer for VerterLanguageServer {
                         let locations: Vec<Location> = type_defs
                             .into_iter()
                             .filter_map(|d| {
-                                // Strip .tsx suffix for .vue.tsx files so user navigates to .vue
+                                // Strip virtual suffixes so user navigates to .vue
                                 let target_path = if d.path.ends_with(".vue.tsx") {
                                     d.path.trim_end_matches(".tsx").to_string()
+                                } else if d.path.ends_with(".vue.d.ts") {
+                                    d.path.trim_end_matches(".d.ts").to_string()
                                 } else {
                                     d.path.clone()
                                 };
@@ -2540,7 +2582,10 @@ impl LanguageServer for VerterLanguageServer {
                         &mapper,
                         &tsx_li,
                     ) {
-                        tracing::debug!("definition: querying type provider at tsx offset {}", tsx_offset);
+                        tracing::debug!(
+                            "definition: querying type provider at tsx offset {}",
+                            tsx_offset
+                        );
                         match tp.get_definition(&tsx_path, tsx_offset).await {
                             Ok(type_defs) => {
                                 tracing::debug!(
@@ -2669,7 +2714,10 @@ impl LanguageServer for VerterLanguageServer {
                         &mapper,
                         &tsx_li,
                     ) {
-                        tracing::debug!("references: querying type provider at tsx offset {}", tsx_offset);
+                        tracing::debug!(
+                            "references: querying type provider at tsx offset {}",
+                            tsx_offset
+                        );
                         match tp.get_references(&tsx_path, tsx_offset).await {
                             Ok(type_refs) => {
                                 tracing::debug!(

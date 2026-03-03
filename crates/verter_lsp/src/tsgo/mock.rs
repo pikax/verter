@@ -20,6 +20,10 @@ mod inner {
             path: String,
             content: String,
         },
+        LoadFile {
+            path: String,
+            content: String,
+        },
         UpdateFile {
             path: String,
             content: String,
@@ -212,7 +216,7 @@ mod inner {
             self.state.lock().unwrap().calls.clone()
         }
 
-        /// Get only file sync calls (open/update/close).
+        /// Get only file sync calls (open/load/update/close).
         pub fn file_sync_calls(&self) -> Vec<MockCall> {
             self.calls()
                 .into_iter()
@@ -220,6 +224,7 @@ mod inner {
                     matches!(
                         c,
                         MockCall::OpenFile { .. }
+                            | MockCall::LoadFile { .. }
                             | MockCall::UpdateFile { .. }
                             | MockCall::CloseFile { .. }
                     )
@@ -360,6 +365,15 @@ mod inner {
         fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::OpenFile {
+                path: path.to_string(),
+                content: content.to_string(),
+            });
+            Box::pin(async { Ok(()) })
+        }
+
+        fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::LoadFile {
                 path: path.to_string(),
                 content: content.to_string(),
             });
