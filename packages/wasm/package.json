@@ -27,7 +27,7 @@
   },
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/verter_wasm --target web --out-dir ../../packages/wasm/wasm",
-    "build:ts": "tsdown src/index.ts --format cjs,esm --dts --outDir dist",
+    "build:ts": "tsdown",
     "build:copy-playground": "npx shx cp wasm/verter_wasm_bg.wasm ../playground/public/verter_wasm_bg.wasm",
     "build": "pnpm run build:wasm && pnpm run build:ts && pnpm run build:copy-playground",
     "test": "vitest run"

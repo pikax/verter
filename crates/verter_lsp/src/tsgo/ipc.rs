@@ -361,6 +361,7 @@ async fn read_loop(
                             let path = uri_to_file_path(raw_uri);
                             let cache = contents_cache.lock().await;
                             // Try exact match first, then case-insensitive on Windows.
+                            #[allow(clippy::unnecessary_lazy_evaluations)]
                             cache.get(&path).cloned().or_else(|| {
                                 #[cfg(windows)]
                                 {
