@@ -353,6 +353,24 @@ impl TypeProvider for ResilientTypeProvider {
                 .await
         })
     }
+
+    fn shutdown(&self) -> ProviderFuture<'_, ()> {
+        Box::pin(async {
+            if let Ok(provider) = self.get_inner().await {
+                let _ = provider.shutdown().await;
+            }
+            Ok(())
+        })
+    }
+
+    fn child_pid(&self) -> Option<u32> {
+        // Synchronous check — try_read avoids blocking if a restart is in progress.
+        self.state
+            .inner
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.as_ref().and_then(|tp| tp.child_pid()))
+    }
 }
 
 #[cfg(test)]
@@ -493,6 +511,32 @@ mod tests {
                 .as_str()
                 .unwrap(),
             "tsgo process crashed"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_returns_ok_when_inner_is_none() {
+        let mock = MockTypeProvider::new();
+        let (resilient, _inner) = make_resilient_with_mock(&mock);
+
+        // Inner is None — shutdown should return Ok(()) without panicking.
+        let result = resilient.shutdown().await;
+        assert!(
+            result.is_ok(),
+            "shutdown should succeed even with no inner provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_pid_returns_none_when_inner_is_none() {
+        let mock = MockTypeProvider::new();
+        let (resilient, _inner) = make_resilient_with_mock(&mock);
+
+        // Inner is None — child_pid should return None.
+        let pid = resilient.child_pid();
+        assert!(
+            pid.is_none(),
+            "child_pid should be None with no inner provider"
         );
     }
 }

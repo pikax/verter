@@ -36,6 +36,7 @@ export function createNotificationHelper<T extends GenericNotificationHelper>(
 export enum NotificationType {
   OnDidChangeTsOrJsFile = "$/onDidChangeTsOrJsFile",
   OnFileChanged = "$/onFileChanged",
+  TsgoStarted = "$/verter/tsgoStarted",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -60,5 +61,8 @@ export type NotificationParams = {
   [NotificationType.OnFileChanged]: {
     uri: string;
     type: FileNotificationChange;
+  };
+  [NotificationType.TsgoStarted]: {
+    pid: number;
   };
 };

@@ -37,6 +37,20 @@ use crate::LspConfig;
 
 // ── Custom protocol types ──────────────────────────────────────────────
 
+/// Server → client notification: TSGO child process started with given PID.
+/// The extension tracks this PID to kill orphaned TSGO processes on restart.
+pub enum TsgoStarted {}
+
+impl tower_lsp_server::lsp_types::notification::Notification for TsgoStarted {
+    type Params = TsgoStartedParams;
+    const METHOD: &'static str = "$/verter/tsgoStarted";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TsgoStartedParams {
+    pub pid: u32,
+}
+
 /// Params for `$/onDidChangeTsOrJsFile` notification.
 #[derive(Debug, Deserialize)]
 pub struct OnDidChangeTsOrJsFileParams {
@@ -1462,10 +1476,23 @@ impl LanguageServer for VerterLanguageServer {
                 self.scan_workspace_vue_files(root_uri);
             }
         }
+
+        // Notify the extension of the TSGO child PID for orphan cleanup.
+        if let Some(tp) = &self.type_provider {
+            if let Some(pid) = tp.child_pid() {
+                self.client
+                    .send_notification::<TsgoStarted>(TsgoStartedParams { pid })
+                    .await;
+            }
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("verter-lsp shutting down");
+        // Gracefully shut down the type provider (sends LSP shutdown+exit to TSGO).
+        if let Some(tp) = &self.type_provider {
+            let _ = tp.shutdown().await;
+        }
         self.client
             .log_message(MessageType::INFO, "verter-lsp shutting down")
             .await;

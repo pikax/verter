@@ -85,4 +85,19 @@ pub trait TypeProvider: Send + Sync {
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         Box::pin(async { Ok(None) })
     }
+
+    /// Gracefully shut down the type provider.
+    ///
+    /// For TSGO, this sends the LSP `shutdown` request followed by `exit` notification.
+    /// Default implementation is a no-op for providers that don't need cleanup.
+    fn shutdown(&self) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Return the PID of the child process, if any.
+    ///
+    /// Used by the server to report the TSGO PID to the extension for orphan cleanup.
+    fn child_pid(&self) -> Option<u32> {
+        None
+    }
 }

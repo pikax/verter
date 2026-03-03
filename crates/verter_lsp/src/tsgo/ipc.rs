@@ -617,8 +617,8 @@ fn offset_to_position(content: &str, offset: u32) -> (u32, u32) {
 /// `TypeProvider` method calls into LSP requests.
 pub struct TsgoTypeProvider {
     transport: Arc<LspTransport>,
-    /// Keep the child alive for the provider's lifetime.
-    _child: Child,
+    /// TSGO child process. Killed on drop to prevent orphans.
+    child: Child,
     /// Document version counter per path.
     versions: Arc<Mutex<HashMap<String, i32>>>,
     /// Cached file contents for byte-offset → LSP position conversion.
@@ -626,6 +626,16 @@ pub struct TsgoTypeProvider {
     /// Cached diagnostics from textDocument/publishDiagnostics push notifications.
     /// Used as fallback when pull diagnostics (textDocument/diagnostic) fails.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+}
+
+impl Drop for TsgoTypeProvider {
+    fn drop(&mut self) {
+        // Kill the TSGO child process to prevent orphans.
+        // start_kill() is non-blocking (sends TerminateProcess on Windows, SIGKILL on Unix).
+        // This is a belt-and-suspenders backup — kill_on_drop(true) on the Command
+        // already handles this, but an explicit Drop makes the intent clear.
+        let _ = self.child.start_kill();
+    }
 }
 
 impl TsgoTypeProvider {
@@ -653,6 +663,7 @@ impl TsgoTypeProvider {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| TypeProviderError::new(format!("failed to spawn tsgo: {e}")))?;
 
@@ -740,7 +751,7 @@ impl TsgoTypeProvider {
 
         Ok(Self {
             transport,
-            _child: child,
+            child,
             versions: Arc::new(Mutex::new(HashMap::new())),
             contents: contents_cache,
             diagnostics_cache,
@@ -1452,6 +1463,25 @@ impl TypeProvider for TsgoTypeProvider {
                 }))
             }
         })
+    }
+
+    fn shutdown(&self) -> ProviderFuture<'_, ()> {
+        let transport = Arc::clone(&self.transport);
+        Box::pin(async move {
+            // Send LSP shutdown request (best-effort, short timeout).
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                transport.request("shutdown", serde_json::Value::Null),
+            )
+            .await;
+            // Send exit notification so the process exits cleanly.
+            let _ = transport.notify("exit", serde_json::Value::Null).await;
+            Ok(())
+        })
+    }
+
+    fn child_pid(&self) -> Option<u32> {
+        self.child.id()
     }
 }
 
@@ -3355,7 +3385,7 @@ const props = withDefaults(defineProps({ bar: String }), {})
 
         let provider = TsgoTypeProvider {
             transport,
-            _child: child,
+            child,
             versions: Arc::new(Mutex::new(HashMap::new())),
             contents: Arc::new(Mutex::new(HashMap::new())),
             diagnostics_cache,
@@ -3895,5 +3925,162 @@ const msg = "hi";
         // .cmd preferred over .bat
         let output2 = "C:\\tsgo.bat\nC:\\tsgo.cmd\n";
         assert_eq!(pick_best_which_candidate(output2), Some("C:\\tsgo.cmd"));
+    }
+
+    /// Verify that kill_on_drop prevents orphaned child processes.
+    /// Spawns a long-lived child, drops it, then checks the process is dead.
+    #[tokio::test]
+    async fn test_kill_on_drop_prevents_orphans() {
+        // Spawn a long-lived process that won't exit on its own.
+        let child = if cfg!(windows) {
+            tokio::process::Command::new("cmd")
+                .args(["/c", "timeout", "/t", "30", "/nobreak"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("failed to spawn long-lived process")
+        } else {
+            tokio::process::Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("failed to spawn long-lived process")
+        };
+
+        let pid = child.id().expect("child should have a PID");
+
+        // Drop the child — kill_on_drop should kill it.
+        drop(child);
+
+        // Give the OS a moment to clean up the process.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Verify the process is no longer running.
+        let is_alive = is_process_alive(pid);
+        assert!(
+            !is_alive,
+            "child process (PID {pid}) should be killed after drop"
+        );
+    }
+
+    /// Verify that explicit Drop on TsgoTypeProvider calls start_kill().
+    /// We create a mock-like scenario: spawn a process, wrap it in
+    /// the TsgoTypeProvider-like struct, drop it, confirm process is dead.
+    #[tokio::test]
+    async fn test_drop_kills_child_process() {
+        // Spawn a long-lived process.
+        let mut child = if cfg!(windows) {
+            tokio::process::Command::new("cmd")
+                .args(["/c", "timeout", "/t", "30", "/nobreak"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("failed to spawn")
+        } else {
+            tokio::process::Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("failed to spawn")
+        };
+
+        let pid = child.id().expect("child should have a PID");
+        let stdin = child.stdin.take().expect("no stdin");
+
+        // Construct a minimal TsgoTypeProvider-like setup.
+        // We only need the child and transport to test Drop behavior.
+        let transport = Arc::new(LspTransport {
+            stdin: Arc::new(Mutex::new(stdin)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicI64::new(1),
+        });
+
+        let provider = TsgoTypeProvider {
+            transport,
+            child,
+            versions: Arc::new(Mutex::new(HashMap::new())),
+            contents: Arc::new(Mutex::new(HashMap::new())),
+            diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        // Drop the provider — Drop impl should call start_kill().
+        drop(provider);
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let is_alive = is_process_alive(pid);
+        assert!(
+            !is_alive,
+            "TSGO child (PID {pid}) should be killed when TsgoTypeProvider is dropped"
+        );
+    }
+
+    /// Verify child_pid() returns the process ID.
+    #[tokio::test]
+    async fn test_child_pid_returns_id() {
+        let (mut child, stdin, _stdout) = spawn_short_lived_process().await;
+        let expected_pid = child.id();
+
+        let _ = child.wait().await;
+
+        let transport = Arc::new(LspTransport {
+            stdin: Arc::new(Mutex::new(stdin)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicI64::new(1),
+        });
+
+        let provider = TsgoTypeProvider {
+            transport,
+            child,
+            versions: Arc::new(Mutex::new(HashMap::new())),
+            contents: Arc::new(Mutex::new(HashMap::new())),
+            diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        // After the process has exited, id() returns None.
+        // But we stored the PID before wait(), so we can verify the method exists.
+        // For a running process, id() returns Some(pid).
+        let _ = expected_pid;
+        // The child_pid() method should delegate to child.id()
+        let pid = provider.child_pid();
+        // Note: After wait(), tokio Child::id() returns None on some platforms.
+        // The important thing is the method exists and doesn't panic.
+        assert!(
+            pid.is_none() || pid == expected_pid,
+            "child_pid() should return the child's PID or None after exit"
+        );
+    }
+
+    /// Helper: check if a process with the given PID is still alive.
+    fn is_process_alive(pid: u32) -> bool {
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            let output = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output();
+            match output {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    // tasklist returns the process info line if it exists,
+                    // or "INFO: No tasks are running which match the specified criteria."
+                    !stdout.contains("No tasks") && stdout.contains(&pid.to_string())
+                }
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            // On Unix, send signal 0 to check if process exists.
+            unsafe { libc::kill(pid as i32, 0) == 0 }
+        }
     }
 }

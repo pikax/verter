@@ -42,6 +42,7 @@ import { PropConstnessDecorationProvider } from "./PropConstnessDecorationProvid
 import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
 import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
+import { restartLanguageServer } from "./restart";
 
 type GetClient = () => PatchClient<LanguageClient>;
 
@@ -307,6 +308,30 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
   );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
 
+  // Track TSGO child PID for orphan cleanup on restart failure.
+  let tsgoPid: number | undefined;
+  function registerTsgoPidListener(lc: LanguageClient) {
+    lc.onNotification(
+      NotificationType.TsgoStarted,
+      (params: { pid: number }) => {
+        tsgoPid = params.pid;
+        log.info(`TSGO started with PID ${params.pid}`);
+      },
+    );
+  }
+  function killTrackedTsgo() {
+    if (tsgoPid != null) {
+      log.info(`Killing orphaned TSGO process (PID ${tsgoPid})`);
+      try {
+        process.kill(tsgoPid);
+      } catch {
+        // Already dead — ignore.
+      }
+      tsgoPid = undefined;
+    }
+  }
+  registerTsgoPidListener(client);
+
   // Initialize CSS service now that getClient is available
   cssService = new CssService(getClient, rootPath);
 
@@ -364,22 +389,27 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
     }
     restarting = true;
     try {
-      log.info("Restarting language server...");
-      await client.stop();
-      client = createLanguageServer(
-        buildServerOptions(binaryPath, rootPath),
-        clientOptions,
-      );
-      await client.start();
-      // Reset CSS service cache (virtual files are stale after restart)
-      cssService?.dispose();
-      cssService = new CssService(getClient, rootPath);
-      cssDiagnostics.clear();
-      if (showMsg) {
+      const success = await restartLanguageServer({
+        stop: () => client.stop(),
+        createAndStart: async () => {
+          client = createLanguageServer(
+            buildServerOptions(binaryPath, rootPath),
+            clientOptions,
+          );
+          registerTsgoPidListener(client);
+          await client.start();
+        },
+        killTrackedTsgo,
+        resetServices: () => {
+          cssService?.dispose();
+          cssService = new CssService(getClient, rootPath);
+          cssDiagnostics.clear();
+        },
+        log,
+      });
+      if (success && showMsg) {
         window.showInformationMessage("Verter Language server restarted");
       }
-    } catch (e) {
-      log.error("Failed to restart language server", e as Error);
     } finally {
       restarting = false;
     }
