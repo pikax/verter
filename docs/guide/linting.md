@@ -4,131 +4,119 @@
 Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
 :::
 
-Verter includes a built-in diagnostic engine (`verter_diagnostics`) that provides 32 lint rules across 8 categories. These rules run against static analysis data from the compiler -- they do not require the full TypeScript type checker, so diagnostics are fast and available immediately as you type.
+Verter includes a built-in diagnostic engine (`verter_diagnostics`) that provides **~164 lint rules** across **11 categories**. These rules run natively in Rust inside the LSP, providing instant diagnostics without external tooling. They analyze static analysis data from the compiler and do not require the full TypeScript type checker, so diagnostics are fast and available immediately as you type.
 
 The diagnostic engine is separate from the template compiler. It depends on `verter_analysis` for import/export/binding data and template element information, but does not depend on `verter_core` or any codegen modules.
 
+## Configuration
+
+By default, only **error-severity** diagnostics from the **Essential** preset are shown. To see warnings and hints, either:
+
+- Create a [`.verterrc.json`](/configuration) in your project root, or
+- Enable `verter.lint.enabled` in VS Code settings
+
+See the [Configuration Reference](/configuration) for presets, per-rule overrides, and ESLint migration.
+
 ## Rule Categories
 
-### Accessibility (10 rules)
+Verter organizes rules into 11 categories. For the complete list of all ~164 rules with severity and auto-fix information, see the [Lint Rules Reference](/lint-rules).
 
-Rules that help ensure your Vue templates produce accessible HTML output.
+### Vue Essential (~95 rules)
 
-| Rule | Description |
-|------|-------------|
-| `alt-text` | Require alt text on `<img>`, `<area>`, `<input type="image">`, and `<object>` elements |
-| `anchor-has-content` | Anchors must have visible content (text, aria-label, or slotted content) |
-| `aria-role` | Only valid ARIA roles are allowed |
-| `click-events-have-key-events` | Elements with `@click` handlers must also have a keyboard event handler |
-| `form-control-has-label` | Form controls (`<input>`, `<select>`, `<textarea>`) need associated labels |
-| `heading-has-content` | Heading elements (`<h1>` through `<h6>`) must have content |
-| `iframe-has-title` | `<iframe>` elements need a `title` attribute for screen readers |
-| `no-autofocus` | Avoid the `autofocus` attribute (can disorient screen reader users) |
-| `no-distracting-elements` | No `<marquee>` or `<blink>` elements |
-| `tabindex-no-positive` | No positive `tabindex` values (disrupts natural tab order) |
+Error-preventing rules that catch invalid Vue syntax, common mistakes, and deprecated patterns. This is the largest category, covering directive validation (`valid-v-if`, `valid-v-for`, `valid-v-model`, etc.), component best practices, template structure, and Vue 2→3 migration rules (`no-deprecated-destroyed-lifecycle`, `no-deprecated-v-bind-sync`, etc.).
 
-### Vue (9 rules)
+### Vue Recommended
 
-Rules that enforce Vue template best practices and catch common mistakes.
+Code quality and consistency rules for readability and style. Includes `attribute-order`, `html-self-closing`, `v-bind-style`, `v-on-style`, `v-slot-style`, `multi-word-component-names`, `component-name-in-template-casing`, and more.
 
-| Rule | Description |
-|------|-------------|
-| `require-v-for-key` | Elements using `v-for` must have a `:key` binding |
-| `valid-v-for` | Validate `v-for` expression syntax (must use `in` or `of`) |
-| `no-duplicate-attributes` | No duplicate attributes or directives on the same element |
-| `no-template-key` | `<template>` elements should not have a `key` attribute |
-| `no-textarea-mustache` | No mustache interpolation inside `<textarea>` (use `v-model` instead) |
-| `no-dupe-v-else-if` | No duplicate conditions in `v-if`/`v-else-if` chains |
-| `no-use-v-if-with-v-for` | Do not use `v-if` and `v-for` on the same element |
-| `no-unused-components` | Detect imported components that are never used in the template |
-| `no-unused-props` | Detect declared props that are never referenced |
+### Script (~36 rules)
+
+Rules for `<script>` and `<script setup>` blocks, covering define macros (`define-macros-order`, `valid-define-props`, `valid-define-emits`), lifecycle hooks, watchers, computed properties, prop defaults, emit declarations, component API style, and more.
+
+### Accessibility (~15 rules)
+
+WCAG-based accessibility rules: `alt-text`, `anchor-has-content`, `aria-props`, `aria-role`, `click-events-have-key-events`, `form-control-has-label`, `heading-has-content`, `iframe-has-title`, `interactive-supports-focus`, `media-has-caption`, `no-aria-hidden-on-focusable`, `no-autofocus`, `no-distracting-elements`, `role-has-required-aria-props`, `tabindex-no-positive`.
 
 ### CSS (3 rules)
 
-Rules that analyze the relationship between `<style>` blocks and the template.
-
-| Rule | Description |
-|------|-------------|
-| `unused-css-selector` | Detect CSS selectors that do not match any template element |
-| `scoped-css-cascade` | Warn about cascade issues in scoped CSS (selectors that may not apply as expected) |
-| `undefined-css-class` | Detect classes used in the template but not defined in any `<style>` block |
-
-### Performance (2 rules)
-
-Rules that flag patterns that may impact rendering performance.
-
-| Rule | Description |
-|------|-------------|
-| `max-template-depth` | Warn when template nesting exceeds a configurable threshold |
-| `prefer-static-class` | Prefer static `class` over dynamic `:class` when the value is a constant string |
-
-### Security (1 rule)
-
-| Rule | Description |
-|------|-------------|
-| `no-v-html` | Warn about XSS risk from `v-html` (renders raw HTML from potentially untrusted data) |
+Rules that analyze the relationship between `<style>` blocks and the template: `unused-css-selector`, `scoped-css-cascade`, `undefined-css-class`.
 
 ### Reactivity (2 rules)
 
-Rules that catch common reactivity mistakes in `<script setup>`.
+Rules that catch common reactivity mistakes in `<script setup>`: `no-ref-as-operand`, `no-setup-props-reactivity-loss`.
 
-| Rule | Description |
-|------|-------------|
-| `no-ref-as-operand` | Do not use a ref directly as an operand (use `.value` instead) |
-| `no-setup-props-reactivity-loss` | Avoid destructuring `props` in setup (loses reactivity tracking) |
+### Performance (2 rules)
 
-### Script (2 rules)
+Rules that flag patterns impacting rendering performance: `max-template-depth` (configurable), `prefer-static-class`.
 
-Rules for lifecycle hook usage patterns.
+### Security (2 rules)
 
-| Rule | Description |
-|------|-------------|
-| `no-inline-lifecycle` | Lifecycle hooks should not be defined inline (extract to named functions) |
-| `no-lifecycle-after-await` | No lifecycle hooks after `await` (the component instance may no longer be active) |
+`no-v-html` (XSS risk) and `no-unsafe-url` (dangerous `javascript:` / `data:` URLs).
+
+### HTML Conformance (2 rules)
+
+HTML spec conformance: `no-void-element-content`, `no-deprecated-element`.
+
+### Vapor (4 rules)
+
+Vapor mode compatibility: `no-suspense`, `no-vue-lifecycle-events`, `no-inline-template`, `no-non-vapor-components`.
 
 ### Cross-File (3 rules)
 
-Rules that analyze patterns across multiple files. These require the host to have compiled related files.
-
-| Rule | Description |
-|------|-------------|
-| `provide-inject-validation` | Validate that `provide()` and `inject()` calls have matching types across files |
-| `deep-composable-tracking` | Track deep composable usage patterns for potential issues |
-| `no-duplicate-vue` | Detect duplicate `.vue` file names that may cause import conflicts |
+Rules that analyze patterns across multiple files (require the host to have compiled related files): `provide-inject-validation`, `deep-composable-tracking`, `no-duplicate-vue`.
 
 ## Comment Directives
 
-You can suppress diagnostics for specific lines or blocks using comment directives.
+You can suppress or adjust diagnostics inline using HTML comments with the `@verter:` prefix.
 
-### Suppress All Rules
-
-Use `verter:ignore` to suppress all diagnostic rules for the next element:
+### Disable a Rule
 
 ```vue
 <template>
-  <!-- verter:ignore -->
+  <!-- @verter:disable no-v-html -->
   <div v-html="content" />
+  <!-- @verter:enable no-v-html -->
 </template>
 ```
 
-### Suppress a Specific Rule
+`@verter:disable` without a rule name disables all rules from that point to EOF (or until `@verter:enable`).
 
-Use `verter/<rule-name>:ignore` to suppress a single rule:
+### Disable for the Next Line
 
 ```vue
 <template>
-  <!-- verter/no-v-html:ignore -->
+  <!-- @verter:disable-next-line no-v-html -->
   <div v-html="trustedContent" />
 
-  <!-- verter/alt-text:ignore -->
+  <!-- @verter:disable-next-line -->
   <img :src="decorativeImage" />
 </template>
 ```
 
-The directive applies to the immediately following element. It does not affect sibling or parent elements.
+### Ignore Regions
+
+```vue
+<template>
+  <!-- @verter:ignore-start -->
+  <div v-html="content" />
+  <img :src="image" />
+  <!-- @verter:ignore-end -->
+</template>
+```
+
+### Override Severity
+
+```vue
+<template>
+  <!-- @verter:level no-v-html warning -->
+  <div v-html="content" />
+</template>
+```
 
 ## Next Steps
 
+- [Lint Rules Reference](/lint-rules) -- Full list of all ~164 rules
+- [Configuration Reference](/configuration) -- Presets, per-rule overrides, `.verterrc.json`
+- [Migrating from ESLint](/migrating-from-eslint) -- Map `eslint-plugin-vue` rules to Verter
 - [Features](./features) -- Type safety features overview
 - [Architecture](./architecture) -- How the diagnostic engine fits into the system
-- [Getting Started](./getting-started) -- Install and configure Verter

@@ -161,6 +161,10 @@ impl DocumentRegistry {
     /// Handle a document being changed.
     pub fn did_change(&self, uri: &Uri, version: i32, text: &str) -> HostUpdateResult {
         let uri_str = uri.as_str().to_string();
+        tracing::info!(
+            "DocumentRegistry::did_change UPSERT_START v{version} thread={:?}",
+            std::thread::current().id()
+        );
 
         // Virtual files: just update text + line index, skip host upsert
         if let Some(mut entry) = self.documents.get_mut(&uri_str) {
@@ -188,6 +192,7 @@ impl DocumentRegistry {
             })
             .unwrap_or(FileKind::NonSfc);
 
+        let upsert_start = std::time::Instant::now();
         let result = self.host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
@@ -195,12 +200,23 @@ impl DocumentRegistry {
             file_kind,
             aliases: vec![],
         });
+        tracing::info!(
+            "DocumentRegistry::did_change HOST_UPSERT_DONE elapsed={:?} thread={:?}",
+            upsert_start.elapsed(),
+            std::thread::current().id()
+        );
 
         // Trigger re-compilation for Vue SFCs
         if file_kind == FileKind::VueSfc {
+            let compile_start = std::time::Instant::now();
             let _ = self
                 .host
                 .ensure_compiled(&canonical_id, &self.tsx_profile.read());
+            tracing::info!(
+                "DocumentRegistry::did_change ENSURE_COMPILED_DONE elapsed={:?} thread={:?}",
+                compile_start.elapsed(),
+                std::thread::current().id()
+            );
         }
 
         // Rebuild position mapper.

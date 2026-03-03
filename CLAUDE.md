@@ -82,10 +82,12 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 | **tsserver** | `node tsserver.js` | Newline-delimited JSON over stdio | Workspace TS version, plugin support |
 
 **Provider selection** (`--type-provider` CLI arg / `verter.typeProvider` VS Code setting):
-- `auto` (default): detects workspace TS version — if TS 5.x/6.x installed, uses tsserver and recommends TSGO; otherwise tries TSGO
+- `auto` (default): if TS 5.x/6.x installed, uses tsserver; otherwise tries TSGO
 - `tsgo`: TSGO only
 - `tsserver`: tsserver only
 - `off`: no type provider (verter-only mode)
+
+**TSGO known limitation**: Re-exported `.vue` components (e.g. barrel files like `export { default as MyComp } from './MyComp.vue'`) lose their typing when imported in another SFC. This is why `auto` mode defaults to tsserver. A warning is shown when TSGO is active. Remove the warning once this is resolved.
 
 Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/traits.rs`) with 14+ methods (hover, completions, diagnostics, definition, references, rename, etc.). Both are wrapped in a `ResilientTypeProvider` that detects crashes, auto-restarts (max 3 with exponential backoff), and replays the file cache.
 
@@ -96,6 +98,13 @@ Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/trait
 - `tsserver/resilient.rs` — `ResilientTsserverProvider` (crash detection + auto-restart)
 
 **Background file sync**: During `initialized()`, the LSP batch-compiles ALL workspace `.vue` files to TSX and syncs them to the type provider. This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
+
+**Freeze prevention** (fast typing): Three layers prevent tokio runtime starvation during rapid typing:
+1. **SyncCoordinator** (`sync_coordinator.rs`): Single long-lived task replaces spawn-per-keystroke debounce. Uses mpsc channel + 300ms deadline map to guarantee exactly one sync per file after typing stops. Holds shared `Arc<VerterHost>`, `ProjectSync`, and `Arc<RwLock<PositionEncodingKind>>` (negotiated encoding from `initialize()`).
+2. **Push diagnostics skip**: `did_change()` checks `is_typing_cooldown()` — when true, both `compute_verter_diagnostics` and `publish_diagnostics` are skipped. Pull diagnostics serve cached results. The SyncCoordinator publishes fresh diagnostics after typing stops.
+3. **Hang detection** (`tsgo/ipc.rs`): `LspTransport` tracks `consecutive_failures` (AtomicU32). After 3 consecutive request timeouts, fires `crash_notify` to trigger `ResilientTypeProvider`'s existing restart machinery. Notifications use `try_send()` (non-blocking) to prevent channel backpressure.
+
+**Heartbeat watchdog**: The server sends `$/verter/heartbeat` every 5s from `initialized()`. The VS Code extension monitors heartbeats — if none arrive for 30s, it auto-restarts the server. This is the last-resort safety net for runtime starvation.
 
 ### Cached Directive Fields on ElementNode
 
@@ -114,6 +123,8 @@ The parser extracts structural directives from `el.props` via `prop.take()` and 
 ### Position Encoding (CRITICAL rules)
 
 See `/position-encoding` skill for full span type reference, encoding tables, and path normalization details.
+
+**Encoding source of truth**: The position encoding MUST come from the client capabilities negotiated during `initialize()`. The server stores it in `Arc<parking_lot::RwLock<PositionEncodingKind>>` shared with the SyncCoordinator. Default is UTF-16 (per LSP spec) until negotiated. **Rust-internal code uses UTF-8 byte offsets**; **LSP boundary code converts to negotiated encoding**; **JS/VS Code uses UTF-16**.
 
 **Line/Column Base Rules** (off-by-one bugs):
 - **PositionResolver is 1-based** — subtract 1 for source maps and LSP

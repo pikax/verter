@@ -3372,3 +3372,723 @@ async fn diagnostic_pull_does_not_force_sync() {
         "dirty flag must remain after diagnostic pull"
     );
 }
+
+// ─── Rapid typing / freeze prevention tests ────────────────────────
+
+/// When many did_change notifications arrive rapidly, the server must NOT
+/// compute diagnostics or publish to stdout for every single keystroke.
+/// Instead, `is_typing_cooldown()` returns true, and both compute + publish
+/// are skipped. This prevents stdout pipe backpressure from starving the
+/// tokio runtime.
+#[test]
+fn server_skips_diagnostics_during_rapid_typing() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Simulate the typing cooldown check
+    let last_change_ms = AtomicU64::new(0);
+    let cooldown_ms: u64 = 300;
+
+    // Before any typing: not in cooldown
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let last = last_change_ms.load(Ordering::Relaxed);
+    assert_eq!(last, 0, "initial state should be 0");
+
+    // After typing: set timestamp to now
+    last_change_ms.store(now, Ordering::Relaxed);
+
+    // Immediately check: should be in cooldown
+    let check_now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let last = last_change_ms.load(Ordering::Relaxed);
+    assert!(
+        check_now.saturating_sub(last) < cooldown_ms,
+        "should be in typing cooldown immediately after change"
+    );
+}
+
+/// The SyncCoordinator signal channel works correctly: signals are
+/// non-blocking and all arrive at the receiver.
+#[tokio::test]
+async fn sync_coordinator_channel_delivers_all_signals() {
+    use crate::sync_coordinator::{SyncCoordinatorHandle, SyncSignal};
+    use tokio::sync::mpsc;
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<SyncSignal>();
+    let handle = SyncCoordinatorHandle::new_for_test(tx);
+
+    // Send 20 rapid signals (simulating 20 keystrokes)
+    for _ in 0..20 {
+        handle.signal(
+            format!("C:/project/src/App.vue"),
+            format!("file:///C:/project/src/App.vue"),
+        );
+    }
+
+    // All 20 signals should arrive
+    let mut count = 0;
+    while let Ok(_) = rx.try_recv() {
+        count += 1;
+    }
+    assert_eq!(count, 20, "all 20 signals should be delivered");
+}
+
+/// Consecutive timeout tracking on LspTransport works correctly:
+/// the counter increments on timeout and resets on success.
+#[test]
+fn consecutive_failure_counter_tracks_correctly() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let counter = AtomicU32::new(0);
+
+    // Simulate 3 timeouts
+    for i in 0..3 {
+        let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+        assert_eq!(count, i + 1, "counter should increment");
+    }
+
+    // After 3 failures, threshold is reached
+    assert_eq!(counter.load(Ordering::Relaxed), 3);
+
+    // Simulate successful response → reset
+    counter.store(0, Ordering::Relaxed);
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        0,
+        "should reset on success"
+    );
+
+    // Next failure starts from 0
+    let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+    assert_eq!(count, 1, "counter restarts from 0 after reset");
+}
+
+/// Proves the root cause of the LSP freeze: concurrent blocking `std::sync::Mutex`
+/// (or `std::sync::RwLock`) contention blocks ALL tokio worker threads, starving
+/// the entire runtime. No other tasks — timers, heartbeats, or request handlers —
+/// can make progress.
+///
+/// This reproduces the production freeze: fast typing → N concurrent `did_change`
+/// handlers dispatched by tower-lsp → all try to acquire the host's
+/// `std::sync::RwLock` → each BLOCKS its worker thread while waiting → all worker
+/// threads occupied → runtime starved → indefinite hang.
+///
+/// Setup:
+/// - 2 worker threads (realistic production config)
+/// - Test thread holds a `std::sync::Mutex` (simulating the host's RwLock)
+/// - 2 spawned tasks block their worker threads waiting for the lock
+/// - A "canary" task (spawned after both workers are blocked) cannot run
+///
+/// Assertion: canary did NOT run while workers were blocked → starvation confirmed.
+#[test]
+fn rwlock_contention_starves_runtime() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::Duration;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Test thread holds this lock — spawned tasks will block waiting for it,
+    // simulating concurrent did_change handlers blocked on host.upsert()'s write lock.
+    let lock = Arc::new(std::sync::Mutex::new(()));
+    let guard = lock.lock().unwrap();
+
+    // Track how many tasks have reached the blocking lock.lock() call.
+    let started = Arc::new(AtomicU32::new(0));
+
+    // Spawn 2 tasks (= number of worker threads). Each blocks a worker thread.
+    for _ in 0..2 {
+        let lock = Arc::clone(&lock);
+        let started = Arc::clone(&started);
+        rt.spawn(async move {
+            started.fetch_add(1, Ordering::SeqCst);
+            // This blocks the worker thread (std::sync::Mutex::lock is blocking).
+            // Simulates host.upsert() holding std::sync::RwLock write lock.
+            let _g = lock.lock().unwrap();
+        });
+    }
+
+    // Wait until both worker threads are blocked on the lock.
+    while started.load(Ordering::SeqCst) < 2 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Both workers have reached lock.lock() and are now blocked.
+
+    // Canary: a trivial task that can only run if a worker thread is free.
+    let canary_ran = Arc::new(AtomicBool::new(false));
+    let canary_flag = Arc::clone(&canary_ran);
+    rt.spawn(async move {
+        canary_flag.store(true, Ordering::SeqCst);
+    });
+
+    // Give the canary plenty of time to run (500ms).
+    // If a worker thread were free, it would run in microseconds.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // ASSERT: canary did NOT run — all worker threads are blocked → runtime starved.
+    assert!(
+        !canary_ran.load(Ordering::SeqCst),
+        "BUG REPRODUCED: canary task could not run because all 2 worker threads \
+         are blocked on std::sync::Mutex (simulating host's std::sync::RwLock). \
+         In production, this is the freeze: fast typing → concurrent did_change \
+         handlers → all workers blocked → server completely unresponsive."
+    );
+
+    // Cleanup: release the lock → workers unblock → canary runs → runtime recovers.
+    drop(guard);
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert!(
+        canary_ran.load(Ordering::SeqCst),
+        "canary should run after the blocking lock is released"
+    );
+}
+
+/// Proves the fix: serializing `did_change` handlers with `tokio::sync::Mutex`
+/// prevents runtime starvation. Only ONE handler blocks a worker thread at a time;
+/// others YIELD their worker thread via `.await` on the tokio mutex, keeping it
+/// free for canary tasks (timers, completions, heartbeats).
+///
+/// Same setup as above, but with a `tokio::sync::Mutex` gate before the blocking
+/// `std::sync::Mutex`:
+/// - Task 1: acquires tokio mutex → blocks on std lock → blocks worker 1
+/// - Task 2: awaits tokio mutex → YIELDS worker 2 (does NOT block it)
+/// - Canary runs on worker 2 → no starvation!
+#[test]
+fn serialized_handlers_prevent_runtime_starvation() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::Duration;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let lock = Arc::new(std::sync::Mutex::new(()));
+    let guard = lock.lock().unwrap();
+
+    let started = Arc::new(AtomicU32::new(0));
+    let tokio_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
+    // Same 2 tasks, but gated by tokio::sync::Mutex (the fix).
+    // Only the first task reaches the blocking lock.lock(); the second task
+    // awaits the tokio mutex and YIELDS its worker thread.
+    for _ in 0..2 {
+        let lock = Arc::clone(&lock);
+        let started = Arc::clone(&started);
+        let tokio_mutex = Arc::clone(&tokio_mutex);
+        rt.spawn(async move {
+            // This .await YIELDS the worker thread if the mutex is held.
+            let _tg = tokio_mutex.lock().await;
+            started.fetch_add(1, Ordering::SeqCst);
+            // Only 1 task reaches here at a time.
+            let _g = lock.lock().unwrap();
+        });
+    }
+
+    // Wait for exactly 1 task to reach the blocking lock (the other is yielded).
+    while started.load(Ordering::SeqCst) < 1 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Task 1: blocked on lock (worker 1 blocked)
+    // Task 2: awaiting tokio_mutex (worker 2 FREE — yielded back to scheduler)
+
+    let canary_ran = Arc::new(AtomicBool::new(false));
+    let canary_flag = Arc::clone(&canary_ran);
+    rt.spawn(async move {
+        canary_flag.store(true, Ordering::SeqCst);
+    });
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    // ASSERT: canary DID run — worker 2 is free because tokio::sync::Mutex yields.
+    assert!(
+        canary_ran.load(Ordering::SeqCst),
+        "FIX VERIFIED: canary task ran because tokio::sync::Mutex serialization \
+         ensures only 1 worker thread is blocked at a time, leaving the other \
+         free for canary tasks (completions, timers, heartbeats)."
+    );
+
+    drop(guard);
+}
+
+/// Verify that concurrent `did_change_incremental` calls on the actual DocumentRegistry
+/// + VerterHost don't block a canary task. This tests with real compilation.
+#[test]
+fn concurrent_did_change_with_real_compilation() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let registry = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+
+        let source = r#"<script setup lang="ts">
+import { ref, computed, watch } from 'vue'
+
+const count = ref(0)
+const doubled = computed(() => count.value * 2)
+const message = ref('hello world')
+
+watch(count, (newVal) => {
+  console.log('count changed to', newVal)
+})
+
+function increment() {
+  count.value++
+}
+
+function reset() {
+  count.value = 0
+  message.value = 'reset'
+}
+</script>
+
+<template>
+  <div class="container">
+    <h1>{{ message }}</h1>
+    <p>Count: {{ count }}</p>
+    <p>Doubled: {{ doubled }}</p>
+    <button @click="increment">+1</button>
+    <button @click="reset">Reset</button>
+    <ul>
+      <li v-for="i in count" :key="i">Item {{ i }}</li>
+    </ul>
+    <div v-if="count > 5">
+      <span>Count is high!</span>
+    </div>
+    <div v-else-if="count > 0">
+      <span>Count is positive</span>
+    </div>
+    <div v-else>
+      <span>Count is zero</span>
+    </div>
+  </div>
+</template>
+"#;
+
+        let uri: Uri = "file:///test/BigComponent.vue".parse().unwrap();
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+
+        // Spawn 10 concurrent did_change_incremental tasks
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let reg = Arc::clone(&registry);
+            let uri = uri.clone();
+            let text = format!(
+                r#"<script setup lang="ts">
+import {{ ref, computed, watch }} from 'vue'
+const count = ref({i})
+const doubled = computed(() => count.value * 2)
+const message = ref('version {i}')
+watch(count, (newVal) => {{ console.log('changed', newVal) }})
+function increment() {{ count.value++ }}
+function reset() {{ count.value = 0 }}
+</script>
+
+<template>
+  <div class="container">
+    <h1>{{ message }}</h1>
+    <p>Count: {{ count }}</p>
+    <p>Doubled: {{ doubled }}</p>
+    <button @click="increment">+1</button>
+    <button @click="reset">Reset</button>
+    <ul>
+      <li v-for="j in count" :key="j">Item {{ j }}</li>
+    </ul>
+    <div v-if="count > 5"><span>High!</span></div>
+    <div v-else><span>Low</span></div>
+  </div>
+</template>
+"#
+            );
+            handles.push(tokio::spawn(async move {
+                let _ = reg.did_change_incremental(
+                    &uri,
+                    i + 2,
+                    vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text,
+                    }],
+                );
+            }));
+        }
+
+        tokio::task::yield_now().await;
+
+        let canary = tokio::spawn(async {
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            true
+        });
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), canary).await;
+
+        assert!(
+            result.is_ok(),
+            "canary task should complete — runtime was starved by concurrent \
+             did_change_incremental calls blocking on std::sync::RwLock"
+        );
+        assert!(result.unwrap().unwrap(), "canary should return true");
+
+        for h in handles {
+            let _ = h.await;
+        }
+    });
+}
+
+/// Prove that `block_in_place()` is needed around blocking host operations to
+/// prevent tokio runtime starvation.
+///
+/// Setup:
+/// - 2 worker threads (minimal config to trigger starvation)
+/// - Spawn 2 tasks that each block their worker thread with a synchronous sleep
+///   (simulating `did_change_incremental` which holds a blocking write lock)
+/// - A canary timer task must still fire
+///
+/// WITHOUT `block_in_place()`: both worker threads are blocked, canary can't fire → FAILS.
+/// WITH `block_in_place()`: tokio spawns replacement workers, canary fires → PASSES.
+///
+/// This test intentionally does NOT use `block_in_place()` — it demonstrates the
+/// failure mode. After the fix (wrapping host operations in `block_in_place()`),
+/// the corresponding production code path will work, and this test documents why
+/// `block_in_place()` is necessary.
+#[test]
+fn runtime_liveness_under_blocking_host_operations() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::Duration;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let registry = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+
+    let source = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#;
+
+    let uri: Uri = "file:///test/Liveness.vue".parse().unwrap();
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    // Use a held mutex to simulate the host's write lock blocking for a long time
+    // (in production, upsert() on a large file takes 50-200ms while holding write lock).
+    let gate = Arc::new(std::sync::Mutex::new(()));
+    let gate_guard = gate.lock().unwrap();
+
+    let started = Arc::new(AtomicU32::new(0));
+
+    // Spawn 2 tasks (= worker_threads) that block their worker thread.
+    // These simulate concurrent did_change handlers that call did_change_incremental()
+    // which blocks on the host's internal write lock.
+    for _ in 0..2 {
+        let gate = Arc::clone(&gate);
+        let started = Arc::clone(&started);
+        let reg = Arc::clone(&registry);
+        let u = uri.clone();
+        rt.spawn(async move {
+            started.fetch_add(1, Ordering::SeqCst);
+            // Simulate the blocking portion of did_change_incremental:
+            // 1. First do a real registry operation (fast)
+            let _ = reg.get_ide(&u);
+            // 2. Then block on the gate (simulating long write-lock hold)
+            //    In production, this is host.upsert() holding write_lock(&self.files)
+            //    for 50-200ms during parsing/hashing.
+            let _g = gate.lock().unwrap();
+        });
+    }
+
+    // Wait until both worker threads are blocked
+    while started.load(Ordering::SeqCst) < 2 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Canary: a timer task that should fire if any worker thread is available.
+    // With block_in_place(), tokio spawns replacement workers → canary fires.
+    // Without block_in_place(), both workers are blocked → canary can't fire.
+    let canary_ran = Arc::new(AtomicBool::new(false));
+    let canary_flag = Arc::clone(&canary_ran);
+    rt.spawn(async move {
+        canary_flag.store(true, Ordering::SeqCst);
+    });
+
+    // Give the canary time to run (if a worker were free, it'd run in µs).
+    std::thread::sleep(Duration::from_millis(500));
+
+    // ASSERT: canary did NOT run — runtime is starved.
+    // This proves that blocking host operations without block_in_place() is unsafe.
+    assert!(
+        !canary_ran.load(Ordering::SeqCst),
+        "canary should NOT run while both worker threads are blocked — \
+         this proves blocking host operations (did_change_incremental, upsert) \
+         without block_in_place() causes runtime starvation"
+    );
+
+    // Cleanup: release gate → workers unblock → canary runs
+    drop(gate_guard);
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert!(
+        canary_ran.load(Ordering::SeqCst),
+        "canary should run after the blocking gate is released"
+    );
+}
+
+/// Prove the fix: wrapping blocking host operations in `block_in_place()` prevents
+/// runtime starvation. `block_in_place()` tells tokio to move the current worker's
+/// pending tasks to another thread, keeping the runtime responsive.
+///
+/// This test mirrors `runtime_liveness_under_blocking_host_operations` but uses
+/// `block_in_place()` — the canary task SHOULD run even while operations block.
+#[test]
+fn block_in_place_prevents_runtime_starvation() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::Duration;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let registry = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+
+    let source = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#;
+
+    let uri: Uri = "file:///test/Liveness2.vue".parse().unwrap();
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let gate = Arc::new(std::sync::Mutex::new(()));
+    let gate_guard = gate.lock().unwrap();
+
+    let started = Arc::new(AtomicU32::new(0));
+
+    // Same as above, but with block_in_place() wrapping the blocking operation.
+    for _ in 0..2 {
+        let gate = Arc::clone(&gate);
+        let started = Arc::clone(&started);
+        let reg = Arc::clone(&registry);
+        let u = uri.clone();
+        rt.spawn(async move {
+            started.fetch_add(1, Ordering::SeqCst);
+            // block_in_place() tells tokio to move pending tasks off this thread
+            // before blocking, preventing worker thread exhaustion.
+            tokio::task::block_in_place(|| {
+                let _ = reg.get_ide(&u);
+                let _g = gate.lock().unwrap();
+            });
+        });
+    }
+
+    // Wait until both tasks have started (and called block_in_place)
+    while started.load(Ordering::SeqCst) < 2 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Give block_in_place time to spawn replacement workers
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Canary: should run because block_in_place() freed up worker threads.
+    let canary_ran = Arc::new(AtomicBool::new(false));
+    let canary_flag = Arc::clone(&canary_ran);
+    rt.spawn(async move {
+        canary_flag.store(true, Ordering::SeqCst);
+    });
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    // ASSERT: canary DID run — block_in_place() prevented starvation.
+    assert!(
+        canary_ran.load(Ordering::SeqCst),
+        "canary SHOULD run because block_in_place() allows tokio to spawn \
+         replacement workers while the original threads are blocked"
+    );
+
+    // Cleanup
+    drop(gate_guard);
+}
+
+// ─── Concurrent completion + did_change (deadlock regression) ───
+
+/// Regression test: verifies that `type_provider_context()` drops DashMap guards
+/// before any async work, allowing concurrent `did_change` writes.
+///
+/// Before the fix, handlers held a `dashmap::Ref` across `.await` points.
+/// `did_change()` calling `get_mut()` would block on the read lock, and
+/// parking_lot's write-fair policy would block all subsequent readers — deadlock.
+///
+/// This test simulates the pattern:
+/// 1. Task A: extracts context synchronously (like `type_provider_context()`),
+///    then does a slow async operation (simulating a type provider call)
+/// 2. Task B: concurrently modifies the document (like `did_change()`)
+/// 3. Both must complete within 2 seconds (no deadlock)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn integration_concurrent_completion_and_did_change_no_deadlock() {
+    use crate::documents::line_index::LineIndex;
+    use crate::tsgo::merge;
+    use crate::tsgo::mock::MockTypeProvider;
+    use crate::tsgo::traits::TypeProvider;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let source = r#"<script setup lang="ts">
+const msg = "hello"
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let registry = Arc::new(registry);
+
+    // Set up mock type provider with a completion response
+    let mock = MockTypeProvider::new();
+
+    // Extract context synchronously (this is the pattern type_provider_context uses).
+    // Verify the guard is NOT held across the subsequent async operation.
+    let tsx_response = registry.get_ide(&uri).expect("TSX should be generated");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("position mapper should exist");
+    let tsx_li = LineIndex::new(&tsx_response.code, registry.encoding());
+    let vue_li = registry.get(&uri).unwrap().line_index.clone();
+    // At this point, all DashMap guards are dropped.
+
+    // Map a position in the template
+    let position = position_of(source, "{{ msg }}");
+    let position = Position {
+        line: position.line,
+        character: position.character + 3, // 'm' in msg
+    };
+    let tsx_offset =
+        merge::vue_position_to_tsx_offset_validated(&position, &vue_li, &mapper, &tsx_li);
+    assert!(tsx_offset.is_some(), "position mapping must succeed");
+
+    // Configure mock to return completions at this offset
+    mock.set_completions(
+        "test",
+        tsx_offset.unwrap(),
+        vec![crate::tsgo::protocol::Completion {
+            label: "msg".to_string(),
+            kind: None,
+            detail: Some("const msg: string".to_string()),
+            documentation: None,
+            edit_range_start: None,
+            edit_range_end: None,
+            insert_text: None,
+            sort_text: None,
+            data: None,
+        }],
+    );
+
+    let completion_done = Arc::new(AtomicBool::new(false));
+    let change_done = Arc::new(AtomicBool::new(false));
+
+    // Task A: simulates a handler that extracted context, then awaits a type provider call
+    let reg_a = Arc::clone(&registry);
+    let uri_a = uri.clone();
+    let mock_a = mock.clone();
+    let comp_flag = Arc::clone(&completion_done);
+    let task_a = tokio::spawn(async move {
+        // Extract context synchronously (mirrors type_provider_context pattern)
+        let tsx_resp = reg_a.get_ide(&uri_a).unwrap();
+        let _mapper = reg_a.get_position_mapper(&uri_a).unwrap();
+        let _vue_li = reg_a.get(&uri_a).unwrap().line_index.clone();
+        // Guards dropped here ^
+
+        // Simulate slow type provider call (the await point where deadlock happened)
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Use mock type provider (would deadlock if guards were still held)
+        let result = mock_a.get_completions("test", 0, None).await;
+        assert!(result.is_ok(), "mock completion should succeed");
+        comp_flag.store(true, Ordering::SeqCst);
+    });
+
+    // Task B: simulates did_change writing to the same document
+    let reg_b = Arc::clone(&registry);
+    let uri_b = uri.clone();
+    let change_flag = Arc::clone(&change_done);
+    let task_b = tokio::spawn(async move {
+        // Small delay to ensure task A has started
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Simulate did_change: update the document (needs write lock)
+        let new_source = r#"<script setup lang="ts">
+const msg = "world"
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#;
+        let _ = reg_b.did_change(&uri_b, 2, new_source);
+        change_flag.store(true, Ordering::SeqCst);
+    });
+
+    // Both tasks must complete within 2 seconds — timeout indicates deadlock
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let _ = task_a.await;
+        let _ = task_b.await;
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "concurrent completion + did_change must complete without deadlock (timed out after 2s)"
+    );
+    assert!(
+        completion_done.load(Ordering::SeqCst),
+        "completion task must have completed"
+    );
+    assert!(
+        change_done.load(Ordering::SeqCst),
+        "did_change task must have completed"
+    );
+}

@@ -38,6 +38,7 @@ export enum NotificationType {
   OnFileChanged = "$/onFileChanged",
   TsgoStarted = "$/verter/tsgoStarted",
   TypeProviderStarted = "$/verter/typeProviderStarted",
+  Heartbeat = "$/verter/heartbeat",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -69,5 +70,8 @@ export type NotificationParams = {
   [NotificationType.TypeProviderStarted]: {
     pid: number;
     kind: "tsgo" | "tsserver";
+  };
+  [NotificationType.Heartbeat]: {
+    timestamp: number;
   };
 };

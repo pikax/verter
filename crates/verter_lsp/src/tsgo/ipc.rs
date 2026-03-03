@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -74,6 +74,12 @@ struct LspTransport {
     /// Pending request senders, keyed by request ID. Shared with the read loop.
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     next_id: AtomicI64,
+    /// Counts consecutive request timeouts. Reset to 0 on any successful response.
+    /// When this reaches `HANG_THRESHOLD`, fires `crash_notify` to trigger a restart
+    /// via the existing `ResilientTypeProvider` crash recovery machinery.
+    consecutive_failures: AtomicU32,
+    /// Shared with `ResilientTypeProvider` — signaled when the provider appears hung.
+    crash_notify: Option<Arc<Notify>>,
 }
 
 /// Default timeout for LSP requests (10 seconds).
@@ -83,6 +89,11 @@ const REQUEST_TIMEOUT_SECS: u64 = 10;
 /// The first request can be slow if tsgo is cold-started (e.g., npx download,
 /// first launch, or heavy system load).
 const INITIALIZE_TIMEOUT_SECS: u64 = 30;
+
+/// Number of consecutive request timeouts before the transport signals a hang.
+/// When reached, `crash_notify` is fired to trigger the `ResilientTypeProvider`'s
+/// existing restart machinery (kill process, backoff, re-spawn, replay file cache).
+const HANG_THRESHOLD: u32 = 3;
 
 impl LspTransport {
     /// Send an LSP request and wait for the response.
@@ -125,6 +136,8 @@ impl LspTransport {
         let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await;
         match result {
             Ok(Ok(val)) => {
+                // Reset consecutive failures on any successful response
+                self.consecutive_failures.store(0, Ordering::Relaxed);
                 // Check for JSON-RPC error
                 if let Some(err) = val.get("error") {
                     let msg = err
@@ -142,6 +155,15 @@ impl LspTransport {
             Err(_) => {
                 // Timeout — clean up the pending entry to prevent leak
                 self.pending.lock().await.remove(&id);
+                let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                if count >= HANG_THRESHOLD {
+                    tracing::error!(
+                        "TSGO appears hung ({count} consecutive timeouts) — triggering restart"
+                    );
+                    if let Some(notify) = &self.crash_notify {
+                        notify.notify_waiters();
+                    }
+                }
                 Err(TypeProviderError::new(format!(
                     "request '{method}' timed out after {timeout_secs}s"
                 )))
@@ -150,6 +172,9 @@ impl LspTransport {
     }
 
     /// Send an LSP notification (no response expected).
+    /// Uses `try_send()` to prevent backpressure from blocking the caller.
+    /// If the channel is full, the notification is dropped with a warning —
+    /// the SyncCoordinator will retry on the next cycle.
     async fn notify(
         &self,
         method: &str,
@@ -164,12 +189,19 @@ impl LspTransport {
             .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
         let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        self.stdin_tx
-            .send(StdinMessage::Frame(frame.into_bytes()))
-            .await
-            .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
-
-        Ok(())
+        match self
+            .stdin_tx
+            .try_send(StdinMessage::Frame(frame.into_bytes()))
+        {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("TSGO stdin channel full — dropping notification '{method}'");
+                Err(TypeProviderError::new("channel full"))
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(TypeProviderError::new("stdin writer closed"))
+            }
+        }
     }
 }
 
@@ -344,21 +376,29 @@ async fn read_loop(
                                 }
                             })
                         };
-                        let diags = params
-                            .get("diagnostics")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|d| parse_lsp_diagnostic(d, content.as_deref()))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        tracing::debug!(
-                            "TSGO publishDiagnostics: {} ({} diagnostics)",
-                            uri,
-                            diags.len()
-                        );
-                        diagnostics_cache.lock().await.insert(uri, diags);
+                        if content.is_some() {
+                            let diags = params
+                                .get("diagnostics")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|d| parse_lsp_diagnostic(d, content.as_deref()))
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            tracing::debug!(
+                                "TSGO publishDiagnostics: {} ({} diagnostics)",
+                                uri,
+                                diags.len()
+                            );
+                            diagnostics_cache.lock().await.insert(uri, diags);
+                        } else {
+                            // File not in our cache (tsconfig, node_modules, etc.) — skip
+                            tracing::trace!(
+                                "TSGO publishDiagnostics: {} (skipped — not a synced file)",
+                                uri,
+                            );
+                        }
                     }
                 }
             }
@@ -756,6 +796,8 @@ impl TsgoTypeProvider {
             stdin_tx: stdin_tx.clone(),
             pending: Arc::clone(&pending),
             next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: crash_notify.as_ref().map(Arc::clone),
         });
 
         let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
@@ -3464,6 +3506,8 @@ const props = withDefaults(defineProps({ bar: String }), {})
             stdin_tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
         };
 
         let result = transport
@@ -3495,6 +3539,8 @@ const props = withDefaults(defineProps({ bar: String }), {})
             stdin_tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
         };
 
         // With the channel approach, the send succeeds but the writer may fail silently.
@@ -3598,6 +3644,8 @@ const props = withDefaults(defineProps({ bar: String }), {})
             stdin_tx: stdin_tx.clone(),
             pending: Arc::clone(&pending),
             next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
         });
 
         // Start the read_loop (it will exit immediately on EOF)
@@ -4234,6 +4282,8 @@ const msg = "hi";
             stdin_tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
         });
 
         let provider = TsgoTypeProvider {
@@ -4271,6 +4321,8 @@ const msg = "hi";
             stdin_tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
         });
 
         let provider = TsgoTypeProvider {
@@ -4381,6 +4433,8 @@ const msg = "hi";
             stdin_tx: stdin_tx.clone(),
             pending: Arc::clone(&pending),
             next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
         });
 
         // Start the read loop
@@ -4486,6 +4540,8 @@ const msg = "hi";
             stdin_tx,
             pending: Arc::clone(&pending),
             next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
         };
 
         // Send a request that will time out (nobody reads from the channel to respond)
@@ -4536,6 +4592,8 @@ const msg = "hi";
             stdin_tx,
             pending,
             next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
         });
 
         // Simulate the shutdown path: 3s internal timeout + Shutdown message
@@ -4651,5 +4709,109 @@ const msg = "hi";
         // None should have errored
         let errors = hover_results.iter().filter(|r| r.is_err()).count();
         assert!(errors == 0, "No hover requests should error");
+    }
+
+    /// @ai-generated — read_loop skips caching diagnostics for files not in contents_cache.
+    ///
+    /// During background sync, TSGO publishes diagnostics for tsconfig files after
+    /// each didOpen. These are project-level diagnostics we never query, so they
+    /// should not be cached. Only diagnostics for files in our contents_cache
+    /// (i.e., synced TSX/JSX from .vue compilation) should be stored.
+    #[tokio::test]
+    async fn test_read_loop_skips_diagnostics_for_unknown_files() {
+        use tokio::io::AsyncWriteExt;
+
+        let (client_stdout_reader, mut mock_writer) = tokio::io::duplex(64 * 1024);
+
+        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // Pre-populate contents_cache with a known synced file.
+        // Key must match what uri_to_file_path() returns for the URI.
+        contents_cache.lock().await.insert(
+            "d:/project/src/App.vue.tsx".to_string(),
+            "const x = 1;".to_string(),
+        );
+
+        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+        tokio::spawn(stdin_writer_loop(tokio::io::duplex(1024).1, stdin_rx));
+
+        tokio::spawn(read_loop(
+            client_stdout_reader,
+            pending,
+            Arc::clone(&diagnostics_cache),
+            Arc::clone(&contents_cache),
+            stdin_tx,
+            None,
+        ));
+
+        // Send publishDiagnostics for a tsconfig file (NOT in contents_cache)
+        let tsconfig_notif = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": "file:///d:/project/tsconfig.app.json",
+                "diagnostics": [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 5}
+                    },
+                    "message": "Some tsconfig error",
+                    "severity": 1
+                }]
+            }
+        });
+        let body = serde_json::to_string(&tsconfig_notif).unwrap();
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        mock_writer.write_all(frame.as_bytes()).await.unwrap();
+
+        // Send publishDiagnostics for a synced TSX file (IS in contents_cache)
+        let tsx_notif = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": "file:///d:/project/src/App.vue.tsx",
+                "diagnostics": [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 5}
+                    },
+                    "message": "Type error in component",
+                    "severity": 1
+                }]
+            }
+        });
+        let body = serde_json::to_string(&tsx_notif).unwrap();
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        mock_writer.write_all(frame.as_bytes()).await.unwrap();
+        mock_writer.flush().await.unwrap();
+
+        // Give read_loop time to process both messages
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let cache = diagnostics_cache.lock().await;
+
+        // Synced file diagnostics SHOULD be cached
+        let tsx_uri = normalize_file_uri("file:///d:/project/src/App.vue.tsx");
+        assert!(
+            cache.contains_key(&tsx_uri),
+            "synced TSX file diagnostics should be cached"
+        );
+        assert_eq!(
+            cache[&tsx_uri].len(),
+            1,
+            "should have exactly 1 diagnostic for synced file"
+        );
+
+        // tsconfig diagnostics should NOT be cached
+        let tsconfig_uri = normalize_file_uri("file:///d:/project/tsconfig.app.json");
+        assert!(
+            !cache.contains_key(&tsconfig_uri),
+            "tsconfig diagnostics should NOT be cached (not a synced file)"
+        );
     }
 }

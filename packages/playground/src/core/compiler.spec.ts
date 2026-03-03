@@ -78,11 +78,16 @@ declare global {
 export {}
 `;
 
+// Must match VERTER_TYPES_AMBIENT_MODULE in crates/verter_core/src/ide/script.rs
 const VERTER_TYPES_STUB = `
 declare module "@verter/types" {
   export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
   export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
   export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
+  export type ExtractRenderComponent<T> = T extends { new (): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
+  export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
+  export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
+  export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
 }
 `;
 
@@ -501,16 +506,13 @@ const instance = getCurrentInstance()
     expect(code).toContain("export function ___VERTER___TemplateBindingFN");
   });
 
-  it("generated TSX without ref has no Comp functions or unused warnings", async () => {
+  it("generated TSX without ref has no unused warnings", async () => {
     const source = `<script setup lang="ts">
 const msg = 'hello'
 </script>
 <template><div>{{ msg }}</div></template>`;
     const { code } = await generateRealTsxOutput(source);
-    // No Comp functions when no ref
-    expect(code).not.toContain("function ___VERTER___Comp");
-    expect(code).not.toContain("___VERTER___getRootComponent");
-    // And no unused warnings
+    // No unused warnings
     const { service, fileName } = createTypecheckService(code);
     const messages = collectTypeScriptDiagnostics(service, fileName);
     const unusedWarnings = messages.filter((m) => /declared but/.test(m));

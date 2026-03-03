@@ -1,6 +1,6 @@
 # Lint Rules Reference
 
-Verter ships with approximately **163 built-in lint rules** organized into 10 categories. Rules run natively in Rust inside the LSP, providing instant diagnostics without external tooling.
+Verter ships with approximately **164 built-in lint rules** organized into 11 categories. Rules run natively in Rust inside the LSP, providing instant diagnostics without external tooling.
 
 ## Comment Directives
 
@@ -161,6 +161,25 @@ Rules that detect patterns causing unnecessary re-renders or poor runtime perfor
 | `no-v-for-index-as-key` | warn | -- | Disallow using `v-for` index as `:key` |
 
 ...and more performance-focused rules.
+
+### Reactivity
+
+Rules that catch common reactivity mistakes in `<script setup>`.
+
+| Rule Name | Default Severity | Auto-fix | Description |
+|-----------|-----------------|----------|-------------|
+| `no-ref-as-operand` | error | yes | Disallow using ref values directly in expressions without `.value` |
+| `no-setup-props-reactivity-loss` | warn | -- | Disallow destructuring `props` in setup (loses reactivity tracking) |
+
+### CrossFile
+
+Rules that analyze patterns across multiple files. These require the host to have compiled related files.
+
+| Rule Name | Default Severity | Auto-fix | Description |
+|-----------|-----------------|----------|-------------|
+| `provide-inject-validation` | warn | -- | Validate that `provide()` and `inject()` calls have matching types across files |
+| `deep-composable-tracking` | warn | -- | Track deep composable usage patterns for potential issues |
+| `no-duplicate-vue` | warn | -- | Detect duplicate `.vue` file names that may cause import conflicts |
 
 ## Preset Contents
 

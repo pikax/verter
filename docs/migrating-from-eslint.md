@@ -108,7 +108,7 @@ These rules enforce code style that is better handled by dedicated formatters li
 
 **Rationale**: Formatting rules conflict with formatters. The ecosystem consensus (including ESLint's own recommendation) is to use a formatter for style and a linter for correctness.
 
-### Restriction / Meta Rules (~14 rules)
+### Restriction / Meta Rules (~12 rules)
 
 These are highly project-specific restriction rules that enforce team conventions rather than catching bugs:
 
@@ -124,22 +124,14 @@ These are highly project-specific restriction rules that enforce team convention
 - `vue/no-restricted-call-after-await`
 - `vue/no-restricted-class`
 - `vue/no-restricted-syntax`
-- `vue/no-bare-strings-in-template`
-- `vue/no-static-inline-styles`
 
 **Rationale**: These are "configurable deny-list" rules. They require extensive configuration to be useful and are rarely enabled in practice. If needed, they can be maintained in ESLint alongside Verter.
 
-### Vue 2 Only Rules (~5 rules)
+Note: `vue/no-bare-strings-in-template` and `vue/no-static-inline-styles` are available in Verter as `no-bare-strings-in-template` and `no-static-inline-styles`.
 
-Verter targets Vue 3 exclusively. These rules apply only to Vue 2 patterns:
+### Vue 2→3 Migration Rules
 
-- `vue/no-deprecated-filter`
-- `vue/no-deprecated-functional-template`
-- `vue/no-deprecated-inline-template`
-- `vue/no-deprecated-$listeners`
-- `vue/no-deprecated-events-api`
-
-**Rationale**: Verter's compiler and type system target Vue 3. Vue 2 migration rules are only useful during the Vue 2 to 3 transition, which is handled by the Vue team's migration build.
+Verter implements ~15 deprecation rules (`no-deprecated-filter`, `no-deprecated-functional-template`, `no-deprecated-inline-template`, `no-deprecated-dollar-listeners-api`, `no-deprecated-events-api`, and more). These are included in the **Essential** preset and help catch deprecated Vue 2 patterns.
 
 ### ESLint-Specific Rules (1 rule)
 

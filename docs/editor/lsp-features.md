@@ -87,15 +87,32 @@ The negotiated encoding is announced in `ServerCapabilities.position_encoding` a
 The LSP binary is structured as follows:
 
 ```
-main.rs          -- stdio transport, CLI argument parsing
-server.rs        -- LSP message loop, request dispatch
-documents/       -- Document tracking and incremental sync
-features/        -- Individual LSP feature handlers
-analysis/        -- Static analysis integration
-css/             -- CSS-specific language features
-tsgo/            -- Optional tsgo type provider integration
-capabilities.rs  -- Server capability registration
-config.rs        -- Server configuration
+main.rs               -- stdio transport, CLI argument parsing
+server.rs              -- LSP message loop, request dispatch
+documents/             -- Document tracking and incremental sync
+features/              -- Individual LSP feature handlers
+analysis/              -- Static analysis integration
+css/                   -- CSS-specific language features
+tsgo/                  -- TSGO type provider (LSP over stdio, resilient wrapper)
+tsserver/              -- tsserver type provider (newline-delimited JSON, resilient wrapper)
+sync_coordinator.rs    -- Background file sync with debounce (freeze prevention)
+config.rs              -- Lint configuration discovery (.verterrc.json, ESLint, VS Code)
+capabilities.rs        -- Server capability registration
 ```
 
 Each feature module in `features/` handles one or more related LSP methods. The server dispatches incoming requests to the appropriate feature handler based on the LSP method.
+
+### Type Provider
+
+The LSP delegates TypeScript type checking to an external process. Two backends are supported:
+
+| Backend | Binary | Protocol | Use Case |
+|---------|--------|----------|----------|
+| **TSGO** | `tsgo` (Go binary) | LSP over stdio | Fast, native TS checking (preview) |
+| **tsserver** | `node tsserver.js` | Newline-delimited JSON | Workspace TS version, plugin support |
+
+Provider selection is configured via the `--type-provider` CLI arg or `verter.typeProvider` VS Code setting. See [Settings Reference](/editor/settings#type-provider) for details.
+
+::: warning TSGO Limitation
+TSGO has a known limitation: re-exported `.vue` components (e.g., barrel files) may lose their typing. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found.
+:::

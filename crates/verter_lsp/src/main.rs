@@ -225,9 +225,7 @@ async fn create_type_provider(
             }
         }
         _ => {
-            // "auto" (default): detect workspace TypeScript version
-            // If TS 5.x is installed → use tsserver, recommend TSGO
-            // If no TS installed → try TSGO, else none
+            // "auto" (default): if TS 5.x/6.x installed, use tsserver; else try TSGO
             let tsserver_path =
                 verter_lsp::tsserver::find_tsserver(args.tsdk.as_deref(), Some(&ws_canonical));
 
@@ -240,14 +238,14 @@ async fn create_type_provider(
                 );
 
                 if ts_major == Some(5) || ts_major == Some(6) {
-                    // TS 5.x/6.x installed — use tsserver with the workspace version
+                    // TS 5.x/6.x installed — default to tsserver
                     if let Some(tp) = try_spawn_tsserver(args, &ws_canonical, client_cell).await {
-                        return (Some(tp), TypeProviderKind::Tsserver, true);
+                        return (Some(tp), TypeProviderKind::Tsserver, false);
                     }
                 }
             }
 
-            // No TS found or tsserver failed — try TSGO
+            // No TS 5/6 found or tsserver failed — try TSGO
             if let Some(tp) = try_spawn_tsgo(&ws_canonical, client_cell).await {
                 return (Some(tp), TypeProviderKind::Tsgo, false);
             }

@@ -63,6 +63,10 @@ All Rust span types are defined in `crates/verter_span/src/lib.rs`. Each type en
 3. Server announces the selected encoding in `ServerCapabilities.position_encoding`
 4. All LSP positions (standard and custom protocol) use the negotiated encoding
 
+**CRITICAL**: The negotiated encoding MUST be used everywhere that produces LSP positions (diagnostics, hover ranges, completion positions, etc.). This includes the `SyncCoordinator` which publishes diagnostics after typing stops — it shares the encoding via `Arc<RwLock<PositionEncodingKind>>` with the server. The default is UTF-16 (per LSP spec) until `initialize()` negotiates the actual encoding.
+
+**Rust-internal code** should prefer UTF-8 byte offsets (Rust's native string encoding). **LSP boundary code** must convert to the negotiated encoding. **JS/VS Code** always uses UTF-16 (JS string encoding).
+
 **Standard LSP positions** (`line:character`): handled by `LineIndex` in `documents/line_index.rs`.
 **Custom protocol data** (analysis spans): converted at the LSP boundary before serialization.
 

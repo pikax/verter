@@ -6,6 +6,7 @@ pub mod documents;
 pub mod features;
 pub mod server;
 pub mod statistics;
+pub mod sync_coordinator;
 pub mod tsgo;
 pub mod tsserver;
 pub mod utils;

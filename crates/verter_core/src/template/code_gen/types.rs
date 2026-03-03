@@ -460,6 +460,7 @@ impl VaporTextPart<'_> {
 
 /// A reactive effect to emit in a `_renderEffect` block.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum VaporEffect<'a> {
     /// `_setText(xN, parts...)`.
     SetText {

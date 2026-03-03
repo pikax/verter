@@ -49,13 +49,20 @@ type GetClient = () => PatchClient<LanguageClient>;
 
 let getClient: GetClient | undefined;
 
+let activated = false;
+let stopHeartbeat: (() => void) | undefined;
+
 export async function activate(context: ExtensionContext) {
+  if (activated) return;
+  activated = true;
+
   const log = window.createOutputChannel("Verter", { log: true });
   context.subscriptions.push(log);
   log.info("Verter extension activating");
 
   const server = activateVueLanguageServer(context, log);
   getClient = server.getClient;
+  stopHeartbeat = server.stopHeartbeatTimer;
 
   if (workspace.textDocuments.some((doc) => doc.languageId === "vue")) {
     commands.executeCommand(
@@ -69,6 +76,9 @@ export async function activate(context: ExtensionContext) {
 }
 
 export function deactivate(): Thenable<void> | undefined {
+  stopHeartbeat?.();
+  stopHeartbeat = undefined;
+  activated = false;
   const stop = getClient?.().stop();
   getClient = undefined;
   return stop;
@@ -350,10 +360,42 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
   }
   registerTypeProviderPidListener(client);
 
+  // ── Heartbeat watchdog ──────────────────────────────────────────
+  // The Rust server sends $/verter/heartbeat every 5 seconds. If we don't
+  // receive one for 30 seconds, the server is likely frozen (e.g., tokio
+  // runtime starvation from stdout pipe backpressure). Auto-restart it.
+  let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+  const HEARTBEAT_TIMEOUT_MS = 30_000;
+
+  function resetHeartbeatTimer() {
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(async () => {
+      log.error("No heartbeat from Verter LSP for 30s — server appears frozen, restarting...");
+      await restartLS(false);
+    }, HEARTBEAT_TIMEOUT_MS);
+  }
+
+  function registerHeartbeatMonitor(lc: LanguageClient) {
+    resetHeartbeatTimer();
+    lc.onNotification(NotificationType.Heartbeat, () => {
+      resetHeartbeatTimer();
+    });
+  }
+
+  function stopHeartbeatTimer() {
+    if (heartbeatTimer) {
+      clearTimeout(heartbeatTimer);
+      heartbeatTimer = undefined;
+    }
+  }
+
+  registerHeartbeatMonitor(client);
+
   // Initialize CSS service now that getClient is available
   cssService = new CssService(getClient, rootPath);
 
-  // CSS validation diagnostics — update on document change
+  // CSS validation diagnostics — update on document change (debounced per URI)
+  const cssDiagTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const updateCssDiagnostics = async (document: TextDocument) => {
     if (document.languageId !== "vue" || !cssService) return;
     try {
@@ -383,11 +425,23 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
       // Silently fail — CSS diagnostics are best-effort
     }
   };
+  const debouncedCssDiag = (document: TextDocument) => {
+    const key = document.uri.toString();
+    const existing = cssDiagTimers.get(key);
+    if (existing) clearTimeout(existing);
+    cssDiagTimers.set(
+      key,
+      setTimeout(() => {
+        cssDiagTimers.delete(key);
+        updateCssDiagnostics(document);
+      }, 300),
+    );
+  };
 
   context.subscriptions.push(
     workspace.onDidChangeTextDocument((e) => {
       if (e.document.languageId === "vue") {
-        updateCssDiagnostics(e.document);
+        debouncedCssDiag(e.document);
       }
     }),
     workspace.onDidOpenTextDocument(updateCssDiagnostics),
@@ -415,6 +469,7 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
             clientOptions,
           );
           registerTypeProviderPidListener(client);
+          registerHeartbeatMonitor(client);
           await client.start();
         },
         killTrackedTypeProvider,
@@ -433,20 +488,24 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
     }
   }
 
-  // Auto-restart on settings changes that require server restart
+  // Auto-restart on settings changes that require server restart (debounced)
+  let configRestartTimer: ReturnType<typeof setTimeout> | undefined;
   context.subscriptions.push(
-    workspace.onDidChangeConfiguration(async (e) => {
-      if (e.affectsConfiguration("verter.server.logLevel")) {
-        log.info("Log level changed, restarting language server...");
-        await restartLS(false);
-      }
-      if (e.affectsConfiguration("verter.typeProvider") || e.affectsConfiguration("verter.typescript.tsdk")) {
-        log.info("Type provider setting changed, restarting language server...");
-        await restartLS(false);
-      }
-      if (e.affectsConfiguration("verter.mcp.enabled") || e.affectsConfiguration("verter.mcp.port")) {
-        log.info("MCP setting changed, restarting language server...");
-        await restartLS(false);
+    workspace.onDidChangeConfiguration((e) => {
+      const needsRestart =
+        e.affectsConfiguration("verter.server.logLevel") ||
+        e.affectsConfiguration("verter.typeProvider") ||
+        e.affectsConfiguration("verter.typescript.tsdk") ||
+        e.affectsConfiguration("verter.mcp.enabled") ||
+        e.affectsConfiguration("verter.mcp.port");
+      if (needsRestart) {
+        // Debounce: VS Code may fire multiple config change events in rapid succession
+        if (configRestartTimer) clearTimeout(configRestartTimer);
+        configRestartTimer = setTimeout(async () => {
+          configRestartTimer = undefined;
+          log.info("Settings changed, restarting language server...");
+          await restartLS(false);
+        }, 200);
       }
     }),
   );
@@ -474,6 +533,7 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
 
   return {
     getClient,
+    stopHeartbeatTimer,
   };
 }
 
@@ -551,10 +611,11 @@ function getStatisticsInitialization(rootPath: string | undefined) {
 
 function addDidChangeTextDocumentListener(getClient: GetClient) {
   workspace.onDidChangeTextDocument((e) => {
+    // Only forward TS/JS changes — .vue changes are handled by the LSP's own did_change.
+    // Sending .vue here would cause redundant notifications and TSGO flooding.
     if (
       e.document.languageId !== "typescript" &&
-      e.document.languageId !== "javascript" &&
-      e.document.languageId !== "vue"
+      e.document.languageId !== "javascript"
     ) {
       return;
     }

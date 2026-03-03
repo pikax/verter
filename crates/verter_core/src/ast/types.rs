@@ -519,6 +519,7 @@ impl ChildrenFlag {
 /// derive PatchFlags and block decisions without re-scanning props.
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[allow(clippy::enum_variant_names)]
 pub enum PropFlags {
     /// Element has a `:key` or `v-bind:key` binding.
     HasDynamicKey = 1,

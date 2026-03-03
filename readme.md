@@ -26,6 +26,9 @@ Verter started as a Vue LSP and SFC-to-TSX transformation tool for VS Code, aimi
 - **Automatic Event Handler Type Inference**: Infers parameter types for functions used as template event handlers
 - **Fully Typed Vue Directives**: Complete type safety for directives with strict modifier, argument, and value validation
 - **Rust-Powered Template Compilation**: High-performance template-to-render-function compilation via native bindings or WASM
+- **Built-in Linting**: ~164 lint rules across 11 categories (Vue, a11y, CSS, performance, security, and more) — runs natively in Rust, no ESLint needed
+- **MCP Server**: Built-in Model Context Protocol server with 36+ Vue analysis tools for AI agents
+- **TypeScript Type Provider**: Delegates type checking to TSGO (fast Go binary) or tsserver (workspace TS version)
 
 ### Generic Components
 
@@ -128,6 +131,20 @@ Since the Vetur days, Vue has struggled with type safety and tooling quality. Vu
 > [!NOTE]
 > If you haven't encountered specific issues with Volar, there's no reason to switch. Verter is for developers who need enhanced TypeScript support and are comfortable with experimental software.
 
+### Type Provider
+
+The LSP delegates TypeScript type checking to an external process. Two backends are supported:
+
+| Backend | Protocol | Use Case |
+|---------|----------|----------|
+| **TSGO** (Go binary) | LSP over stdio | Fast, native TS checking (preview) |
+| **tsserver** (Node.js) | Newline-delimited JSON | Workspace TS version, plugin support |
+
+Set `verter.typeProvider` in VS Code settings to `auto` (default), `tsgo`, `tsserver`, or `off`.
+
+> [!WARNING]
+> **TSGO limitation**: Re-exported `.vue` components (e.g., barrel files like `export { default as MyComp } from './MyComp.vue'`) may lose their typing when imported in another SFC. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found. If you experience missing types with TSGO, switch to `tsserver`.
+
 ## Architecture
 
 Verter is a hybrid Rust + TypeScript monorepo. Rust crates handle template compilation (exposed via NAPI-RS native bindings and wasm-bindgen WASM) and the LSP server (`verter-lsp` binary, communicates over stdio), while TypeScript packages handle the SFC-to-TSX transformation and IDE integration.
@@ -195,7 +212,14 @@ flowchart LR
 verter/
 ├── crates/                        # Rust crates
 │   ├── verter_core/               # Core template compiler (pure Rust)
+│   ├── verter_analysis/           # Static analysis: imports, exports, bindings, type resolution
+│   ├── verter_host/               # In-memory file host: caching, dependency tracking
+│   ├── verter_diagnostics/        # Diagnostic engine: ~164 lint rules, visitor, DiagnosticSet
+│   ├── verter_actions/            # Code actions: quick fixes, refactoring
 │   ├── verter_lsp/                # Rust LSP server binary (stdio)
+│   ├── verter_mcp/                # MCP server binary (stdio + HTTP)
+│   ├── verter_ffi/                # FFI types: shared serializable structs for NAPI/WASM
+│   ├── verter_span/               # Typed span types (Span, RelativeSpan, GeneratedSpan)
 │   ├── verter_bench/              # Benchmarks and comparison examples
 │   ├── verter_napi/               # Native Node.js bindings (NAPI-RS)
 │   └── verter_wasm/               # WASM bindings (wasm-bindgen)
@@ -211,9 +235,7 @@ verter/
 │   ├── playground/                # @verter/playground — Online playground
 │   ├── vue-vscode/                # verter-vscode — VS Code extension
 │   └── example/                   # Example project
-├── docs/                          # Additional documentation
-│   ├── architecture.md            # Architecture deep-dive
-│   └── rust-setup.md              # Rust development guide
+├── docs/                          # Documentation (VitePress site)
 └── scripts/                       # Build and utility scripts
 ```
 
@@ -223,10 +245,18 @@ verter/
 verter-vscode (VS Code extension)
 ├── verter-lsp (Rust LSP binary, stdio)
 │   ├── verter_host (file host + compilation)
-│   └── TsgoTypeProvider (optional, for TS type checking)
+│   ├── verter_diagnostics (lint rules + DiagnosticSet)
+│   ├── verter_actions (quick fixes + refactoring)
+│   └── TypeProvider (optional: TSGO or tsserver, for TS type checking)
 ├── @verter/language-shared (custom protocol types)
 ├── @verter/typescript-plugin (.vue import resolution, NAPI-backed)
 └── @verter/oxc-bindings (OXC parser binary helper)
+
+verter-mcp (MCP server binary, stdio + HTTP)
+├── verter_host (file host + compilation)
+├── verter_analysis (static analysis snapshots)
+├── verter_diagnostics (lint rules + DiagnosticSet)
+└── verter_actions (quick fixes + refactoring)
 
 @verter/unplugin (universal bundler plugin)
 └── @verter/native
@@ -402,13 +432,20 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 
 ### Rust Crates
 
-| Crate          | README                                    | Description                        |
-| -------------- | ----------------------------------------- | ---------------------------------- |
-| `verter_core`  | [README](./crates/verter_core/README.md)  | Core template compiler             |
-| `verter_lsp`   | [README](./crates/verter_lsp/)            | Rust LSP server binary (stdio)     |
-| `verter_bench` | [README](./crates/verter_bench/Cargo.toml)| Benchmarks and comparison examples |
-| `verter_napi`  | [README](./crates/verter_napi/README.md)  | NAPI-RS Node.js bindings           |
-| `verter_wasm`  | [README](./crates/verter_wasm/README.md)  | WASM bindings                      |
+| Crate                | Description                                      |
+| -------------------- | ------------------------------------------------ |
+| `verter_core`        | Core template compiler                           |
+| `verter_analysis`    | Static analysis: imports, exports, bindings       |
+| `verter_host`        | In-memory file host: caching, dependency tracking |
+| `verter_diagnostics` | Diagnostic engine: ~164 lint rules                |
+| `verter_actions`     | Code actions: quick fixes, refactoring            |
+| `verter_lsp`         | Rust LSP server binary (stdio)                   |
+| `verter_mcp`         | MCP server binary (stdio + HTTP)                 |
+| `verter_ffi`         | FFI types for NAPI/WASM boundaries               |
+| `verter_span`        | Typed span types (Span, RelativeSpan, etc.)      |
+| `verter_bench`       | Benchmarks and comparison examples               |
+| `verter_napi`        | NAPI-RS Node.js bindings                         |
+| `verter_wasm`        | WASM bindings (wasm-bindgen)                     |
 
 ## Credits
 

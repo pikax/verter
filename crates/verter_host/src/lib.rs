@@ -2062,4 +2062,88 @@ mod tests {
         assert_eq!(req.lang, "pug");
         assert!(req.content.contains("div hello"));
     }
+
+    /// Verify that the host's `Shared<T>` RwLock has writer-preferring semantics.
+    ///
+    /// When a writer is waiting, new readers should queue behind it. This prevents
+    /// writer starvation where continuous readers indefinitely delay write operations.
+    ///
+    /// With `parking_lot::RwLock` (writer-preferring): once the writer calls write(),
+    /// new read() calls block until the writer is done → reader_cycles stays low (~16,
+    /// equal to the number of currently-holding readers that finish their cycle).
+    ///
+    /// A reader-preferring lock would allow hundreds+ of reader cycles while the
+    /// writer waits, causing the upsert latency issues seen in production.
+    #[test]
+    fn writer_starvation_under_continuous_read_pressure() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
+
+        let data = Arc::new(default_shared(0u64));
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_waiting = Arc::new(AtomicBool::new(false));
+        let reader_cycles_during_wait = Arc::new(AtomicU64::new(0));
+
+        // Spawn 16 reader threads that hold the lock for ~5ms each, back-to-back.
+        let mut reader_handles = Vec::new();
+        for _ in 0..16 {
+            let data = Arc::clone(&data);
+            let stop = Arc::clone(&stop);
+            let ww = Arc::clone(&writer_waiting);
+            let cycles = Arc::clone(&reader_cycles_during_wait);
+            reader_handles.push(std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let guard = read_lock(&data);
+                    // Count read cycles that occur while the writer is waiting.
+                    // With writer-preferring locks: readers block → very low count.
+                    if ww.load(Ordering::Relaxed) {
+                        cycles.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Hold the read lock for ~5ms (busy wait)
+                    let hold_start = Instant::now();
+                    while hold_start.elapsed() < Duration::from_millis(5) {
+                        std::hint::spin_loop();
+                    }
+                    drop(guard);
+                }
+            }));
+        }
+
+        // Let readers saturate
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Signal that writer is about to request the lock
+        writer_waiting.store(true, Ordering::SeqCst);
+
+        // Acquire write lock — measures how many reader cycles happen while waiting
+        let data_w = Arc::clone(&data);
+        let start = Instant::now();
+        let mut guard = write_lock(&data_w);
+        *guard = 42;
+        let write_latency = start.elapsed();
+        drop(guard);
+
+        // Stop readers
+        stop.store(true, Ordering::Relaxed);
+        for h in reader_handles {
+            let _ = h.join();
+        }
+
+        let reader_cycles = reader_cycles_during_wait.load(Ordering::SeqCst);
+
+        // With writer-preferring lock, once the writer calls write(), new readers
+        // are blocked. Only the ~16 currently-holding readers finish their 5ms cycle.
+        // Threshold: 50 (generous: 16 holding + possible re-acquires before visibility).
+        assert!(
+            reader_cycles <= 50,
+            "writer-preferring lock should block new readers while writer waits — \
+             got {reader_cycles} reader cycles during writer wait (latency: {write_latency:?})"
+        );
+        // Writer should complete in ~5ms (max reader hold time), not seconds.
+        assert!(
+            write_latency < Duration::from_millis(500),
+            "writer should acquire lock quickly with writer-preferring semantics — \
+             took {write_latency:?}"
+        );
+    }
 }

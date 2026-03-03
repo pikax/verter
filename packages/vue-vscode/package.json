@@ -232,8 +232,8 @@
           ],
           "default": "auto",
           "enumDescriptions": [
-            "Try TSGO first, fall back to workspace TypeScript (recommended)",
-            "Use TSGO only (TypeScript native preview)",
+            "Use workspace TypeScript if available, fall back to TSGO (recommended)",
+            "Use TSGO only (faster, but re-exported .vue components may lose typing)",
             "Use workspace TypeScript version (tsserver)",
             "Disable TypeScript type checking"
           ],
