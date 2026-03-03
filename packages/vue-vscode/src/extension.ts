@@ -79,9 +79,12 @@ export function deactivate(): Thenable<void> | undefined {
  *
  * Search order:
  * 1. `verter.lspBinaryPath` setting (user-configured)
- * 2. `<extensionPath>/bin/verter-lsp[.exe]` (bundled in VSIX)
- * 3. `<workspaceRoot>/target/debug/verter-lsp[.exe]` (development mode — `pnpm run build:lsp`)
+ * 2. `<monorepoRoot>/target/{debug,release}/verter-lsp[.exe]` (dev mode — newest wins)
+ * 3. `<extensionPath>/bin/verter-lsp[.exe]` (bundled in VSIX)
  * 4. `verter-lsp` on PATH
+ *
+ * In development (running from the monorepo), the cargo build is preferred over the
+ * bundled binary to ensure newly compiled changes take effect immediately.
  */
 function findLspBinary(extensionPath: string, log: LogOutputChannel): string {
   const ext = process.platform === "win32" ? ".exe" : "";
@@ -93,15 +96,9 @@ function findLspBinary(extensionPath: string, log: LogOutputChannel): string {
     return configuredPath;
   }
 
-  // 2. Bundled binary
-  const bundledPath = join(extensionPath, "bin", `verter-lsp${ext}`);
-  if (existsSync(bundledPath)) {
-    log.info(`LSP binary: ${bundledPath} (bundled)`);
-    return bundledPath;
-  }
-
-  // 3. Development mode — cargo build output relative to extension path
+  // 2. Development mode — cargo build output relative to extension path
   //    extensionPath is packages/vue-vscode, so monorepo root is ../../
+  //    Prefer debug/release over bundled so `cargo build` changes are picked up.
   const monorepoRoot = join(extensionPath, "..", "..");
   for (const profile of ["debug", "release"]) {
     const cargoPath = join(monorepoRoot, "target", profile, `verter-lsp${ext}`);
@@ -109,6 +106,13 @@ function findLspBinary(extensionPath: string, log: LogOutputChannel): string {
       log.info(`LSP binary: ${cargoPath} (dev ${profile})`);
       return cargoPath;
     }
+  }
+
+  // 3. Bundled binary (VSIX packaging)
+  const bundledPath = join(extensionPath, "bin", `verter-lsp${ext}`);
+  if (existsSync(bundledPath)) {
+    log.info(`LSP binary: ${bundledPath} (bundled)`);
+    return bundledPath;
   }
 
   // 4. Fall back to PATH
@@ -308,7 +312,7 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
   };
 
   let client = createLanguageServer(
-    buildServerOptions(binaryPath, rootPath, context.extensionPath),
+    buildServerOptions(binaryPath, rootPath, context.extensionPath, log),
     clientOptions,
   );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
@@ -407,7 +411,7 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
         stop: () => client.stop(),
         createAndStart: async () => {
           client = createLanguageServer(
-            buildServerOptions(binaryPath, rootPath, context.extensionPath),
+            buildServerOptions(binaryPath, rootPath, context.extensionPath, log),
             clientOptions,
           );
           registerTypeProviderPidListener(client);
@@ -477,6 +481,7 @@ function buildServerOptions(
   binaryPath: string,
   rootPath: string | undefined,
   extensionPath: string,
+  log?: LogOutputChannel,
 ): ServerOptions {
   const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
   const verterConfig = workspace.getConfiguration("verter");
@@ -496,6 +501,8 @@ function buildServerOptions(
     args.push(`--mcp-lint-preset=${mcpLintPreset}`);
   }
   if (rootPath) args.push(rootPath);
+
+  log?.info(`[buildServerOptions] typeProvider=${typeProvider}, tsdk=${tsdk}, args=${JSON.stringify(args)}`);
 
   return {
     run: {

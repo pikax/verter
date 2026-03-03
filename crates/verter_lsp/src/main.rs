@@ -171,6 +171,12 @@ async fn create_type_provider(
     args: &CliArgs,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
 ) -> (Option<Arc<dyn TypeProvider>>, TypeProviderKind, bool) {
+    tracing::info!(
+        "create_type_provider: type_provider={:?}, tsdk={:?}, workspace_root={:?}",
+        args.type_provider,
+        args.tsdk,
+        args.workspace_root
+    );
     let workspace_root = args
         .workspace_root
         .clone()

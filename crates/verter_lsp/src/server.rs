@@ -1505,12 +1505,13 @@ impl LanguageServer for VerterLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         tracing::info!("verter-lsp initializing");
         tracing::info!(
-            "type provider: {}",
+            "type provider: {} ({})",
             if self.type_provider.is_some() {
-                "TSGO connected"
+                "connected"
             } else {
                 "NONE — no TypeScript intellisense"
-            }
+            },
+            self.type_provider_kind,
         );
 
         // ── Position encoding negotiation (LSP 3.17) ────────────────────
@@ -1819,7 +1820,7 @@ impl LanguageServer for VerterLanguageServer {
         let style_only = update_result.changed && update_result.slice_changes.is_style_only();
         if style_only {
             tracing::debug!(
-                "did_change: style-only change for {} — skipping TSGO sync",
+                "did_change: style-only change for {} — skipping type provider sync",
                 uri.as_str()
             );
         }
@@ -1972,7 +1973,7 @@ impl LanguageServer for VerterLanguageServer {
                     match (tp.get_diagnostics(&tsx_path).await, vue_li) {
                         (Ok(type_diags), Some(vue_li)) => {
                             tracing::debug!(
-                                "diagnostic (pull): TSGO returned {} for {}",
+                                "diagnostic (pull): type provider returned {} for {}",
                                 type_diags.len(),
                                 uri.as_str()
                             );
@@ -1986,7 +1987,7 @@ impl LanguageServer for VerterLanguageServer {
                         }
                         (Err(e), _) => {
                             tracing::warn!(
-                                "diagnostic (pull): TSGO error for {}: {e}",
+                                "diagnostic (pull): type provider error for {}: {e}",
                                 uri.as_str()
                             );
                             verter_diags
@@ -2088,7 +2089,7 @@ impl LanguageServer for VerterLanguageServer {
                         match tp.get_hover(&tsx_path, tsx_offset).await {
                             Ok(type_hover) => {
                                 tracing::info!(
-                                    "hover TSGO result: {}",
+                                    "hover type provider result: {}",
                                     if type_hover.is_some() {
                                         type_hover
                                             .as_ref()
@@ -2107,7 +2108,7 @@ impl LanguageServer for VerterLanguageServer {
                                 ));
                             }
                             Err(e) => {
-                                tracing::warn!("hover TSGO error: {}", e);
+                                tracing::warn!("hover type provider error: {}", e);
                             }
                         }
                     } else {
@@ -2313,7 +2314,7 @@ impl LanguageServer for VerterLanguageServer {
                         {
                             Ok(type_result) => {
                                 tracing::debug!(
-                                    "completion: TSGO returned {} items (incomplete={})",
+                                    "completion: type provider returned {} items (incomplete={})",
                                     type_result.items.len(),
                                     type_result.is_incomplete
                                 );
@@ -2335,7 +2336,7 @@ impl LanguageServer for VerterLanguageServer {
                                 });
                             }
                             Err(e) => {
-                                tracing::warn!("completion: TSGO error: {e}");
+                                tracing::warn!("completion: type provider error: {e}");
                             }
                         }
                     }
@@ -2521,7 +2522,7 @@ impl LanguageServer for VerterLanguageServer {
         // Querying TSGO with a synthetic TSX position often crashes it.
         if let Some(GotoDefinitionResponse::Scalar(ref loc)) = verter_result {
             if loc.uri.as_str() != uri.as_str() {
-                tracing::debug!("definition: verter resolved cross-file, skipping TSGO");
+                tracing::debug!("definition: verter resolved cross-file, skipping type provider");
                 return Ok(verter_result);
             }
         }
@@ -2539,11 +2540,11 @@ impl LanguageServer for VerterLanguageServer {
                         &mapper,
                         &tsx_li,
                     ) {
-                        tracing::debug!("definition: querying TSGO at tsx offset {}", tsx_offset);
+                        tracing::debug!("definition: querying type provider at tsx offset {}", tsx_offset);
                         match tp.get_definition(&tsx_path, tsx_offset).await {
                             Ok(type_defs) => {
                                 tracing::debug!(
-                                    "definition: TSGO returned {} locations",
+                                    "definition: type provider returned {} locations",
                                     type_defs.len()
                                 );
                                 return Ok(merge::merge_definitions(
@@ -2555,7 +2556,7 @@ impl LanguageServer for VerterLanguageServer {
                                 ));
                             }
                             Err(e) => {
-                                tracing::warn!("definition: TSGO error: {e}");
+                                tracing::warn!("definition: type provider error: {e}");
                             }
                         }
                     } else {
@@ -2668,11 +2669,11 @@ impl LanguageServer for VerterLanguageServer {
                         &mapper,
                         &tsx_li,
                     ) {
-                        tracing::debug!("references: querying TSGO at tsx offset {}", tsx_offset);
+                        tracing::debug!("references: querying type provider at tsx offset {}", tsx_offset);
                         match tp.get_references(&tsx_path, tsx_offset).await {
                             Ok(type_refs) => {
                                 tracing::debug!(
-                                    "references: TSGO returned {} locations",
+                                    "references: type provider returned {} locations",
                                     type_refs.len()
                                 );
                                 return Ok(merge::merge_references(
@@ -2684,7 +2685,7 @@ impl LanguageServer for VerterLanguageServer {
                                 ));
                             }
                             Err(e) => {
-                                tracing::warn!("references: TSGO error: {e}");
+                                tracing::warn!("references: type provider error: {e}");
                             }
                         }
                     } else {

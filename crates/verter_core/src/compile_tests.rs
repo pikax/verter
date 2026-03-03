@@ -12232,3 +12232,191 @@ const attrs = useAttrs()
         tsx.code
     );
 }
+
+// ── Instance declaration regression tests ─────────────────────────
+//
+// These tests verify that the ___VERTER___instance declaration is correctly
+// typed based on the script language. TS SFCs must get InstanceType<...>,
+// not `any`. JS SFCs must get `@type {any}` (JSDoc style).
+
+#[test]
+fn tsx_instance_declaration_ts_sfc_has_instance_type() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(!tsx.is_jsx, "TS SFC should produce TSX, not JSX");
+
+    // Positive: should have typed InstanceType declaration
+    assert!(
+        tsx.code.contains("InstanceType<import("),
+        "TS SFC instance declaration should use InstanceType<import(...)>, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("let ___VERTER___instance!:"),
+        "TS SFC should use definite assignment 'let ... !:', got:\n{}",
+        tsx.code
+    );
+
+    // Negative: must NOT have JSDoc `any` instance declaration
+    assert!(
+        !tsx.code.contains("/** @type {any} */\nvar ___VERTER___instance"),
+        "TS SFC must NOT use JSDoc @type {{any}} for instance, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_instance_declaration_js_sfc_has_jsdoc_any() {
+    let result = compile_tsx(
+        r#"<script setup>
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(tsx.is_jsx, "JS SFC (no lang attr) should produce JSX");
+
+    // Positive: should have JSDoc-style instance
+    assert!(
+        tsx.code.contains("/** @type {any} */"),
+        "JS SFC should use JSDoc @type {{any}} for instance, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: must NOT have TS-style InstanceType
+    assert!(
+        !tsx.code.contains("InstanceType<import("),
+        "JS SFC must NOT use InstanceType<import(...)>, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("let ___VERTER___instance!:"),
+        "JS SFC must NOT use definite assignment 'let ... !:', got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_instance_declaration_explicit_js_lang_has_jsdoc_any() {
+    let result = compile_tsx(
+        r#"<script setup lang="js">
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(tsx.is_jsx, "lang='js' SFC should produce JSX");
+
+    // Positive: should have JSDoc-style instance
+    assert!(
+        tsx.code.contains("/** @type {any} */"),
+        "lang='js' SFC should use JSDoc @type {{any}} for instance, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: must NOT have TS InstanceType
+    assert!(
+        !tsx.code.contains("InstanceType<"),
+        "lang='js' SFC must NOT use InstanceType, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_instance_declaration_options_api_ts_has_ambient_instance_type() {
+    let result = compile_tsx(
+        r#"<script lang="ts">
+export default {
+  data() { return { count: 0 } }
+}
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(!tsx.is_jsx, "TS Options API should produce TSX, not JSX");
+
+    // Positive: should have ambient typed instance declaration
+    assert!(
+        tsx.code.contains("declare let ___VERTER___instance:"),
+        "TS Options API should use 'declare let' for instance, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("InstanceType<import("),
+        "TS Options API should use InstanceType<import(...)>, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: must NOT have JSDoc `any`
+    assert!(
+        !tsx.code.contains("/** @type {any} */\nvar ___VERTER___instance"),
+        "TS Options API must NOT use JSDoc @type {{any}} for instance, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_instance_declaration_options_api_js_has_jsdoc_any() {
+    let result = compile_tsx(
+        r#"<script>
+export default {
+  data() { return { count: 0 } }
+}
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(tsx.is_jsx, "JS Options API should produce JSX");
+
+    // Positive: should have JSDoc-style instance
+    assert!(
+        tsx.code.contains("/** @type {any} */"),
+        "JS Options API should use JSDoc @type {{any}} for instance, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: must NOT have TS ambient instance
+    assert!(
+        !tsx.code.contains("declare let ___VERTER___instance:"),
+        "JS Options API must NOT use 'declare let' for instance, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("InstanceType<"),
+        "JS Options API must NOT use InstanceType, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_instance_declaration_template_only_uses_instance_type() {
+    let result = compile_tsx(r#"<template><div>hello</div></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Template-only SFCs default to TS mode (is_jsx=false)
+    assert!(!tsx.is_jsx, "Template-only SFC should default to TSX");
+
+    // Positive: should have typed instance
+    assert!(
+        tsx.code.contains("InstanceType<import("),
+        "Template-only SFC should use InstanceType<import(...)>, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: must NOT be `any`
+    assert!(
+        !tsx.code.contains("/** @type {any} */\nvar ___VERTER___instance"),
+        "Template-only SFC must NOT use JSDoc @type {{any}} for instance, got:\n{}",
+        tsx.code
+    );
+}

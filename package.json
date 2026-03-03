@@ -19,7 +19,7 @@
     "build:lsp": "cargo build -p verter_lsp",
     "build:lsp:release": "cargo build -p verter_lsp --release",
     "build:wasm": "pnpm --filter @verter/wasm build",
-    "build:ts": "pnpm -r --filter './packages/**' --filter '!@verter/native' --filter '!@verter/wasm' --filter '!@verter/playground' --filter '!example' build",
+    "build:ts": "pnpm -r --filter ./packages/** --filter !@verter/native --filter !@verter/wasm --filter !@verter/playground --filter !example run build",
     "build:tsc": "cargo build -p verter_tsc",
     "build:tsc:release": "cargo build -p verter_tsc --release",
     "build:mcp": "cargo build -p verter_mcp",

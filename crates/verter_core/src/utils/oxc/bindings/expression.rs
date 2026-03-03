@@ -743,24 +743,23 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn add_literal(&mut self, span: OxcSpan) {
         let start = span.start as usize;
         let end = span.end as usize;
-        // SAFETY: Spans from OXC parser are guaranteed to be valid byte offsets
-        // within the source string, and source is valid UTF-8
-        debug_assert!(
-            end <= self.source_bytes.len(),
-            "OXC literal span {}..{} exceeds source length {}",
-            start,
-            end,
-            self.source_bytes.len(),
-        );
-        debug_assert!(
-            std::str::from_utf8(&self.source_bytes[start..end]).is_ok(),
-            "OXC literal span {}..{} is not valid UTF-8",
-            start,
-            end,
-        );
-        let content = unsafe {
-            let bytes = self.source_bytes.get_unchecked(start..end);
-            std::str::from_utf8_unchecked(bytes)
+        if end > self.source_bytes.len() {
+            eprintln!(
+                "[verter] BUG: OXC literal span {}..{} exceeds source length {}, skipping",
+                start, end, self.source_bytes.len(),
+            );
+            return;
+        }
+        let bytes = &self.source_bytes[start..end];
+        let content = match std::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!(
+                    "[verter] BUG: OXC literal span {}..{} is not valid UTF-8, skipping",
+                    start, end,
+                );
+                return;
+            }
         };
         self.result.literals.push(LiteralBinding {
             span: span.into(),
