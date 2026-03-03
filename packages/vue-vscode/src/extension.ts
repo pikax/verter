@@ -307,34 +307,43 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
   };
 
   let client = createLanguageServer(
-    buildServerOptions(binaryPath, rootPath),
+    buildServerOptions(binaryPath, rootPath, context.extensionPath),
     clientOptions,
   );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
 
-  // Track TSGO child PID for orphan cleanup on restart failure.
-  let tsgoPid: number | undefined;
-  function registerTsgoPidListener(lc: LanguageClient) {
+  // Track type provider child PID for orphan cleanup on restart failure.
+  let typeProviderPid: number | undefined;
+  function registerTypeProviderPidListener(lc: LanguageClient) {
+    // New unified notification
+    lc.onNotification(
+      NotificationType.TypeProviderStarted,
+      (params: { pid: number; kind: "tsgo" | "tsserver" }) => {
+        typeProviderPid = params.pid;
+        log.info(`Type provider (${params.kind}) started with PID ${params.pid}`);
+      },
+    );
+    // Legacy notification for backward compat
     lc.onNotification(
       NotificationType.TsgoStarted,
       (params: { pid: number }) => {
-        tsgoPid = params.pid;
+        typeProviderPid = params.pid;
         log.info(`TSGO started with PID ${params.pid}`);
       },
     );
   }
-  function killTrackedTsgo() {
-    if (tsgoPid != null) {
-      log.info(`Killing orphaned TSGO process (PID ${tsgoPid})`);
+  function killTrackedTypeProvider() {
+    if (typeProviderPid != null) {
+      log.info(`Killing orphaned type provider process (PID ${typeProviderPid})`);
       try {
-        process.kill(tsgoPid);
+        process.kill(typeProviderPid);
       } catch {
         // Already dead — ignore.
       }
-      tsgoPid = undefined;
+      typeProviderPid = undefined;
     }
   }
-  registerTsgoPidListener(client);
+  registerTypeProviderPidListener(client);
 
   // Initialize CSS service now that getClient is available
   cssService = new CssService(getClient, rootPath);
@@ -397,13 +406,13 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
         stop: () => client.stop(),
         createAndStart: async () => {
           client = createLanguageServer(
-            buildServerOptions(binaryPath, rootPath),
+            buildServerOptions(binaryPath, rootPath, context.extensionPath),
             clientOptions,
           );
-          registerTsgoPidListener(client);
+          registerTypeProviderPidListener(client);
           await client.start();
         },
-        killTrackedTsgo,
+        killTrackedTypeProvider,
         resetServices: () => {
           cssService?.dispose();
           cssService = new CssService(getClient, rootPath);
@@ -419,11 +428,15 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
     }
   }
 
-  // Auto-restart on log level change
+  // Auto-restart on settings changes that require server restart
   context.subscriptions.push(
     workspace.onDidChangeConfiguration(async (e) => {
       if (e.affectsConfiguration("verter.server.logLevel")) {
         log.info("Log level changed, restarting language server...");
+        await restartLS(false);
+      }
+      if (e.affectsConfiguration("verter.typeProvider") || e.affectsConfiguration("verter.typescript.tsdk")) {
+        log.info("Type provider setting changed, restarting language server...");
         await restartLS(false);
       }
     }),
@@ -445,12 +458,26 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
   };
 }
 
-function buildServerOptions(binaryPath: string, rootPath: string | undefined): ServerOptions {
+function buildServerOptions(
+  binaryPath: string,
+  rootPath: string | undefined,
+  extensionPath: string,
+): ServerOptions {
   const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
+  const verterConfig = workspace.getConfiguration("verter");
+  const typeProvider = verterConfig.get<string>("typeProvider", "auto");
+  const tsdk = verterConfig.get<string>("typescript.tsdk", "");
+
+  const args: string[] = [];
+  args.push(`--type-provider=${typeProvider}`);
+  if (tsdk) args.push(`--tsdk=${tsdk}`);
+  args.push(`--plugin-path=${join(extensionPath, "node_modules")}`);
+  if (rootPath) args.push(rootPath);
+
   return {
     run: {
       command: binaryPath,
-      args: rootPath ? [rootPath] : [],
+      args,
       transport: TransportKind.stdio,
       options: {
         env: { ...process.env, VERTER_LOG: logLevel },
@@ -458,7 +485,7 @@ function buildServerOptions(binaryPath: string, rootPath: string | undefined): S
     },
     debug: {
       command: binaryPath,
-      args: rootPath ? [rootPath] : [],
+      args,
       transport: TransportKind.stdio,
       options: {
         env: { ...process.env, VERTER_LOG: "debug" },

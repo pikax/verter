@@ -193,6 +193,28 @@
             "Strictest ruleset"
           ],
           "description": "Lint rule preset. Only applies when verter.lint.enabled is true."
+        },
+        "verter.typeProvider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "tsgo",
+            "tsserver",
+            "off"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Try TSGO first, fall back to workspace TypeScript (recommended)",
+            "Use TSGO only (TypeScript native preview)",
+            "Use workspace TypeScript version (tsserver)",
+            "Disable TypeScript type checking"
+          ],
+          "description": "TypeScript type provider for Vue files. Changing this setting restarts the server."
+        },
+        "verter.typescript.tsdk": {
+          "type": "string",
+          "default": "",
+          "description": "Path to TypeScript SDK directory (e.g., node_modules/typescript/lib). Leave empty to auto-detect."
         }
       }
     },

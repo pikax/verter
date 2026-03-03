@@ -11,7 +11,7 @@ function makeDeps(overrides: Partial<RestartDeps> = {}): RestartDeps {
   return {
     stop: vi.fn().mockResolvedValue(undefined),
     createAndStart: vi.fn().mockResolvedValue(undefined),
-    killTrackedTsgo: vi.fn(),
+    killTrackedTypeProvider: vi.fn(),
     resetServices: vi.fn(),
     log: {
       info: vi.fn(),
@@ -31,7 +31,7 @@ describe("restartLanguageServer", () => {
     expect(deps.stop).toHaveBeenCalledOnce();
     expect(deps.createAndStart).toHaveBeenCalledOnce();
     expect(deps.resetServices).toHaveBeenCalledOnce();
-    expect(deps.killTrackedTsgo).not.toHaveBeenCalled();
+    expect(deps.killTrackedTypeProvider).not.toHaveBeenCalled();
   });
 
   it("stop timeout recovery: creates new server even when stop throws", async () => {
@@ -45,8 +45,8 @@ describe("restartLanguageServer", () => {
     // Critical: new server must still be created
     expect(deps.createAndStart).toHaveBeenCalledOnce();
     expect(deps.resetServices).toHaveBeenCalledOnce();
-    // TSGO orphan killed on stop failure
-    expect(deps.killTrackedTsgo).toHaveBeenCalledOnce();
+    // Type provider orphan killed on stop failure
+    expect(deps.killTrackedTypeProvider).toHaveBeenCalledOnce();
     expect(deps.log.warn).toHaveBeenCalledWith(
       "Failed to stop language server cleanly, forcing restart",
       expect.any(Error),
@@ -82,7 +82,7 @@ describe("restartLanguageServer", () => {
     const result = await restartLanguageServer(deps);
 
     expect(result).toBe(false);
-    expect(deps.killTrackedTsgo).toHaveBeenCalledOnce();
+    expect(deps.killTrackedTypeProvider).toHaveBeenCalledOnce();
     expect(deps.log.error).toHaveBeenCalled();
   });
 

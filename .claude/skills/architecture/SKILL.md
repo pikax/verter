@@ -101,7 +101,7 @@ export const MyPlugin = definePlugin({
 The LSP is a standalone Rust binary (`verter-lsp`) that communicates with VS Code over stdio.
 
 ```
-main.rs (stdio transport + CLI args)
+main.rs (stdio transport + CLI args + provider selection)
     ↓
 server.rs (LSP message loop, request dispatch)
     ↓
@@ -109,10 +109,44 @@ documents/       → Document tracking and synchronization
 features/        → LSP feature handlers (see table below)
 analysis/        → Static analysis integration
 css/             → CSS-specific language features
-tsgo/            → Optional tsgo type provider integration
+tsgo/            → TSGO type provider integration (LSP protocol)
+tsserver/        → tsserver type provider integration (JSON protocol)
 capabilities.rs  → Server capability registration
 config.rs        → Server configuration
 ```
+
+### TypeProvider Trait (`tsgo/traits.rs`)
+
+Both TSGO and tsserver implement the `TypeProvider` trait (14+ methods: hover, completions, diagnostics, definition, references, rename, signature help, code actions, semantic tokens, highlights, inlay hints, open/update/close file, shutdown). The trait is object-safe (`dyn TypeProvider`) so the server is backend-agnostic.
+
+### TSGO Module (`tsgo/`)
+
+| File | Purpose |
+|------|---------|
+| `ipc.rs` | LSP client: Content-Length framing, JSON-RPC request/response correlation |
+| `traits.rs` | `TypeProvider` trait definition + `TypeProviderError` |
+| `protocol.rs` | Response types: `CompletionResult`, `HoverInfo`, `TypeDiagnostic`, etc. |
+| `resilient.rs` | `ResilientTypeProvider`: crash detection via `Notify`, auto-restart (max 3), file cache replay |
+| `project_sync.rs` | `ProjectSync`: batches `open_tsx`/`sync_tsx`/`close_tsx` calls to the provider |
+| `merge.rs` | Merges TSGO diagnostics/completions with verter's own results |
+| `mock.rs` | Mock provider for integration tests |
+
+### tsserver Module (`tsserver/`)
+
+| File | Purpose |
+|------|---------|
+| `mod.rs` | `find_tsserver()` (tsdk → workspace → global), `find_node()`, `detect_ts_major_version()` |
+| `ipc.rs` | `TsserverTypeProvider`: newline-delimited JSON transport, position conversion (byte offset ↔ 1-based line/offset), all 14+ `TypeProvider` methods |
+| `resilient.rs` | `ResilientTsserverProvider`: same crash/restart pattern as TSGO resilient wrapper |
+
+### Provider Selection (`main.rs`)
+
+CLI arg `--type-provider=auto|tsgo|tsserver|off` (from VS Code `verter.typeProvider` setting):
+- **auto**: detect TS version in node_modules — TS 5.x/6.x → tsserver + recommend TSGO; else try TSGO
+- **tsgo/tsserver**: explicit, no fallback
+- **off**: verter-only mode
+
+Only one provider runs at a time. Provider PID is sent to the extension via `$/verter/typeProviderStarted` notification for orphan cleanup.
 
 **LSP features** (`features/`):
 
@@ -503,7 +537,7 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `packages/core/src/v5/process/script/script.ts` | Script processing orchestration |
 | `packages/core/src/v5/process/script/types.ts` | `definePlugin`, `ScriptContext`, `ScriptPlugin` |
 | `packages/core/src/v5/process/script/plugins/macros/macros.ts` | Vue macro transformations |
-| `crates/verter_lsp/src/main.rs` | LSP binary entry point (stdio transport, CLI args) |
+| `crates/verter_lsp/src/main.rs` | LSP binary entry point (stdio transport, CLI args, provider selection) |
 | `crates/verter_lsp/src/server.rs` | LSP message loop, request dispatch, feature routing |
 | `crates/verter_mcp/src/main.rs` | MCP binary entry point (stdio + HTTP transport) |
 | `crates/verter_mcp/src/server.rs` | MCP tool router: 33 tools for analysis, diagnostics, scoring |
@@ -536,3 +570,10 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `packages/unplugin/src/core/types.ts` | `VerterPluginOptions`, `HmrStrategy` |
 | `packages/unplugin/src/core/scanner.ts` | `scanVueFiles()` — async recursive directory walker for preCompile |
 | `packages/unplugin/src/core/compiler.ts` | Host singleton, `generateComponentId`, `processStyle` |
+| `crates/verter_lsp/src/tsgo/traits.rs` | `TypeProvider` trait definition (14+ methods) |
+| `crates/verter_lsp/src/tsgo/ipc.rs` | TSGO LSP client: Content-Length framing, JSON-RPC |
+| `crates/verter_lsp/src/tsgo/resilient.rs` | `ResilientTypeProvider`: crash detection + auto-restart |
+| `crates/verter_lsp/src/tsgo/project_sync.rs` | `ProjectSync`: batches open/sync/close to type provider |
+| `crates/verter_lsp/src/tsserver/mod.rs` | `find_tsserver()`, `find_node()`, `detect_ts_major_version()` |
+| `crates/verter_lsp/src/tsserver/ipc.rs` | `TsserverTypeProvider`: JSON transport, position conversion |
+| `crates/verter_lsp/src/tsserver/resilient.rs` | `ResilientTsserverProvider`: crash detection + auto-restart |

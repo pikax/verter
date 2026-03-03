@@ -37,6 +37,7 @@ export enum NotificationType {
   OnDidChangeTsOrJsFile = "$/onDidChangeTsOrJsFile",
   OnFileChanged = "$/onFileChanged",
   TsgoStarted = "$/verter/tsgoStarted",
+  TypeProviderStarted = "$/verter/typeProviderStarted",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -64,5 +65,9 @@ export type NotificationParams = {
   };
   [NotificationType.TsgoStarted]: {
     pid: number;
+  };
+  [NotificationType.TypeProviderStarted]: {
+    pid: number;
+    kind: "tsgo" | "tsserver";
   };
 };

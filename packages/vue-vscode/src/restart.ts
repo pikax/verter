@@ -10,8 +10,8 @@ export interface RestartDeps {
   stop: () => Promise<void>;
   /** Create a new language server client and start it. */
   createAndStart: () => Promise<void>;
-  /** Kill the tracked TSGO child process (orphan cleanup on stop failure). */
-  killTrackedTsgo: () => void;
+  /** Kill the tracked type provider child process (orphan cleanup on stop failure). */
+  killTrackedTypeProvider: () => void;
   /** Reset dependent services (CSS service, diagnostics). */
   resetServices: () => void;
   log: {
@@ -42,7 +42,7 @@ export async function restartLanguageServer(
         "Failed to stop language server cleanly, forcing restart",
         e,
       );
-      deps.killTrackedTsgo();
+      deps.killTrackedTypeProvider();
     }
     await deps.createAndStart();
     deps.resetServices();

@@ -51,6 +51,22 @@ pub struct TsgoStartedParams {
     pub pid: u32,
 }
 
+/// Server → client notification: type provider child process started.
+/// Supersedes `TsgoStarted` — includes the provider kind so the extension
+/// can track both TSGO and tsserver processes.
+pub enum TypeProviderStarted {}
+
+impl tower_lsp_server::lsp_types::notification::Notification for TypeProviderStarted {
+    type Params = TypeProviderStartedParams;
+    const METHOD: &'static str = "$/verter/typeProviderStarted";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TypeProviderStartedParams {
+    pub pid: u32,
+    pub kind: String,
+}
+
 /// Params for `$/onDidChangeTsOrJsFile` notification.
 #[derive(Debug, Deserialize)]
 pub struct OnDidChangeTsOrJsFileParams {
@@ -290,6 +306,10 @@ pub struct VerterLanguageServer {
     /// `open_tsx()` to avoid "already open" errors.  When `did_close()` fires, we keep
     /// the file alive in the provider instead of closing it.
     background_synced_files: DashMap<String, ()>,
+    /// Which type provider backend is active (TSGO, tsserver, or none).
+    type_provider_kind: crate::TypeProviderKind,
+    /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
+    suggest_tsgo: bool,
 }
 
 impl VerterLanguageServer {
@@ -313,6 +333,8 @@ impl VerterLanguageServer {
             init_lint_options: tokio::sync::Mutex::new(None),
             cached_verter_diags: DashMap::new(),
             background_synced_files: DashMap::new(),
+            type_provider_kind: config.type_provider_kind,
+            suggest_tsgo: config.suggest_tsgo,
         }
     }
 
@@ -1516,11 +1538,7 @@ impl LanguageServer for VerterLanguageServer {
 
     async fn initialized(&self, _params: InitializedParams) {
         tracing::info!("verter-lsp initialized");
-        let tp_label = if self.type_provider.is_some() {
-            "TSGO"
-        } else {
-            "none"
-        };
+        let tp_label = self.type_provider_kind.to_string();
         self.client
             .log_message(
                 MessageType::INFO,
@@ -1666,13 +1684,33 @@ impl LanguageServer for VerterLanguageServer {
             );
         }
 
-        // Notify the extension of the TSGO child PID for orphan cleanup.
+        // Notify the extension of the type provider child PID for orphan cleanup.
         if let Some(tp) = &self.type_provider {
             if let Some(pid) = tp.child_pid() {
+                let kind = self.type_provider_kind.to_string().to_lowercase();
+                // Send the new notification with kind info.
+                self.client
+                    .send_notification::<TypeProviderStarted>(TypeProviderStartedParams {
+                        pid,
+                        kind: kind.clone(),
+                    })
+                    .await;
+                // Also send the legacy notification for backward compatibility.
                 self.client
                     .send_notification::<TsgoStarted>(TsgoStartedParams { pid })
                     .await;
             }
+        }
+
+        // Suggest switching to TSGO if auto mode chose tsserver
+        if self.suggest_tsgo {
+            self.client
+                .show_message(
+                    MessageType::INFO,
+                    "Verter: Using workspace TypeScript (tsserver) for type checking. \
+                     For faster performance, install TSGO and set verter.typeProvider to \"tsgo\" in VS Code settings.",
+                )
+                .await;
         }
     }
 

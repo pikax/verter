@@ -7,6 +7,7 @@ pub mod features;
 pub mod server;
 pub mod statistics;
 pub mod tsgo;
+pub mod tsserver;
 pub mod utils;
 
 #[cfg(test)]
@@ -17,6 +18,27 @@ use verter_host::VerterHost;
 
 use tsgo::traits::TypeProvider;
 
+/// Which TypeScript type provider backend is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeProviderKind {
+    /// TSGO (Go-based TypeScript server).
+    Tsgo,
+    /// tsserver (Node.js-based TypeScript server).
+    Tsserver,
+    /// No type provider — verter-only mode.
+    None,
+}
+
+impl std::fmt::Display for TypeProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeProviderKind::Tsgo => write!(f, "TSGO"),
+            TypeProviderKind::Tsserver => write!(f, "tsserver"),
+            TypeProviderKind::None => write!(f, "none"),
+        }
+    }
+}
+
 /// Configuration for creating a verter LSP server instance.
 pub struct LspConfig {
     /// The verter host instance (always required).
@@ -26,6 +48,11 @@ pub struct LspConfig {
     pub type_provider: Option<Arc<dyn TypeProvider>>,
     /// How files are synced to the type provider.
     pub project_sync_mode: ProjectSyncMode,
+    /// Which type provider backend is active.
+    pub type_provider_kind: TypeProviderKind,
+    /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
+    /// Set by `auto` mode when tsserver is chosen because TS 5.x was detected.
+    pub suggest_tsgo: bool,
 }
 
 /// Controls what data `verter_lsp` sends to the type provider.

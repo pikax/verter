@@ -30,7 +30,7 @@ All Rust crates are in the `crates/` directory:
 | `verter_host` | File host -- in-memory caching, dependency tracking, multi-file compilation |
 | `verter_diagnostics` | Diagnostic engine -- Vue SFC lint rules, rule trait, visitor, diagnostic set |
 | `verter_actions` | Code actions engine -- quick fixes, refactoring (depends on `verter_diagnostics` + `verter_analysis`) |
-| `verter_lsp` | LSP server binary -- stdio transport, feature handlers, document synchronization |
+| `verter_lsp` | LSP server binary -- stdio transport, feature handlers, document synchronization, TypeProvider integration (TSGO + tsserver) |
 | `verter_ffi` | FFI types -- shared serializable structs for NAPI and WASM boundaries |
 | `verter_napi` | NAPI-RS bindings -- Node.js native addon (cdylib) |
 | `verter_wasm` | wasm-bindgen bindings -- browser WASM module (cdylib) |
@@ -180,6 +180,8 @@ When working on specific areas, these are the primary entry points:
 | CSS processing | `crates/verter_core/src/css/mod.rs` |
 | Static analysis | `crates/verter_analysis/src/lib.rs` |
 | LSP server | `crates/verter_lsp/src/server.rs` |
+| TSGO type provider | `crates/verter_lsp/src/tsgo/ipc.rs` |
+| tsserver type provider | `crates/verter_lsp/src/tsserver/ipc.rs` |
 | Diagnostics | `crates/verter_diagnostics/src/lib.rs` |
 
 ## Two Template Codegen Paths

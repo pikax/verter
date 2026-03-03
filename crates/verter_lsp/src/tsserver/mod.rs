@@ -11,6 +11,28 @@ pub mod resilient;
 
 use std::path::{Path, PathBuf};
 
+/// Detect the major TypeScript version from the workspace.
+///
+/// Reads `<tsserver_path>/../../package.json` to extract the `version` field.
+/// Returns `Some(major)` (e.g., `5` for TypeScript 5.x) or `None` if unreadable.
+pub fn detect_ts_major_version(tsserver_path: &Path) -> Option<u32> {
+    // tsserver.js lives in typescript/lib/ — go up twice to get typescript/
+    let ts_root = tsserver_path.parent()?.parent()?;
+    let pkg_json = ts_root.join("package.json");
+    let content = std::fs::read_to_string(pkg_json).ok()?;
+    // Simple extraction: find `"version": "X.Y.Z"` — no serde needed
+    let version_key = content.find("\"version\"")?;
+    let after = &content[version_key..];
+    let colon = after.find(':')?;
+    let after_colon = after[colon + 1..].trim_start();
+    let quote_start = after_colon.find('"')? + 1;
+    let version_str = &after_colon[quote_start..];
+    let quote_end = version_str.find('"')?;
+    let version = &version_str[..quote_end];
+    let major = version.split('.').next()?;
+    major.parse::<u32>().ok()
+}
+
 /// Find the tsserver.js binary path.
 ///
 /// Search order:

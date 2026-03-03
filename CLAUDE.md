@@ -14,7 +14,7 @@ verter-vscode (VS Code extension)
 │   ├── verter_host (file host + compilation)
 │   ├── verter_diagnostics (lint rules + DiagnosticSet)
 │   ├── verter_actions (quick fixes + refactoring)
-│   └── TsgoTypeProvider (optional, for TS type checking)
+│   └── TypeProvider (optional: TSGO or tsserver, for TS type checking)
 ├── @verter/language-shared (custom protocol types)
 ├── @verter/typescript-plugin (.vue import resolution, NAPI-backed)
 └── @verter/unplugin (bundler plugin)
@@ -71,6 +71,31 @@ The Rust compiler has **two separate template codegen paths**. Modifying one doe
 | **IDE** | `ide/template/` | Valid JSX/TSX for LSP/TSGO type checking | `<div prop={expr}>` JSX elements |
 
 The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. The IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX), while JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
+
+### TypeProvider Architecture
+
+The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends are supported:
+
+| Backend | Binary | Protocol | Use Case |
+|---------|--------|----------|----------|
+| **TSGO** | `tsgo` (Go binary) | LSP over stdio (Content-Length + JSON-RPC) | Fast, native TS checking (preview) |
+| **tsserver** | `node tsserver.js` | Newline-delimited JSON over stdio | Workspace TS version, plugin support |
+
+**Provider selection** (`--type-provider` CLI arg / `verter.typeProvider` VS Code setting):
+- `auto` (default): detects workspace TS version — if TS 5.x/6.x installed, uses tsserver and recommends TSGO; otherwise tries TSGO
+- `tsgo`: TSGO only
+- `tsserver`: tsserver only
+- `off`: no type provider (verter-only mode)
+
+Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/traits.rs`) with 14+ methods (hover, completions, diagnostics, definition, references, rename, etc.). Both are wrapped in a `ResilientTypeProvider` that detects crashes, auto-restarts (max 3 with exponential backoff), and replays the file cache.
+
+**Key modules** (`crates/verter_lsp/src/`):
+- `tsgo/` — TSGO integration (LSP client, resilient wrapper, project sync)
+- `tsserver/mod.rs` — `find_tsserver()`, `find_node()`, `detect_ts_major_version()`
+- `tsserver/ipc.rs` — `TsserverTypeProvider`, newline-delimited JSON transport, position conversion
+- `tsserver/resilient.rs` — `ResilientTsserverProvider` (crash detection + auto-restart)
+
+**Background file sync**: During `initialized()`, the LSP batch-compiles ALL workspace `.vue` files to TSX and syncs them to the type provider. This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
 
 ### Cached Directive Fields on ElementNode
 
