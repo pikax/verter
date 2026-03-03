@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::*;
@@ -317,6 +317,17 @@ pub struct VerterLanguageServer {
     /// triggers a completion request. By incrementing this counter, stale requests can
     /// detect they've been superseded and skip the expensive type provider call.
     completion_generation: std::sync::atomic::AtomicU64,
+    /// Canonical IDs of files needing provider sync (set in did_change, cleared after sync).
+    /// Prevents flooding the type provider with updates during rapid typing.
+    needs_provider_sync: Arc<DashSet<String>>,
+    /// Generation counter per canonical_id for debounce — latest generation wins.
+    /// Used to skip stale debounced sync tasks when newer changes arrive.
+    provider_sync_gen: Arc<DashMap<String, u64>>,
+    /// Epoch millis of the last `did_change` call.  Used to skip non-critical TSGO requests
+    /// (diagnostics, semantic tokens, inlay hints) during typing.  The debounced sync needs
+    /// time to fire + TSGO needs time to process the update, so we suppress these requests
+    /// for a short cooldown window after the last edit.
+    last_change_ms: std::sync::atomic::AtomicU64,
 }
 
 impl VerterLanguageServer {
@@ -343,6 +354,9 @@ impl VerterLanguageServer {
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
             completion_generation: std::sync::atomic::AtomicU64::new(0),
+            needs_provider_sync: Arc::new(DashSet::new()),
+            provider_sync_gen: Arc::new(DashMap::new()),
+            last_change_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -574,6 +588,56 @@ impl VerterLanguageServer {
         }
     }
 
+    /// If the file has pending changes, sync the IDE TSX + API DTS to the type provider NOW.
+    /// Called by interactive handlers (hover, completion, etc.) to ensure the provider is up-to-date
+    /// before making a query. Uses a tight timeout to avoid blocking interactive requests.
+    async fn ensure_provider_synced(&self, uri: &Uri) {
+        if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+            if self.needs_provider_sync.remove(&canonical_id).is_some() {
+                tracing::debug!(
+                    "ensure_provider_synced: flushing pending sync for {}",
+                    uri.as_str()
+                );
+                // Use a tight timeout — if the provider is overwhelmed, don't block
+                // the interactive request. The debounced task will retry later.
+                if tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    tokio::join!(
+                        self.sync_ide_to_provider(uri),
+                        self.sync_api_to_provider(uri),
+                    );
+                })
+                .await
+                .is_err()
+                {
+                    tracing::warn!(
+                        "ensure_provider_synced: sync timed out for {}, proceeding with stale data",
+                        uri.as_str()
+                    );
+                    // Re-insert so a future request or debounced task can retry
+                    self.needs_provider_sync.insert(canonical_id);
+                }
+            }
+        }
+    }
+
+    /// Returns true if the user is actively typing (last change was within the cooldown window).
+    /// Used to suppress non-critical TSGO requests (diagnostics, semantic tokens, inlay hints)
+    /// during rapid typing.  TSGO processes requests serially, so queuing these during typing
+    /// blocks interactive requests like completions.
+    fn is_typing_cooldown(&self) -> bool {
+        let last = self
+            .last_change_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            return false;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        now.saturating_sub(last) < 300
+    }
+
     /// Get IDE context for TypeProvider queries: (ide_path, ide_code, position_mapper).
     fn ide_context(&self, uri: &Uri) -> Option<(String, Arc<str>, PositionMapper)> {
         let canonical_id = self.documents.get_canonical_id(uri);
@@ -631,6 +695,24 @@ impl VerterLanguageServer {
             .or_else(|| ide_path.strip_suffix(".jsx"))?;
         let uri = self.documents.canonical_id_to_uri(canonical_id)?;
         self.ide_context(&uri)
+    }
+
+    /// Get external IDE context for a `.vue.tsx` path (used by merge functions for
+    /// cross-file position mapping, e.g., CTRL+CLICK on component navigates to target file).
+    fn external_ide_context(&self, ide_path: &str) -> Option<merge::ExternalIdeContext> {
+        let (_tsx_path, tsx_content, mapper) = self.ide_context_by_path(ide_path)?;
+        let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
+        // Get the Vue file's line index
+        let canonical_id = ide_path
+            .strip_suffix(".tsx")
+            .or_else(|| ide_path.strip_suffix(".jsx"))?;
+        let uri = self.documents.canonical_id_to_uri(canonical_id)?;
+        let doc = self.documents.get(&uri)?;
+        Some(merge::ExternalIdeContext {
+            tsx_line_index,
+            mapper,
+            vue_line_index: doc.line_index.clone(),
+        })
     }
 
     /// Find the Vue URI corresponding to an IDE path.
@@ -1753,10 +1835,19 @@ impl LanguageServer for VerterLanguageServer {
             }
             let sync = sync.clone();
             let bg_files = Arc::clone(&self.background_synced_files);
+            let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
             tokio::spawn(async move {
                 let mut synced = 0u32;
                 for (tsx_path, code) in &tsx_files {
-                    if sync.load_tsx(tsx_path, code).await.is_ok() {
+                    // For TSGO, use open_tsx (sends didOpen) so the files are in TSGO's
+                    // virtual FS and can be resolved by import. For tsserver, use load_tsx
+                    // (cache only) because the TS plugin handles resolution lazily.
+                    let result = if is_tsgo {
+                        sync.open_tsx(tsx_path, code).await
+                    } else {
+                        sync.load_tsx(tsx_path, code).await
+                    };
+                    if result.is_ok() {
                         bg_files.insert(tsx_path.clone(), ());
                         synced += 1;
                     }
@@ -1836,6 +1927,14 @@ impl LanguageServer for VerterLanguageServer {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
+        // Record change timestamp for typing cooldown (suppresses non-critical TSGO requests)
+        self.last_change_ms.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let _timer = self
             .statistics
             .timer("did_change", Some(uri.as_str().to_string()));
@@ -1869,21 +1968,55 @@ impl LanguageServer for VerterLanguageServer {
         // Push only verter diagnostics; TSGO diagnostics come via pull path.
         let verter_diags = self.compute_verter_diagnostics(&uri);
 
-        // Use timeout to prevent indefinite hangs when the type provider is slow/crashed.
-        if !style_only
-            && tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                tokio::join!(
-                    self.sync_ide_to_provider(&uri),
-                    self.sync_api_to_provider(&uri),
-                );
-            })
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                "did_change: type provider sync timed out for {}",
-                uri.as_str()
-            );
+        // Debounced type provider sync: mark the file as dirty and spawn a delayed task.
+        // If another change arrives within 50ms, the stale task is skipped (generation check).
+        // Completion and other interactive handlers do NOT flush inline — they let TSGO
+        // answer with whatever version it has, avoiding the 2-3s re-analysis latency.
+        if !style_only {
+            if let Some(canonical_id) = self.documents.get_canonical_id(&uri) {
+                self.needs_provider_sync.insert(canonical_id.clone());
+                let gen = {
+                    let mut entry = self
+                        .provider_sync_gen
+                        .entry(canonical_id.clone())
+                        .or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+                if let Some(sync) = self.project_sync.clone() {
+                    let ide = self.documents.get_ide(&uri);
+                    let ide_path = self.ide_path_for_uri(&uri);
+                    let dts_path = self.dts_path_for_uri(&uri);
+                    let api_code = dts_path.as_ref().and_then(|_| {
+                        self.documents
+                            .host
+                            .get_public_api(&canonical_id)
+                            .map(|a| a.code.to_string())
+                    });
+                    let needs_sync = self.needs_provider_sync.clone();
+                    let sync_gen = self.provider_sync_gen.clone();
+                    let canonical_clone = canonical_id.clone();
+                    if let Some(ide) = ide {
+                        let ide_code = ide.code.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            // Check if a newer change arrived — if so, skip this stale sync.
+                            if sync_gen.get(&canonical_clone).map(|v| *v) != Some(gen) {
+                                return;
+                            }
+                            // Check if a flush (ensure_provider_synced) already handled this.
+                            if !needs_sync.contains(&canonical_clone) {
+                                return;
+                            }
+                            let _ = sync.sync_tsx(&ide_path, &ide_code).await;
+                            if let (Some(dts_path), Some(api_code)) = (dts_path, api_code) {
+                                let _ = sync.sync_dts(&dts_path, &api_code).await;
+                            }
+                            needs_sync.remove(&canonical_clone);
+                        });
+                    }
+                }
+            }
         }
 
         if tokio::time::timeout(
@@ -2005,7 +2138,17 @@ impl LanguageServer for VerterLanguageServer {
 
         let verter_diags = self.compute_verter_diagnostics(uri);
 
-        let diagnostics = if let Some(tp) = &self.type_provider {
+        // Skip TSGO diagnostics while the user is actively typing.
+        // TSGO processes requests serially — queuing diagnostics during typing blocks
+        // interactive features like completions.  After the debounced sync fires and TSGO
+        // processes the update, VS Code will re-request diagnostics with fresh data.
+        let diagnostics = if self.is_typing_cooldown() {
+            tracing::debug!(
+                "diagnostic (pull): skipping TSGO (typing cooldown) for {}",
+                uri.as_str()
+            );
+            verter_diags
+        } else if let Some(tp) = &self.type_provider {
             match self.ide_context(uri) {
                 Some((tsx_path, tsx_content, mapper)) => {
                     let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
@@ -2193,6 +2336,26 @@ impl LanguageServer for VerterLanguageServer {
             trigger_character
         );
 
+        // Check coalescing — skip stale requests superseded by newer keystrokes.
+        if self
+            .completion_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+            != completion_gen + 1
+        {
+            tracing::debug!(
+                "completion: skipping stale request (gen {})",
+                completion_gen
+            );
+            return Ok(None);
+        }
+
+        // NOTE: We do NOT call ensure_provider_synced here.  The debounced sync in
+        // did_change sends the update to TSGO within 50ms of the last keystroke.
+        // Flushing inline would serialize: sync → TSGO re-analysis → get_completions,
+        // which takes 2-3s on large files and blocks the entire completion pipeline.
+        // Instead we let TSGO answer with whatever version it has; if it's stale the
+        // response arrives fast and VS Code re-requests after the debounce fires.
+
         // Virtual file: route directly through TSGO
         if let Some(tp) = &self.type_provider {
             if let Some((tsx_path, vf_li)) = self.virtual_file_context(uri) {
@@ -2348,11 +2511,13 @@ impl LanguageServer for VerterLanguageServer {
                                 })
                             }));
                         }
-                        match tp
-                            .get_completions(&tsx_path, tsx_offset, trigger_character)
-                            .await
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(500),
+                            tp.get_completions(&tsx_path, tsx_offset, trigger_character),
+                        )
+                        .await
                         {
-                            Ok(type_result) => {
+                            Ok(Ok(type_result)) => {
                                 tracing::debug!(
                                     "completion: type provider returned {} items (incomplete={})",
                                     type_result.items.len(),
@@ -2375,8 +2540,19 @@ impl LanguageServer for VerterLanguageServer {
                                     }))
                                 });
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 tracing::warn!("completion: type provider error: {e}");
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    "completion: type provider timed out after 500ms, returning verter-only results"
+                                );
+                                return Ok(verter_items.map(|items| {
+                                    CompletionResponse::List(CompletionList {
+                                        is_incomplete: true,
+                                        items,
+                                    })
+                                }));
                             }
                         }
                     }
@@ -2482,6 +2658,8 @@ impl LanguageServer for VerterLanguageServer {
             position.line,
             position.character
         );
+
+        self.ensure_provider_synced(uri).await;
 
         // Virtual file: route directly through TSGO (position is already in TSX coordinates)
         if let Some(tp) = &self.type_provider {
@@ -2598,6 +2776,7 @@ impl LanguageServer for VerterLanguageServer {
                                     &tsx_li,
                                     &mapper,
                                     &doc.line_index,
+                                    Some(&|ide_path: &str| self.external_ide_context(ide_path)),
                                 ));
                             }
                             Err(e) => {
@@ -2730,6 +2909,7 @@ impl LanguageServer for VerterLanguageServer {
                                     &tsx_li,
                                     &mapper,
                                     &doc.line_index,
+                                    Some(&|ide_path: &str| self.external_ide_context(ide_path)),
                                 ));
                             }
                             Err(e) => {
@@ -2834,6 +3014,7 @@ impl LanguageServer for VerterLanguageServer {
                                 &tsx_li,
                                 &mapper,
                                 &doc.line_index,
+                                Some(&|ide_path: &str| self.external_ide_context(ide_path)),
                             ));
                         }
                     }
@@ -3219,22 +3400,26 @@ impl LanguageServer for VerterLanguageServer {
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = &params.text_document.uri;
 
-        if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
-                let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
-                if let Some(doc) = self.documents.get(uri) {
-                    if let Ok(type_tokens) = tp.get_semantic_tokens(&tsx_path).await {
-                        let tokens = merge::merge_semantic_tokens(
-                            type_tokens,
-                            &tsx_li,
-                            &mapper,
-                            &doc.line_index,
-                        );
-                        if !tokens.is_empty() {
-                            return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-                                result_id: None,
-                                data: tokens,
-                            })));
+        // Skip TSGO while typing — serial TSGO pipeline must stay clear
+        // for interactive requests. VS Code re-requests after the typing pause.
+        if !self.is_typing_cooldown() {
+            if let Some(tp) = &self.type_provider {
+                if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
+                    let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
+                    if let Some(doc) = self.documents.get(uri) {
+                        if let Ok(type_tokens) = tp.get_semantic_tokens(&tsx_path).await {
+                            let tokens = merge::merge_semantic_tokens(
+                                type_tokens,
+                                &tsx_li,
+                                &mapper,
+                                &doc.line_index,
+                            );
+                            if !tokens.is_empty() {
+                                return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+                                    result_id: None,
+                                    data: tokens,
+                                })));
+                            }
                         }
                     }
                 }
@@ -3264,41 +3449,47 @@ impl LanguageServer for VerterLanguageServer {
         let uri = &params.text_document.uri;
         let range = &params.range;
 
+        // Skip TSGO while typing — serial TSGO pipeline must stay clear
+        // for interactive requests.
+        let typing = self.is_typing_cooldown();
+
         // Virtual file: route directly through TSGO (positions already in TSX coordinates)
-        if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, vf_li)) = self.virtual_file_context(uri) {
-                let start = vf_li.position_to_offset(&range.start);
-                let end = vf_li.position_to_offset(&range.end);
-                if let (Some(so), Some(eo)) = (start, end) {
-                    if let Ok(type_hints) = tp.get_inlay_hints(&tsx_path, so, eo).await {
-                        let hints: Vec<InlayHint> = type_hints
-                            .into_iter()
-                            .filter_map(|h| {
-                                let pos = vf_li.offset_to_position(h.position)?;
-                                let kind = h.kind.map(|k| match k {
-                                    crate::tsgo::protocol::InlayHintKind::Type => {
-                                        InlayHintKind::TYPE
-                                    }
-                                    crate::tsgo::protocol::InlayHintKind::Parameter => {
-                                        InlayHintKind::PARAMETER
-                                    }
-                                });
-                                Some(InlayHint {
-                                    position: pos,
-                                    label: InlayHintLabel::String(h.label),
-                                    kind,
-                                    text_edits: None,
-                                    tooltip: None,
-                                    padding_left: h.padding_left,
-                                    padding_right: h.padding_right,
-                                    data: None,
+        if !typing {
+            if let Some(tp) = &self.type_provider {
+                if let Some((tsx_path, vf_li)) = self.virtual_file_context(uri) {
+                    let start = vf_li.position_to_offset(&range.start);
+                    let end = vf_li.position_to_offset(&range.end);
+                    if let (Some(so), Some(eo)) = (start, end) {
+                        if let Ok(type_hints) = tp.get_inlay_hints(&tsx_path, so, eo).await {
+                            let hints: Vec<InlayHint> = type_hints
+                                .into_iter()
+                                .filter_map(|h| {
+                                    let pos = vf_li.offset_to_position(h.position)?;
+                                    let kind = h.kind.map(|k| match k {
+                                        crate::tsgo::protocol::InlayHintKind::Type => {
+                                            InlayHintKind::TYPE
+                                        }
+                                        crate::tsgo::protocol::InlayHintKind::Parameter => {
+                                            InlayHintKind::PARAMETER
+                                        }
+                                    });
+                                    Some(InlayHint {
+                                        position: pos,
+                                        label: InlayHintLabel::String(h.label),
+                                        kind,
+                                        text_edits: None,
+                                        tooltip: None,
+                                        padding_left: h.padding_left,
+                                        padding_right: h.padding_right,
+                                        data: None,
+                                    })
                                 })
-                            })
-                            .collect();
-                        return Ok(if hints.is_empty() { None } else { Some(hints) });
+                                .collect();
+                            return Ok(if hints.is_empty() { None } else { Some(hints) });
+                        }
                     }
+                    return Ok(None);
                 }
-                return Ok(None);
             }
         }
 
@@ -3317,31 +3508,33 @@ impl LanguageServer for VerterLanguageServer {
         .unwrap_or_default();
 
         // Standard .vue file: merge with TSGO type hints when available
-        if let Some(tp) = &self.type_provider {
-            if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
-                let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
-                if let Some(doc) = self.documents.get(uri) {
-                    let start_offset = merge::vue_position_to_tsx_offset_validated(
-                        &range.start,
-                        &doc.line_index,
-                        &mapper,
-                        &tsx_li,
-                    );
-                    let end_offset = merge::vue_position_to_tsx_offset_validated(
-                        &range.end,
-                        &doc.line_index,
-                        &mapper,
-                        &tsx_li,
-                    );
-                    if let (Some(so), Some(eo)) = (start_offset, end_offset) {
-                        if let Ok(type_hints) = tp.get_inlay_hints(&tsx_path, so, eo).await {
-                            let mut tsgo_hints = merge::merge_inlay_hints(
-                                type_hints,
-                                &tsx_li,
-                                &mapper,
-                                &doc.line_index,
-                            );
-                            hints.append(&mut tsgo_hints);
+        if !typing {
+            if let Some(tp) = &self.type_provider {
+                if let Some((tsx_path, tsx_content, mapper)) = self.ide_context(uri) {
+                    let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
+                    if let Some(doc) = self.documents.get(uri) {
+                        let start_offset = merge::vue_position_to_tsx_offset_validated(
+                            &range.start,
+                            &doc.line_index,
+                            &mapper,
+                            &tsx_li,
+                        );
+                        let end_offset = merge::vue_position_to_tsx_offset_validated(
+                            &range.end,
+                            &doc.line_index,
+                            &mapper,
+                            &tsx_li,
+                        );
+                        if let (Some(so), Some(eo)) = (start_offset, end_offset) {
+                            if let Ok(type_hints) = tp.get_inlay_hints(&tsx_path, so, eo).await {
+                                let mut tsgo_hints = merge::merge_inlay_hints(
+                                    type_hints,
+                                    &tsx_li,
+                                    &mapper,
+                                    &doc.line_index,
+                                );
+                                hints.append(&mut tsgo_hints);
+                            }
                         }
                     }
                 }
@@ -3627,5 +3820,36 @@ mod tests {
         let result = debug_snippet(content, 3);
         // offset == len is valid (cursor at end)
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn needs_provider_sync_insert_and_remove() {
+        let set = DashSet::new();
+        let id = "C:/project/src/App.vue".to_string();
+        set.insert(id.clone());
+        assert!(set.contains(&id), "should contain the inserted id");
+        let removed = set.remove(&id);
+        assert!(removed.is_some(), "remove should return Some");
+        assert!(!set.contains(&id), "should no longer contain the id");
+    }
+
+    #[test]
+    fn provider_sync_gen_increment() {
+        let map = DashMap::new();
+        let id = "C:/project/src/App.vue".to_string();
+        {
+            let mut entry = map.entry(id.clone()).or_insert(0u64);
+            *entry += 1;
+        }
+        assert_eq!(*map.get(&id).unwrap(), 1);
+        {
+            let mut entry = map.entry(id.clone()).or_insert(0u64);
+            *entry += 1;
+        }
+        assert_eq!(*map.get(&id).unwrap(), 2);
+        // Old generation check fails
+        assert_ne!(map.get(&id).map(|v| *v), Some(1), "gen 1 is stale");
+        // Current generation check passes
+        assert_eq!(map.get(&id).map(|v| *v), Some(2), "gen 2 is current");
     }
 }

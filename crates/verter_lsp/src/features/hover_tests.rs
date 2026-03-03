@@ -314,6 +314,61 @@ fn test_hover_on_component_shows_prop_constness() {
 }
 
 #[test]
+fn test_hover_on_component_with_no_props() {
+    let source =
+        "<template>\n  <Popup />\n</template>\n\n<script setup>\nimport Popup from './Popup.vue'\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let comp_offset = source.find("<Popup").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(TemplateAnalysisSnapshot {
+            components: vec![verter_analysis::template::TemplateComponentUsage {
+                name: "Popup".into(),
+                import_source: Some("./Popup.vue".into()),
+                is_dynamic: false,
+                props: vec![], // No props
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_classes: vec![],
+                v_models: vec![],
+                span: verter_span::Span::new(comp_offset as u32, (comp_offset + 10) as u32),
+            }],
+            elements: vec![],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Hover on "Popup" tag name — should return info even with no props
+    let pos = line_index
+        .offset_to_position((comp_offset + 1) as u32)
+        .unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index);
+
+    assert!(
+        hover.is_some(),
+        "should provide hover on component even without props"
+    );
+    let contents = match hover.unwrap().contents {
+        HoverContents::Markup(m) => m.value,
+        _ => panic!("expected markup"),
+    };
+    assert!(contents.contains("Popup"), "should show component name");
+    assert!(
+        contents.contains("./Popup.vue"),
+        "should show import source"
+    );
+    assert!(
+        !contents.contains("Props:"),
+        "should not show Props section when empty"
+    );
+}
+
+#[test]
 fn test_hover_on_element_shows_css_rules() {
     let source = "<template>\n  <div class=\"foo\">hello</div>\n</template>\n\n<style scoped>\n.foo { color: red; }\ndiv { font-size: 14px; }\n</style>";
     let blocks = scan_sfc_blocks(source);

@@ -840,6 +840,27 @@ impl TsgoTypeProvider {
     }
 }
 
+/// Rewrite `.vue` import specifiers to `.vue.tsx` (or `.vue.jsx` for JS SFCs)
+/// in content sent to TSGO, so that `import Foo from './Foo.vue'` resolves to
+/// the virtual `./Foo.vue.tsx` file in TSGO's virtual FS.
+///
+/// The replacement target depends on the file extension of `path`:
+/// - `.jsx` files → rewrite to `.vue.jsx` (JS SFC output)
+/// - everything else (`.tsx`) → rewrite to `.vue.tsx`
+///
+/// This is safe because `.vue'` and `.vue"` only appear as import specifier
+/// endings in generated TSX/JSX content.
+fn rewrite_vue_imports_for_tsgo(content: &str, path: &str) -> String {
+    let ext = if path.ends_with(".jsx") {
+        ".vue.jsx"
+    } else {
+        ".vue.tsx"
+    };
+    content
+        .replace(".vue'", &format!("{ext}'"))
+        .replace(".vue\"", &format!("{ext}\""))
+}
+
 impl TypeProvider for TsgoTypeProvider {
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO open_file: {} ({} bytes)", path, content.len());
@@ -853,7 +874,7 @@ impl TypeProvider for TsgoTypeProvider {
         } else {
             "typescript"
         };
-        let content = content.to_string();
+        let content = rewrite_vue_imports_for_tsgo(content, path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
@@ -890,7 +911,7 @@ impl TypeProvider for TsgoTypeProvider {
     fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO load_file: {} ({} bytes)", path, content.len());
         let path_owned = path.to_string();
-        let content_owned = content.to_string();
+        let content_owned = rewrite_vue_imports_for_tsgo(content, path);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
             contents_cache
@@ -913,7 +934,7 @@ impl TypeProvider for TsgoTypeProvider {
         } else {
             "typescript"
         };
-        let content = content.to_string();
+        let content = rewrite_vue_imports_for_tsgo(content, path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
@@ -1111,17 +1132,13 @@ impl TypeProvider for TsgoTypeProvider {
                     for item in arr {
                         if let Some(s) = item.as_str() {
                             doc_parts.push(s.to_string());
-                        } else if let Some(lang) =
-                            item.get("language").and_then(|l| l.as_str())
-                        {
+                        } else if let Some(lang) = item.get("language").and_then(|l| l.as_str()) {
                             let val = item
                                 .get("value")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default();
                             code_parts.push(format!("```{lang}\n{val}\n```"));
-                        } else if let Some(val) =
-                            item.get("value").and_then(|v| v.as_str())
-                        {
+                        } else if let Some(val) = item.get("value").and_then(|v| v.as_str()) {
                             code_parts.push(val.to_string());
                         }
                     }
@@ -2029,6 +2046,74 @@ pub fn create_test_project(dir: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use tokio::process::{ChildStdin, ChildStdout};
+
+    /// @ai-generated — rewrite_vue_imports_for_tsgo rewrites .vue imports to .vue.tsx for TSX files
+    #[test]
+    fn test_rewrite_vue_imports_tsx() {
+        let input = r#"import Foo from './Foo.vue'
+import Bar from "@/components/Bar.vue"
+const x = 1;"#;
+        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
+        assert!(
+            result.contains("./Foo.vue.tsx'"),
+            "single-quote import should be rewritten"
+        );
+        assert!(
+            result.contains("@/components/Bar.vue.tsx\""),
+            "double-quote import should be rewritten"
+        );
+        assert!(
+            !result.contains("from './Foo.vue'"),
+            ".vue should not remain in single-quote import"
+        );
+        assert!(
+            !result.contains("Bar.vue\""),
+            ".vue should not remain in double-quote import (without .tsx)"
+        );
+        assert!(
+            result.contains("const x = 1;"),
+            "non-import content should be preserved"
+        );
+    }
+
+    /// @ai-generated — rewrite_vue_imports_for_tsgo rewrites to .vue.jsx for JSX files
+    #[test]
+    fn test_rewrite_vue_imports_jsx() {
+        let input = r#"import Foo from './Foo.vue'"#;
+        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.jsx");
+        assert!(
+            result.contains("./Foo.vue.jsx'"),
+            "JSX file should rewrite to .vue.jsx"
+        );
+        assert!(
+            !result.contains(".vue.tsx"),
+            "JSX file should NOT rewrite to .vue.tsx"
+        );
+    }
+
+    /// @ai-generated — rewrite_vue_imports_for_tsgo is a no-op when there are no .vue imports
+    #[test]
+    fn test_rewrite_vue_imports_no_vue() {
+        let input = r#"import { ref } from 'vue'
+import utils from './utils'"#;
+        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
+        assert_eq!(
+            result, input,
+            "content without .vue imports should be unchanged"
+        );
+    }
+
+    /// @ai-generated — rewrite_vue_imports_for_tsgo does not touch .vue in non-import contexts
+    #[test]
+    fn test_rewrite_vue_imports_no_false_positives() {
+        // .vue in a variable name or comment (without quotes) should not be rewritten
+        let input = "const vueFile = 'hello'; // .vue files are great";
+        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
+        assert_eq!(
+            result, input,
+            "non-import .vue occurrences should be unchanged"
+        );
+    }
 
     fn tsgo_bin_or_skip() -> Option<String> {
         match find_tsgo_binary() {

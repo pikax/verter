@@ -27,6 +27,17 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    tracing::info!(
+        "verter-lsp v{} ({}, built {})",
+        env!("CARGO_PKG_VERSION"),
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        env!("VERTER_BUILD_DATE"),
+    );
+
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 

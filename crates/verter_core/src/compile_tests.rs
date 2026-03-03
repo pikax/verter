@@ -7149,11 +7149,18 @@ let el = useTemplateRef('el')
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
+    // Uses ReturnType<typeof ___VERTER___Comp{offset}> which resolves to the build node type
     assert!(
-        tsx.code.contains(
-            r#"useTemplateRef<("div" extends keyof HTMLElementTagNameMap ? HTMLElementTagNameMap["div"] : "div" extends keyof SVGElementTagNameMap ? SVGElementTagNameMap["div"] : Element),"el">('el')"#
-        ),
-        "Expected inferred useTemplateRef generic for static ref, got:\n{}",
+        tsx.code
+            .contains(r#"useTemplateRef<ReturnType<typeof ___VERTER___Comp"#)
+            && tsx.code.contains(r#","el">('el')"#),
+        "Expected inferred useTemplateRef generic with Comp build node, got:\n{}",
+        tsx.code
+    );
+    // Negative: should NOT use InstanceType for ref type
+    assert!(
+        !tsx.code.contains("useTemplateRef<InstanceType"),
+        "should use ReturnType<typeof Comp>, not InstanceType in useTemplateRef: {}",
         tsx.code
     );
 }
@@ -7196,10 +7203,12 @@ const foo = 'test'
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
+    // Dynamic ref with const match: should use Comp build node, not InstanceType
     assert!(
         tsx.code
-            .contains(r#"useTemplateRef<InstanceType<typeof MyComp>,typeof foo>('test')"#),
-        "Expected dynamic ref const-value matching to infer component type, got:\n{}",
+            .contains(r#"useTemplateRef<ReturnType<typeof ___VERTER___Comp"#)
+            && tsx.code.contains(r#",typeof foo>('test')"#),
+        "Expected dynamic ref const-value matching to use Comp build node, got:\n{}",
         tsx.code
     );
 }
@@ -7238,10 +7247,11 @@ let a = useTemplateRef('a')
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
+    // Dynamic component :is with ref should use ReturnType<typeof Comp{offset}>
     assert!(
-        tsx.code.contains(r#"HTMLElementTagNameMap["div"]"#)
-            && tsx.code.contains(r#"HTMLElementTagNameMap["span"]"#),
-        "Expected dynamic component :is string-literal union to infer both tag types, got:\n{}",
+        tsx.code
+            .contains(r#"useTemplateRef<ReturnType<typeof ___VERTER___Comp"#),
+        "Expected dynamic component ref to use Comp build node, got:\n{}",
         tsx.code
     );
 }
@@ -7406,10 +7416,10 @@ let el = useTemplateRef('el')
 </script>
 <template><div ref="el"></div></template>"#,
             &[
-                r#"useTemplateRef<("div" extends keyof HTMLElementTagNameMap"#,
+                r#"useTemplateRef<ReturnType<typeof ___VERTER___Comp"#,
                 r#","el">('el')"#,
             ],
-            &[],
+            &[r#"useTemplateRef<InstanceType"#],
         ),
         (
             r#"<script setup lang="ts">
@@ -7418,7 +7428,10 @@ let x = useTemplateRef('test')
 const foo = 'test'
 </script>
 <template><my-comp :ref="foo"></my-comp></template>"#,
-            &[r#"useTemplateRef<InstanceType<typeof MyComp>,typeof foo>('test')"#],
+            &[
+                r#"useTemplateRef<ReturnType<typeof ___VERTER___Comp"#,
+                r#",typeof foo>('test')"#,
+            ],
             &[r#"useTemplateRef<unknown,typeof foo>('test')"#],
         ),
         (
@@ -7445,10 +7458,7 @@ const itemRef = ref()
 let a = useTemplateRef('a')
 </script>
 <template><component :is="true ? 'div' : 'span'" ref="a"></component></template>"#,
-            &[
-                r#"HTMLElementTagNameMap["div"]"#,
-                r#"HTMLElementTagNameMap["span"]"#,
-            ],
+            &[r#"useTemplateRef<ReturnType<typeof ___VERTER___Comp"#],
             &[],
         ),
         (

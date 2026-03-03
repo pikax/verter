@@ -245,10 +245,6 @@ fn component_prop_constness_hover(offset: u32, analysis: &FileAnalysisSnapshot) 
         .iter()
         .find(|c| offset >= c.span.start && offset <= c.span.end)?;
 
-    if comp.props.is_empty() {
-        return None;
-    }
-
     let mut lines = Vec::new();
     let source_info = comp
         .import_source
@@ -256,6 +252,19 @@ fn component_prop_constness_hover(offset: u32, analysis: &FileAnalysisSnapshot) 
         .map(|s| format!(" (from `{s}`)"))
         .unwrap_or_default();
     lines.push(format!("**`<{}>`**{source_info}\n", comp.name));
+
+    if comp.props.is_empty() {
+        // Return component info even without props — TSGO may also return None,
+        // so this ensures the user always sees at least the component name.
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: lines.join("\n"),
+            }),
+            range: None,
+        });
+    }
+
     lines.push("**Props:**".to_string());
 
     for prop in &comp.props {

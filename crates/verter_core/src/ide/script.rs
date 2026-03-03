@@ -1483,129 +1483,16 @@ fn collect_template_ref_candidates_from_node(
 
 fn resolve_template_ref_target_type(
     el: &crate::ast::types::ElementNode,
-    tag_name: &str,
-    source: &str,
-    available_bindings: &FxHashSet<String>,
+    _tag_name: &str,
+    _source: &str,
+    _available_bindings: &FxHashSet<String>,
 ) -> String {
-    if tag_name == "component" {
-        if let Some(static_is) = find_component_static_is(el, source) {
-            return resolve_tag_name_type(&static_is, false, available_bindings);
-        }
-        if let Some(dynamic_is_expr) = find_component_dynamic_is_expression(el, source) {
-            return resolve_dynamic_component_is_type(&dynamic_is_expr, available_bindings);
-        }
-        return "unknown".to_string();
-    }
-
-    resolve_tag_name_type(
-        tag_name,
-        el.tag_type == TagType::Component,
-        available_bindings,
-    )
-}
-
-fn find_component_static_is(el: &crate::ast::types::ElementNode, source: &str) -> Option<String> {
-    for prop in &el.props {
-        if prop.is_directive {
-            continue;
-        }
-        let name = &source[prop.start as usize..prop.name_end as usize];
-        if name != "is" {
-            continue;
-        }
-        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-            let value = source[vs as usize..ve as usize].trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn find_component_dynamic_is_expression(
-    el: &crate::ast::types::ElementNode,
-    source: &str,
-) -> Option<String> {
-    for prop in &el.props {
-        if !prop.is_directive {
-            continue;
-        }
-        let base = &source[prop.start as usize..prop.name_end as usize];
-        if base != ":" && base != "v-bind" {
-            continue;
-        }
-        let (Some(arg_s), Some(arg_e)) = (prop.arg_start, prop.arg_end) else {
-            continue;
-        };
-        if &source[arg_s as usize..arg_e as usize] != "is" {
-            continue;
-        }
-        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-            let expr = source[vs as usize..ve as usize].trim();
-            if !expr.is_empty() {
-                return Some(expr.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn resolve_dynamic_component_is_type(expr: &str, available_bindings: &FxHashSet<String>) -> String {
-    let tags = extract_string_literals(expr);
-    if tags.is_empty() {
-        return format!("typeof {}", expr);
-    }
-
-    let mut types = Vec::with_capacity(tags.len());
-    for tag in tags {
-        types.push(resolve_tag_name_type(&tag, false, available_bindings));
-    }
-    join_type_union(&types)
-}
-
-fn resolve_tag_name_type(
-    tag_name: &str,
-    is_component_hint: bool,
-    available_bindings: &FxHashSet<String>,
-) -> String {
-    if is_component_hint {
-        if let Some(binding) = resolve_component_binding_name(tag_name, available_bindings) {
-            return format!("InstanceType<typeof {}>", binding);
-        }
-        if is_member_path(tag_name) {
-            return format!("InstanceType<typeof {}>", tag_name);
-        }
-    } else if is_probably_native_tag(tag_name) {
-        return native_tag_element_type(tag_name);
-    } else if let Some(binding) = resolve_component_binding_name(tag_name, available_bindings) {
-        return format!("InstanceType<typeof {}>", binding);
-    } else if is_member_path(tag_name) {
-        return format!("InstanceType<typeof {}>", tag_name);
-    }
-
-    native_tag_element_type(tag_name)
-}
-
-fn native_tag_element_type(tag_name: &str) -> String {
-    format!(
-        "(\"{0}\" extends keyof HTMLElementTagNameMap ? HTMLElementTagNameMap[\"{0}\"] : \"{0}\" extends keyof SVGElementTagNameMap ? SVGElementTagNameMap[\"{0}\"] : Element)",
-        tag_name
-    )
-}
-
-fn is_probably_native_tag(tag_name: &str) -> bool {
-    let Some(first) = tag_name.chars().next() else {
-        return false;
-    };
-    first.is_ascii_lowercase() && !tag_name.chars().any(|c| c.is_ascii_uppercase())
-}
-
-fn is_member_path(value: &str) -> bool {
-    if !value.contains('.') {
-        return false;
-    }
-    value.split('.').all(is_simple_ident)
+    // Elements with refs always get a ___VERTER___Comp{offset} build-node function emitted
+    // (see walk_children_for_comp). Using ReturnType gives the correct type:
+    // - For native elements: the enhanced element type with props
+    // - For components: the component instance type (new Component({props}))
+    let offset = el.tag_open.start;
+    format!("ReturnType<typeof {}Comp{}>", PREFIX, offset)
 }
 
 fn element_is_inside_v_for(id: crate::types::NodeId, ast: &TemplateAst) -> bool {
@@ -1684,46 +1571,6 @@ fn resolve_declared_string_value<'a>(
     declaration_string_values: &'a FxHashMap<String, String>,
 ) -> Option<&'a str> {
     declaration_string_values.get(key).map(|v| v.as_str())
-}
-
-fn extract_string_literals(expr: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = expr.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let quote = bytes[i];
-        if quote != b'\'' && quote != b'"' {
-            i += 1;
-            continue;
-        }
-        i += 1;
-        let start = i;
-        let mut escaped = false;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if escaped {
-                escaped = false;
-                i += 1;
-                continue;
-            }
-            if b == b'\\' {
-                escaped = true;
-                i += 1;
-                continue;
-            }
-            if b == quote {
-                if i > start {
-                    out.push(expr[start..i].to_string());
-                } else {
-                    out.push(String::new());
-                }
-                i += 1;
-                break;
-            }
-            i += 1;
-        }
-    }
-    out
 }
 
 impl TemplateRefScriptScanner {

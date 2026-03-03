@@ -16,6 +16,22 @@ use crate::tsgo::protocol::{
     TypeDocumentHighlightKind, TypeLocation,
 };
 
+/// External IDE context for resolving positions in a foreign `.vue.tsx` file.
+///
+/// For cross-file navigation (e.g., CTRL+CLICK navigates to another `.vue` file),
+/// the merge functions need the target file's TSX line index, position mapper, and
+/// Vue line index. This struct carries those, and the resolver closure produces it.
+pub struct ExternalIdeContext {
+    pub tsx_line_index: LineIndex,
+    pub mapper: PositionMapper,
+    pub vue_line_index: LineIndex,
+}
+
+/// Resolver for looking up IDE context by IDE path (e.g., `/path/to/Comp.vue.tsx`).
+///
+/// Returns `None` if the file isn't tracked or hasn't been compiled yet.
+pub type ExternalIdeResolver<'a> = &'a dyn Fn(&str) -> Option<ExternalIdeContext>;
+
 /// Map an LSP `Position` (in the Vue file) to a byte offset in the generated TSX.
 ///
 /// Steps: LSP Position → byte offset via LineIndex → line/col → PositionMapper → TSX line/col → TSX byte offset via TSX LineIndex.
@@ -382,18 +398,65 @@ fn convert_severity(sev: TypeDiagnosticSeverity) -> DiagnosticSeverity {
 
 // ── Definition merge ───────────────────────────────────────────────
 
+/// Resolve a `.vue.tsx` target's byte offsets to a Vue source Range.
+///
+/// Prioritizes the external resolver (which looks up the target file's actual IDE context)
+/// over the current file's mapper. Only falls back to the current file's context if
+/// no external resolver is provided or the resolver doesn't know about the target.
+fn resolve_vue_tsx_range(
+    path: &str,
+    start: u32,
+    end: u32,
+    current_tsx_line_index: &LineIndex,
+    current_mapper: &PositionMapper,
+    current_vue_line_index: &LineIndex,
+    external_resolver: Option<ExternalIdeResolver<'_>>,
+) -> Range {
+    // Try external resolver first — it provides the correct mapper for the target file.
+    // Without this, cross-file navigation uses the *current* file's mapper, producing
+    // wrong positions (e.g., (0,0) or positions from the wrong file).
+    if let Some(resolver) = external_resolver {
+        if let Some(ctx) = resolver(path) {
+            if let Some(range) = tsx_range_to_vue_range(
+                start,
+                end,
+                &ctx.tsx_line_index,
+                &ctx.mapper,
+                &ctx.vue_line_index,
+            ) {
+                return range;
+            }
+        }
+    }
+
+    // Fallback: use current file context (works when target is same file being queried)
+    tsx_range_to_vue_range(
+        start,
+        end,
+        current_tsx_line_index,
+        current_mapper,
+        current_vue_line_index,
+    )
+    .unwrap_or_default()
+}
+
 /// Merge verter definition with TypeProvider definitions.
 ///
 /// Strategy:
 /// - If verter provides a definition, use it (it's already precise for in-file navigation)
 /// - TypeProvider definitions are used for cross-file navigation (import targets, etc.)
 /// - Map TypeProvider locations back to Vue positions where applicable
+///
+/// `external_resolver` is used to resolve positions in `.vue.tsx` files that differ
+/// from the current file (cross-file navigation, e.g., CTRL+CLICK on component tag
+/// navigates to the target component's file).
 pub fn merge_definitions(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
     tsx_line_index: &LineIndex,
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
+    external_resolver: Option<ExternalIdeResolver<'_>>,
 ) -> Option<GotoDefinitionResponse> {
     // If verter provides a definition, prefer it when:
     // - TSGO returned nothing, or
@@ -417,14 +480,15 @@ pub fn merge_definitions(
                 // Map TSX byte offsets back to Vue positions for .vue.tsx targets
                 // (.vue.d.ts targets use Range::default — no position mapping available)
                 let range = if loc.path.ends_with(".vue.tsx") {
-                    tsx_range_to_vue_range(
+                    resolve_vue_tsx_range(
+                        &loc.path,
                         loc.start,
                         loc.end,
                         tsx_line_index,
                         mapper,
                         vue_line_index,
+                        external_resolver,
                     )
-                    .unwrap_or_default()
                 } else {
                     Range::default()
                 };
@@ -497,24 +561,30 @@ pub fn merge_references(
     tsx_line_index: &LineIndex,
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
+    external_resolver: Option<ExternalIdeResolver<'_>>,
 ) -> Option<Vec<Location>> {
     let mut result = verter_refs.unwrap_or_default();
 
-    for loc in type_refs {
+    for loc in &type_refs {
         // For .vue.tsx targets, map back to .vue positions
         if loc.path.ends_with(".vue.tsx") {
-            if let Some(range) =
-                tsx_range_to_vue_range(loc.start, loc.end, tsx_line_index, mapper, vue_line_index)
-            {
-                let vue_path = loc.path.trim_end_matches(".tsx");
-                if let Some(uri) = path_to_uri(vue_path) {
-                    // Deduplicate: skip if we already have a ref at this position
-                    let dup = result
-                        .iter()
-                        .any(|r| r.uri == uri && r.range.start == range.start);
-                    if !dup {
-                        result.push(Location { uri, range });
-                    }
+            let range = resolve_vue_tsx_range(
+                &loc.path,
+                loc.start,
+                loc.end,
+                tsx_line_index,
+                mapper,
+                vue_line_index,
+                external_resolver,
+            );
+            let vue_path = loc.path.trim_end_matches(".tsx");
+            if let Some(uri) = path_to_uri(vue_path) {
+                // Deduplicate: skip if we already have a ref at this position
+                let dup = result
+                    .iter()
+                    .any(|r| r.uri == uri && r.range.start == range.start);
+                if !dup {
+                    result.push(Location { uri, range });
                 }
             }
         } else if loc.path.ends_with(".vue.d.ts") {
@@ -560,6 +630,7 @@ pub fn merge_rename_locations(
     tsx_line_index: &LineIndex,
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
+    external_resolver: Option<ExternalIdeResolver<'_>>,
 ) -> Option<WorkspaceEdit> {
     let mut edit = verter_edit.unwrap_or_else(|| WorkspaceEdit {
         changes: Some(std::collections::HashMap::new()),
@@ -570,21 +641,26 @@ pub fn merge_rename_locations(
         .changes
         .get_or_insert_with(std::collections::HashMap::new);
 
-    for loc in type_locations {
+    for loc in &type_locations {
         if loc.path.ends_with(".vue.tsx") {
-            if let Some(range) =
-                tsx_range_to_vue_range(loc.start, loc.end, tsx_line_index, mapper, vue_line_index)
-            {
-                let vue_path = loc.path.trim_end_matches(".tsx");
-                if let Some(uri) = path_to_uri(vue_path) {
-                    let edits = changes.entry(uri).or_default();
-                    let dup = edits.iter().any(|e| e.range.start == range.start);
-                    if !dup {
-                        edits.push(TextEdit {
-                            range,
-                            new_text: new_name.to_string(),
-                        });
-                    }
+            let range = resolve_vue_tsx_range(
+                &loc.path,
+                loc.start,
+                loc.end,
+                tsx_line_index,
+                mapper,
+                vue_line_index,
+                external_resolver,
+            );
+            let vue_path = loc.path.trim_end_matches(".tsx");
+            if let Some(uri) = path_to_uri(vue_path) {
+                let edits = changes.entry(uri).or_default();
+                let dup = edits.iter().any(|e| e.range.start == range.start);
+                if !dup {
+                    edits.push(TextEdit {
+                        range,
+                        new_text: new_name.to_string(),
+                    });
                 }
             }
         } else if loc.path.ends_with(".vue.d.ts") {
@@ -1244,7 +1320,7 @@ mod tests {
             range: Range::default(),
         }));
 
-        let result = merge_definitions(verter, vec![], &tsx_li, &mapper, &vue_li);
+        let result = merge_definitions(verter, vec![], &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some());
     }
 
@@ -1258,7 +1334,7 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_definitions(None, types, &tsx_li, &mapper, &vue_li);
+        let result = merge_definitions(None, types, &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some());
     }
 
@@ -1266,7 +1342,7 @@ mod tests {
     #[test]
     fn merge_definitions_neither() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_definitions(None, vec![], &tsx_li, &mapper, &vue_li);
+        let result = merge_definitions(None, vec![], &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_none());
     }
 
@@ -1302,7 +1378,7 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_references(verter, type_refs, &tsx_li, &mapper, &vue_li);
+        let result = merge_references(verter, type_refs, &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 2);
     }
@@ -1311,7 +1387,7 @@ mod tests {
     #[test]
     fn merge_references_neither() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_references(None, vec![], &tsx_li, &mapper, &vue_li);
+        let result = merge_references(None, vec![], &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_none());
     }
 
@@ -1324,7 +1400,7 @@ mod tests {
             range: Range::default(),
         }]);
 
-        let result = merge_references(verter, vec![], &tsx_li, &mapper, &vue_li);
+        let result = merge_references(verter, vec![], &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 1);
     }
@@ -1480,7 +1556,8 @@ mod tests {
             ..Default::default()
         });
 
-        let result = merge_rename_locations(verter, vec![], "newName", &tsx_li, &mapper, &vue_li);
+        let result =
+            merge_rename_locations(verter, vec![], "newName", &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some());
     }
 
@@ -1488,7 +1565,8 @@ mod tests {
     #[test]
     fn merge_rename_neither() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_rename_locations(None, vec![], "newName", &tsx_li, &mapper, &vue_li);
+        let result =
+            merge_rename_locations(None, vec![], "newName", &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_none());
     }
 
@@ -1511,7 +1589,7 @@ mod tests {
             end: 9,
         }];
 
-        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li);
+        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some(), "Expected definition response");
 
         match result.unwrap() {
@@ -1559,7 +1637,7 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li);
+        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some());
     }
 
@@ -1592,7 +1670,7 @@ mod tests {
             end: 120,
         }];
 
-        let result = merge_definitions(verter_def, type_defs, &tsx_li, &mapper, &vue_li);
+        let result = merge_definitions(verter_def, type_defs, &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some(), "should return TSGO's external definition");
 
         match result.unwrap() {
@@ -1633,7 +1711,7 @@ mod tests {
             },
         }));
 
-        let result = merge_definitions(verter_def, vec![], &tsx_li, &mapper, &vue_li);
+        let result = merge_definitions(verter_def, vec![], &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some());
         match result.unwrap() {
             GotoDefinitionResponse::Scalar(loc) => {
@@ -1688,7 +1766,7 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li);
+        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some());
         match result.unwrap() {
             GotoDefinitionResponse::Scalar(loc) => {
@@ -1718,7 +1796,7 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_references(None, type_refs, &tsx_li, &mapper, &vue_li);
+        let result = merge_references(None, type_refs, &tsx_li, &mapper, &vue_li, None);
         assert!(result.is_some());
         let locs = result.unwrap();
         assert_eq!(locs.len(), 1);
@@ -1744,8 +1822,15 @@ mod tests {
             end: 10,
         }];
 
-        let result =
-            merge_rename_locations(None, type_locations, "NewName", &tsx_li, &mapper, &vue_li);
+        let result = merge_rename_locations(
+            None,
+            type_locations,
+            "NewName",
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+        );
         assert!(result.is_some());
         let edit = result.unwrap();
         let changes = edit.changes.unwrap();
@@ -2000,7 +2085,9 @@ mod tests {
 
         // Type should be inside fence
         assert!(
-            text.starts_with("```typescript\n(property) GameItemProps.game: GameVo | ProfilePlayedVo\n```"),
+            text.starts_with(
+                "```typescript\n(property) GameItemProps.game: GameVo | ProfilePlayedVo\n```"
+            ),
             "type should be in code fence: {text}"
         );
         // Doc should be outside fence
@@ -2069,5 +2156,86 @@ mod tests {
         };
 
         assert_eq!(text, "```typescript\n(property) msg: string\n```");
+    }
+
+    /// External resolver provides correct position mapping for cross-file definitions.
+    /// When TSGO returns a .vue.tsx target pointing to a *different* file,
+    /// the merge function should use the external resolver's mapper instead of the
+    /// current file's mapper.
+    #[test]
+    fn merge_definitions_uses_external_resolver_for_cross_file() {
+        let (_mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        // Build target file's mapper: TSX line 0 col 0 → Vue line 1 col 0
+        let target_vue = "<script setup>\ndefineComponent({})\n</script>";
+        let target_tsx = "defineComponent({});\n";
+        let target_vue_li = LineIndex::new_utf16(target_vue);
+        let target_tsx_li = LineIndex::new_utf16(target_tsx);
+
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        let sid = builder.set_source_and_content("Target.vue", target_vue);
+        builder.add_token(0, 0, 1, 0, Some(sid), None); // TSX 0:0 → Vue 1:0
+        builder.add_token(0, 16, 1, 16, Some(sid), None); // TSX 0:16 → Vue 1:16
+        let json = builder.into_sourcemap().to_json_string();
+        let target_mapper = PositionMapper::from_json(&json).unwrap();
+
+        let type_defs = vec![TypeLocation {
+            path: "/src/components/Target.vue.tsx".to_string(),
+            start: 0,
+            end: 16, // "defineComponent("
+        }];
+
+        // Without resolver: current file's mapper can't resolve target's TSX offsets → default range
+        let result_no_resolver =
+            merge_definitions(None, type_defs.clone(), &tsx_li, &_mapper, &vue_li, None);
+        assert!(result_no_resolver.is_some());
+        match result_no_resolver.unwrap() {
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert!(
+                    loc.uri.as_str().ends_with("Target.vue"),
+                    "should navigate to .vue: {}",
+                    loc.uri.as_str()
+                );
+            }
+            _ => panic!("expected scalar"),
+        }
+
+        // With resolver: external mapper resolves correctly
+        let resolver = |ide_path: &str| -> Option<ExternalIdeContext> {
+            if ide_path == "/src/components/Target.vue.tsx" {
+                Some(ExternalIdeContext {
+                    tsx_line_index: target_tsx_li.clone(),
+                    mapper: target_mapper.clone(),
+                    vue_line_index: target_vue_li.clone(),
+                })
+            } else {
+                None
+            }
+        };
+
+        let result_with_resolver =
+            merge_definitions(None, type_defs, &tsx_li, &_mapper, &vue_li, Some(&resolver));
+        assert!(result_with_resolver.is_some());
+        match result_with_resolver.unwrap() {
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert!(
+                    loc.uri.as_str().ends_with("Target.vue"),
+                    "should navigate to .vue: {}",
+                    loc.uri.as_str()
+                );
+                // Position should map to Vue line 1 (inside <script setup>)
+                assert_eq!(
+                    loc.range.start.line, 1,
+                    "with resolver, definition should map to Vue line 1, got: {:?}",
+                    loc.range
+                );
+                assert_ne!(
+                    loc.range,
+                    Range::default(),
+                    "with resolver, range should not be default (0,0)"
+                );
+            }
+            _ => panic!("expected scalar"),
+        }
     }
 }

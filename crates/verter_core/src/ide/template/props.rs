@@ -190,15 +190,26 @@ fn process_merged_class_or_style<'alloc>(
     let prop_end = get_prop_end(prop);
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
         let value_expr = &source[vs as usize..ve as usize];
-        let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+        // Patch-based: overwrite only boundaries, apply binding patches individually.
+        // This preserves source map tokens for identifiers in the expression
+        // (e.g., `props.x` in `:class="{ 'key': props.x }"`).
+        let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
+        let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
+        let tvs = vs + leading_ws;
+        let tve = ve - trailing_ws;
         out.overwrite(
             prop.start,
-            prop_end,
-            &format!(
-                "{}={{{}([{},\"{}\"])}}",
-                attr_name, helper_name, resolved, static_value
-            ),
+            tvs,
+            &format!("{}={{{}([", attr_name, helper_name),
         );
+        out.overwrite(tve, prop_end, &format!(",\"{}\"])}}}}", static_value));
+        if let Some(oxc_p) = oxc_prop {
+            if let Some(ref exp) = oxc_p.exp {
+                if let Some(ref bindings) = exp.bindings {
+                    resolver.collect_binding_patches(bindings, out);
+                }
+            }
+        }
     } else {
         // No dynamic value — shouldn't happen if merge flag is set, but handle gracefully
         out.overwrite(
@@ -333,12 +344,30 @@ fn process_v_bind<'alloc>(
             let tve = ve - trailing_ws;
             out.overwrite(prop.start, tvs, &format!("{}={{{}", arg_name, prefix));
             out.overwrite(tve, prop_end, "}");
-        } else {
+        } else if guarded.is_some() {
+            // Guard was injected — the expression was rewritten, can't patch individually
             out.overwrite(
                 prop.start,
                 prop_end,
                 &format!("{}={{{}}}", arg_name, final_expr),
             );
+        } else {
+            // Patch-based: overwrite only boundaries, apply binding patches individually.
+            // This preserves source map tokens for each identifier in the expression,
+            // enabling TSGO hover on sub-expressions (e.g., `props.x` in `:class="{ 'key': props.x }"`).
+            let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
+            let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
+            let tvs = vs + leading_ws;
+            let tve = ve - trailing_ws;
+            out.overwrite(prop.start, tvs, &format!("{}={{", arg_name));
+            out.overwrite(tve, prop_end, "}");
+            if let Some(oxc_p) = oxc_prop {
+                if let Some(ref exp) = oxc_p.exp {
+                    if let Some(ref bindings) = exp.bindings {
+                        resolver.collect_binding_patches(bindings, out);
+                    }
+                }
+            }
         }
     } else {
         // `:foo` shorthand → `foo={ctx.foo}`; `:foo-bar` uses camelCase lookup.
@@ -454,11 +483,16 @@ fn process_v_on<'alloc>(
                 out.overwrite(prop.start, trimmed_vs, &format!("{}={{", jsx_event_name));
                 out.overwrite(trimmed_ve, prop_end, "}");
             } else {
-                out.overwrite(
-                    prop.start,
-                    prop_end,
-                    &format!("{}={{{}}}", jsx_event_name, resolved_expr),
-                );
+                // Patch-based: preserve source map tokens for sub-expressions.
+                out.overwrite(prop.start, trimmed_vs, &format!("{}={{", jsx_event_name));
+                out.overwrite(trimmed_ve, prop_end, "}");
+                if let Some(oxc_p) = oxc_prop {
+                    if let Some(ref exp) = oxc_p.exp {
+                        if let Some(ref bindings) = exp.bindings {
+                            resolver.collect_binding_patches(bindings, out);
+                        }
+                    }
+                }
             }
         } else if has_event_param {
             // $event can only exist inside a callback parameter scope.
@@ -473,15 +507,20 @@ fn process_v_on<'alloc>(
                 );
                 out.overwrite(trimmed_ve, prop_end, "}}");
             } else {
+                // Patch-based: preserve source map tokens inside callback body.
                 out.overwrite(
                     prop.start,
-                    prop_end,
-                    &format!(
-                        "{}={{{}}}",
-                        jsx_event_name,
-                        build_event_callback_body("$event", resolved_expr, v_if_guard)
-                    ),
+                    trimmed_vs,
+                    &format!("{}={{($event) => {{{}", jsx_event_name, guard_prefix),
                 );
+                out.overwrite(trimmed_ve, prop_end, "}}");
+                if let Some(oxc_p) = oxc_prop {
+                    if let Some(ref exp) = oxc_p.exp {
+                        if let Some(ref bindings) = exp.bindings {
+                            resolver.collect_binding_patches(bindings, out);
+                        }
+                    }
+                }
             }
         } else if is_simple_ident || is_member_expr {
             // Simple handler: @click="handler" → onClick={handler}
@@ -489,11 +528,16 @@ fn process_v_on<'alloc>(
                 out.overwrite(prop.start, trimmed_vs, &format!("{}={{", jsx_event_name));
                 out.overwrite(trimmed_ve, prop_end, "}");
             } else {
-                out.overwrite(
-                    prop.start,
-                    prop_end,
-                    &format!("{}={{{}}}", jsx_event_name, resolved_expr),
-                );
+                // Patch-based: preserve source map tokens.
+                out.overwrite(prop.start, trimmed_vs, &format!("{}={{", jsx_event_name));
+                out.overwrite(trimmed_ve, prop_end, "}");
+                if let Some(oxc_p) = oxc_prop {
+                    if let Some(ref exp) = oxc_p.exp {
+                        if let Some(ref bindings) = exp.bindings {
+                            resolver.collect_binding_patches(bindings, out);
+                        }
+                    }
+                }
             }
         } else {
             // Inline expression: @click="count++" → onClick={() => count++}
@@ -508,15 +552,20 @@ fn process_v_on<'alloc>(
                 );
                 out.overwrite(trimmed_ve, prop_end, "}}");
             } else {
+                // Patch-based: preserve source map tokens inside callback body.
                 out.overwrite(
                     prop.start,
-                    prop_end,
-                    &format!(
-                        "{}={{{}}}",
-                        jsx_event_name,
-                        build_event_callback_body("", resolved_expr, v_if_guard)
-                    ),
+                    trimmed_vs,
+                    &format!("{}={{() => {{{}", jsx_event_name, guard_prefix),
                 );
+                out.overwrite(trimmed_ve, prop_end, "}}");
+                if let Some(oxc_p) = oxc_prop {
+                    if let Some(ref exp) = oxc_p.exp {
+                        if let Some(ref bindings) = exp.bindings {
+                            resolver.collect_binding_patches(bindings, out);
+                        }
+                    }
+                }
             }
         }
     } else {
@@ -524,18 +573,6 @@ fn process_v_on<'alloc>(
         let prop_end = get_prop_end(prop);
         out.overwrite(prop.start, prop_end, "");
     }
-}
-
-fn build_event_callback_body(
-    event_arg: &str,
-    expression: &str,
-    v_if_guard: Option<&str>,
-) -> String {
-    let params = if event_arg.is_empty() { "" } else { event_arg };
-    let guard_prefix = v_if_guard
-        .map(|guard| format!("if (!({})) {{ return undefined; }} ", guard))
-        .unwrap_or_default();
-    format!("({}) => {{{}{}}}", params, guard_prefix, expression)
 }
 
 /// Process `v-model` directive → expand to prop + update event pair.
