@@ -215,7 +215,7 @@ export declare class VerterHost {
   applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
   getPublicApi(canonicalId: string): { code: string; sourceMap?: string } | null;
   getIde(canonicalId: string, profile?: import("./host-types").HostCompileProfile): import("./host-types").HostIdeResponse | null;
-  getVirtualFile(query: import("./host-types").HostVirtualQuery): import("./host-types").HostVirtualFileResponse;
+  getVirtualFile(query: import("./host-types").HostVirtualQuery): import("./host-types").HostVirtualFileResponse | null;
   listVirtualFiles(canonicalId: string): import("./host-types").HostVirtualNodeKind[];
   remove(canonicalOrAlias: string): import("./host-types").HostRemoveResult | null;
   /**

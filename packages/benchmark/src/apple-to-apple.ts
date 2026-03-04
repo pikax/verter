@@ -118,9 +118,9 @@ for (const f of fixtures) {
 
   await bench.run()
 
-  const vue    = bench.getTask('vue')!.result!.mean
-  const verter = bench.getTask('verter')!.result!.mean
-  const vizeMs = bench.getTask('vize')!.result!.mean
+  const vue    = (bench.getTask('vue')!.result! as any).latency?.mean || 0
+  const verter = (bench.getTask('verter')!.result! as any).latency?.mean || 0
+  const vizeMs = (bench.getTask('vize')!.result! as any).latency?.mean || 0
 
   stResults.push({ name: f.name, size: f.size, vueMean: vue, verterMean: verter, vizeMean: vizeMs })
 

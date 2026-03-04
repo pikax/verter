@@ -398,10 +398,12 @@ function fmtBytes(bytes: number): string {
 
 function printBenchResults(bench: Bench) {
   for (const task of bench.tasks) {
-    const r = task.result!;
-    const meanNs = r.mean * 1_000_000; // ms → ns
+    const r = task.result! as any;
+    const lat = r.latency || {};
+    const thr = r.throughput || {};
+    const meanNs = (lat.mean || 0) * 1_000_000; // ms → ns
     console.log(
-      `    ${task.name.padEnd(50)} ${pad(fmtNs(meanNs), 12)}  (${pad(r.hz.toFixed(0), 8)} ops/s)`,
+      `    ${task.name.padEnd(50)} ${pad(fmtNs(meanNs), 12)}  (${pad((thr.mean || 0).toFixed(0), 8)} ops/s)`,
     );
   }
 }
@@ -567,8 +569,8 @@ async function benchNapiTransferCost(host: VerterHost, analyses: FixtureAnalysis
   console.log("    " + "─".repeat(69));
 
   for (const task of bench.tasks) {
-    const r = task.result!;
-    const meanNs = r.mean * 1_000_000;
+    const r = task.result! as any;
+    const meanNs = (r.latency?.mean || 0) * 1_000_000;
     const a = analyses.find((x) => task.name.includes(x.fixture.name))!;
     const nsPerByte = meanNs / a.compiledCode.length;
     console.log(
@@ -586,8 +588,8 @@ async function benchNapiTransferCost(host: VerterHost, analyses: FixtureAnalysis
   // Use average ns/byte from results
   const avgNsPerByte =
     bench.tasks.reduce((sum, task) => {
-      const r = task.result!;
-      const meanNs = r.mean * 1_000_000;
+      const r = task.result! as any;
+      const meanNs = (r.latency?.mean || 0) * 1_000_000;
       const a = analyses.find((x) => task.name.includes(x.fixture.name))!;
       return sum + meanNs / a.compiledCode.length;
     }, 0) / bench.tasks.length;

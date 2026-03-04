@@ -100,6 +100,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' || 
        (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
       pull-requests: write

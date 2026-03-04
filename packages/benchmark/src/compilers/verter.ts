@@ -37,23 +37,29 @@ export function compileVerterHost(host: VerterHost, source: string, filename: st
     })
 
     let code = ''
-    const scriptFile = (host as any).getVirtualFile({
-      canonicalId: result.canonicalId,
-      nodeKind: { kind: 'script' },
-      compileProfile: hostProfile
-    })
-    if (scriptFile) code += scriptFile.code
+    try {
+      const scriptFile = (host as any).getVirtualFile({
+        canonicalId: result.canonicalId,
+        nodeKind: { kind: 'script' },
+        compileProfile: hostProfile
+      })
+      if (scriptFile) code += scriptFile.code
+    } catch { /* no script block */ }
 
-    const templateFile = (host as any).getVirtualFile({
-      canonicalId: result.canonicalId,
-      nodeKind: { kind: 'template' },
-      compileProfile: hostProfile
-    })
-    if (templateFile) code += '\n\n' + templateFile.code
+    try {
+      const templateFile = (host as any).getVirtualFile({
+        canonicalId: result.canonicalId,
+        nodeKind: { kind: 'template' },
+        compileProfile: hostProfile
+      })
+      if (templateFile) code += '\n\n' + templateFile.code
+    } catch { /* no template block */ }
 
     return {
       code,
-      errors: result.diagnostics?.diagnostics?.map((d: any) => d.message) || []
+      errors: result.diagnostics?.diagnostics
+        ?.filter((d: any) => d.severity === 'error')
+        .map((d: any) => d.message) || []
     }
   } catch (error) {
     return {

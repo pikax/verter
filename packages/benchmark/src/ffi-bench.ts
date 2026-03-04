@@ -68,10 +68,12 @@ function fmtNs(ns: number): string {
 
 function printBenchResults(bench: Bench) {
   for (const task of bench.tasks) {
-    const r = task.result!;
-    const meanNs = r.mean * 1_000_000; // ms → ns
+    const r = task.result! as any;
+    const lat = r.latency || {};
+    const thr = r.throughput || {};
+    const meanNs = (lat.mean || 0) * 1_000_000; // ms → ns
     console.log(
-      `    ${task.name.padEnd(45)} ${pad(fmtNs(meanNs), 12)}  (${pad(r.hz.toFixed(0), 8)} ops/s)`,
+      `    ${task.name.padEnd(45)} ${pad(fmtNs(meanNs), 12)}  (${pad((thr.mean || 0).toFixed(0), 8)} ops/s)`,
     );
   }
 }

@@ -975,9 +975,13 @@ impl NapiVerterHost {
     /// Returns the compiled code, optional source map, language hint, and
     /// any compilation diagnostics.
     ///
-    /// Returns an error if the query is invalid or the file is not found.
+    /// Returns `null` if the virtual node does not exist (e.g. no `<script>` block).
+    /// Returns an error if the query is invalid or the source file is not found.
     #[napi(js_name = "getVirtualFile")]
-    pub fn get_virtual_file(&self, query: NapiVirtualQuery) -> Result<NapiVirtualFileResponse> {
+    pub fn get_virtual_file(
+        &self,
+        query: NapiVirtualQuery,
+    ) -> Result<Option<NapiVirtualFileResponse>> {
         let canonical_for_source = if let Some(canonical) = query.canonicalId.as_ref() {
             Some(canonical.clone())
         } else if let Some(raw_id) = query.rawId.as_ref() {
@@ -989,12 +993,17 @@ impl NapiVerterHost {
         let host_query = ffi_virtual_query_to_host(ffi_query).map_err(ffi_err)?;
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.get_virtual_file(host_query)
-        }))?
-        .map_err(host_error)?;
-        let source = canonical_for_source
-            .as_deref()
-            .and_then(|canonical| self.inner.get_source(canonical));
-        Ok(host_virtual_file_to_napi(result, source.as_deref()))
+        }))?;
+        match result {
+            Ok(vf) => {
+                let source = canonical_for_source
+                    .as_deref()
+                    .and_then(|canonical| self.inner.get_source(canonical));
+                Ok(Some(host_virtual_file_to_napi(vf, source.as_deref())))
+            }
+            Err(host::HostError::MissingVirtualNode { .. }) => Ok(None),
+            Err(e) => Err(host_error(e)),
+        }
     }
 
     /// Lists all virtual node kinds for a given canonical file ID.

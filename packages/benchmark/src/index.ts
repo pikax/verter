@@ -67,15 +67,6 @@ function loadFixtures(): Fixture[] {
   })
 }
 
-function percentile(sorted: number[], p: number): number {
-  if (sorted.length === 0) return 0
-  const idx = (p / 100) * (sorted.length - 1)
-  const lo = Math.floor(idx)
-  const hi = Math.ceil(idx)
-  if (lo === hi) return sorted[lo]
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo)
-}
-
 async function benchSync(
   label: string,
   fn: () => { errors: string[] },
@@ -100,27 +91,34 @@ async function benchSync(
 
   await bench.run()
   const task = bench.tasks[0]!
-  const r = task.result!
+  const r = task.result! as any
+
+  // tinybench v6: stats are under r.latency / r.throughput (TaskResultWithStatistics)
+  const lat = r.latency || {}
+  const thr = r.throughput || {}
+
+  // Diagnostic: log raw tinybench result to stderr if stats are missing
+  if (!lat.mean && !thr.mean) {
+    process.stderr.write(`[bench-diag] "${label}" — state=${r.state}, latency=${JSON.stringify(lat)}, throughput=${JSON.stringify(thr)}\n`)
+  }
 
   const heapAfter = process.memoryUsage().heapUsed
   const heapUsedMB = Math.max(0, (heapAfter - heapBefore) / (1024 * 1024))
 
-  const sorted = [...(r.samples || [])].sort((a, b) => a - b)
-
   const stats: BenchmarkStats = {
-    mean: r.mean || 0,
-    median: percentile(sorted, 50),
-    p95: percentile(sorted, 95),
-    p99: r.p99 || percentile(sorted, 99),
-    min: r.min || 0,
-    max: r.max || 0,
-    stdDev: r.sd || 0,
+    mean: lat.mean || 0,
+    median: lat.p50 || 0,
+    p95: lat.p75 || 0,
+    p99: lat.p99 || 0,
+    min: lat.min || 0,
+    max: lat.max || 0,
+    stdDev: lat.sd || 0,
     heapUsedMB
   }
 
   return {
     mean: stats.mean,
-    opsPerSec: r.hz || 0,
+    opsPerSec: thr.mean || 0,
     errors,
     stats
   }
@@ -202,10 +200,11 @@ async function stressTest(fixtures: Fixture[]) {
   console.log(`\n  stress-test: ${allSources.length} files (${totalSizeMB} MB total)`)
 
   const run = async (label: string, fn: () => void) => {
-    const bench = new Bench({ time: 30000, warmupIterations: 0, iterations: 1 })
+    const bench = new Bench({ time: 10000, warmupIterations: 0, iterations: 1 })
     bench.add(label, fn)
     await bench.run()
-    return bench.tasks[0]!.result?.mean || 0
+    const r = bench.tasks[0]!.result as any
+    return r?.latency?.mean || 0
   }
 
   const vueMean = await run('vue', () => {

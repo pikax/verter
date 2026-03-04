@@ -573,33 +573,59 @@ jobs:
             if [ -f "pnpm-workspace.yaml" ] || [ -f "pnpm-workspace.yml" ]; then
               PNPM_W="-w"
             fi
-            pnpm add $PNPM_W $INSTALL_PKGS
 
-            # 2. Add pnpm overrides using file: protocol to the tarballs.
-            #    The $packageName syntax doesn't work with tarball-installed packages —
-            #    pnpm resolves the semver version separately, missing the native binary.
-            NUXT_OVERRIDE=""
-            if [ "$BUNDLER" = "nuxt" ] && [ -n "$NUXT_TGZ" ]; then
-              NUXT_OVERRIDE="pkg.pnpm.overrides['@verter/nuxt'] = 'file:${NUXT_TGZ}';"
+            PNPM_ADD_OK=true
+            if ! pnpm add $PNPM_W $INSTALL_PKGS 2>&1; then
+              PNPM_ADD_OK=false
             fi
-            node -e "
-              const fs = require('fs');
-              const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-              pkg.pnpm = pkg.pnpm || {};
-              pkg.pnpm.overrides = pkg.pnpm.overrides || {};
-              pkg.pnpm.overrides['@verter/native'] = 'file:${NATIVE_TGZ}';
-              pkg.pnpm.overrides['@verter/unplugin'] = 'file:${UNPLUGIN_TGZ}';
-              ${NUXT_OVERRIDE}
-              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-            "
 
-            # 3. Reinstall to apply overrides to workspace packages.
-            #    If install fails (e.g. lockfile references a yanked npm version),
-            #    delete the lockfile and retry with fresh resolution.
-            if ! pnpm install --no-frozen-lockfile 2>/dev/null; then
-              echo "⚠️ Reinstall failed, retrying without lockfile..."
-              rm -f pnpm-lock.yaml
-              pnpm install
+            if [ "$PNPM_ADD_OK" = "true" ]; then
+              # 2. Add pnpm overrides using file: protocol to the tarballs.
+              #    The $packageName syntax doesn't work with tarball-installed packages —
+              #    pnpm resolves the semver version separately, missing the native binary.
+              NUXT_OVERRIDE=""
+              if [ "$BUNDLER" = "nuxt" ] && [ -n "$NUXT_TGZ" ]; then
+                NUXT_OVERRIDE="pkg.pnpm.overrides['@verter/nuxt'] = 'file:${NUXT_TGZ}';"
+              fi
+              node -e "
+                const fs = require('fs');
+                const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+                pkg.pnpm = pkg.pnpm || {};
+                pkg.pnpm.overrides = pkg.pnpm.overrides || {};
+                pkg.pnpm.overrides['@verter/native'] = 'file:${NATIVE_TGZ}';
+                pkg.pnpm.overrides['@verter/unplugin'] = 'file:${UNPLUGIN_TGZ}';
+                ${NUXT_OVERRIDE}
+                fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+              "
+
+              # 3. Reinstall to apply overrides to workspace packages.
+              #    Use --prefer-offline to avoid re-fetching metadata for unrelated deps.
+              #    If install fails (e.g. lockfile references a yanked npm version),
+              #    delete the lockfile and retry with fresh resolution.
+              if ! pnpm install --prefer-offline --no-frozen-lockfile 2>&1; then
+                echo "⚠️ Reinstall failed, retrying without lockfile..."
+                rm -f pnpm-lock.yaml
+                if ! pnpm install --prefer-offline 2>&1; then
+                  echo "⚠️ Full reinstall also failed, falling back to direct injection"
+                  PNPM_ADD_OK=false
+                fi
+              fi
+            fi
+
+            if [ "$PNPM_ADD_OK" = "false" ]; then
+              # Fallback: Direct node_modules injection bypassing pnpm resolution entirely.
+              # This avoids failures from upstream broken deps (yanked packages, jsr: protocol, etc.)
+              echo "⚠️ pnpm resolution failed (upstream dep issue), using direct injection"
+              for TGZ in $INSTALL_PKGS; do
+                PKG_NAME=$(tar xzf "$TGZ" -O package/package.json | node -e "
+                  let d='';process.stdin.on('data',c=>d+=c);
+                  process.stdin.on('end',()=>console.log(JSON.parse(d).name))
+                ")
+                TARGET="node_modules/$PKG_NAME"
+                mkdir -p "$TARGET"
+                tar xzf "$TGZ" -C "$TARGET" --strip-components=1
+                echo "  Injected $PKG_NAME → $TARGET"
+              done
             fi
           else
             # 1. Install packages
