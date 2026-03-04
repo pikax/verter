@@ -673,7 +673,7 @@ const {{ pathToFileURL }} = require('url');
     const raw = typeof config === 'function' ? config({{ mode: 'development', command: 'serve' }}) : config;
     const resolved = raw instanceof Promise ? await raw : raw;
     const alias = resolved?.resolve?.alias;
-    if (!alias) {{ process.stdout.write('[]'); return; }}
+    if (!alias) {{ process.stdout.write('__VERTER_ALIASES_BEGIN__[]__VERTER_ALIASES_END__'); return; }}
     let entries = [];
     if (Array.isArray(alias)) {{
       for (const a of alias) {{
@@ -687,10 +687,10 @@ const {{ pathToFileURL }} = require('url');
         if (typeof val === 'string') entries.push({{ find: key, replacement: val }});
       }}
     }}
-    process.stdout.write(JSON.stringify(entries));
+    process.stdout.write('__VERTER_ALIASES_BEGIN__' + JSON.stringify(entries) + '__VERTER_ALIASES_END__');
   }} catch (e) {{
     process.stderr.write('vite config eval error: ' + e.message + '\n');
-    process.stdout.write('[]');
+    process.stdout.write('__VERTER_ALIASES_BEGIN__[]__VERTER_ALIASES_END__');
   }}
 }})();
 "#
@@ -731,24 +731,17 @@ const {{ pathToFileURL }} = require('url');
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stdout = stdout.trim();
-    if stdout.is_empty() {
-        tracing::debug!(
-            "vite config eval returned empty output for {}",
-            config_path_str
-        );
-        return Vec::new();
-    }
-
-    let entries: Vec<ViteAliasEntry> = match serde_json::from_str(stdout) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(
-                "failed to parse vite alias output for {}: {} (raw: {:?})",
-                config_path_str,
-                e,
-                &stdout[..stdout.len().min(200)]
-            );
+    let entries = match parse_vite_alias_stdout(&stdout) {
+        Some(v) => v,
+        None => {
+            let trimmed = stdout.trim();
+            if !trimmed.is_empty() {
+                tracing::debug!(
+                    "failed to parse vite alias output for {} (raw: {:?})",
+                    config_path_str,
+                    &trimmed[..trimmed.len().min(200)]
+                );
+            }
             return Vec::new();
         }
     };
@@ -779,6 +772,36 @@ const {{ pathToFileURL }} = require('url');
 struct ViteAliasEntry {
     find: String,
     replacement: String,
+}
+
+/// Sentinel markers used to extract JSON from potentially noisy Node.js stdout.
+/// The vite config eval script wraps its JSON output in these markers so that
+/// warnings, deprecation notices, or other console output don't corrupt parsing.
+const VITE_SENTINEL_BEGIN: &str = "__VERTER_ALIASES_BEGIN__";
+const VITE_SENTINEL_END: &str = "__VERTER_ALIASES_END__";
+
+/// Parse vite alias JSON from Node.js stdout, handling noise via sentinel markers.
+///
+/// Strategy:
+/// 1. If sentinel markers are present, extract JSON between them (ignores prefix/suffix noise).
+/// 2. Fallback: try parsing the entire trimmed output as JSON (backward compat).
+/// 3. Returns `None` if input is empty, whitespace-only, or unparseable.
+fn parse_vite_alias_stdout(raw: &str) -> Option<Vec<ViteAliasEntry>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Sentinel-based extraction (handles prefix AND suffix noise)
+    if let Some(begin) = trimmed.find(VITE_SENTINEL_BEGIN) {
+        let after = &trimmed[begin + VITE_SENTINEL_BEGIN.len()..];
+        if let Some(end) = after.find(VITE_SENTINEL_END) {
+            return serde_json::from_str(&after[..end]).ok();
+        }
+    }
+
+    // Fallback: try clean parse (backward compat with old eval script)
+    serde_json::from_str(trimmed).ok()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2351,5 +2374,96 @@ export default {{
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── parse_vite_alias_stdout tests ──────────────────────────────────
+
+    #[test]
+    fn parse_vite_alias_stdout_clean_json() {
+        let raw = r#"[{"find":"@","replacement":"/src"}]"#;
+        let result = parse_vite_alias_stdout(raw);
+        assert!(result.is_some(), "should parse clean JSON");
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].find, "@");
+        assert_eq!(entries[0].replacement, "/src");
+    }
+
+    #[test]
+    fn parse_vite_alias_stdout_empty_input() {
+        assert!(
+            parse_vite_alias_stdout("").is_none(),
+            "empty input should return None"
+        );
+        assert!(
+            parse_vite_alias_stdout("  \n  ").is_none(),
+            "whitespace-only input should return None"
+        );
+    }
+
+    #[test]
+    fn parse_vite_alias_stdout_sentinel_markers() {
+        let raw = "some noise\n__VERTER_ALIASES_BEGIN__[{\"find\":\"@\",\"replacement\":\"/src\"}]__VERTER_ALIASES_END__\nmore noise";
+        let result = parse_vite_alias_stdout(raw);
+        assert!(result.is_some(), "should extract JSON between sentinels");
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].find, "@");
+    }
+
+    #[test]
+    fn parse_vite_alias_stdout_sentinel_with_prefix_noise() {
+        let raw = "Warning: something\nDeprecation notice\n__VERTER_ALIASES_BEGIN__[]__VERTER_ALIASES_END__";
+        let result = parse_vite_alias_stdout(raw);
+        assert!(
+            result.is_some(),
+            "should handle prefix noise with sentinels"
+        );
+        assert!(result.unwrap().is_empty(), "should return empty array");
+    }
+
+    #[test]
+    fn parse_vite_alias_stdout_invalid_json_between_sentinels() {
+        let raw = "__VERTER_ALIASES_BEGIN__not-json__VERTER_ALIASES_END__";
+        let result = parse_vite_alias_stdout(raw);
+        assert!(
+            result.is_none(),
+            "should return None when sentinel content is not valid JSON"
+        );
+    }
+
+    #[test]
+    fn parse_vite_alias_stdout_multiple_sentinel_pairs() {
+        // First valid pair should win
+        let raw = "__VERTER_ALIASES_BEGIN__[{\"find\":\"@\",\"replacement\":\"/src\"}]__VERTER_ALIASES_END__ junk __VERTER_ALIASES_BEGIN__[{\"find\":\"~\",\"replacement\":\"/lib\"}]__VERTER_ALIASES_END__";
+        let result = parse_vite_alias_stdout(raw);
+        assert!(result.is_some(), "should use first sentinel pair");
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].find, "@", "should use first pair's content");
+        assert!(
+            entries.iter().all(|e| e.find != "~"),
+            "should not include second pair's content"
+        );
+    }
+
+    #[test]
+    fn parse_vite_alias_stdout_fallback_without_sentinels() {
+        // Backward compat: clean JSON without sentinels
+        let raw = r#"[{"find":"@","replacement":"/src"},{"find":"~","replacement":"/lib"}]"#;
+        let result = parse_vite_alias_stdout(raw);
+        assert!(result.is_some(), "should fall back to direct JSON parse");
+        assert_eq!(result.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parse_vite_alias_stdout_noisy_without_sentinels() {
+        // No sentinels + noise → fallback fails
+        let raw = "ExperimentalWarning: something\n[{\"find\":\"@\"}]";
+        let result = parse_vite_alias_stdout(raw);
+        assert!(
+            result.is_none(),
+            "noisy output without sentinels should return None (fallback parse fails)"
+        );
     }
 }

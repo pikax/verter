@@ -24,9 +24,11 @@ pub struct DocumentRegistry {
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
     /// Default compile profile for TSX generation (LSP mode).
-    /// Wrapped in `RwLock` so `set_embed_ambient_types()` can update it
+    /// Wrapped in `Arc<RwLock>` so `set_embed_ambient_types()` can update it
     /// after `initialized()` determines whether `@verter/types` is installed.
-    pub(crate) tsx_profile: RwLock<CompileProfile>,
+    /// Arc-wrapped so the background init task can share the same profile instance
+    /// and see `embed_ambient_types` toggled without cloning.
+    pub(crate) tsx_profile: Arc<RwLock<CompileProfile>>,
     /// Negotiated position encoding from the client (LSP 3.17).
     /// Set once during `initialize()`, before any documents are opened.
     encoding: RwLock<PositionEncodingKind>,
@@ -57,11 +59,11 @@ impl DocumentRegistry {
         Self {
             host,
             documents: DashMap::new(),
-            tsx_profile: RwLock::new(CompileProfile {
+            tsx_profile: Arc::new(RwLock::new(CompileProfile {
                 source_map: true,
                 target: verter_host::CompileTarget::IDE | verter_host::CompileTarget::TEMPLATE_DATA,
                 ..CompileProfile::default()
-            }),
+            })),
             encoding: RwLock::new(PositionEncodingKind::UTF16),
         }
     }

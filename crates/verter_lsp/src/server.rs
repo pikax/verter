@@ -124,6 +124,21 @@ pub struct HeartbeatParams {
     pub timestamp: u64,
 }
 
+/// Server → client notification: background initialization complete.
+/// Sent after project registry, workspace scanner, and type provider are ready.
+/// The extension uses this to re-request diagnostics for open docs.
+pub enum VerterReady {}
+
+impl tower_lsp_server::ls_types::notification::Notification for VerterReady {
+    type Params = VerterReadyParams;
+    const METHOD: &'static str = "$/verter/ready";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VerterReadyParams {
+    pub gen: u64,
+}
+
 /// Params for `$/onDidChangeTsOrJsFile` notification.
 #[derive(Debug, Deserialize)]
 pub struct OnDidChangeTsOrJsFileParams {
@@ -366,9 +381,11 @@ pub struct VerterLanguageServer {
     position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
     /// Per-project configuration registry (path aliases, lint config, linters).
     /// Initialized during `initialized()` from workspace roots.
-    project_registry: parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
+    /// Arc-wrapped so background init can commit the registry without &self.
+    project_registry: Arc<parking_lot::RwLock<Option<crate::config::ProjectRegistry>>>,
     /// Fallback linter for files outside any project. Uses default config.
-    fallback_linter: parking_lot::RwLock<verter_diagnostics::Linter>,
+    /// Arc-wrapped so background init can update it without &self.
+    fallback_linter: Arc<parking_lot::RwLock<verter_diagnostics::Linter>>,
     /// Action engine — produces quick fixes and refactoring code actions.
     action_engine: verter_actions::ActionEngine,
     /// Lint options from initializationOptions, stored during initialize() for use in initialized().
@@ -418,7 +435,14 @@ pub struct VerterLanguageServer {
     did_change_mutex: tokio::sync::Mutex<()>,
     /// Handle for the background workspace scanner. Receives priority signals
     /// from `did_open` to reorder the scan queue. `None` until `initialized()`.
-    workspace_scanner: tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>,
+    /// Arc-wrapped so background init can install the scanner without &self.
+    workspace_scanner:
+        Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
+    /// Generation counter for background initialization. Incremented each time
+    /// `initialized()` or `did_change_workspace_folders` spawns a new background
+    /// init task. Background tasks check this before committing results to discard
+    /// stale work when a newer init supersedes them.
+    init_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl VerterLanguageServer {
@@ -454,8 +478,10 @@ impl VerterLanguageServer {
             workspace_roots: tokio::sync::Mutex::new(Vec::new()),
             statistics: Arc::new(Statistics::new(500)),
             position_encoding,
-            project_registry: parking_lot::RwLock::new(None),
-            fallback_linter: parking_lot::RwLock::new(verter_diagnostics::Linter::default()),
+            project_registry: Arc::new(parking_lot::RwLock::new(None)),
+            fallback_linter: Arc::new(parking_lot::RwLock::new(
+                verter_diagnostics::Linter::default(),
+            )),
             action_engine: verter_actions::ActionEngine::default(),
             init_lint_options: tokio::sync::Mutex::new(None),
             vite_config_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -468,7 +494,8 @@ impl VerterLanguageServer {
             sync_coordinator,
             last_change_ms: std::sync::atomic::AtomicU64::new(0),
             did_change_mutex: tokio::sync::Mutex::new(()),
-            workspace_scanner: tokio::sync::Mutex::new(None),
+            workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
+            init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1787,6 +1814,291 @@ fn extract_type_from_hover(contents: &str, binding_name: &str) -> Option<String>
     None
 }
 
+// ── Background initialization ───────────────────────────────────────────
+
+/// Spawn the heartbeat task. Sends `$/verter/heartbeat` every 5 seconds.
+/// Called first in `initialized()` so the extension always sees heartbeats,
+/// even during long background initialization.
+fn spawn_heartbeat(client: Client) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let active = ACTIVE_HANDLERS.load(std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(
+                "heartbeat TICK ts={ts} active_handlers={active} thread={:?}",
+                std::thread::current().id()
+            );
+            client
+                .send_notification::<Heartbeat>(HeartbeatParams { timestamp: ts })
+                .await;
+            tracing::info!("heartbeat SENT ts={ts}");
+        }
+    });
+}
+
+/// Arguments for the background initialization task.
+/// All fields are owned or Arc-wrapped so the task can run independently.
+struct BackgroundInitArgs {
+    roots: Vec<String>,
+    node_path: Option<String>,
+    vite_config_enabled: bool,
+    init_lint_opts: Option<serde_json::Value>,
+    my_gen: u64,
+    client: Client,
+    type_provider: Option<Arc<dyn TypeProvider>>,
+    project_registry: Arc<parking_lot::RwLock<Option<crate::config::ProjectRegistry>>>,
+    fallback_linter: Arc<parking_lot::RwLock<verter_diagnostics::Linter>>,
+    workspace_scanner:
+        Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
+    init_generation: Arc<std::sync::atomic::AtomicU64>,
+    project_sync: Option<ProjectSync>,
+    host: Arc<verter_host::VerterHost>,
+    background_synced_files: Arc<DashMap<String, ()>>,
+    is_tsgo: bool,
+    tsx_profile: Arc<parking_lot::RwLock<verter_host::CompileProfile>>,
+}
+
+/// Run all blocking initialization work in the background.
+///
+/// This function is spawned from `initialized()` and performs:
+/// 1. Project registry build (blocking: vite config eval, tsconfig discovery)
+/// 2. Type provider workspace sync (async)
+/// 3. Lint option merging
+/// 4. @verter/types materialisation (blocking FS)
+/// 5. Workspace scanner spawn
+///
+/// Generation checks before each irreversible commit ensure stale init tasks
+/// (superseded by `did_change_workspace_folders`) are discarded.
+async fn background_init(args: BackgroundInitArgs) -> Result<()> {
+    let BackgroundInitArgs {
+        roots,
+        node_path,
+        vite_config_enabled,
+        init_lint_opts,
+        my_gen,
+        client,
+        type_provider,
+        project_registry,
+        fallback_linter,
+        workspace_scanner,
+        init_generation,
+        project_sync,
+        host,
+        background_synced_files,
+        is_tsgo,
+        tsx_profile,
+    } = args;
+
+    // 1. Build project registry (spawn_blocking — blocking I/O: vite eval, tsconfig)
+    let roots_for_registry = roots.clone();
+    let np = node_path.clone();
+    let registry_result = tokio::task::spawn_blocking(move || {
+        crate::config::ProjectRegistry::from_workspace_roots(
+            &roots_for_registry,
+            np.as_deref(),
+            vite_config_enabled,
+        )
+    })
+    .await;
+
+    let mut registry = match registry_result {
+        Ok(r) => r,
+        Err(e) => {
+            if e.is_panic() {
+                tracing::error!("project registry build panicked: {e}");
+                client
+                    .show_message(
+                        MessageType::WARNING,
+                        "Verter: initialization failed (panic in config discovery)",
+                    )
+                    .await;
+            }
+            return Err(tower_lsp_server::jsonrpc::Error::internal_error());
+        }
+    };
+
+    // Log discovered projects
+    for project in registry.projects() {
+        tracing::info!(
+            "project config: root={}, aliases={}, lint_explicit={}",
+            project.root,
+            !project.path_resolver.is_empty(),
+            project.lint_explicitly_configured,
+        );
+    }
+
+    // 2. Type provider: workspace folder sync + path config (async, non-blocking)
+    if let Some(tp) = &type_provider {
+        let added: Vec<serde_json::Value> = roots
+            .iter()
+            .map(|uri| {
+                serde_json::json!({
+                    "uri": uri,
+                    "name": uri.rsplit('/').next().unwrap_or(uri)
+                })
+            })
+            .collect();
+        let _ = tp.update_workspace_folders(added, vec![]).await;
+
+        for project in registry.projects() {
+            let project_root_path = std::path::PathBuf::from(&project.root);
+            let mut discovery = crate::config::TsConfigDiscovery::new();
+            discovery.discover(&project_root_path);
+
+            let candidates = [
+                discovery.find_config_for(&project_root_path.join("src/dummy.ts")),
+                discovery.configs().first(),
+            ];
+            for candidate in candidates.into_iter().flatten() {
+                if let Some((base_url, paths)) =
+                    crate::config::TsConfigPathResolver::raw_paths_json(&candidate.config_path)
+                {
+                    tracing::info!(
+                        "configuring tsserver paths for {} (baseUrl: {})",
+                        project.root,
+                        base_url,
+                    );
+                    if let Err(e) = tp.configure_paths(&base_url, paths).await {
+                        tracing::warn!("failed to configure tsserver paths: {e}");
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // 3. Merge lint options
+    if let Some(init_opts) = init_lint_opts {
+        let mut resolved = crate::config::ResolvedLintConfig::default();
+        crate::config::merge_init_options(&mut resolved, &init_opts);
+        if resolved.explicitly_configured {
+            *fallback_linter.write() = verter_diagnostics::Linter::new(resolved.config.clone());
+            registry.apply_default_lint(&resolved.config);
+        }
+    }
+
+    // 4. Generation check → commit registry
+    if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+        tracing::info!("init gen={my_gen} superseded, discarding registry");
+        return Ok(());
+    }
+    *project_registry.write() = Some(registry);
+
+    // 5. Materialize @verter/types (spawn_blocking — blocking FS)
+    let roots_for_types = roots.clone();
+    let any_failed =
+        tokio::task::spawn_blocking(move || materialize_verter_types(&roots_for_types))
+            .await
+            .unwrap_or(true);
+    if any_failed {
+        tsx_profile.write().embed_ambient_types = true;
+    }
+
+    // 6. Generation check → spawn workspace scanner
+    if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+        tracing::info!("init gen={my_gen} superseded before scanner, discarding");
+        return Ok(());
+    }
+
+    let roots_for_scan = roots.clone();
+    let tsconfig_patterns =
+        tokio::task::spawn_blocking(move || collect_tsconfig_patterns(&roots_for_scan))
+            .await
+            .unwrap_or_default();
+
+    let root_paths: Vec<std::path::PathBuf> = roots
+        .iter()
+        .map(|uri| std::path::PathBuf::from(crate::documents::uri_to_canonical_id_from_str(uri)))
+        .collect();
+
+    let scanner = crate::workspace_scanner::spawn_workspace_scanner(
+        crate::workspace_scanner::WorkspaceScannerConfig {
+            root_paths,
+            host: Arc::clone(&host),
+            project_sync: project_sync.clone(),
+            background_synced_files: Arc::clone(&background_synced_files),
+            is_tsgo,
+            tsx_profile: tsx_profile.read().clone(),
+            tsconfig_patterns,
+        },
+    );
+
+    {
+        let mut guard = workspace_scanner.lock().await;
+        if let Some(old) = guard.take() {
+            old.stop();
+        }
+        *guard = Some(scanner);
+    }
+
+    // 7. Generation check → notify ready
+    if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+        return Ok(());
+    }
+    client
+        .send_notification::<VerterReady>(VerterReadyParams { gen: my_gen })
+        .await;
+
+    tracing::info!("background init complete (gen={my_gen})");
+    Ok(())
+}
+
+/// Materialise `@verter/types` in all workspace roots that don't already have it.
+/// Returns `true` if any root failed (caller should fall back to embedding ambient types).
+fn materialize_verter_types(roots: &[String]) -> bool {
+    let mut any_failed = false;
+    for root_uri in roots {
+        let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
+        let root_path = std::path::PathBuf::from(&canonical);
+        let types_index = root_path.join("node_modules/@verter/types/index.d.ts");
+        if !types_index.exists() {
+            let types_dir = root_path.join("node_modules/@verter/types");
+            match std::fs::create_dir_all(&types_dir) {
+                Ok(()) => {
+                    let dts = verter_host::VERTER_TYPES_STANDALONE_DTS;
+                    let pkg = r#"{"name":"@verter/types","types":"index.d.ts"}"#;
+                    if let Err(e) = std::fs::write(types_dir.join("index.d.ts"), dts) {
+                        tracing::warn!("failed to write @verter/types index.d.ts: {e}");
+                        any_failed = true;
+                    } else if let Err(e) = std::fs::write(types_dir.join("package.json"), pkg) {
+                        tracing::warn!("failed to write @verter/types package.json: {e}");
+                    } else {
+                        tracing::info!(
+                            "@verter/types not installed — materialised at {}",
+                            types_dir.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to create @verter/types dir: {e} — falling back to embed"
+                    );
+                    any_failed = true;
+                }
+            }
+        }
+    }
+    any_failed
+}
+
+/// Collect tsconfig patterns for all workspace roots (blocking FS walk).
+fn collect_tsconfig_patterns(roots: &[String]) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for root_uri in roots {
+        let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
+        let root_path = std::path::PathBuf::from(&canonical);
+        let mut ts_discovery = crate::config::TsConfigDiscovery::new();
+        ts_discovery.discover(&root_path);
+        patterns.extend(ts_discovery.configs().iter().map(|e| e.pattern.clone()));
+    }
+    patterns
+}
+
 impl LanguageServer for VerterLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         tracing::info!("verter-lsp initializing");
@@ -1878,6 +2190,12 @@ impl LanguageServer for VerterLanguageServer {
 
     async fn initialized(&self, _params: InitializedParams) {
         tracing::info!("verter-lsp initialized");
+
+        // A. Spawn heartbeat FIRST — ensures the extension sees heartbeats
+        // even while background initialization is running.
+        spawn_heartbeat(self.client.clone());
+
+        // B. Send immediate non-blocking notifications
         let tp_label = self.type_provider_kind.to_string();
         self.client
             .log_message(
@@ -1889,186 +2207,16 @@ impl LanguageServer for VerterLanguageServer {
             )
             .await;
 
-        // Build per-project configuration registry (path aliases + lint configs + vite aliases)
-        // Clone roots out of the mutex before expensive work (Node.js spawn for vite
-        // config, type provider calls) to avoid holding the async mutex across .await points.
-        let node_path = crate::tsserver::find_node();
-        let vite_config_enabled = self
-            .vite_config_enabled
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let roots_snapshot = self.workspace_roots.lock().await.clone();
-        if !roots_snapshot.is_empty() {
-            let mut registry = crate::config::ProjectRegistry::from_workspace_roots(
-                &roots_snapshot,
-                node_path.as_deref(),
-                vite_config_enabled,
-            );
-
-            // Log discovered projects
-            for project in registry.projects() {
-                tracing::info!(
-                    "project config: root={}, aliases={}, lint_explicit={}",
-                    project.root,
-                    !project.path_resolver.is_empty(),
-                    project.lint_explicitly_configured,
-                );
-            }
-
-            // Populate type provider's workspace folders (tsserver uses these
-            // for per-file projectRootPath). Without this, tsserver falls back
-            // to the global workspace root for all files until
-            // did_change_workspace_folders fires.
-            if let Some(tp) = &self.type_provider {
-                let added: Vec<serde_json::Value> = roots_snapshot
-                    .iter()
-                    .map(|uri| {
-                        serde_json::json!({
-                            "uri": uri,
-                            "name": uri.rsplit('/').next().unwrap_or(uri)
-                        })
-                    })
-                    .collect();
-                let _ = tp.update_workspace_folders(added, vec![]).await;
-            }
-
-            // Send discovered paths to tsserver for each project (inferred project fallback)
-            if let Some(tp) = &self.type_provider {
-                for project in registry.projects() {
-                    let project_root_path = std::path::PathBuf::from(&project.root);
-                    let mut discovery = crate::config::TsConfigDiscovery::new();
-                    discovery.discover(&project_root_path);
-
-                    // Find the best tsconfig for this project
-                    let candidates = [
-                        discovery.find_config_for(&project_root_path.join("src/dummy.ts")),
-                        discovery.configs().first(),
-                    ];
-                    for candidate in candidates.into_iter().flatten() {
-                        if let Some((base_url, paths)) =
-                            crate::config::TsConfigPathResolver::raw_paths_json(
-                                &candidate.config_path,
-                            )
-                        {
-                            tracing::info!(
-                                "configuring tsserver paths for {} (baseUrl: {})",
-                                project.root,
-                                base_url,
-                            );
-                            if let Err(e) = tp.configure_paths(&base_url, paths).await {
-                                tracing::warn!("failed to configure tsserver paths: {e}");
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Merge VS Code initializationOptions into per-project linters
-            // (for projects without explicit config) and the fallback linter.
-            {
-                if let Some(init_opts) = self.init_lint_options.lock().await.take() {
-                    let mut resolved = crate::config::ResolvedLintConfig::default();
-                    crate::config::merge_init_options(&mut resolved, &init_opts);
-                    if resolved.explicitly_configured {
-                        *self.fallback_linter.write() =
-                            verter_diagnostics::Linter::new(resolved.config.clone());
-                        // Also apply to per-project linters that don't have their own config
-                        registry.apply_default_lint(&resolved.config);
-                    }
-                }
-            }
-
-            *self.project_registry.write() = Some(registry);
-        }
-
-        // Ensure @verter/types is available for TSGO module resolution.
-        // Materialise in all workspace roots that don't already have it.
-        {
-            let roots = self.workspace_roots.lock().await;
-            let mut any_failed = false;
-            for root_uri in roots.iter() {
-                let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
-                let root_path = std::path::PathBuf::from(&canonical);
-                let types_index = root_path.join("node_modules/@verter/types/index.d.ts");
-                if !types_index.exists() {
-                    let types_dir = root_path.join("node_modules/@verter/types");
-                    match std::fs::create_dir_all(&types_dir) {
-                        Ok(()) => {
-                            let dts = verter_host::VERTER_TYPES_STANDALONE_DTS;
-                            let pkg = r#"{"name":"@verter/types","types":"index.d.ts"}"#;
-                            if let Err(e) = std::fs::write(types_dir.join("index.d.ts"), dts) {
-                                tracing::warn!("failed to write @verter/types index.d.ts: {e}");
-                                any_failed = true;
-                            } else if let Err(e) =
-                                std::fs::write(types_dir.join("package.json"), pkg)
-                            {
-                                tracing::warn!("failed to write @verter/types package.json: {e}");
-                            } else {
-                                tracing::info!(
-                                    "@verter/types not installed — materialised at {}",
-                                    types_dir.display()
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "failed to create @verter/types dir: {e} — falling back to embed"
-                            );
-                            any_failed = true;
-                        }
-                    }
-                }
-            }
-            if any_failed {
-                self.documents.set_embed_ambient_types(true);
-            }
-        }
-
-        // Spawn async workspace scanner to find, compile, and sync .vue files
-        // in the background. Scans all workspace roots.
-        {
-            let roots = self.workspace_roots.lock().await;
-            if !roots.is_empty() {
-                // Collect tsconfig patterns from all workspace roots
-                let mut tsconfig_patterns = Vec::new();
-                let mut root_paths = Vec::new();
-                for root_uri in roots.iter() {
-                    let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
-                    let root_path = std::path::PathBuf::from(&canonical);
-                    let mut ts_discovery = crate::config::TsConfigDiscovery::new();
-                    ts_discovery.discover(&root_path);
-                    tsconfig_patterns
-                        .extend(ts_discovery.configs().iter().map(|e| e.pattern.clone()));
-                    root_paths.push(root_path);
-                }
-
-                let scanner = crate::workspace_scanner::spawn_workspace_scanner(
-                    crate::workspace_scanner::WorkspaceScannerConfig {
-                        root_paths,
-                        host: Arc::clone(&self.documents.host),
-                        project_sync: self.project_sync.clone(),
-                        background_synced_files: Arc::clone(&self.background_synced_files),
-                        is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-                        tsx_profile: self.documents.tsx_profile.read().clone(),
-                        tsconfig_patterns,
-                    },
-                );
-                *self.workspace_scanner.lock().await = Some(scanner);
-            }
-        }
-
         // Notify the extension of the type provider child PID for orphan cleanup.
         if let Some(tp) = &self.type_provider {
             if let Some(pid) = tp.child_pid() {
                 let kind = self.type_provider_kind.to_string().to_lowercase();
-                // Send the new notification with kind info.
                 self.client
                     .send_notification::<TypeProviderStarted>(TypeProviderStartedParams {
                         pid,
                         kind: kind.clone(),
                     })
                     .await;
-                // Also send the legacy notification for backward compatibility.
                 self.client
                     .send_notification::<TsgoStarted>(TsgoStartedParams { pid })
                     .await;
@@ -2098,28 +2246,43 @@ impl LanguageServer for VerterLanguageServer {
                 .await;
         }
 
-        // Start heartbeat: send $/verter/heartbeat every 5 seconds.
-        // If the tokio runtime is starved (e.g., by stdout pipe backpressure),
-        // the heartbeat task can't run and heartbeats stop. The extension detects
-        // the missing heartbeats and restarts the server.
-        let heartbeat_client = self.client.clone();
+        // C. Read inputs, release locks
+        let roots = self.workspace_roots.lock().await.clone();
+        if roots.is_empty() {
+            return;
+        }
+        let init_lint_opts = self.init_lint_options.lock().await.take();
+        let my_gen = self
+            .init_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+
+        // D. Clone Arcs for background task
+        let args = BackgroundInitArgs {
+            roots,
+            node_path: crate::tsserver::find_node(),
+            vite_config_enabled: self
+                .vite_config_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
+            init_lint_opts,
+            my_gen,
+            client: self.client.clone(),
+            type_provider: self.type_provider.clone(),
+            project_registry: Arc::clone(&self.project_registry),
+            fallback_linter: Arc::clone(&self.fallback_linter),
+            workspace_scanner: Arc::clone(&self.workspace_scanner),
+            init_generation: Arc::clone(&self.init_generation),
+            project_sync: self.project_sync.clone(),
+            host: Arc::clone(&self.documents.host),
+            background_synced_files: Arc::clone(&self.background_synced_files),
+            is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
+            tsx_profile: Arc::clone(&self.documents.tsx_profile),
+        };
+
+        // E. Spawn background init (fire-and-forget)
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let active = ACTIVE_HANDLERS.load(std::sync::atomic::Ordering::Relaxed);
-                tracing::info!(
-                    "heartbeat TICK ts={ts} active_handlers={active} thread={:?}",
-                    std::thread::current().id()
-                );
-                heartbeat_client
-                    .send_notification::<Heartbeat>(HeartbeatParams { timestamp: ts })
-                    .await;
-                tracing::info!("heartbeat SENT ts={ts}");
+            if let Err(e) = background_init(args).await {
+                tracing::error!("background initialization failed: {e}");
             }
         });
     }
@@ -2302,16 +2465,14 @@ impl LanguageServer for VerterLanguageServer {
         let _hg = HandlerGuard::new("did_change_workspace_folders");
         let event = &params.event;
 
-        // Update workspace_roots
+        // Update workspace_roots (quick, non-blocking)
         {
             let mut roots = self.workspace_roots.lock().await;
-            // Remove closed folders
             for removed in &event.removed {
                 let uri_str = removed.uri.as_str().to_string();
                 roots.retain(|r| r != &uri_str);
                 tracing::info!("workspace folder removed: {}", uri_str);
             }
-            // Add new folders
             for added in &event.added {
                 let uri_str = added.uri.as_str().to_string();
                 if !roots.contains(&uri_str) {
@@ -2321,31 +2482,7 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
-        // Rebuild ProjectRegistry from updated roots.
-        // Clone roots to release the mutex before expensive work (vite config eval).
-        let node_path = crate::tsserver::find_node();
-        let vite_config_enabled = self
-            .vite_config_enabled
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let roots_snapshot = self.workspace_roots.lock().await.clone();
-        if !roots_snapshot.is_empty() {
-            let registry = crate::config::ProjectRegistry::from_workspace_roots(
-                &roots_snapshot,
-                node_path.as_deref(),
-                vite_config_enabled,
-            );
-            for project in registry.projects() {
-                tracing::info!(
-                    "project config (rebuilt): root={}, aliases={}, lint_explicit={}",
-                    project.root,
-                    !project.path_resolver.is_empty(),
-                    project.lint_explicitly_configured,
-                );
-            }
-            *self.project_registry.write() = Some(registry);
-        }
-
-        // Forward to type provider (TSGO supports workspace/didChangeWorkspaceFolders)
+        // Forward to type provider immediately (async, non-blocking)
         if let Some(tp) = &self.type_provider {
             let added: Vec<serde_json::Value> = event
                 .added
@@ -2370,55 +2507,43 @@ impl LanguageServer for VerterLanguageServer {
             let _ = tp.update_workspace_folders(added, removed).await;
         }
 
-        // Scan newly added roots for .vue files in background (so imports resolve)
-        if !event.added.is_empty() {
-            let mut new_root_paths = Vec::new();
-            let mut tsconfig_patterns = Vec::new();
-            for folder in &event.added {
-                let canonical = crate::documents::uri_to_canonical_id_from_str(folder.uri.as_str());
-                let root_path = std::path::PathBuf::from(&canonical);
-                let mut ts_discovery = crate::config::TsConfigDiscovery::new();
-                ts_discovery.discover(&root_path);
-                tsconfig_patterns
-                    .extend(ts_discovery.configs().iter().map(|e| e.pattern.clone()));
-                new_root_paths.push(root_path);
-            }
-            if !new_root_paths.is_empty() {
-                let scanner = crate::workspace_scanner::spawn_workspace_scanner(
-                    crate::workspace_scanner::WorkspaceScannerConfig {
-                        root_paths: new_root_paths,
-                        host: Arc::clone(&self.documents.host),
-                        project_sync: self.project_sync.clone(),
-                        background_synced_files: Arc::clone(&self.background_synced_files),
-                        is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-                        tsx_profile: self.documents.tsx_profile.read().clone(),
-                        tsconfig_patterns,
-                    },
-                );
-                // Replace the scanner handle so did_open priority signals go to the new one
-                *self.workspace_scanner.lock().await = Some(scanner);
-            }
+        // Clone roots snapshot and increment generation for background rebuild
+        let roots = self.workspace_roots.lock().await.clone();
+        if roots.is_empty() {
+            return;
         }
+        let my_gen = self
+            .init_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
 
-        // Materialise @verter/types in newly added roots
-        for added in &event.added {
-            let canonical = crate::documents::uri_to_canonical_id_from_str(added.uri.as_str());
-            let root_path = std::path::PathBuf::from(&canonical);
-            let types_index = root_path.join("node_modules/@verter/types/index.d.ts");
-            if !types_index.exists() {
-                let types_dir = root_path.join("node_modules/@verter/types");
-                if let Ok(()) = std::fs::create_dir_all(&types_dir) {
-                    let dts = verter_host::VERTER_TYPES_STANDALONE_DTS;
-                    let pkg = r#"{"name":"@verter/types","types":"index.d.ts"}"#;
-                    let _ = std::fs::write(types_dir.join("index.d.ts"), dts);
-                    let _ = std::fs::write(types_dir.join("package.json"), pkg);
-                    tracing::info!(
-                        "@verter/types materialised in new root: {}",
-                        types_dir.display()
-                    );
-                }
+        // Spawn background task for the blocking work (same as background_init)
+        let args = BackgroundInitArgs {
+            roots,
+            node_path: crate::tsserver::find_node(),
+            vite_config_enabled: self
+                .vite_config_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
+            init_lint_opts: None,
+            my_gen,
+            client: self.client.clone(),
+            type_provider: self.type_provider.clone(),
+            project_registry: Arc::clone(&self.project_registry),
+            fallback_linter: Arc::clone(&self.fallback_linter),
+            workspace_scanner: Arc::clone(&self.workspace_scanner),
+            init_generation: Arc::clone(&self.init_generation),
+            project_sync: self.project_sync.clone(),
+            host: Arc::clone(&self.documents.host),
+            background_synced_files: Arc::clone(&self.background_synced_files),
+            is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
+            tsx_profile: Arc::clone(&self.documents.tsx_profile),
+        };
+
+        tokio::spawn(async move {
+            if let Err(e) = background_init(args).await {
+                tracing::error!("background workspace folder rebuild failed: {e}");
             }
-        }
+        });
     }
 
     async fn did_create_files(&self, params: CreateFilesParams) {

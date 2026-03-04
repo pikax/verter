@@ -367,21 +367,39 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
   // The Rust server sends $/verter/heartbeat every 5 seconds. If we don't
   // receive one for 30 seconds, the server is likely frozen (e.g., tokio
   // runtime starvation from stdout pipe backpressure). Auto-restart it.
+  //
+  // Uses a 60s initial grace period to allow background initialization
+  // (vite config eval, workspace scan) to complete before enforcing the
+  // 30s timeout. The first heartbeat received switches to the normal 30s window.
   let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
   const HEARTBEAT_TIMEOUT_MS = 30_000;
+  const HEARTBEAT_INITIAL_TIMEOUT_MS = 60_000;
+  let heartbeatInitialized = false;
 
   function resetHeartbeatTimer() {
     if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    const timeout = heartbeatInitialized ? HEARTBEAT_TIMEOUT_MS : HEARTBEAT_INITIAL_TIMEOUT_MS;
+    heartbeatInitialized = true; // After first reset from heartbeat, use normal timeout
     heartbeatTimer = setTimeout(async () => {
-      log.error("No heartbeat from Verter LSP for 30s — server appears frozen, restarting...");
+      log.error(`No heartbeat from Verter LSP for ${timeout / 1000}s — server appears frozen, restarting...`);
       await restartLS(false);
-    }, HEARTBEAT_TIMEOUT_MS);
+    }, timeout);
   }
 
   function registerHeartbeatMonitor(lc: LanguageClient) {
-    resetHeartbeatTimer();
+    // Start with initial grace period (60s) — background init may take time.
+    // The first heartbeat received switches to the normal 30s timeout.
+    heartbeatInitialized = false;
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(async () => {
+      log.error(`No heartbeat from Verter LSP for ${HEARTBEAT_INITIAL_TIMEOUT_MS / 1000}s — server appears frozen, restarting...`);
+      await restartLS(false);
+    }, HEARTBEAT_INITIAL_TIMEOUT_MS);
     lc.onNotification(NotificationType.Heartbeat, () => {
       resetHeartbeatTimer();
+    });
+    lc.onNotification(NotificationType.Ready, (params: { gen: number }) => {
+      log.info(`Verter ready (init generation ${params.gen})`);
     });
   }
 

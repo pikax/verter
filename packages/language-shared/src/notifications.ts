@@ -39,6 +39,7 @@ export enum NotificationType {
   TsgoStarted = "$/verter/tsgoStarted",
   TypeProviderStarted = "$/verter/typeProviderStarted",
   Heartbeat = "$/verter/heartbeat",
+  Ready = "$/verter/ready",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -73,5 +74,8 @@ export type NotificationParams = {
   };
   [NotificationType.Heartbeat]: {
     timestamp: number;
+  };
+  [NotificationType.Ready]: {
+    gen: number;
   };
 };

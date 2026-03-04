@@ -27,6 +27,7 @@ use crate::tsgo::project_sync::ProjectSync;
 /// to the front of the processing queue.
 pub struct WorkspaceScannerHandle {
     tx: mpsc::UnboundedSender<ScannerSignal>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl WorkspaceScannerHandle {
@@ -34,6 +35,12 @@ impl WorkspaceScannerHandle {
     /// directory siblings to the front of the scan queue.
     pub fn signal_priority(&self, canonical_id: String) {
         let _ = self.tx.send(ScannerSignal::PriorityFile(canonical_id));
+    }
+
+    /// Cancel the scanner task. Safe to call multiple times; cancels at the
+    /// next `.await` point inside the scanner loop.
+    pub fn stop(&self) {
+        self.task.abort();
     }
 }
 
@@ -213,8 +220,8 @@ const BATCH_SIZE: usize = 10;
 /// 5. Accepts [`ScannerSignal::PriorityFile`] to dynamically reorder the queue
 pub fn spawn_workspace_scanner(config: WorkspaceScannerConfig) -> WorkspaceScannerHandle {
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(scanner_loop(config, rx));
-    WorkspaceScannerHandle { tx }
+    let task = tokio::spawn(scanner_loop(config, rx));
+    WorkspaceScannerHandle { tx, task }
 }
 
 async fn scanner_loop(
