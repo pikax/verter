@@ -10,6 +10,7 @@ pub mod sync_coordinator;
 pub mod tsgo;
 pub mod tsserver;
 pub mod utils;
+pub mod workspace_scanner;
 
 #[cfg(test)]
 mod integration_tests;

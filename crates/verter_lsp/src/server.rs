@@ -409,6 +409,9 @@ pub struct VerterLanguageServer {
     /// lock at a time. Others `.await` this mutex, YIELDING their worker thread back to
     /// the runtime so timers, completions, and heartbeats can still run.
     did_change_mutex: tokio::sync::Mutex<()>,
+    /// Handle for the background workspace scanner. Receives priority signals
+    /// from `did_open` to reorder the scan queue. `None` until `initialized()`.
+    workspace_scanner: tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>,
 }
 
 impl VerterLanguageServer {
@@ -458,6 +461,7 @@ impl VerterLanguageServer {
             sync_coordinator,
             last_change_ms: std::sync::atomic::AtomicU64::new(0),
             did_change_mutex: tokio::sync::Mutex::new(()),
+            workspace_scanner: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -612,46 +616,6 @@ impl VerterLanguageServer {
             })
         } else {
             None
-        }
-    }
-
-    /// Scan the workspace for .vue files and upsert them into the host.
-    /// Runs in the background so initialization isn't blocked.
-    fn scan_workspace_vue_files(&self, root_uri: &str) {
-        let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
-        let root_path = std::path::PathBuf::from(&canonical);
-        if !root_path.is_dir() {
-            tracing::warn!(
-                "scan_workspace: root path is not a directory: {:?}",
-                root_path
-            );
-            return;
-        }
-
-        let mut count = 0u32;
-        scan_vue_files_recursive(&root_path, &self.documents.host, &mut count);
-        tracing::info!("scan_workspace: indexed {} .vue files", count);
-
-        // When a type provider is connected, compile all scanned files to TSX
-        // so that TSGO can resolve imports of non-open .vue files.
-        if self.type_provider.is_some() {
-            let profile = self.documents.tsx_profile.read().clone();
-            let mut compiled = 0u32;
-            for (canonical_id, kind) in self.documents.host.list_files() {
-                if kind == verter_host::FileKind::VueSfc
-                    && self
-                        .documents
-                        .host
-                        .ensure_compiled(&canonical_id, &profile)
-                        .is_ok()
-                {
-                    compiled += 1;
-                }
-            }
-            tracing::info!(
-                "scan_workspace: compiled {} .vue files for type provider",
-                compiled
-            );
         }
     }
 
@@ -1700,47 +1664,6 @@ fn compute_relative_path(from_dir: &str, to_file: &str) -> String {
     }
 }
 
-/// Recursively scan a directory for .vue files and upsert them into the host.
-/// Skips `node_modules`, dot-directories, and `dist`/`build` directories.
-fn scan_vue_files_recursive(
-    dir: &std::path::Path,
-    host: &verter_host::VerterHost,
-    count: &mut u32,
-) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-
-        if path.is_dir() {
-            // Skip node_modules, dot-dirs, dist, build
-            if name == "node_modules" || name.starts_with('.') || name == "dist" || name == "build"
-            {
-                continue;
-            }
-            scan_vue_files_recursive(&path, host, count);
-        } else if name.ends_with(".vue") {
-            // Read file and upsert into host (analysis-only, no compilation needed)
-            if let Ok(source) = std::fs::read_to_string(&path) {
-                let file_path = path.to_string_lossy().replace('\\', "/");
-                let _ = host.upsert(verter_host::UpsertRequest {
-                    canonical_id: None,
-                    input_id: file_path,
-                    source: source.into(),
-                    file_kind: verter_host::FileKind::VueSfc,
-                    aliases: Vec::new(),
-                });
-                *count += 1;
-            }
-        }
-    }
-}
-
 /// Check if a resolved import path matches a target file path.
 ///
 /// Handles cases where the import source omits the `.vue` extension:
@@ -2039,76 +1962,38 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
-        // Scan workspace for .vue files to enable auto-import completions.
+        // Spawn async workspace scanner to find, compile, and sync .vue files
+        // in the background. This replaces the old synchronous scan that blocked
+        // initialized() for seconds on large workspaces.
         {
             let root = self.workspace_root.lock().await;
             if let Some(root_uri) = root.as_ref() {
-                self.scan_workspace_vue_files(root_uri);
-            }
-        }
+                let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
+                let root_path = std::path::PathBuf::from(&canonical);
 
-        // Batch-sync all compiled .vue files to the type provider in the background.
-        // This makes the type provider see proper types for ALL .vue files, not just open ones.
-        // Collect data synchronously (fast — already compiled), then spawn async sync.
-        //
-        // For TSGO: only sync DTS (.vue.ts) for background files. The DTS has a proper
-        // `export default` for cross-file imports. IDE (.vue.tsx) files are only synced when
-        // a file is opened in the editor (for internal type checking). If IDE files were
-        // synced here too, TSGO's module resolution would prefer .vue.tsx over .vue.ts,
-        // and the IDE output has no default export — causing "no default export" errors.
-        //
-        // For tsserver: sync IDE files as before (the TS plugin handles resolution).
-        if let Some(sync) = &self.project_sync {
-            let profile = self.documents.tsx_profile.read().clone();
-            let mut tsx_files: Vec<(String, String)> = Vec::new();
-            let mut dts_files: Vec<(String, String)> = Vec::new();
-            for (canonical_id, kind) in self.documents.host.list_files() {
-                if kind == verter_host::FileKind::VueSfc {
-                    if let Some(ide) = self.documents.host.get_ide(&canonical_id, &profile) {
-                        let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-                        let tsx_path = format!("{canonical_id}{ext}");
-                        tsx_files.push((tsx_path, ide.code.to_string()));
-                    }
-                    if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
-                        let base = canonical_id.strip_suffix(".vue").unwrap_or(&canonical_id);
-                        let dts_path = format!("{base}.vue.ts");
-                        dts_files.push((dts_path, api.code.to_string()));
-                    }
-                }
-            }
-            let sync = sync.clone();
-            let bg_files = Arc::clone(&self.background_synced_files);
-            let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
-            tokio::spawn(async move {
-                let mut synced = 0u32;
-                if !is_tsgo {
-                    // tsserver: sync IDE files (TS plugin handles resolution)
-                    for (tsx_path, code) in &tsx_files {
-                        let result = sync.load_tsx(tsx_path, code).await;
-                        if result.is_ok() {
-                            bg_files.insert(tsx_path.clone(), ());
-                            synced += 1;
-                        }
-                    }
-                }
-                for (dts_path, code) in &dts_files {
-                    // For TSGO, open DTS files (sends didOpen) so they're in TSGO's
-                    // virtual FS for import resolution. For tsserver, load only.
-                    let result = if is_tsgo {
-                        sync.open_dts(dts_path, code).await
-                    } else {
-                        sync.load_dts(dts_path, code).await
-                    };
-                    if result.is_ok() && is_tsgo {
-                        bg_files.insert(dts_path.clone(), ());
-                        synced += 1;
-                    }
-                }
-                tracing::info!(
-                    "scan_workspace: synced {} .vue files to type provider (background)",
-                    synced
+                // Reuse TsConfigDiscovery from the path alias section above.
+                // Re-discover here (fast — just glob) to extract coverage patterns.
+                let mut ts_discovery = crate::config::TsConfigDiscovery::new();
+                ts_discovery.discover(&root_path);
+                let tsconfig_patterns: Vec<String> = ts_discovery
+                    .configs()
+                    .iter()
+                    .map(|e| e.pattern.clone())
+                    .collect();
+
+                let scanner = crate::workspace_scanner::spawn_workspace_scanner(
+                    crate::workspace_scanner::WorkspaceScannerConfig {
+                        root_path,
+                        host: Arc::clone(&self.documents.host),
+                        project_sync: self.project_sync.clone(),
+                        background_synced_files: Arc::clone(&self.background_synced_files),
+                        is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
+                        tsx_profile: self.documents.tsx_profile.read().clone(),
+                        tsconfig_patterns,
+                    },
                 );
-            });
+                *self.workspace_scanner.lock().await = Some(scanner);
+            }
         }
 
         // Notify the extension of the type provider child PID for orphan cleanup.
@@ -2205,6 +2090,13 @@ impl LanguageServer for VerterLanguageServer {
                 uri.as_str(),
             );
         }
+        // Signal the background scanner to prioritize this file's directory
+        if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+            if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
+                scanner.signal_priority(canonical_id);
+            }
+        }
+
         tokio::join!(
             self.sync_ide_to_provider(uri),
             self.sync_api_to_provider(uri),

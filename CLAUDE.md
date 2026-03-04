@@ -119,8 +119,9 @@ Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/trait
 - `tsserver/mod.rs` — `find_tsserver()`, `find_node()`, `detect_ts_major_version()`
 - `tsserver/ipc.rs` — `TsserverTypeProvider`, newline-delimited JSON transport, position conversion
 - `tsserver/resilient.rs` — `ResilientTsserverProvider` (crash detection + auto-restart)
+- `workspace_scanner.rs` — Async background workspace scanner with priority-based file loading
 
-**Background file sync**: During `initialized()`, the LSP batch-compiles ALL workspace `.vue` files to TSX and syncs them to the type provider. This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
+**Background file sync**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
 
 **Freeze prevention** (fast typing): Three layers prevent tokio runtime starvation during rapid typing:
 1. **SyncCoordinator** (`sync_coordinator.rs`): Single long-lived task replaces spawn-per-keystroke debounce. Uses mpsc channel + 300ms deadline map to guarantee exactly one sync per file after typing stops. Holds shared `Arc<VerterHost>`, `ProjectSync`, and `Arc<RwLock<PositionEncodingKind>>` (negotiated encoding from `initialize()`).
@@ -128,6 +129,16 @@ Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/trait
 3. **Hang detection** (`tsgo/ipc.rs`): `LspTransport` tracks `consecutive_failures` (AtomicU32). After 3 consecutive request timeouts, fires `crash_notify` to trigger `ResilientTypeProvider`'s existing restart machinery. Notifications use `try_send()` (non-blocking) to prevent channel backpressure.
 
 **Heartbeat watchdog**: The server sends `$/verter/heartbeat` every 5s from `initialized()`. The VS Code extension monitors heartbeats — if none arrive for 30s, it auto-restarts the server. This is the last-resort safety net for runtime starvation.
+
+**Async workspace scanning**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task instead of scanning synchronously. The scanner walks the filesystem, compiles `.vue` files to TSX, and syncs them to the type provider in priority order:
+
+1. **Tier 0**: Files opened in the editor (signaled by `did_open`)
+2. **Tier 1**: Project source files covered by `tsconfig.json` — siblings of open files first, then expanding outward
+3. **Tier 2**: Remaining `.vue` files not covered by any tsconfig
+
+TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner receives priority signals from `did_open` to dynamically re-order its queue. This makes `initialized()` return in <1s instead of blocking for the full scan duration.
+
+**Key module**: `crates/verter_lsp/src/workspace_scanner.rs` — `WorkspaceScannerHandle`, `spawn_workspace_scanner()`, priority sorting, throttled sync loop.
 
 ### Cached Directive Fields on ElementNode
 

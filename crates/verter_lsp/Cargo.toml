@@ -33,3 +33,6 @@ parking_lot = "0.12"
 [[bin]]
 name = "verter-lsp"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3.26.0"
