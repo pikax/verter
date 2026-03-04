@@ -4,6 +4,20 @@
 //! Unlike the normal script codegen (which transforms macros into runtime code), this
 //! preserves TypeScript types and macro call syntax for IDE type checking.
 //!
+//! ## Error Recovery
+//!
+//! When OXC encounters parse errors (common during typing), a truncate-and-reparse
+//! strategy recovers as much IDE functionality as possible:
+//!
+//! 1. Find the earliest error offset from OXC diagnostics.
+//! 2. Truncate source at the last newline before that offset — the "clean prefix".
+//! 3. Re-parse only the clean prefix (which succeeds since the error is removed).
+//! 4. Use the clean prefix AST for normal codegen (import hoisting, binding extraction,
+//!    macro processing), while the broken tail passes through unchanged.
+//!
+//! A lightweight token scanner ([`script_recover::ScriptTokenScanner`]) recovers
+//! macro binding names from the broken tail so template resolution still works.
+//!
 //! ## Output structure
 //!
 //! For `<script setup>`:
@@ -115,6 +129,134 @@ struct MacroSourceCtx<'a, 'alloc> {
 
 // Re-export from compile::types for internal use.
 pub use crate::compile::types::{DestructuredBindingInfo, DestructuredBlockMeta};
+
+// ── Partial AST Assessment (test-only) ──────────────────────────
+//
+// OXC 0.116.0 does NOT produce partial ASTs — `program.body` is empty for all
+// error cases. These types and the `assess_partial_ast()` function are kept
+// behind `#[cfg(test)]` for the Category E assessment tests. If a future OXC
+// version starts producing partial ASTs, this code can be promoted to production.
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartialAstStrategy {
+    Normal,
+    NormalSkipDamagedMacros,
+    ErrorRecovery,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct PartialAstAssessment {
+    clean_stmt_count: usize,
+    total_stmt_count: usize,
+    clean_import_count: usize,
+    clean_macro_count: usize,
+    damaged_macro_count: usize,
+    damaged_import_count: usize,
+    strategy: PartialAstStrategy,
+}
+
+#[cfg(test)]
+fn assess_partial_ast(
+    program: &oxc_ast::ast::Program<'_>,
+    errors: &[oxc_diagnostics::OxcDiagnostic],
+    parse_result: &crate::utils::oxc::vue::ScriptParseResult<'_>,
+) -> PartialAstAssessment {
+    let total_stmt_count = program.body.len();
+
+    if total_stmt_count == 0 {
+        return PartialAstAssessment {
+            clean_stmt_count: 0,
+            total_stmt_count: 0,
+            clean_import_count: 0,
+            clean_macro_count: 0,
+            damaged_macro_count: 0,
+            damaged_import_count: 0,
+            strategy: PartialAstStrategy::ErrorRecovery,
+        };
+    }
+
+    let error_ranges: Vec<(u32, u32)> = errors
+        .iter()
+        .flat_map(|e| e.labels.iter().flatten())
+        .map(|label| (label.offset() as u32, (label.offset() + label.len()) as u32))
+        .collect();
+
+    let clean_stmt_count = program
+        .body
+        .iter()
+        .filter(|stmt| {
+            let span = stmt.span();
+            !overlaps_any(&error_ranges, span.start, span.end)
+        })
+        .count();
+
+    let mut clean_macro_count = 0usize;
+    let mut damaged_macro_count = 0usize;
+    let mut clean_import_count = 0usize;
+    let mut damaged_import_count = 0usize;
+
+    for item in &parse_result.items {
+        match item {
+            ScriptItem::Macro(m) => {
+                let span = macro_span(m);
+                if overlaps_any(&error_ranges, span.start, span.end) {
+                    damaged_macro_count += 1;
+                } else {
+                    clean_macro_count += 1;
+                }
+            }
+            ScriptItem::Import(imp) => {
+                if overlaps_any(&error_ranges, imp.span.start, imp.span.end) {
+                    damaged_import_count += 1;
+                } else {
+                    clean_import_count += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let strategy = if clean_stmt_count == 0 && clean_macro_count == 0 && clean_import_count == 0 {
+        PartialAstStrategy::ErrorRecovery
+    } else if damaged_macro_count > 0 {
+        PartialAstStrategy::NormalSkipDamagedMacros
+    } else {
+        PartialAstStrategy::Normal
+    };
+
+    PartialAstAssessment {
+        clean_stmt_count,
+        total_stmt_count,
+        clean_import_count,
+        clean_macro_count,
+        damaged_macro_count,
+        damaged_import_count,
+        strategy,
+    }
+}
+
+/// Check if a span [start, end) overlaps with any error range.
+#[cfg(test)]
+fn overlaps_any(error_ranges: &[(u32, u32)], start: u32, end: u32) -> bool {
+    error_ranges
+        .iter()
+        .any(|&(e_start, e_end)| start < e_end && end > e_start)
+}
+
+/// Extract the span from a ScriptMacro variant.
+fn macro_span(m: &ScriptMacro<'_>) -> verter_span::Span {
+    match m {
+        ScriptMacro::DefineProps { span, .. }
+        | ScriptMacro::DefineEmits { span, .. }
+        | ScriptMacro::DefineExpose { span, .. }
+        | ScriptMacro::DefineOptions { span, .. }
+        | ScriptMacro::DefineModel { span, .. }
+        | ScriptMacro::DefineSlots { span, .. }
+        | ScriptMacro::WithDefaults { span, .. } => *span,
+    }
+}
 
 /// Result of TSX script generation (internal, before building string).
 pub struct IdeScriptGenResult<'alloc> {
@@ -269,56 +411,143 @@ fn process_tsx_script_setup<'alloc>(
         rewrite_ts_type_assertions(content_str, content_start, ct);
     }
 
-    // ── Error Recovery: File-Scope Mode ──────────────────────────
-    // When OXC has parse errors (e.g. `count.` during typing), it returns
-    // an empty or partial AST. In this case, keep the script body at file
-    // scope so TS can still resolve variables for IntelliSense, and emit
-    // a minimal TemplateBindingFN wrapper for the template only.
+    // ── Partial AST Recovery ──────────────────────────────────────
+    // OXC (0.116) doesn't produce partial ASTs on errors (body is empty).
+    // When real parse errors exist, we find the clean prefix before the first
+    // error, re-parse it, and use that for normal codegen. The broken tail
+    // passes through as-is in the CodeTransform output.
     //
-    // Only enter error mode if the TS-mode parse also has errors. If only the
-    // TSX parse fails (but TS succeeds), the errors are from angle bracket
-    // type assertions which `rewrite_ts_type_assertions` already handled.
+    // Only enter recovery if TS-mode parse also fails. If only TSX fails
+    // (but TS succeeds), the errors are from angle bracket type assertions
+    // which `rewrite_ts_type_assertions` already handled.
+    let mut damaged_macro_spans: Vec<verter_span::Span> = Vec::new();
+
+    // This allocator + clean_prefix_str live for the rest of the function,
+    // so parse results borrowing from them remain valid.
+    let recovery_alloc;
+    let mut clean_prefix_str: &str = "";
+    let mut use_recovery_parse = false;
+
     if !parser_ret.errors.is_empty() {
         let ts_alloc = Allocator::default();
         let ts_check = Parser::new(&ts_alloc, content_str, SourceType::ts()).parse();
         if !ts_check.errors.is_empty() {
-            return (
-                process_tsx_script_setup_error_mode(
-                    setup,
-                    source,
-                    out,
-                    type_constructs,
-                    options,
-                    builtin_components,
-                    template_end,
-                    hoist_pos,
-                ),
-                None,
-            );
+            // Find the earliest error offset (relative to content_str)
+            let earliest_error = parser_ret
+                .errors
+                .iter()
+                .flat_map(|e| e.labels.iter().flatten())
+                .map(|label| label.offset())
+                .min()
+                .unwrap_or(0);
+
+            // Find the last complete line boundary before the error.
+            // If the error is at EOF, back up past any trailing newline first.
+            let search_end = if earliest_error >= content_str.len() {
+                content_str.trim_end().len()
+            } else {
+                earliest_error
+            };
+            let truncate_at = content_str[..search_end]
+                .rfind('\n')
+                .map(|p| p + 1) // include the newline
+                .unwrap_or(0);
+
+            if truncate_at == 0 {
+                // Error is on the first line — nothing useful to recover
+                return (
+                    process_tsx_script_setup_error_mode(
+                        setup,
+                        source,
+                        out,
+                        type_constructs,
+                        options,
+                        builtin_components,
+                        template_end,
+                        hoist_pos,
+                    ),
+                    None,
+                );
+            }
+
+            // Re-parse only the clean prefix
+            clean_prefix_str = &content_str[..truncate_at];
+            recovery_alloc = Allocator::default();
+            let reparse_ret =
+                Parser::new(&recovery_alloc, clean_prefix_str, SourceType::tsx()).parse();
+
+            if reparse_ret.errors.is_empty() && !reparse_ret.program.body.is_empty() {
+                use_recovery_parse = true;
+                // parser_ret will be shadowed below with the re-parsed result
+
+                // Use tokenizer to detect macros in the broken tail region
+                let recovery =
+                    super::script_recover::ScriptTokenScanner::new(content_str, content_start)
+                        .recover();
+                for m in &recovery.macros {
+                    if m.call_span.end > content_start + truncate_at as u32 {
+                        damaged_macro_spans.push(m.call_span);
+                    }
+                }
+            } else {
+                // Clean prefix also has errors — truly broken, use error recovery
+                return (
+                    process_tsx_script_setup_error_mode(
+                        setup,
+                        source,
+                        out,
+                        type_constructs,
+                        options,
+                        builtin_components,
+                        template_end,
+                        hoist_pos,
+                    ),
+                    None,
+                );
+            }
         }
     }
 
+    // Use either the original full parse or the clean-prefix re-parse.
+    // The recovery allocator must outlive `effective_program` which borrows from it.
+    let recovery_alloc2 = Allocator::default();
+    let recovery_ret = if use_recovery_parse {
+        Some(Parser::new(&recovery_alloc2, clean_prefix_str, SourceType::tsx()).parse())
+    } else {
+        None
+    };
+    let effective_program = recovery_ret
+        .as_ref()
+        .map(|r| &r.program)
+        .unwrap_or(&parser_ret.program);
+    let effective_content_str = if use_recovery_parse {
+        clean_prefix_str
+    } else {
+        content_str
+    };
+
     let parse_result = parse_script_with_companion(
-        &parser_ret.program,
+        effective_program,
         ScriptMode::Setup,
         content_start,
-        content_str,
+        effective_content_str,
         None, // No companion types needed for TSX — we preserve types as-is
     );
 
     // Build binding source info for JSDoc + offset comments
     let binding_source_info = build_binding_source_info(
-        &parser_ret.program.body,
-        &parser_ret.program.comments,
-        content_str,
+        &effective_program.body,
+        &effective_program.comments,
+        effective_content_str,
         content_start,
     );
 
     // Infer event-handler parameter types from template usage (v5/process parity).
     if should_infer_function_types(setup.lang) {
-        let available_bindings = collect_binding_names(&parse_result.bindings, source, content_str);
+        let available_bindings =
+            collect_binding_names(&parse_result.bindings, source, effective_content_str);
         apply_event_handler_param_inference(
-            &parser_ret.program.body,
+            &effective_program.body,
             template_ast,
             source,
             content_start,
@@ -326,10 +555,10 @@ fn process_tsx_script_setup<'alloc>(
             out,
         );
         apply_template_ref_call_inference(
-            &parser_ret.program.body,
+            &effective_program.body,
             template_ast,
             source,
-            content_str,
+            effective_content_str,
             content_start,
             &available_bindings,
             out,
@@ -387,13 +616,20 @@ fn process_tsx_script_setup<'alloc>(
     // Note: binding spans have mixed coordinate systems (see script/macros.rs:93):
     // - Props/PropsAliased spans are SFC-absolute (content_offset baked in by resolve_type)
     // - All other bindings are relative to content_str (0-based from OXC parser)
+    // Bounds-checked: partial ASTs may produce garbage spans, skip invalid ones.
     for (span, bt) in &parse_result.bindings {
         let name = if *bt == BindingType::Props || *bt == BindingType::PropsAliased {
             // Absolute span — index into full SFC source
-            &source[span.start as usize..span.end as usize]
+            match source.get(span.start as usize..span.end as usize) {
+                Some(s) if !s.is_empty() => s,
+                _ => continue,
+            }
         } else {
             // Relative span — index into content_str (script content only)
-            &content_str[span.start as usize..span.end as usize]
+            match content_str.get(span.start as usize..span.end as usize) {
+                Some(s) if !s.is_empty() => s,
+                _ => continue,
+            }
         };
         let alloc_name = alloc.alloc_str(name);
         bindings.insert(alloc_name, *bt);
@@ -429,9 +665,10 @@ fn process_tsx_script_setup<'alloc>(
                 Some(s.to_string())
             }
         })
-        .or_else(|| detect_use_attrs_type_arg(&parser_ret.program.body, content_str));
+        .or_else(|| detect_use_attrs_type_arg(&effective_program.body, effective_content_str));
 
-    // Process macros: emit type aliases only (no boxing)
+    // Process macros: emit type aliases only (no boxing).
+    // Skip macros whose spans overlap with parse errors (damaged by typing).
     let mut macro_ctx = MacroSourceCtx {
         source,
         content_str,
@@ -439,11 +676,53 @@ fn process_tsx_script_setup<'alloc>(
         out,
         is_jsx: options.is_jsx,
     };
-    let macro_state = process_macros(&parse_result.items, &mut macro_ctx);
+    let macro_state = process_macros(&parse_result.items, &mut macro_ctx, &damaged_macro_spans);
     let out = macro_ctx.out;
 
+    // For NormalSkipDamagedMacros: recover binding names from damaged macros,
+    // variables, and functions using the lightweight token scanner, so templates
+    // can still reference them.
+    if !damaged_macro_spans.is_empty() {
+        let recovery =
+            super::script_recover::ScriptTokenScanner::new(content_str, content_start).recover();
+        for m in &recovery.macros {
+            if let Some(name) = m.binding_name {
+                let bt = match m.kind {
+                    super::script_recover::RecoveredMacroKind::DefineProps => BindingType::Props,
+                    super::script_recover::RecoveredMacroKind::WithDefaults => BindingType::Props,
+                    super::script_recover::RecoveredMacroKind::DefineEmits => {
+                        BindingType::SetupConst
+                    }
+                    super::script_recover::RecoveredMacroKind::DefineModel => BindingType::SetupRef,
+                    super::script_recover::RecoveredMacroKind::DefineSlots => {
+                        BindingType::SetupConst
+                    }
+                    _ => BindingType::SetupConst,
+                };
+                let alloc_name = alloc.alloc_str(name);
+                bindings.entry(alloc_name).or_insert(bt);
+            }
+        }
+        // Recover variable bindings from the broken tail
+        for v in &recovery.variables {
+            let bt = match v.kind {
+                super::script_recover::RecoveredVarKind::Const => BindingType::SetupConst,
+                _ => BindingType::SetupLet,
+            };
+            let alloc_name = alloc.alloc_str(v.name);
+            bindings.entry(alloc_name).or_insert(bt);
+        }
+        // Recover function bindings from the broken tail
+        for f in &recovery.functions {
+            let alloc_name = alloc.alloc_str(f.name);
+            bindings
+                .entry(alloc_name)
+                .or_insert(BindingType::SetupConst);
+        }
+    }
+
     // Detect getCurrentInstance() usage for conditional type emission
-    let has_get_current_instance = detect_get_current_instance(&parser_ret.program.body);
+    let has_get_current_instance = detect_get_current_instance(&effective_program.body);
 
     // Build component function wrapper opening
     // Replace <script setup> tag with ___VERTER___TemplateBindingFN function declaration.
@@ -955,6 +1234,13 @@ fn apply_event_handler_param_inference(
     }
 }
 
+/// Annotate untyped function parameters with inferred event handler types.
+///
+/// Uses two targeted overwrites around the parameter identifiers instead of one
+/// big overwrite of the entire params span. This preserves per-character source
+/// map mappings for identifiers, enabling hover-to-definition on parameters.
+///
+/// Transform: `(event)` → `(...[event]: Type)` where `event` stays as Original source.
 fn maybe_annotate_function_params(
     func: &Function<'_>,
     handler_type_hints: &FxHashMap<String, String>,
@@ -974,20 +1260,24 @@ fn maybe_annotate_function_params(
         return;
     }
 
-    let mut param_names: Vec<&str> = Vec::with_capacity(func.params.items.len());
+    // Collect ident spans (SFC-absolute) for targeted overwrites.
+    let mut ident_spans: Vec<(u32, u32)> = Vec::with_capacity(func.params.items.len());
     for param in &func.params.items {
         if param.type_annotation.is_some() {
             return;
         }
         match &param.pattern {
             BindingPattern::BindingIdentifier(ident) => {
-                param_names.push(ident.name.as_str());
+                ident_spans.push((
+                    content_start + ident.span.start,
+                    content_start + ident.span.end,
+                ));
             }
             _ => return,
         }
     }
 
-    if param_names.is_empty() {
+    if ident_spans.is_empty() {
         return;
     }
 
@@ -998,14 +1288,22 @@ fn maybe_annotate_function_params(
     }
 
     let params_src = &source[params_start as usize..params_end as usize];
-    let tuple_param = format!("...[{}]: {}", param_names.join(", "), type_expr);
-    let replacement = if params_src.starts_with('(') && params_src.ends_with(')') {
-        format!("({})", tuple_param)
-    } else {
-        tuple_param
-    };
+    let has_parens = params_src.starts_with('(') && params_src.ends_with(')');
 
-    out.overwrite(params_start, params_end, &replacement);
+    let first_ident_start = ident_spans[0].0;
+    let last_ident_end = ident_spans[ident_spans.len() - 1].1;
+
+    // Overwrite before first ident: "(" → "(...["
+    let prefix = if has_parens { "(...[" } else { "...[" };
+    out.overwrite(params_start, first_ident_start, prefix);
+
+    // Overwrite after last ident: ")" → "]: Type)"
+    let suffix = if has_parens {
+        format!("]: {})", type_expr)
+    } else {
+        format!("]: {}", type_expr)
+    };
+    out.overwrite(last_ident_end, params_end, &suffix);
 }
 
 fn collect_event_handler_type_hints(
@@ -2196,11 +2494,25 @@ fn process_tsx_script_only<'alloc>(
 // ── Macro Boxing ──────────────────────────────────────────────────
 
 /// Process all macros in the parsed items: emit type aliases (no boxing).
-fn process_macros(items: &[ScriptItem<'_>], ctx: &mut MacroSourceCtx<'_, '_>) -> TsxMacroState {
+fn process_macros(
+    items: &[ScriptItem<'_>],
+    ctx: &mut MacroSourceCtx<'_, '_>,
+    skip_damaged: &[verter_span::Span],
+) -> TsxMacroState {
     let mut state = TsxMacroState::default();
 
     for item in items {
         if let ScriptItem::Macro(mac) = item {
+            // Skip macros whose spans overlap with parse errors
+            if !skip_damaged.is_empty() {
+                let span = macro_span(mac);
+                if skip_damaged
+                    .iter()
+                    .any(|d| span.start < d.end && span.end > d.start)
+                {
+                    continue;
+                }
+            }
             process_single_macro(mac, ctx, &mut state);
         }
     }
@@ -3657,6 +3969,10 @@ fn emit_comp_function_for_element(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "script_partial_tests.rs"]
+mod script_partial_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6562,44 +6878,32 @@ const u = {} as unknown as U
 
     #[test]
     fn imports_hoisted_with_script_syntax_error() {
-        let (code, _) = gen_tsx_script(
+        let (code, bindings) = gen_tsx_script(
             r#"<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
 count.
 </script>"#,
         );
-        // In error mode, script body is at file scope (not wrapped in function).
-        // The import stays in its original position, which is before the
-        // TemplateBindingFN that only wraps the template.
+        // With partial AST recovery, clean prefix is parsed normally.
+        // Import is hoisted, binding extracted, TemplateBindingFN wraps the body.
         assert!(
             code.contains("import { ref } from 'vue'"),
             "import must be present:\n{}",
             code
         );
-        // Positive: the broken `count.` line must still appear (for TS resolution)
+        // The broken `count.` line must still appear (passthrough in CodeTransform)
         assert!(
             code.contains("count."),
             "broken expression must be preserved:\n{}",
             code
         );
-        // Negative: script body should NOT be wrapped in TemplateBindingFN
-        // (error mode keeps it at file scope)
-        let fn_pos = code.find("function ___VERTER___TemplateBindingFN");
-        if let Some(fn_pos) = fn_pos {
-            let import_pos = code.find("import { ref } from 'vue'").unwrap();
-            assert!(
-                import_pos < fn_pos,
-                "import must be at file scope (before TemplateBindingFN):\n{}",
-                code
-            );
-            let count_dot_pos = code.find("count.\n").unwrap();
-            assert!(
-                count_dot_pos < fn_pos,
-                "broken expression must be at file scope (before TemplateBindingFN):\n{}",
-                code
-            );
-        }
+        // With recovery: count binding should be extracted from clean prefix
+        assert!(
+            bindings.contains_key("count"),
+            "count binding should be extracted: {:?}",
+            bindings.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -6636,7 +6940,7 @@ function increment() {
 
     #[test]
     fn template_wrapper_with_script_error() {
-        let (code, _, _) = gen_tsx_script_full(
+        let (code, bindings, _) = gen_tsx_script_full(
             r#"<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
@@ -6644,28 +6948,27 @@ count.
 </script>
 <template><div>{{ count }}</div></template>"#,
         );
-        // Positive: TemplateBindingFN wrapper must exist (for template)
+        // With partial AST recovery: TemplateBindingFN wraps the BODY (not just template)
         assert!(
             code.contains("function ___VERTER___TemplateBindingFN()"),
             "TemplateBindingFN wrapper must exist:\n{}",
             code
         );
-        // Positive: import must appear before TemplateBindingFN (file scope)
+        // Import hoisted to file scope
         let fn_pos = code.find("function ___VERTER___TemplateBindingFN").unwrap();
         let import_pos = code.find("import { ref } from 'vue'").unwrap();
         assert!(
             import_pos < fn_pos,
-            "import must be at file scope:\n{}",
+            "import must be hoisted before TemplateBindingFN:\n{}",
             code
         );
-        // Positive: script body must appear before TemplateBindingFN
-        let count_pos = code.find("const count = ref(0)").unwrap();
+        // count binding extracted from clean prefix
         assert!(
-            count_pos < fn_pos,
-            "script body must be at file scope:\n{}",
-            code
+            bindings.contains_key("count"),
+            "count binding should be extracted: {:?}",
+            bindings.keys().collect::<Vec<_>>()
         );
-        // Positive: wrapper must close
+        // Wrapper must close
         assert!(
             code.contains("close templateBindingFN"),
             "TemplateBindingFN must be closed:\n{}",
@@ -6674,59 +6977,55 @@ count.
     }
 
     #[test]
-    fn script_error_no_block_scope_wrapping() {
-        let (code, _) = gen_tsx_script(
+    fn script_error_with_partial_recovery_has_destructuring() {
+        let (code, bindings) = gen_tsx_script(
             r#"<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
 count.
 </script>"#,
         );
-        // Negative: error mode should NOT use block scope destructuring
+        // With partial AST recovery, the clean prefix is used for normal codegen.
+        // count is a ref binding so it gets unwrapped destructuring.
         assert!(
-            !code.contains("___VERTER___unwrapped"),
-            "error mode should not use block scope destructuring:\n{}",
-            code
+            bindings.contains_key("count"),
+            "count should be extracted: {:?}",
+            bindings.keys().collect::<Vec<_>>()
         );
-        // Negative: no block scope opening/closing
         assert!(
-            !code.contains("close block scope"),
-            "error mode should not have block scope:\n{}",
+            code.contains("import { ref } from 'vue'"),
+            "import should be present:\n{}",
             code
         );
     }
 
     #[test]
-    fn script_error_file_scope_declarations() {
-        let (code, _) = gen_tsx_script(
+    fn script_error_partial_recovery_preserves_declarations() {
+        let (code, bindings) = gen_tsx_script(
             r#"<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
 count.
 </script>"#,
         );
-        // Positive: declaration should appear in output at file scope
+        // With partial AST recovery: declaration preserved in output
         assert!(
             code.contains("const count = ref(0)"),
             "declaration should be preserved:\n{}",
             code
         );
-        // Positive: import should appear in output
+        // Import should be hoisted
         assert!(
             code.contains("import { ref } from 'vue'"),
             "import should be preserved:\n{}",
             code
         );
-        // Negative: script body should NOT be inside a function
-        // Check that `const count` comes before any TemplateBindingFN
-        if let Some(fn_pos) = code.find("function ___VERTER___TemplateBindingFN") {
-            let count_pos = code.find("const count = ref(0)").unwrap();
-            assert!(
-                count_pos < fn_pos,
-                "declarations should be at file scope (before TemplateBindingFN):\n{}",
-                code
-            );
-        }
+        // Binding extracted from clean prefix
+        assert!(
+            bindings.contains_key("count"),
+            "count binding should be extracted: {:?}",
+            bindings.keys().collect::<Vec<_>>()
+        );
     }
 
     // =========================================================================
@@ -7275,6 +7574,137 @@ const props = defineProps<{ msg: string }>()
         assert!(
             output.contains("Prettify<{ foo: string, bar: number }>"),
             "type content should be in the Prettify wrapper: {output}"
+        );
+    }
+
+    // ── Bug 1: Event handler param source map ──────────────────────
+
+    #[test]
+    fn event_handler_param_sourcemap_preserved() {
+        // Verify that hovering over the `event` parameter in `function handleClick(event) {}`
+        // maps back to the original source. The fix uses two targeted overwrites to leave
+        // identifiers as Original source chunks instead of one big overwrite.
+        let source = r#"<script setup lang="ts">
+function handleClick(event) {}
+</script>
+<template><button @click="handleClick">click</button></template>"#;
+        let alloc = Allocator::new();
+        let mut ct = CodeTransform::new(source, &alloc);
+
+        let bytes = source.as_bytes();
+        let mut syntax = crate::parser::Syntax::new(false);
+        crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+            syntax.handle(
+                &e,
+                &crate::diagnostics::SyntaxPluginContext {
+                    input: source,
+                    bytes,
+                    options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                    diagnostics: Vec::new(),
+                },
+            )
+        });
+
+        let options = IdeScriptOptions {
+            component_name: "App",
+            js_component_name: "App",
+            filename: "App.vue",
+            scope_id: "data-v-abc123",
+            has_scoped_style: false,
+            runtime_module_name: "vue",
+            types_module_name: "@verter/types",
+            is_vapor: false,
+            embed_ambient_types: true,
+            is_jsx: false,
+        };
+
+        let template_end = syntax.template_ast().map(|tpl| {
+            tpl.root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(tpl.root.tag_open.end)
+        });
+
+        let result = generate_ide_script(
+            syntax.script(),
+            syntax.script_setup(),
+            syntax.template_ast(),
+            source,
+            &mut ct,
+            &alloc,
+            &options,
+            template_end,
+        );
+
+        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
+            ct.prepend_left(tpl_end, return_close);
+        }
+
+        let map =
+            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("App.vue"));
+        let output = ct.build_string();
+
+        // Positive: the output should contain the tuple-param annotation
+        assert!(
+            output.contains("...[event]"),
+            "should contain tuple param with event: {output}"
+        );
+
+        // Find position of "event" in the original SFC source (inside function params)
+        let event_src_offset =
+            source.find("function handleClick(event)").unwrap() + "function handleClick(".len();
+        let event_src_line = source[..event_src_offset].matches('\n').count() as u32;
+        let event_src_col = event_src_offset - source[..event_src_offset].rfind('\n').unwrap() - 1;
+
+        // Find position of "event" in the generated output (inside ...[event]: ...)
+        let event_gen_pos = output.find("...[event]").unwrap() + "...[".len();
+        let event_gen_line = output[..event_gen_pos].matches('\n').count() as u32;
+        let event_gen_col = event_gen_pos
+            - output[..event_gen_pos]
+                .rfind('\n')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+
+        // Verify there's a sourcemap token mapping the generated `event` back to source `event`
+        let tokens: Vec<_> = map.get_tokens().collect();
+        let has_event_mapping = tokens.iter().any(|t| {
+            t.get_dst_line() == event_gen_line
+                && t.get_dst_col() == event_gen_col as u32
+                && t.get_src_line() == event_src_line
+                && t.get_src_col() == event_src_col as u32
+        });
+        assert!(
+            has_event_mapping,
+            "event param should have sourcemap token mapping gen({},{}) → src({},{})\nOutput: {}\nTokens: {:?}",
+            event_gen_line, event_gen_col, event_src_line, event_src_col, output,
+            tokens.iter().filter(|t| t.get_dst_line() == event_gen_line).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn event_handler_multi_param_sourcemap_preserved() {
+        // Multi-param case: function handleDrag(startEvent, endEvent) {}
+        let source = r#"<script setup lang="ts">
+function handleDrag(startEvent, endEvent) {}
+</script>
+<template><div @drag="handleDrag">drag</div></template>"#;
+        let (code, _) = gen_tsx_script(source);
+
+        // Positive: contains the tuple-param annotation with both params
+        assert!(
+            code.contains("...[startEvent, endEvent]"),
+            "should contain both params in tuple: {code}"
+        );
+        // Negative: the original parens should NOT appear as a single overwrite
+        // (i.e., the identifiers remain in the output)
+        assert!(
+            code.contains("startEvent"),
+            "startEvent should be in output: {code}"
+        );
+        assert!(
+            code.contains("endEvent"),
+            "endEvent should be in output: {code}"
         );
     }
 }

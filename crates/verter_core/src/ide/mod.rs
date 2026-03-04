@@ -33,6 +33,7 @@
 
 pub mod condition;
 pub mod script;
+pub mod script_recover;
 pub mod template;
 
 /// Options for IDE script generation.
