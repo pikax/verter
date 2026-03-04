@@ -489,6 +489,55 @@ fn strip_json_comments(input: &str) -> String {
         }
     }
 
+    // Strip trailing commas before } or ] (JSONC/tsconfig allows them, JSON does not)
+    strip_trailing_commas(&result)
+}
+
+/// Remove trailing commas before `}` or `]` in JSON.
+/// Handles whitespace/newlines between the comma and the closing bracket.
+fn strip_trailing_commas(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b'"' {
+            // Copy string literals unchanged
+            let start = i;
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    i += 2;
+                } else if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            result.push_str(&input[start..i]);
+        } else if bytes[i] == b',' {
+            // Check if this comma is trailing (only whitespace before } or ])
+            let mut j = i + 1;
+            while j < len
+                && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r')
+            {
+                j += 1;
+            }
+            if j < len && (bytes[j] == b'}' || bytes[j] == b']') {
+                // Trailing comma — skip it, keep the whitespace
+                i += 1;
+            } else {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
     result
 }
 
@@ -604,16 +653,22 @@ pub fn discover_vite_aliases(project_root: &Path, node_path: &str) -> Vec<(Strin
 
     let config_path_str = config_path.to_string_lossy().replace('\\', "/");
 
-    // Inline Node.js script that:
-    // 1. Imports the vite config (handles both default export and named export)
-    // 2. Extracts resolve.alias
-    // 3. Normalizes to array of {find, replacement} objects
-    // 4. Prints as JSON
+    // Inline Node.js script that dynamically imports the vite config and
+    // extracts resolve.alias as JSON. Uses pathToFileURL for correct Windows paths.
+    // For .ts configs, tries to register tsx loader first.
+    let loader_setup = if config_path_str.ends_with(".ts") {
+        "try { await import('tsx/esm'); } catch {}"
+    } else {
+        ""
+    };
+
     let script = format!(
         r#"
+const {{ pathToFileURL }} = require('url');
 (async () => {{
   try {{
-    const mod = await import('file:///{config_path_str}');
+    {loader_setup}
+    const mod = await import(pathToFileURL('{config_path_str}').href);
     const config = mod.default || mod;
     const raw = typeof config === 'function' ? config({{ mode: 'development', command: 'serve' }}) : config;
     const resolved = raw instanceof Promise ? await raw : raw;
@@ -642,7 +697,6 @@ pub fn discover_vite_aliases(project_root: &Path, node_path: &str) -> Vec<(Strin
     );
 
     let result = std::process::Command::new(node_path)
-        .arg("--input-type=module")
         .arg("-e")
         .arg(&script)
         .current_dir(project_root)
@@ -658,17 +712,43 @@ pub fn discover_vite_aliases(project_root: &Path, node_path: &str) -> Vec<(Strin
         }
     };
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.is_empty() {
+        tracing::debug!(
+            "vite config eval stderr ({}): {}",
+            config_path_str,
+            stderr.trim()
+        );
+    }
+
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::debug!("vite config eval failed: {stderr}");
+        tracing::debug!(
+            "vite config eval failed for {} (exit code: {:?})",
+            config_path_str,
+            output.status.code()
+        );
         return Vec::new();
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let entries: Vec<ViteAliasEntry> = match serde_json::from_str(&stdout) {
+    let stdout = stdout.trim();
+    if stdout.is_empty() {
+        tracing::debug!(
+            "vite config eval returned empty output for {}",
+            config_path_str
+        );
+        return Vec::new();
+    }
+
+    let entries: Vec<ViteAliasEntry> = match serde_json::from_str(stdout) {
         Ok(v) => v,
         Err(e) => {
-            tracing::debug!("failed to parse vite alias output: {e}");
+            tracing::debug!(
+                "failed to parse vite alias output for {}: {} (raw: {:?})",
+                config_path_str,
+                e,
+                &stdout[..stdout.len().min(200)]
+            );
             return Vec::new();
         }
     };
@@ -1378,6 +1458,34 @@ mod tests {
         let input2 = r#"{ "url": "http://example.com" }"#;
         let result2 = strip_json_comments(input2);
         assert!(result2.contains("http://example.com"));
+
+        // Trailing commas should be stripped (common in tsconfig.json)
+        let input3 = r#"{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+  },
+  "include": ["src/**/*",],
+}"#;
+        let result3 = strip_json_comments(input3);
+        // Should parse as valid JSON after stripping
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&result3);
+        assert!(
+            parsed.is_ok(),
+            "trailing commas should be stripped: {result3}"
+        );
+
+        // Commas inside strings should NOT be stripped
+        let input4 = r#"{ "paths": { "@/*": ["src/*",] }, "desc": "a, b," }"#;
+        let result4 = strip_json_comments(input4);
+        let parsed4: Result<serde_json::Value, _> = serde_json::from_str(&result4);
+        assert!(parsed4.is_ok(), "should handle mixed commas: {result4}");
+        let v4 = parsed4.unwrap();
+        assert_eq!(
+            v4["desc"].as_str().unwrap(),
+            "a, b,",
+            "commas inside strings must be preserved"
+        );
     }
 
     /// @ai-generated - PathAlias resolution with wildcard patterns
