@@ -491,7 +491,7 @@ pub fn merge_definitions(
                 let uri = path_to_uri(file_path)?;
                 // Map TSX byte offsets back to Vue positions for .vue.tsx targets
                 // (.vue.d.ts targets use Range::default — no position mapping available)
-                let range = if loc.path.ends_with(".vue.tsx") {
+                let range = if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
                     resolve_vue_tsx_range(
                         &loc.path,
                         loc.start,
@@ -536,16 +536,26 @@ pub fn merge_definitions(
 
 /// Normalize a TypeProvider path back to the original Vue file path.
 ///
-/// Strips `.tsx` from `.vue.tsx` (Verter-generated virtual files) and
-/// `.d.ts` from `.vue.d.ts` (published type declarations).
+/// Strips virtual file suffixes from Verter-generated paths:
+/// - `.vue.tsx` / `.vue.jsx` → `.vue` (IDE output)
+/// - `.vue.ts` → `.vue` (public API / DTS output)
+/// - `.vue.d.ts` → `.vue` (published type declarations)
 fn normalize_vue_path(path: &str) -> &str {
-    if path.ends_with(".vue.tsx") {
-        path.trim_end_matches(".tsx")
+    if path.ends_with(".vue.tsx") || path.ends_with(".vue.jsx") {
+        &path[..path.len() - 4] // strip .tsx/.jsx
+    } else if path.ends_with(".vue.ts") {
+        &path[..path.len() - 3] // strip .ts
     } else if path.ends_with(".vue.d.ts") {
         path.trim_end_matches(".d.ts")
     } else {
         path
     }
+}
+
+/// Like `normalize_vue_path` but returns an owned String.
+/// Used by server.rs for inline path normalization.
+pub fn normalize_vue_path_owned(path: &str) -> String {
+    normalize_vue_path(path).to_string()
 }
 
 /// Convert a file path to a `file://` URI.
@@ -590,8 +600,8 @@ pub fn merge_references(
     let mut result = verter_refs.unwrap_or_default();
 
     for loc in &type_refs {
-        // For .vue.tsx targets, map back to .vue positions
-        if loc.path.ends_with(".vue.tsx") {
+        // For .vue.tsx/.vue.jsx targets, map back to .vue positions
+        if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
             let range = resolve_vue_tsx_range(
                 &loc.path,
                 loc.start,
@@ -601,7 +611,7 @@ pub fn merge_references(
                 vue_line_index,
                 external_resolver,
             );
-            let vue_path = loc.path.trim_end_matches(".tsx");
+            let vue_path = normalize_vue_path(&loc.path);
             if let Some(uri) = path_to_uri(vue_path) {
                 // Deduplicate: skip if we already have a ref at this position
                 let dup = result
@@ -611,9 +621,9 @@ pub fn merge_references(
                     result.push(Location { uri, range });
                 }
             }
-        } else if loc.path.ends_with(".vue.d.ts") {
-            // Published .vue.d.ts declarations: strip suffix, use default range
-            let vue_path = loc.path.trim_end_matches(".d.ts");
+        } else if loc.path.ends_with(".vue.d.ts") || loc.path.ends_with(".vue.ts") {
+            // DTS declarations (.vue.d.ts or .vue.ts): strip suffix, use default range
+            let vue_path = normalize_vue_path(&loc.path);
             if let Some(uri) = path_to_uri(vue_path) {
                 result.push(Location {
                     uri,
@@ -666,7 +676,7 @@ pub fn merge_rename_locations(
         .get_or_insert_with(std::collections::HashMap::new);
 
     for loc in &type_locations {
-        if loc.path.ends_with(".vue.tsx") {
+        if loc.path.ends_with(".vue.tsx") || loc.path.ends_with(".vue.jsx") {
             let range = resolve_vue_tsx_range(
                 &loc.path,
                 loc.start,
@@ -676,7 +686,7 @@ pub fn merge_rename_locations(
                 vue_line_index,
                 external_resolver,
             );
-            let vue_path = loc.path.trim_end_matches(".tsx");
+            let vue_path = normalize_vue_path(&loc.path);
             if let Some(uri) = path_to_uri(vue_path) {
                 let edits = changes.entry(uri).or_default();
                 let dup = edits.iter().any(|e| e.range.start == range.start);
@@ -687,9 +697,8 @@ pub fn merge_rename_locations(
                     });
                 }
             }
-        } else if loc.path.ends_with(".vue.d.ts") {
-            // Published .vue.d.ts declarations: strip suffix, use default range
-            let vue_path = loc.path.trim_end_matches(".d.ts");
+        } else if loc.path.ends_with(".vue.d.ts") || loc.path.ends_with(".vue.ts") {
+            let vue_path = normalize_vue_path(&loc.path);
             if let Some(uri) = path_to_uri(vue_path) {
                 let edits = changes.entry(uri).or_default();
                 edits.push(TextEdit {
@@ -819,7 +828,7 @@ pub fn merge_code_actions(
                 std::collections::HashMap::new();
 
             for edit in action.edits {
-                if edit.path.ends_with(".vue.tsx") {
+                if edit.path.ends_with(".vue.tsx") || edit.path.ends_with(".vue.jsx") {
                     if let Some(range) = tsx_range_to_vue_range(
                         edit.start,
                         edit.end,
@@ -827,7 +836,7 @@ pub fn merge_code_actions(
                         mapper,
                         vue_line_index,
                     ) {
-                        let vue_path = edit.path.trim_end_matches(".tsx");
+                        let vue_path = normalize_vue_path(&edit.path);
                         if let Some(uri) = path_to_uri(vue_path) {
                             changes.entry(uri).or_default().push(TextEdit {
                                 range,
@@ -835,9 +844,8 @@ pub fn merge_code_actions(
                             });
                         }
                     }
-                } else if edit.path.ends_with(".vue.d.ts") {
-                    // Published .vue.d.ts declarations: strip suffix, use default range
-                    let vue_path = edit.path.trim_end_matches(".d.ts");
+                } else if edit.path.ends_with(".vue.d.ts") || edit.path.ends_with(".vue.ts") {
+                    let vue_path = normalize_vue_path(&edit.path);
                     if let Some(uri) = path_to_uri(vue_path) {
                         changes.entry(uri).or_default().push(TextEdit {
                             range: Range::default(),
@@ -1868,8 +1876,13 @@ mod tests {
     }
 
     #[test]
-    fn normalize_vue_path_passthrough_ts() {
-        assert_eq!(normalize_vue_path("/src/utils.ts"), "/src/utils.ts");
+    fn normalize_vue_path_strips_vue_ts() {
+        assert_eq!(normalize_vue_path("/src/App.vue.ts"), "/src/App.vue");
+    }
+
+    #[test]
+    fn normalize_vue_path_strips_vue_jsx() {
+        assert_eq!(normalize_vue_path("/src/App.vue.jsx"), "/src/App.vue");
     }
 
     #[test]
@@ -1879,6 +1892,12 @@ mod tests {
             normalize_vue_path("/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts"),
             "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts"
         );
+    }
+
+    #[test]
+    fn normalize_vue_path_passthrough_plain_ts() {
+        // Non-.vue .ts files should NOT be stripped
+        assert_eq!(normalize_vue_path("/src/utils.ts"), "/src/utils.ts");
     }
 
     // ── .vue.d.ts definition tests ──────────────────────────────────

@@ -377,6 +377,12 @@ fn process_tsx_script_setup<'alloc>(
         }
     }
 
+    // Rewrite .vue specifiers in dynamic imports (e.g., `import('./Foo.vue')`).
+    for src_span in &parse_result.vue_dynamic_import_spans {
+        let quote_pos = content_start + src_span.end - 1;
+        ct.prepend_left(quote_pos, ".ts");
+    }
+
     // Extract bindings
     // Note: binding spans have mixed coordinate systems (see script/macros.rs:93):
     // - Props/PropsAliased spans are SFC-absolute (content_offset baked in by resolve_type)
@@ -880,6 +886,12 @@ fn process_companion_for_tsx<'alloc>(
                 }
             }
         }
+    }
+
+    // Rewrite .vue specifiers in dynamic imports (see script setup comment above).
+    for src_span in &parse_result.vue_dynamic_import_spans {
+        let quote_pos = comp_start + src_span.end - 1;
+        ct.prepend_left(quote_pos, ".ts");
     }
 
     // Remove `export default { ... }` — runtime-only Options API config.

@@ -2156,6 +2156,49 @@ import utils from './utils'"#;
         );
     }
 
+    /// rewrite_vue_imports_for_tsgo must NOT double-rewrite already-rewritten .vue.ts imports
+    #[test]
+    fn test_rewrite_vue_imports_no_double_rewrite() {
+        // IDE codegen already produces .vue.ts imports via prepend_left
+        let input = r#"import Foo from './Foo.vue.ts'
+import Bar from "@/components/Bar.vue.ts"
+const x = 1;"#;
+        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
+        assert!(
+            !result.contains(".vue.ts.ts"),
+            "must NOT double-rewrite .vue.ts to .vue.ts.ts, got: {result}"
+        );
+        assert!(
+            result.contains("./Foo.vue.ts'"),
+            ".vue.ts imports should be preserved unchanged, got: {result}"
+        );
+        assert!(
+            result.contains("@/components/Bar.vue.ts\""),
+            ".vue.ts imports should be preserved unchanged, got: {result}"
+        );
+    }
+
+    /// rewrite_vue_imports_for_tsgo handles mixed .vue and .vue.ts imports
+    #[test]
+    fn test_rewrite_vue_imports_mixed() {
+        // Some imports already rewritten by codegen, some not (e.g. FullProject mode)
+        let input = r#"import Foo from './Foo.vue.ts'
+import Bar from './Bar.vue'"#;
+        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
+        assert!(
+            result.contains("./Foo.vue.ts'"),
+            "already-rewritten import should stay .vue.ts, got: {result}"
+        );
+        assert!(
+            result.contains("./Bar.vue.ts'"),
+            "unrewritten .vue import should become .vue.ts, got: {result}"
+        );
+        assert!(
+            !result.contains(".vue.ts.ts"),
+            "must NOT double-rewrite, got: {result}"
+        );
+    }
+
     /// @ai-generated — rewrite_vue_imports_for_tsgo does not touch .vue in non-import contexts
     #[test]
     fn test_rewrite_vue_imports_no_false_positives() {

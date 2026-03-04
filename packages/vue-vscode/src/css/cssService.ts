@@ -116,11 +116,8 @@ export class CssService {
     if (!block || !service || !cssDoc) return null;
 
     const cssPos = this.toCssPosition(block, line, character);
-    console.log(`[CSS doComplete] SFC(${line}:${character}) → CSS(${cssPos.line}:${cssPos.character}) block.lang=${block.lang} contentStartLine=${block.contentStartLine} contentStartCol=${block.contentStartColumn}`);
-    console.log(`[CSS doComplete] cssDoc length=${cssDoc.getText().length} first 100 chars: ${JSON.stringify(cssDoc.getText().slice(0, 100))}`);
     const stylesheet = service.parseStylesheet(cssDoc);
     const result = service.doComplete(cssDoc, cssPos, stylesheet);
-    console.log(`[CSS doComplete] result items: ${result.items.length}, first 5: ${result.items.slice(0, 5).map(i => i.label).join(', ')}`);
 
     // Map textEdit ranges back to SFC coordinates
     for (const item of result.items) {
@@ -163,10 +160,8 @@ export class CssService {
     if (!block || !service || !cssDoc) return null;
 
     const cssPos = this.toCssPosition(block, line, character);
-    console.log(`[CSS doHover] SFC(${line}:${character}) → CSS(${cssPos.line}:${cssPos.character}) block.lang=${block.lang} contentStartLine=${block.contentStartLine}`);
     const stylesheet = service.parseStylesheet(cssDoc);
     const hover = service.doHover(cssDoc, cssPos, stylesheet);
-    console.log(`[CSS doHover] hover=${hover ? 'found' : 'null'}`);
     if (!hover) return null;
 
     // Map hover range back to SFC coordinates
@@ -359,9 +354,13 @@ export class CssService {
     // For direct languages (css, scss, less, postcss), use virtual file content.
     // Fall back to extracting content directly from the SFC source when the LSP
     // doesn't provide style virtual files (e.g., when the compile profile doesn't
-    // include the STYLE target).
+    // include the STYLE target — the IDE profile only includes TSX).
     const vf = entry.virtualFiles.get(block.index);
-    const code = vf?.code ?? entry.source.slice(block.contentStartOffset, block.contentEndOffset);
+    // Use virtual file content only if it's non-empty and has the correct language.
+    // Empty code with lang "js" indicates a failed compilation (MissingVirtualNode).
+    const code = (vf?.code)
+      ? vf.code
+      : entry.source.slice(block.contentStartOffset, block.contentEndOffset);
 
     const langId = block.lang === "postcss" ? "css" : block.lang;
     return TextDocument.create(

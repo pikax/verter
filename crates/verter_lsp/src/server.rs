@@ -2970,13 +2970,8 @@ impl LanguageServer for VerterLanguageServer {
                             .into_iter()
                             .filter_map(|d| {
                                 // Strip virtual suffixes so user navigates to .vue
-                                let target_path = if d.path.ends_with(".vue.tsx") {
-                                    d.path.trim_end_matches(".tsx").to_string()
-                                } else if d.path.ends_with(".vue.d.ts") {
-                                    d.path.trim_end_matches(".d.ts").to_string()
-                                } else {
-                                    d.path.clone()
-                                };
+                                let target_path =
+                                    merge::normalize_vue_path_owned(&d.path);
                                 let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
                                 // Convert byte offsets to positions using vf LineIndex for
                                 // same-file refs; for external files, fall back to 0:0
@@ -3120,11 +3115,8 @@ impl LanguageServer for VerterLanguageServer {
                         let locations: Vec<Location> = type_refs
                             .into_iter()
                             .filter_map(|r| {
-                                let target_path = if r.path.ends_with(".vue.tsx") {
-                                    r.path.trim_end_matches(".tsx").to_string()
-                                } else {
-                                    r.path.clone()
-                                };
+                                let target_path =
+                                    merge::normalize_vue_path_owned(&r.path);
                                 let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
                                 let range = if r.path == tsx_path {
                                     Range {

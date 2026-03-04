@@ -31,6 +31,9 @@ pub struct ScriptParseResult<'a> {
     /// Each entry is a (span, type) pair where the span references the identifier
     /// in the parsed script content (offset by `base_offset`).
     pub bindings: Vec<(Span, BindingType)>,
+    /// Source literal spans (including quotes) of dynamic `import('./Foo.vue')` calls
+    /// whose specifier ends in `.vue`. Used by IDE codegen for `.vue` → `.vue.ts` rewriting.
+    pub vue_dynamic_import_spans: Vec<Span>,
 }
 
 /// A parsed script item
