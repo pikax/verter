@@ -674,7 +674,7 @@ impl VerterLanguageServer {
         }
     }
 
-    /// Sync the public API (.d.vue.ts) to the type provider for cross-file component resolution.
+    /// Sync the public API (.vue.ts) to the type provider for cross-file component resolution.
     async fn sync_api_to_provider(&self, uri: &Uri) {
         if let Some(sync) = &self.project_sync {
             if let Some(dts_path) = self.dts_path_for_uri(uri) {
@@ -781,13 +781,13 @@ impl VerterLanguageServer {
         format!("{canonical}{ext}")
     }
 
-    /// Generate the DTS declaration file path (.d.vue.ts) for a given Vue file URI.
+    /// Generate the DTS declaration file path (.vue.ts) for a given Vue file URI.
     /// Uses TypeScript 5.0 `allowArbitraryExtensions` naming convention:
-    /// `import('./Comp.vue')` resolves to `./Comp.d.vue.ts`
+    /// `import('./Comp.vue')` resolves to `./Comp.vue.ts`
     fn dts_path_for_uri(&self, uri: &Uri) -> Option<String> {
         let canonical = self.documents.get_canonical_id(uri)?;
         let base = canonical.strip_suffix(".vue")?;
-        Some(format!("{base}.d.vue.ts"))
+        Some(format!("{base}.vue.ts"))
     }
 
     /// Get IDE content and mapper by IDE path (reverse lookup).
@@ -1000,15 +1000,25 @@ impl VerterLanguageServer {
                     self.resync_background_vue_file(&canonical_id).await;
                 }
                 "delete" => {
-                    // Close TSX in the type provider and clean up.
+                    // Close TSX/DTS in the type provider and clean up.
                     if let Some(sync) = &self.project_sync {
-                        let profile = self.documents.tsx_profile.read().clone();
-                        if let Some(ide) = self.documents.host.get_ide(&canonical_id, &profile) {
-                            let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-                            let tsx_path = format!("{canonical_id}{ext}");
-                            let _ = sync.close_tsx(&tsx_path).await;
-                            self.background_synced_files.remove(&tsx_path);
+                        let is_tsgo =
+                            matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+                        if !is_tsgo {
+                            let profile = self.documents.tsx_profile.read().clone();
+                            if let Some(ide) = self.documents.host.get_ide(&canonical_id, &profile)
+                            {
+                                let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
+                                let tsx_path = format!("{canonical_id}{ext}");
+                                let _ = sync.close_tsx(&tsx_path).await;
+                                self.background_synced_files.remove(&tsx_path);
+                            }
                         }
+                        // Close DTS file
+                        let base = canonical_id.strip_suffix(".vue").unwrap_or(&canonical_id);
+                        let dts_path = format!("{base}.vue.ts");
+                        let _ = sync.close_dts(&dts_path).await;
+                        self.background_synced_files.remove(&dts_path);
                     }
                     self.documents.host.remove(&canonical_id);
                 }
@@ -1064,27 +1074,49 @@ impl VerterLanguageServer {
         };
 
         // Sync to type provider
+        // For TSGO: only sync DTS (has default export for cross-file imports).
+        // IDE files (.vue.tsx) are only synced when the file is open in the editor.
+        // For tsserver: sync IDE files (TS plugin resolves .vue → .vue.tsx).
         if let Some(sync) = &self.project_sync {
-            if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
-                let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-                let tsx_path = format!("{canonical_id}{ext}");
-                let is_bg = self.background_synced_files.contains_key(&tsx_path);
-                let result = if is_bg {
-                    sync.sync_tsx(&tsx_path, &ide.code).await
-                } else {
-                    sync.open_tsx(&tsx_path, &ide.code).await
-                };
-                if result.is_ok() {
-                    self.background_synced_files.insert(tsx_path, ());
-                } else if let Err(e) = result {
-                    tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
+            let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+
+            if !is_tsgo {
+                // tsserver: sync IDE output
+                if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
+                    let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
+                    let tsx_path = format!("{canonical_id}{ext}");
+                    let is_bg = self.background_synced_files.contains_key(&tsx_path);
+                    let result = if is_bg {
+                        sync.sync_tsx(&tsx_path, &ide.code).await
+                    } else {
+                        sync.open_tsx(&tsx_path, &ide.code).await
+                    };
+                    if result.is_ok() {
+                        self.background_synced_files.insert(tsx_path, ());
+                    } else if let Err(e) = result {
+                        tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
+                    }
                 }
             }
-            // Sync .d.vue.ts for cross-file component type resolution
+
+            // Sync .vue.ts for cross-file component type resolution
             if let Some(api) = self.documents.host.get_public_api(canonical_id) {
                 let base = canonical_id.strip_suffix(".vue").unwrap_or(canonical_id);
-                let dts_path = format!("{base}.d.vue.ts");
-                let _ = sync.sync_dts(&dts_path, &api.code).await;
+                let dts_path = format!("{base}.vue.ts");
+                let is_bg = self.background_synced_files.contains_key(&dts_path);
+                let result = if is_tsgo {
+                    // TSGO: open/update DTS so it's in TSGO's virtual FS
+                    if is_bg {
+                        sync.sync_dts(&dts_path, &api.code).await
+                    } else {
+                        sync.open_dts(&dts_path, &api.code).await
+                    }
+                } else {
+                    sync.sync_dts(&dts_path, &api.code).await
+                };
+                if result.is_ok() && is_tsgo {
+                    self.background_synced_files.insert(dts_path, ());
+                }
             }
         }
     }
@@ -1486,6 +1518,15 @@ impl VerterLanguageServer {
 
         let file_list = self.documents.host.list_files();
         let mut parents = Vec::new();
+        let vue_count = file_list
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .count();
+        tracing::info!(
+            "getComponentParents: target='{}' scanning {} vue files",
+            target_normalized,
+            vue_count
+        );
 
         for (canonical_id, file_kind) in &file_list {
             if *file_kind != verter_host::FileKind::VueSfc {
@@ -1505,20 +1546,39 @@ impl VerterLanguageServer {
                             let resolved = if !src.starts_with('.') {
                                 // Non-relative: use TsConfigPathResolver (reads tsconfig paths/aliases)
                                 let pr_guard = self.path_resolver.read();
-                                pr_guard
-                                    .as_ref()
-                                    .and_then(|r| r.resolve(src))
-                                    .unwrap_or_else(|| src.to_string())
+                                let r = pr_guard.as_ref().and_then(|r| r.resolve(src));
+                                tracing::info!(
+                                    "  [{}] component '{}' import='{}' (non-relative) → resolved={:?}",
+                                    normalized_id.rsplit('/').next().unwrap_or("?"), comp.name, src, r
+                                );
+                                r.unwrap_or_else(|| src.to_string())
                             } else {
                                 // Relative: resolve against importer directory
                                 let importer_dir = normalized_id
                                     .rfind('/')
                                     .map(|i| &normalized_id[..i])
                                     .unwrap_or("");
-                                resolve_import_path(importer_dir, src)
+                                let r = resolve_import_path(importer_dir, src);
+                                tracing::info!(
+                                    "  [{}] component '{}' import='{}' (relative) → resolved='{}'",
+                                    normalized_id.rsplit('/').next().unwrap_or("?"),
+                                    comp.name,
+                                    src,
+                                    r
+                                );
+                                r
                             };
                             let resolved_normalized = resolved.replace('\\', "/");
-                            if resolved_normalized == target_normalized {
+                            let matches = import_resolved_matches_target(
+                                &resolved_normalized,
+                                &target_normalized,
+                            );
+                            if matches {
+                                tracing::info!(
+                                    "  MATCH! resolved='{}' == target='{}'",
+                                    resolved_normalized,
+                                    target_normalized
+                                );
                                 let props_json = comp
                                     .props
                                     .iter()
@@ -1679,6 +1739,36 @@ fn scan_vue_files_recursive(
             }
         }
     }
+}
+
+/// Check if a resolved import path matches a target file path.
+///
+/// Handles cases where the import source omits the `.vue` extension:
+/// - `./Popup` → matches `./Popup.vue`
+/// - `./Popover` → matches `./Popover/index.vue` or `./Popover/Popover.vue`
+fn import_resolved_matches_target(resolved: &str, target: &str) -> bool {
+    if resolved == target {
+        return true;
+    }
+    // Skip if resolved already has .vue extension — no fuzzy matching needed
+    if resolved.ends_with(".vue") {
+        return false;
+    }
+    // Try: resolved + ".vue"
+    if target == format!("{resolved}.vue") {
+        return true;
+    }
+    // Try: resolved/index.vue
+    if target == format!("{resolved}/index.vue") {
+        return true;
+    }
+    // Try: resolved/Name.vue where Name is the last segment of resolved
+    if let Some(last) = resolved.rsplit('/').next() {
+        if !last.is_empty() && target == format!("{resolved}/{last}.vue") {
+            return true;
+        }
+    }
+    false
 }
 
 fn resolve_import_path(importer_dir: &str, import_source: &str) -> String {
@@ -1960,6 +2050,14 @@ impl LanguageServer for VerterLanguageServer {
         // Batch-sync all compiled .vue files to the type provider in the background.
         // This makes the type provider see proper types for ALL .vue files, not just open ones.
         // Collect data synchronously (fast — already compiled), then spawn async sync.
+        //
+        // For TSGO: only sync DTS (.vue.ts) for background files. The DTS has a proper
+        // `export default` for cross-file imports. IDE (.vue.tsx) files are only synced when
+        // a file is opened in the editor (for internal type checking). If IDE files were
+        // synced here too, TSGO's module resolution would prefer .vue.tsx over .vue.ts,
+        // and the IDE output has no default export — causing "no default export" errors.
+        //
+        // For tsserver: sync IDE files as before (the TS plugin handles resolution).
         if let Some(sync) = &self.project_sync {
             let profile = self.documents.tsx_profile.read().clone();
             let mut tsx_files: Vec<(String, String)> = Vec::new();
@@ -1973,7 +2071,7 @@ impl LanguageServer for VerterLanguageServer {
                     }
                     if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
                         let base = canonical_id.strip_suffix(".vue").unwrap_or(&canonical_id);
-                        let dts_path = format!("{base}.d.vue.ts");
+                        let dts_path = format!("{base}.vue.ts");
                         dts_files.push((dts_path, api.code.to_string()));
                     }
                 }
@@ -1983,22 +2081,28 @@ impl LanguageServer for VerterLanguageServer {
             let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
             tokio::spawn(async move {
                 let mut synced = 0u32;
-                for (tsx_path, code) in &tsx_files {
-                    // For TSGO, use open_tsx (sends didOpen) so the files are in TSGO's
-                    // virtual FS and can be resolved by import. For tsserver, use load_tsx
-                    // (cache only) because the TS plugin handles resolution lazily.
-                    let result = if is_tsgo {
-                        sync.open_tsx(tsx_path, code).await
-                    } else {
-                        sync.load_tsx(tsx_path, code).await
-                    };
-                    if result.is_ok() {
-                        bg_files.insert(tsx_path.clone(), ());
-                        synced += 1;
+                if !is_tsgo {
+                    // tsserver: sync IDE files (TS plugin handles resolution)
+                    for (tsx_path, code) in &tsx_files {
+                        let result = sync.load_tsx(tsx_path, code).await;
+                        if result.is_ok() {
+                            bg_files.insert(tsx_path.clone(), ());
+                            synced += 1;
+                        }
                     }
                 }
                 for (dts_path, code) in &dts_files {
-                    let _ = sync.load_dts(dts_path, code).await;
+                    // For TSGO, open DTS files (sends didOpen) so they're in TSGO's
+                    // virtual FS for import resolution. For tsserver, load only.
+                    let result = if is_tsgo {
+                        sync.open_dts(dts_path, code).await
+                    } else {
+                        sync.load_dts(dts_path, code).await
+                    };
+                    if result.is_ok() && is_tsgo {
+                        bg_files.insert(dts_path.clone(), ());
+                        synced += 1;
+                    }
                 }
                 tracing::info!(
                     "scan_workspace: synced {} .vue files to type provider (background)",
@@ -2207,18 +2311,25 @@ impl LanguageServer for VerterLanguageServer {
                 // (only .vue files get the .tsx/.jsx suffix and are synced to TSGO)
                 if self.documents.get_ide(uri).is_some() {
                     let tsx_path = self.ide_path_for_uri(uri);
-                    // If this file was background-synced, keep it alive in the
-                    // provider — it's still needed for cross-file type resolution.
-                    if self.background_synced_files.contains_key(&tsx_path) {
+                    let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+
+                    if is_tsgo {
+                        // TSGO: always close IDE (.vue.tsx) — it was only opened for
+                        // internal type checking of this file. DTS stays alive for imports.
+                        if let Err(e) = sync.close_tsx(&tsx_path).await {
+                            tracing::warn!("did_close: failed to close TSX in provider: {e}");
+                        }
+                    } else if self.background_synced_files.contains_key(&tsx_path) {
+                        // tsserver: keep background-synced TSX alive for cross-file resolution.
                         tracing::debug!(
                             "did_close: keeping background-synced file in provider: {}",
                             tsx_path
                         );
                     } else {
+                        // tsserver: close TSX and DTS for non-background files.
                         if let Err(e) = sync.close_tsx(&tsx_path).await {
                             tracing::warn!("did_close: failed to close TSX in provider: {e}");
                         }
-                        // Also close the .d.vue.ts declaration file
                         if let Some(dts_path) = self.dts_path_for_uri(uri) {
                             let _ = sync.close_dts(&dts_path).await;
                         }
@@ -2284,10 +2395,11 @@ impl LanguageServer for VerterLanguageServer {
                     let _ = sync.close_tsx(&tsx_path).await;
                     self.background_synced_files.remove(&tsx_path);
                 }
-                // Close the .d.vue.ts declaration file
+                // Close the .vue.ts declaration file
                 let base = canonical_id.strip_suffix(".vue").unwrap_or(&canonical_id);
-                let dts_path = format!("{base}.d.vue.ts");
+                let dts_path = format!("{base}.vue.ts");
                 let _ = sync.close_dts(&dts_path).await;
+                self.background_synced_files.remove(&dts_path);
             }
             self.documents.host().remove(&canonical_id);
             self.cached_verter_diags.remove(uri.as_str());
@@ -4049,5 +4161,55 @@ mod tests {
         );
         // This means `resolved == target_normalized` will never match for aliases,
         // causing component parents to always be empty for alias-based imports.
+    }
+
+    #[test]
+    fn import_resolved_matches_target_exact() {
+        assert!(import_resolved_matches_target(
+            "C:/project/src/components/Foo.vue",
+            "C:/project/src/components/Foo.vue"
+        ));
+    }
+
+    #[test]
+    fn import_resolved_matches_target_missing_vue_ext() {
+        // Import `../Popup` resolves to `C:/proj/src/Popup` (no ext)
+        // Target is `C:/proj/src/Popup.vue`
+        assert!(import_resolved_matches_target(
+            "C:/proj/src/Popup",
+            "C:/proj/src/Popup.vue"
+        ));
+    }
+
+    #[test]
+    fn import_resolved_matches_target_directory_index() {
+        // Import `./Popover` resolves to `C:/proj/src/Popover` (directory)
+        // Target is `C:/proj/src/Popover/index.vue`
+        assert!(import_resolved_matches_target(
+            "C:/proj/src/Popover",
+            "C:/proj/src/Popover/index.vue"
+        ));
+    }
+
+    #[test]
+    fn import_resolved_matches_target_directory_same_name() {
+        // Import `./Popover` resolves to `C:/proj/src/Popover` (directory)
+        // Target is `C:/proj/src/Popover/Popover.vue`
+        assert!(import_resolved_matches_target(
+            "C:/proj/src/Popover",
+            "C:/proj/src/Popover/Popover.vue"
+        ));
+    }
+
+    #[test]
+    fn import_resolved_does_not_match_different_component() {
+        assert!(!import_resolved_matches_target(
+            "C:/proj/src/Popup",
+            "C:/proj/src/Dialog.vue"
+        ));
+        assert!(!import_resolved_matches_target(
+            "C:/proj/src/Popup",
+            "C:/proj/src/PopupMenu.vue"
+        ));
     }
 }

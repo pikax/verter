@@ -116,8 +116,11 @@ export class CssService {
     if (!block || !service || !cssDoc) return null;
 
     const cssPos = this.toCssPosition(block, line, character);
+    console.log(`[CSS doComplete] SFC(${line}:${character}) → CSS(${cssPos.line}:${cssPos.character}) block.lang=${block.lang} contentStartLine=${block.contentStartLine} contentStartCol=${block.contentStartColumn}`);
+    console.log(`[CSS doComplete] cssDoc length=${cssDoc.getText().length} first 100 chars: ${JSON.stringify(cssDoc.getText().slice(0, 100))}`);
     const stylesheet = service.parseStylesheet(cssDoc);
     const result = service.doComplete(cssDoc, cssPos, stylesheet);
+    console.log(`[CSS doComplete] result items: ${result.items.length}, first 5: ${result.items.slice(0, 5).map(i => i.label).join(', ')}`);
 
     // Map textEdit ranges back to SFC coordinates
     for (const item of result.items) {
@@ -160,8 +163,10 @@ export class CssService {
     if (!block || !service || !cssDoc) return null;
 
     const cssPos = this.toCssPosition(block, line, character);
+    console.log(`[CSS doHover] SFC(${line}:${character}) → CSS(${cssPos.line}:${cssPos.character}) block.lang=${block.lang} contentStartLine=${block.contentStartLine}`);
     const stylesheet = service.parseStylesheet(cssDoc);
     const hover = service.doHover(cssDoc, cssPos, stylesheet);
+    console.log(`[CSS doHover] hover=${hover ? 'found' : 'null'}`);
     if (!hover) return null;
 
     // Map hover range back to SFC coordinates

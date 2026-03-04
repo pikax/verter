@@ -155,6 +155,8 @@ pub struct ScriptExport<'a> {
     pub bindings: Vec<ScriptBinding<'a>>,
     /// Source module (for re-exports like `export * from 'foo'`)
     pub source: Option<&'a str>,
+    /// Span of the source string literal (including quotes), for re-exports
+    pub source_span: Option<Span>,
     /// Whether this is a type-only export
     pub is_type_only: bool,
 }

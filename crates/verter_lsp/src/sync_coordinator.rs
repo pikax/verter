@@ -144,7 +144,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     if let Some(api) = api {
         tracing::info!("sync_coordinator: HOST_GET_API_DONE {canonical_id}");
         let base = canonical_id.strip_suffix(".vue").unwrap_or(canonical_id);
-        let dts_path = format!("{base}.d.vue.ts");
+        let dts_path = format!("{base}.vue.ts");
         if let Err(e) = deps.project_sync.sync_dts(&dts_path, &api.code).await {
             tracing::warn!("sync_coordinator: dts sync failed for {dts_path}: {e}");
         }

@@ -893,15 +893,15 @@ impl TsgoTypeProvider {
 ///
 /// This is safe because `.vue'` and `.vue"` only appear as import specifier
 /// endings in generated TSX/JSX content.
-fn rewrite_vue_imports_for_tsgo(content: &str, path: &str) -> String {
-    let ext = if path.ends_with(".jsx") {
-        ".vue.jsx"
-    } else {
-        ".vue.tsx"
-    };
+pub(crate) fn rewrite_vue_imports_for_tsgo(content: &str, _path: &str) -> String {
+    // Rewrite .vue imports to .vue.ts so TSGO resolves them to the public API
+    // output rather than the IDE (.vue.tsx) output.
+    // The .vue.ts file has a proper `export default` for cross-file imports.
+    // NOTE: We use .vue.ts (not .d.vue.ts) because TypeScript treats .d.vue.ts
+    // as a declaration file and forbids regular imports from it.
     content
-        .replace(".vue'", &format!("{ext}'"))
-        .replace(".vue\"", &format!("{ext}\""))
+        .replace(".vue'", ".vue.ts'")
+        .replace(".vue\"", ".vue.ts\"")
 }
 
 impl TypeProvider for TsgoTypeProvider {
@@ -2090,47 +2090,57 @@ mod tests {
     use super::*;
     use tokio::process::{ChildStdin, ChildStdout};
 
-    /// @ai-generated — rewrite_vue_imports_for_tsgo rewrites .vue imports to .vue.tsx for TSX files
+    /// rewrite_vue_imports_for_tsgo rewrites .vue imports to .vue.ts for type resolution
     #[test]
-    fn test_rewrite_vue_imports_tsx() {
+    fn test_rewrite_vue_imports_to_vue_ts() {
         let input = r#"import Foo from './Foo.vue'
 import Bar from "@/components/Bar.vue"
 const x = 1;"#;
         let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
         assert!(
-            result.contains("./Foo.vue.tsx'"),
-            "single-quote import should be rewritten"
+            result.contains("./Foo.vue.ts'"),
+            "single-quote import should be rewritten to .vue.ts, got: {result}"
         );
         assert!(
-            result.contains("@/components/Bar.vue.tsx\""),
-            "double-quote import should be rewritten"
+            result.contains("@/components/Bar.vue.ts\""),
+            "double-quote import should be rewritten to .vue.ts, got: {result}"
         );
         assert!(
             !result.contains("from './Foo.vue'"),
             ".vue should not remain in single-quote import"
         );
         assert!(
-            !result.contains("Bar.vue\""),
-            ".vue should not remain in double-quote import (without .tsx)"
-        );
-        assert!(
             result.contains("const x = 1;"),
             "non-import content should be preserved"
         );
+        // Negative: should NOT rewrite to .vue.tsx or .d.vue.ts
+        assert!(
+            !result.contains(".vue.tsx"),
+            ".vue imports must NOT be rewritten to .vue.tsx"
+        );
+        assert!(
+            !result.contains(".d.vue.ts"),
+            ".vue imports must NOT be rewritten to .d.vue.ts (declaration file)"
+        );
     }
 
-    /// @ai-generated — rewrite_vue_imports_for_tsgo rewrites to .vue.jsx for JSX files
+    /// rewrite_vue_imports_for_tsgo rewrites to .vue.ts for JSX files too
     #[test]
-    fn test_rewrite_vue_imports_jsx() {
+    fn test_rewrite_vue_imports_jsx_to_vue_ts() {
         let input = r#"import Foo from './Foo.vue'"#;
         let result = rewrite_vue_imports_for_tsgo(input, "App.vue.jsx");
         assert!(
-            result.contains("./Foo.vue.jsx'"),
-            "JSX file should rewrite to .vue.jsx"
+            result.contains("./Foo.vue.ts'"),
+            "JSX file should also rewrite to .vue.ts, got: {result}"
+        );
+        // Negative: should NOT rewrite to .vue.jsx or .d.vue.ts
+        assert!(
+            !result.contains(".vue.jsx"),
+            "JSX file should NOT rewrite to .vue.jsx"
         );
         assert!(
-            !result.contains(".vue.tsx"),
-            "JSX file should NOT rewrite to .vue.tsx"
+            !result.contains(".d.vue.ts"),
+            "should NOT use declaration file extension"
         );
     }
 

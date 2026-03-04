@@ -52,7 +52,7 @@ impl ProjectSync {
         self.provider.close_file(tsx_path).await
     }
 
-    /// Load a DTS file (.d.vue.ts) into the type provider for import resolution only.
+    /// Load a DTS file (.vue.ts) into the type provider for import resolution only.
     /// Unlike `open_dts`, this does NOT trigger diagnostics in providers that support it.
     pub async fn load_dts(
         &self,
@@ -62,7 +62,7 @@ impl ProjectSync {
         self.provider.load_file(dts_path, dts_content).await
     }
 
-    /// Open a new DTS file (.d.vue.ts) in the type provider.
+    /// Open a new DTS file (.vue.ts) in the type provider.
     pub async fn open_dts(
         &self,
         dts_path: &str,
@@ -71,7 +71,7 @@ impl ProjectSync {
         self.provider.open_file(dts_path, dts_content).await
     }
 
-    /// Sync a Vue file's DTS representation (.d.vue.ts) to the type provider.
+    /// Sync a Vue file's DTS representation (.vue.ts) to the type provider.
     pub async fn sync_dts(
         &self,
         dts_path: &str,
@@ -198,7 +198,7 @@ mod tests {
         let mock = MockTypeProvider::new();
         let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
 
-        sync.open_dts("App.d.vue.ts", "export default App;")
+        sync.open_dts("App.vue.ts", "export default App;")
             .await
             .unwrap();
 
@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         match &calls[0] {
             MockCall::OpenFile { path, content } => {
-                assert_eq!(path, "App.d.vue.ts");
+                assert_eq!(path, "App.vue.ts");
                 assert_eq!(content, "export default App;");
             }
             _ => panic!("expected OpenFile"),
@@ -219,7 +219,7 @@ mod tests {
         let mock = MockTypeProvider::new();
         let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
 
-        sync.load_dts("App.d.vue.ts", "export default App;")
+        sync.load_dts("App.vue.ts", "export default App;")
             .await
             .unwrap();
 
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         match &calls[0] {
             MockCall::LoadFile { path, content } => {
-                assert_eq!(path, "App.d.vue.ts");
+                assert_eq!(path, "App.vue.ts");
                 assert_eq!(content, "export default App;");
             }
             _ => panic!("expected LoadFile, got {:?}", calls[0]),
@@ -240,7 +240,7 @@ mod tests {
         let mock = MockTypeProvider::new();
         let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
 
-        sync.sync_dts("App.d.vue.ts", "export default App;")
+        sync.sync_dts("App.vue.ts", "export default App;")
             .await
             .unwrap();
 
@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         match &calls[0] {
             MockCall::UpdateFile { path, content } => {
-                assert_eq!(path, "App.d.vue.ts");
+                assert_eq!(path, "App.vue.ts");
                 assert_eq!(content, "export default App;");
             }
             _ => panic!("expected UpdateFile"),
@@ -261,13 +261,13 @@ mod tests {
         let mock = MockTypeProvider::new();
         let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
 
-        sync.close_dts("App.d.vue.ts").await.unwrap();
+        sync.close_dts("App.vue.ts").await.unwrap();
 
         let calls = mock.file_sync_calls();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
             MockCall::CloseFile { path } => {
-                assert_eq!(path, "App.d.vue.ts");
+                assert_eq!(path, "App.vue.ts");
             }
             _ => panic!("expected CloseFile"),
         }
@@ -404,7 +404,7 @@ mod tests {
             FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
         let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
 
-        let result = sync.load_dts("App.d.vue.ts", "export default App;").await;
+        let result = sync.load_dts("App.vue.ts", "export default App;").await;
         assert!(result.is_err(), "load_dts should propagate provider error");
     }
 

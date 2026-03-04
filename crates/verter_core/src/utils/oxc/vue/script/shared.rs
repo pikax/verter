@@ -128,6 +128,7 @@ pub fn process_named_export<'a>(export: &ExportNamedDeclaration<'a>) -> ScriptEx
         span: Span::from(export.span),
         bindings,
         source: export.source.as_ref().map(|s| s.value.as_str()),
+        source_span: export.source.as_ref().map(|s| Span::from(s.span)),
         is_type_only: export.export_kind.is_type(),
     }
 }
@@ -158,6 +159,7 @@ pub fn process_all_export<'a>(
         span: Span::from(export.span),
         bindings,
         source: Some(export.source.value.as_str()),
+        source_span: Some(Span::from(export.source.span)),
         is_type_only: export.export_kind.is_type(),
     }
 }

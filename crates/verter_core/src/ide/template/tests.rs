@@ -2123,6 +2123,116 @@ fn class_merge_no_extra_closing_brace() {
     );
 }
 
+#[test]
+fn class_merge_static_before_dynamic_no_extra_brace() {
+    // Popover.vue pattern: static `class` BEFORE dynamic `:class`
+    let source =
+        r#"<template><span class="ns-popover--wrapper" :class="$attrs.class">hi</span></template>"#;
+    let output = gen_tsx_template(source);
+
+    eprintln!("=== OUTPUT ===\n{}\n=== END ===", output);
+
+    // Positive: should contain normalizeClass
+    assert!(
+        output.contains("normalizeClass"),
+        "should use normalizeClass: {output}"
+    );
+
+    // Negative: must NOT have double closing brace
+    let double_brace = "])}}";
+    assert!(
+        !output.contains(double_brace),
+        "must not have extra closing brace: {output}"
+    );
+}
+
+#[test]
+fn class_merge_dynamic_before_static_no_extra_brace() {
+    // Original Bug 2 pattern: dynamic `:class` BEFORE static `class`
+    let source =
+        r#"<template><span :class="$attrs.class" class="ns-popover--wrapper">hi</span></template>"#;
+    let output = gen_tsx_template(source);
+
+    eprintln!("=== OUTPUT ===\n{}\n=== END ===", output);
+
+    // Positive: should contain normalizeClass
+    assert!(
+        output.contains("normalizeClass"),
+        "should use normalizeClass: {output}"
+    );
+
+    // Negative: must NOT have double closing brace
+    let double_brace = "])}}";
+    assert!(
+        !output.contains(double_brace),
+        "must not have extra closing brace: {output}"
+    );
+}
+
+#[test]
+fn popover_vue_template_generates_valid_tsx() {
+    // Full Popover.vue template pattern that user reports as broken
+    let source = r#"<script setup lang="ts">
+import { computed, ref, useTemplateRef, watch } from 'vue'
+const show = ref(false)
+const onClickWrapper = () => {}
+const floatingStyles = ref({})
+const showArrow = ref(false)
+const arrowPos = ref({})
+</script>
+<template>
+  <span
+    ref="wrapperElm"
+    class="ns-popover--wrapper"
+    :class="$attrs.class"
+    :style="$attrs.style as any"
+    @click="onClickWrapper"
+  >
+    <slot name="reference" />
+  </span>
+  <Popup
+    ref="popupElm"
+    v-model:show="show"
+    class="ns-popover"
+    :style="[floatingStyles, $attrs.style]"
+    position=""
+  >
+    <div v-if="showArrow" ref="arrowElm" class="ns-popover__arrow" :style="[arrowPos]"></div>
+    <div
+      role="menu"
+      class="ns-popover__content"
+      :class="{
+        'ns-popover__content--horizontal': true,
+      }"
+    >
+      <slot />
+    </div>
+  </Popup>
+</template>"#;
+    let output = gen_tsx_template(source);
+
+    eprintln!("=== POPOVER OUTPUT ===\n{}\n=== END ===", output);
+
+    // Must not have any double closing braces from normalizeClass
+    let double_brace = "])}}";
+    assert!(
+        !output.contains(double_brace),
+        "must not have extra closing brace: {output}"
+    );
+
+    // normalizeClass should be present for merged class attrs
+    assert!(
+        output.contains("normalizeClass"),
+        "should use normalizeClass for merged class: {output}"
+    );
+
+    // v-if should NOT appear in JSX
+    assert!(
+        !output.contains("v-if"),
+        "v-if attribute must be removed from JSX: {output}"
+    );
+}
+
 // ── Split overwrite tests for source map accuracy ────────────────
 
 /// `v-bind="$attrs"` must produce `{...___VERTER___instance.$attrs}` using split
@@ -2382,5 +2492,86 @@ fn dollar_props_member_access_source_map() {
                 }
             }
         }
+    }
+}
+
+/// Props binding prefix sourcemap accuracy: `:title="myProp"` with Props binding.
+/// The generated output has `__props.myProp`. The source map token for `myProp`
+/// should point to the generated position of `myProp` (AFTER `__props.`), not to
+/// `__props.` itself. This ensures hover at `myProp` in the Vue SFC resolves to the
+/// correct prop type rather than the full `__props` object type.
+#[test]
+fn prop_binding_prefix_source_map_accuracy() {
+    let source = r#"<template><div :title="myProp"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("myProp", BindingType::Props)]);
+
+    // Positive: output should contain __props.myProp
+    assert!(
+        output.contains("__props.myProp"),
+        "should apply __props prefix: {output}"
+    );
+
+    // Find source column of `myProp` in the :title attribute value
+    let src_col = source.find("myProp").unwrap() as u32;
+
+    // There should be a source map token whose source column points to `myProp`
+    let token = tokens.iter().find(|&&(_, _, sc)| sc == src_col);
+    assert!(
+        token.is_some(),
+        "source map must have a token for myProp at src col {src_col}. Tokens: {:?}",
+        tokens
+    );
+
+    // The generated column of that token should point to `myProp` (after `__props.`),
+    // not to `__props.` itself.
+    let &(gen_line, gen_col, _) = token.unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    if let Some(line_str) = lines.get(gen_line as usize) {
+        let at_gen = &line_str[gen_col as usize..];
+        assert!(
+            at_gen.starts_with("myProp"),
+            "generated column {gen_col} should point to 'myProp', not '__props.'. \
+             At gen col {gen_col}: '{}'. Full output: {output}",
+            &at_gen[..at_gen.len().min(20)]
+        );
+    }
+}
+
+/// Props binding in template literal: `:class="\`prefix--${closeIconPosition}\`"`.
+/// Same issue as above but within a template literal expression.
+#[test]
+fn prop_in_template_literal_source_map_accuracy() {
+    let source = r#"<template><div :class="`prefix--${closeIconPosition}`"></div></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("closeIconPosition", BindingType::Props)]);
+
+    // Positive: should apply __props prefix
+    assert!(
+        output.contains("__props.closeIconPosition"),
+        "should apply __props prefix: {output}"
+    );
+
+    // Find source column of `closeIconPosition` in the template literal
+    let src_col = source.find("closeIconPosition").unwrap() as u32;
+
+    // There should be a source map token for closeIconPosition
+    let token = tokens.iter().find(|&&(_, _, sc)| sc == src_col);
+    assert!(
+        token.is_some(),
+        "source map must have a token for closeIconPosition at src col {src_col}. Tokens: {:?}",
+        tokens
+    );
+
+    // The generated column should point to 'closeIconPosition', not '__props.'
+    let &(gen_line, gen_col, _) = token.unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    if let Some(line_str) = lines.get(gen_line as usize) {
+        let at_gen = &line_str[gen_col as usize..];
+        assert!(
+            at_gen.starts_with("closeIconPosition"),
+            "generated column should point to 'closeIconPosition', not '__props.'. \
+             At gen col {gen_col}: '{}'. Full output: {output}",
+            &at_gen[..at_gen.len().min(30)]
+        );
     }
 }

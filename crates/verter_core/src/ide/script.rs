@@ -344,6 +344,13 @@ fn process_tsx_script_setup<'alloc>(
         if let ScriptItem::Import(imp) = item {
             let abs_start = content_start + imp.span.start;
             let abs_end = content_start + imp.span.end;
+            // Rewrite .vue imports to .vue.ts so type providers resolve them
+            // to the public API output instead of the IDE (.vue.tsx) output.
+            // Uses prepend_left so the sourcemap accounts for the extra bytes.
+            if imp.source.ends_with(".vue") {
+                let quote_pos = content_start + imp.source_span.end - 1;
+                ct.prepend_left(quote_pos, ".ts");
+            }
             ct.move_with_suffix(abs_start, abs_end, hoist_pos, "\n");
         }
     }
@@ -354,6 +361,19 @@ fn process_tsx_script_setup<'alloc>(
             let abs_start = content_start + td.span.start;
             let abs_end = content_start + td.span.end;
             ct.move_with_suffix(abs_start, abs_end, hoist_pos, "\n");
+        }
+    }
+
+    // Rewrite .vue specifiers in re-exports (e.g., `export { Foo } from './Foo.vue'`).
+    // These aren't hoisted, but their specifiers still need .vue → .vue.ts.
+    for item in &parse_result.items {
+        if let ScriptItem::Export(exp) = item {
+            if let (Some(src), Some(src_span)) = (exp.source, exp.source_span) {
+                if src.ends_with(".vue") {
+                    let quote_pos = content_start + src_span.end - 1;
+                    ct.prepend_left(quote_pos, ".ts");
+                }
+            }
         }
     }
 
@@ -818,6 +838,11 @@ fn process_companion_for_tsx<'alloc>(
         if let ScriptItem::Import(imp) = item {
             let abs_start = comp_start + imp.span.start;
             let abs_end = comp_start + imp.span.end;
+            // Rewrite .vue imports to .vue.ts (see script setup comment above)
+            if imp.source.ends_with(".vue") {
+                let quote_pos = comp_start + imp.source_span.end - 1;
+                ct.prepend_left(quote_pos, ".ts");
+            }
             ct.move_with_suffix(abs_start, abs_end, hoist_pos, "\n");
 
             // Register non-type import bindings for template resolution.
@@ -842,6 +867,18 @@ fn process_companion_for_tsx<'alloc>(
             let abs_start = comp_start + td.span.start;
             let abs_end = comp_start + td.span.end;
             ct.move_with_suffix(abs_start, abs_end, hoist_pos, "\n");
+        }
+    }
+
+    // Rewrite .vue specifiers in re-exports (see script setup comment above).
+    for item in &parse_result.items {
+        if let ScriptItem::Export(exp) = item {
+            if let (Some(src), Some(src_span)) = (exp.source, exp.source_span) {
+                if src.ends_with(".vue") {
+                    let quote_pos = comp_start + src_span.end - 1;
+                    ct.prepend_left(quote_pos, ".ts");
+                }
+            }
         }
     }
 
@@ -2831,13 +2868,13 @@ fn instance_declaration(filename: &str, is_jsx: bool, override_attrs: bool) -> S
     } else if override_attrs {
         // With Comp functions + attrs type aliases: override $attrs with composed type
         format!(
-            "\n// @ts-ignore\nlet {P}instance!: Omit<InstanceType<import('./{filename}')['default']>, '$attrs'> & {{ $attrs: {P}Attrs }};\nvoid {P}instance;\n",
+            "\n// @ts-ignore\nlet {P}instance!: Omit<InstanceType<import('./{filename}.ts')['default']>, '$attrs'> & {{ $attrs: {P}Attrs }};\nvoid {P}instance;\n",
             P = PREFIX,
             filename = filename,
         )
     } else {
         format!(
-            "\n// @ts-ignore\nlet {P}instance!: InstanceType<import('./{filename}')['default']>;\nvoid {P}instance;\n",
+            "\n// @ts-ignore\nlet {P}instance!: InstanceType<import('./{filename}.ts')['default']>;\nvoid {P}instance;\n",
             P = PREFIX,
             filename = filename,
         )
@@ -2856,7 +2893,7 @@ fn instance_declaration_ambient(filename: &str, is_jsx: bool) -> String {
         )
     } else {
         format!(
-            "\n// @ts-ignore\ndeclare let {P}instance: InstanceType<import('./{filename}')['default']>;\n",
+            "\n// @ts-ignore\ndeclare let {P}instance: InstanceType<import('./{filename}.ts')['default']>;\n",
             P = PREFIX,
             filename = filename,
         )
@@ -3708,6 +3745,92 @@ mod tests {
         (code, bindings)
     }
 
+    /// IDE output rewrites `.vue` import specifiers to `.vue.ts` so that
+    /// type providers (TSGO/tsserver) resolve them to the public API output.
+    /// The rewrite uses CodeTransform::prepend_left so the sourcemap stays correct.
+    #[test]
+    fn vue_imports_rewritten_to_vue_ts() {
+        let (code, _) = gen_tsx_script(
+            r#"<script setup>
+import MyComp from './MyComp.vue'
+import { helper } from '../utils'
+import Another from "@/components/Another.vue"
+const x = 1
+</script>"#,
+        );
+
+        // Positive: .vue imports should become .vue.ts
+        assert!(
+            code.contains("from './MyComp.vue.ts'"),
+            "single-quoted .vue import should become .vue.ts: {code}"
+        );
+        assert!(
+            code.contains("from \"@/components/Another.vue.ts\""),
+            "double-quoted .vue import should become .vue.ts: {code}"
+        );
+
+        // Negative: non-.vue imports should NOT be rewritten
+        assert!(
+            code.contains("from '../utils'"),
+            "non-.vue import must not be rewritten: {code}"
+        );
+
+        // Negative: should NOT have bare .vue' or .vue" (without .ts)
+        assert!(
+            !code.contains(".vue'") || code.contains(".vue.ts'"),
+            "bare .vue' should not remain: {code}"
+        );
+        assert!(
+            !code.contains(".vue\"") || code.contains(".vue.ts\""),
+            "bare .vue\" should not remain: {code}"
+        );
+    }
+
+    /// Companion `<script>` imports should also be rewritten to `.vue.ts`.
+    #[test]
+    fn companion_script_vue_imports_rewritten_to_vue_ts() {
+        let (code, _) = gen_tsx_script(
+            r#"<script>
+import Base from './Base.vue'
+export default { extends: Base }
+</script>
+<script setup>
+const x = 1
+</script>"#,
+        );
+
+        assert!(
+            code.contains("from './Base.vue.ts'"),
+            "companion script .vue import should become .vue.ts: {code}"
+        );
+    }
+
+    /// Re-exports like `export { Foo } from './Foo.vue'` should also be rewritten.
+    #[test]
+    fn reexport_vue_specifier_rewritten_to_vue_ts() {
+        let (code, _) = gen_tsx_script(
+            r#"<script>
+export { default as Dropdown } from './Dropdown.vue'
+export * from './utils'
+</script>
+<script setup>
+const x = 1
+</script>"#,
+        );
+
+        // Positive: .vue re-export should become .vue.ts
+        assert!(
+            code.contains("from './Dropdown.vue.ts'"),
+            "re-export .vue specifier should become .vue.ts: {code}"
+        );
+
+        // Negative: non-.vue re-export should NOT be rewritten
+        assert!(
+            code.contains("from './utils'"),
+            "non-.vue re-export must not be rewritten: {code}"
+        );
+    }
+
     #[test]
     fn basic_script_setup() {
         let (code, bindings) = gen_tsx_script(
@@ -3742,8 +3865,8 @@ const count = ref(0)
             code
         );
         assert!(
-            code.contains("import('./App.vue')"),
-            "Should reference the component's own .vue file. Got: {}",
+            code.contains("import('./App.vue.ts')"),
+            "Should reference the component's own .vue.ts file. Got: {}",
             code
         );
         assert!(
@@ -5166,8 +5289,8 @@ const count = ref(0)
 
         // Companion imports should be hoisted above the wrapper function
         assert!(
-            code.contains("import MyComponent from './MyComponent.vue'"),
-            "companion import should be hoisted: {code}"
+            code.contains("import MyComponent from './MyComponent.vue.ts'"),
+            "companion import should be hoisted with .vue.ts rewrite: {code}"
         );
 
         // Import should appear before the wrapper function
