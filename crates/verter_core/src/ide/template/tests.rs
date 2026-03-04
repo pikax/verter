@@ -2091,6 +2091,38 @@ fn class_only_dynamic_no_merge() {
     );
 }
 
+#[test]
+fn class_merge_no_extra_closing_brace() {
+    // Bug: `<span :class="$attrs.class" class="ns-popover--wrapper">` generated `])}}`
+    // (double closing brace) instead of `])}`
+    let source =
+        r#"<template><span :class="$attrs.class" class="ns-popover--wrapper">hi</span></template>"#;
+    let output = gen_tsx_template(source);
+
+    // Positive: should contain merged normalizeClass with static value
+    assert!(
+        output.contains("normalizeClass"),
+        "should use normalizeClass for merged class: {output}"
+    );
+    assert!(
+        output.contains("\"ns-popover--wrapper\""),
+        "should contain static class value: {output}"
+    );
+
+    // Negative: must NOT have double closing brace `])}}` — only `])}`
+    let double_brace = "])}}";
+    assert!(
+        !output.contains(double_brace),
+        "must not have extra closing brace: {output}"
+    );
+    // Positive: should have exactly `])}`
+    let single_brace = "])}";
+    assert!(
+        output.contains(single_brace),
+        "should have correct single closing brace: {output}"
+    );
+}
+
 // ── Split overwrite tests for source map accuracy ────────────────
 
 /// `v-bind="$attrs"` must produce `{...___VERTER___instance.$attrs}` using split

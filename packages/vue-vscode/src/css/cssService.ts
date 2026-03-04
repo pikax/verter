@@ -67,6 +67,7 @@ interface CachedStyleEntry {
 interface DocumentCache {
   version: number;
   blocks: StyleBlockInfo[];
+  source: string;
   /** Keyed by style block index */
   virtualFiles: Map<number, CachedStyleEntry>;
   /** Keyed by style block index — transpiled CSS for preprocessors */
@@ -350,16 +351,19 @@ export class CssService {
       );
     }
 
-    // For direct languages, use virtual file content
+    // For direct languages (css, scss, less, postcss), use virtual file content.
+    // Fall back to extracting content directly from the SFC source when the LSP
+    // doesn't provide style virtual files (e.g., when the compile profile doesn't
+    // include the STYLE target).
     const vf = entry.virtualFiles.get(block.index);
-    if (!vf) return null;
+    const code = vf?.code ?? entry.source.slice(block.contentStartOffset, block.contentEndOffset);
 
     const langId = block.lang === "postcss" ? "css" : block.lang;
     return TextDocument.create(
       `${sfcUri}.style.${block.index}.${langId}`,
       langId,
       1,
-      vf.code,
+      code,
     );
   }
 
@@ -476,6 +480,7 @@ export class CssService {
     const entry: DocumentCache = {
       version,
       blocks,
+      source,
       virtualFiles,
       transpiled,
     };

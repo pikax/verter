@@ -3558,32 +3558,32 @@ fn emit_comp_function_for_element(
 
     match el.tag_type {
         TagType::Element => {
+            // For HTML elements, return the plain element type without props enhancement.
+            // useTemplateRef should resolve to e.g. HTMLSpanElement, not HTMLSpanElement & { onClick: ... }
             if is_jsx {
                 write!(
                     buf,
                     "\nfunction {P}Comp{offset}{gs}() {{{guard}\
-                     \n  return {P}enhanceElementWithProps(/** @type {{HTMLElementTagNameMap[\"{tag}\"]}} */ ({{}}), {props});\
+                     \n  return /** @type {{HTMLElementTagNameMap[\"{tag}\"]}} */ ({{}});\
                      \n}}",
                     P = PREFIX,
                     offset = offset,
                     gs = gs,
                     guard = guard,
                     tag = tag_name,
-                    props = props_literal,
                 )
                 .expect("write to String is infallible");
             } else {
                 write!(
                     buf,
                     "\nfunction {P}Comp{offset}{gs}() {{{guard}\
-                     \n  return {P}enhanceElementWithProps({{}} as HTMLElementTagNameMap[\"{tag}\"], {props});\
+                     \n  return {{}} as HTMLElementTagNameMap[\"{tag}\"];\
                      \n}}",
                     P = PREFIX,
                     offset = offset,
                     gs = gs,
                     guard = guard,
                     tag = tag_name,
-                    props = props_literal,
                 )
                 .expect("write to String is infallible");
             }
@@ -4141,10 +4141,41 @@ const el = ref<HTMLDivElement>()
 <template><div ref="el">hello</div></template>"#,
         );
         assert!(
-            code.contains(
-                "___VERTER___enhanceElementWithProps({} as HTMLElementTagNameMap[\"div\"]"
-            ),
-            "should emit Comp for div with ref in code: {}",
+            code.contains("{} as HTMLElementTagNameMap[\"div\"]"),
+            "should emit Comp for div with ref returning plain element type: {}",
+            code
+        );
+        assert!(
+            !code.contains("enhanceElementWithProps({} as HTMLElementTagNameMap"),
+            "should NOT use enhanceElementWithProps for HTML elements: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn comp_function_html_element_plain_type() {
+        // Bug: useTemplateRef on HTML elements should resolve to plain HTMLSpanElement,
+        // not `HTMLSpanElement & { onClick: () => void }`
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import { useTemplateRef } from 'vue'
+const el = useTemplateRef('el')
+</script>
+<template><span ref="el" @click="() => {}">hello</span></template>"#,
+        );
+
+        // Positive: should return just the HTMLElementTagNameMap type
+        assert!(
+            code.contains("HTMLElementTagNameMap[\"span\"]"),
+            "should reference HTMLElementTagNameMap for span: {}",
+            code
+        );
+
+        // Negative: must NOT use enhanceElementWithProps for HTML elements
+        // (only components need props enhancement)
+        assert!(
+            !code.contains("enhanceElementWithProps({} as HTMLElementTagNameMap"),
+            "should NOT use enhanceElementWithProps for HTML elements: {}",
             code
         );
     }

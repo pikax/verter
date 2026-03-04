@@ -1501,13 +1501,24 @@ impl VerterLanguageServer {
                 if let Some(template) = &analysis.template {
                     for comp in &template.components {
                         if let Some(src) = &comp.import_source {
-                            // Resolve the import source relative to the importing file's directory
-                            let importer_dir = normalized_id
-                                .rfind('/')
-                                .map(|i| &normalized_id[..i])
-                                .unwrap_or("");
-                            let resolved = resolve_import_path(importer_dir, src);
-                            if resolved == target_normalized {
+                            // Resolve the import source to an absolute path
+                            let resolved = if !src.starts_with('.') {
+                                // Non-relative: use TsConfigPathResolver (reads tsconfig paths/aliases)
+                                let pr_guard = self.path_resolver.read();
+                                pr_guard
+                                    .as_ref()
+                                    .and_then(|r| r.resolve(src))
+                                    .unwrap_or_else(|| src.to_string())
+                            } else {
+                                // Relative: resolve against importer directory
+                                let importer_dir = normalized_id
+                                    .rfind('/')
+                                    .map(|i| &normalized_id[..i])
+                                    .unwrap_or("");
+                                resolve_import_path(importer_dir, src)
+                            };
+                            let resolved_normalized = resolved.replace('\\', "/");
+                            if resolved_normalized == target_normalized {
                                 let props_json = comp
                                     .props
                                     .iter()
@@ -4008,5 +4019,27 @@ mod tests {
         let removed = set.remove(&id);
         assert!(removed.is_some(), "remove should return Some");
         assert!(!set.contains(&id), "should no longer contain the id");
+    }
+
+    #[test]
+    fn resolve_import_path_relative() {
+        let result = resolve_import_path("C:/project/src/views", "./Foo.vue");
+        assert_eq!(result, "C:/project/src/views/Foo.vue");
+
+        let result = resolve_import_path("C:/project/src/views", "../components/Bar.vue");
+        assert_eq!(result, "C:/project/src/components/Bar.vue");
+    }
+
+    #[test]
+    fn resolve_import_path_alias_returns_raw() {
+        // Non-relative imports (aliases) are returned as-is — they can't be resolved
+        // without a TsConfigPathResolver
+        let result = resolve_import_path("C:/project/src/views", "@/components/Foo.vue");
+        assert_eq!(
+            result, "@/components/Foo.vue",
+            "alias import should be returned as-is (unresolvable by resolve_import_path)"
+        );
+        // This means `resolved == target_normalized` will never match for aliases,
+        // causing component parents to always be empty for alias-based imports.
     }
 }

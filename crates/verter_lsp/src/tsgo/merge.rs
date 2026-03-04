@@ -470,7 +470,7 @@ pub fn merge_definitions(
 
     // If TypeProvider provides definitions, convert them
     if !type_defs.is_empty() {
-        let locations: Vec<Location> = type_defs
+        let mut locations: Vec<Location> = type_defs
             .into_iter()
             .filter_map(|loc| {
                 // TypeProvider returns paths; convert to URIs
@@ -498,6 +498,18 @@ pub fn merge_definitions(
 
         if locations.is_empty() {
             return verter_def;
+        }
+
+        // Deduplicate by URI (multiple .vue.tsx spans normalize to the same .vue)
+        let mut seen = std::collections::HashSet::new();
+        locations.retain(|loc| seen.insert(loc.uri.clone()));
+
+        // Prefer non-.vue definitions over .vue re-export sites.
+        // When CTRL+CLICKing a library symbol (e.g., `onClickOutside` from @vueuse/core),
+        // TSGO may return both the real definition (.d.mts) and .vue consumer files.
+        let has_non_vue = locations.iter().any(|l| !l.uri.as_str().ends_with(".vue"));
+        if has_non_vue {
+            locations.retain(|l| !l.uri.as_str().ends_with(".vue"));
         }
 
         return Some(if locations.len() == 1 {
@@ -2236,6 +2248,89 @@ mod tests {
                 );
             }
             _ => panic!("expected scalar"),
+        }
+    }
+
+    // ── Definition deduplication and filtering tests ──────────────
+
+    #[test]
+    fn merge_definitions_deduplicates_vue_locations() {
+        // Bug: multiple .vue.tsx targets for the same .vue file should deduplicate
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let type_defs = vec![
+            TypeLocation {
+                path: "/src/components/Dropdown.vue.tsx".to_string(),
+                start: 0,
+                end: 10,
+            },
+            TypeLocation {
+                path: "/src/components/Dropdown.vue.tsx".to_string(),
+                start: 20,
+                end: 30,
+            },
+        ];
+
+        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
+        match result {
+            Some(GotoDefinitionResponse::Scalar(_)) => {
+                // Deduplicated to a single location — correct
+            }
+            Some(GotoDefinitionResponse::Array(locs)) => {
+                panic!(
+                    "should deduplicate to Scalar, got Array with {} locations",
+                    locs.len()
+                );
+            }
+            other => panic!("expected Scalar, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn merge_definitions_filters_vue_when_non_vue_exists() {
+        // Bug: when CTRL+CLICKing on an import from a library, both .d.mts (real def)
+        // and .vue.tsx (consumer) are returned. Should filter out .vue targets.
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let type_defs = vec![
+            TypeLocation {
+                path: "/node_modules/@vueuse/core/index.d.mts".to_string(),
+                start: 100,
+                end: 120,
+            },
+            TypeLocation {
+                path: "/src/components/Dropdown.vue.tsx".to_string(),
+                start: 0,
+                end: 10,
+            },
+            TypeLocation {
+                path: "/src/components/Drawer.vue.tsx".to_string(),
+                start: 0,
+                end: 10,
+            },
+        ];
+
+        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
+        match result {
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                // Should keep only the .d.mts definition
+                assert!(
+                    !loc.uri.as_str().contains(".vue"),
+                    ".vue targets should be filtered out, got: {:?}",
+                    loc.uri
+                );
+            }
+            Some(GotoDefinitionResponse::Array(locs)) => {
+                for loc in &locs {
+                    assert!(
+                        !loc.uri.as_str().contains(".vue"),
+                        ".vue targets should be filtered out when .d.mts exists, got: {:?}",
+                        loc.uri
+                    );
+                }
+            }
+            None => panic!("expected some definitions"),
+            _ => panic!("unexpected response type"),
         }
     }
 }

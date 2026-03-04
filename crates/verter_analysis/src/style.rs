@@ -1007,6 +1007,9 @@ fn scan_css(css_content: &str) -> Option<CssAnalysis> {
     let mut selector_start: usize = 0;
     // Track declaration block start for custom property scanning
     let mut decl_block_start: usize = 0;
+    // Track end of last statement (`;`) inside rule blocks, so nested selectors
+    // start after the last property declaration, not from the opening `{`.
+    let mut last_statement_end: usize = 0;
     // At-rule depth stack: at_rule_entry_depths[i] = brace_depth where the at-rule block began
     // This lets us know when we're inside an at-rule block (not at selector level)
     let mut pending_at_rule: Option<(AtRuleKind, String)> = None;
@@ -1074,9 +1077,23 @@ fn scan_css(css_content: &str) -> Option<CssAnalysis> {
             continue;
         }
 
+        // Track semicolons inside rule blocks for nested selector start position
+        if b == b';' && brace_depth > 0 {
+            last_statement_end = i + 1;
+            i += 1;
+            continue;
+        }
+
         // Opening brace
         if b == b'{' {
-            let selector_text = &css_content[selector_start..i];
+            // For nested selectors (brace_depth > 0), use last_statement_end
+            // so we don't capture property declarations in the selector text.
+            let effective_start = if brace_depth > 0 && last_statement_end > selector_start {
+                last_statement_end
+            } else {
+                selector_start
+            };
+            let selector_text = &css_content[effective_start..i];
             let trimmed = selector_text.trim();
 
             if !trimmed.is_empty() {

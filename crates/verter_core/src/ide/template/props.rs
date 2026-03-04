@@ -202,7 +202,7 @@ fn process_merged_class_or_style<'alloc>(
             tvs,
             &format!("{}={{{}([", attr_name, helper_name),
         );
-        out.overwrite(tve, prop_end, &format!(",\"{}\"])}}}}", static_value));
+        out.overwrite(tve, prop_end, &format!(",\"{}\"])}}", static_value));
         if let Some(oxc_p) = oxc_prop {
             if let Some(ref exp) = oxc_p.exp {
                 if let Some(ref bindings) = exp.bindings {

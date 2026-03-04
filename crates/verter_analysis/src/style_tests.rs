@@ -939,3 +939,49 @@ fn selector_with_inline_comment_parsed() {
         "selector with comment should still parse structurally"
     );
 }
+
+#[test]
+fn nested_selector_text_does_not_contain_declarations() {
+    // Bug: hovering `background-color` in nested CSS shows entire rule block content
+    // because selector_start includes property declarations before the nested selector.
+    let analysis = analyze_css(
+        r#".ns-popover {
+  background-color: transparent;
+  overflow: visible;
+  &__content {
+    padding: 8px;
+  }
+}"#,
+    );
+
+    let css = analysis.css.as_ref().expect("should have CSS analysis");
+
+    // Find all selectors
+    let selector_texts: Vec<&str> = css.selectors.iter().map(|s| s.text.as_str()).collect();
+
+    // Positive: should contain the parent and nested selectors
+    assert!(
+        selector_texts.contains(&".ns-popover"),
+        "should contain .ns-popover selector: {:?}",
+        selector_texts
+    );
+    assert!(
+        selector_texts.iter().any(|s| s.contains("&__content")),
+        "should contain &__content nested selector: {:?}",
+        selector_texts
+    );
+
+    // Negative: no selector text should contain CSS property declarations
+    for sel in &css.selectors {
+        assert!(
+            !sel.text.contains("background-color"),
+            "selector '{}' should NOT contain property declarations",
+            sel.text
+        );
+        assert!(
+            !sel.text.contains("overflow"),
+            "selector '{}' should NOT contain property declarations",
+            sel.text
+        );
+    }
+}
