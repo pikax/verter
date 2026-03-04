@@ -562,7 +562,10 @@ pub fn compile(
                 let template_block_inner = if needs_tpl_codegen {
                     let tpl_alloc = Allocator::new();
                     // Use the full SFC input so AST positions (which are absolute) align correctly.
-                    // After codegen we slice out only the template region from the result.
+                    // The CT is initialized with the full SFC so AST positions
+                    // align. Remove the prefix (before <template>) and suffix
+                    // (after </template>) within the CT so build_string() produces
+                    // only the template region with correct sourcemap offsets.
                     let mut tpl_ct = CodeTransform::new(input, &tpl_alloc);
                     let tpl_tag_start = template_ast.root.tag_open.start as usize;
                     let tpl_tag_end = template_ast
@@ -578,6 +581,12 @@ pub fn compile(
                                 .map(|c| c.end as usize)
                                 .unwrap_or(template_ast.root.tag_open.end as usize),
                         );
+                    if tpl_tag_start > 0 {
+                        tpl_ct.remove(0, tpl_tag_start as u32);
+                    }
+                    if tpl_tag_end < input.len() {
+                        tpl_ct.remove(tpl_tag_end as u32, input.len() as u32);
+                    }
 
                     let tpl_options = TemplateCodeGenOptions {
                         mode: if verter_options.ssr {
@@ -626,12 +635,9 @@ pub fn compile(
                         }
                     }
 
-                    // The full output includes unchanged prefix (before <template>) and suffix
-                    // (after </template>). Slice out only the transformed template region.
-                    let full_output = tpl_ct.build_string();
-                    let suffix_len = input.len() - tpl_tag_end;
-                    let tpl_code =
-                        full_output[tpl_tag_start..full_output.len() - suffix_len].to_string();
+                    // Prefix and suffix were removed via CT operations above,
+                    // so build_string() produces only the template region.
+                    let tpl_code = tpl_ct.build_string();
                     let tpl_source_map = if verter_options.source_map {
                         let sm_opts = SourceMapOptions {
                             source: options.filename.as_deref(),
@@ -808,8 +814,14 @@ pub fn compile(
             tsx_ct.prepend_left(tpl_end, return_close);
         }
 
+        // Append type constructs via CT outro — they have no sourcemap mapping
+        // but must go through the CT so it remains the single source of truth.
+        if !tsx_script_result.type_constructs.is_empty() {
+            tsx_ct.append(&tsx_script_result.type_constructs);
+        }
+
         // Build output and source map from the single unified CT
-        let mut tsx_code = tsx_ct.build_string();
+        let tsx_code = tsx_ct.build_string();
         let tsx_sm = if verter_options.source_map {
             let sm_opts = SourceMapOptions {
                 source: options.filename.as_deref(),
@@ -822,21 +834,28 @@ pub fn compile(
         };
         let tsx_dur = tsx_start.elapsed().as_secs_f64() * 1000.0;
 
-        // Append type constructs after source map generation — they have no sourcemap
-        if !tsx_script_result.type_constructs.is_empty() {
-            tsx_code.push_str(&tsx_script_result.type_constructs);
-        }
-
-        // Compute block_start/block_end from boundary markers in the final TSX code
+        // Compute block_start/block_end from boundary markers in the final TSX code.
+        // The markers are unique constants inserted by script codegen; debug_assert
+        // that they are found when destructured_block metadata exists.
         let mut destructured_block = tsx_script_result.destructured_block;
         if let Some(ref mut meta) = destructured_block {
             const START_MARKER: &str = "/* verter-destructured-start */";
             const END_MARKER: &str = "/* verter-destructured-end */";
             if let Some(start) = tsx_code.find(START_MARKER) {
                 meta.block_start = start as u32;
-                if let Some(end) = tsx_code.find(END_MARKER) {
+                let end = tsx_code.find(END_MARKER);
+                debug_assert!(
+                    end.is_some(),
+                    "Found start marker but not end marker in TSX output"
+                );
+                if let Some(end) = end {
                     meta.block_end = (end + END_MARKER.len()) as u32;
                 }
+            } else {
+                debug_assert!(
+                    false,
+                    "destructured_block metadata exists but start marker not found in TSX output"
+                );
             }
         }
 

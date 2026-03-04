@@ -734,6 +734,82 @@ const show = true
             // compile_tests.rs's verify_sourcemap_tokens_in_bounds covers this.
         }
     }
+
+    /// Verify that generated positions in the template sourcemap are relative to
+    /// the template block output (`tpl_code`), not the full SFC. When a script
+    /// block precedes the template, generated lines must NOT be shifted by the
+    /// prefix line count.
+    #[test]
+    fn template_sourcemap_generated_positions_relative_to_tpl_code() {
+        let source = r#"<script setup>
+const msg = 'hello'
+const show = true
+</script>
+
+<template>
+  <div v-if="show">
+    <span>{{ msg }}</span>
+  </div>
+</template>
+"#;
+        let result = compile_with_sourcemap(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let tpl = result.template.as_ref().expect("template block");
+        assert!(!tpl.source_map.is_empty(), "template source map is empty");
+
+        let sm = oxc_sourcemap::SourceMap::from_json_string(&tpl.source_map)
+            .expect("valid source map JSON");
+
+        let tpl_line_count = tpl.code.lines().count();
+
+        // Every mapped token's generated line must be within the template code,
+        // not shifted by the script prefix lines.
+        for token in sm.get_tokens() {
+            if token.get_source_id().is_none() {
+                continue;
+            }
+            let gen_line = token.get_dst_line() as usize;
+            assert!(
+                gen_line < tpl_line_count + 1, // +1 for possible trailing newline
+                "Template sourcemap generated line {} exceeds template code ({} lines).\n\
+                 This suggests generated positions are relative to the full SFC \
+                 rather than the sliced template output.\nTemplate code:\n{}",
+                gen_line,
+                tpl_line_count,
+                tpl.code
+            );
+        }
+    }
+
+    /// Verify that template sourcemap tokens map generated positions to matching
+    /// text in the original SFC source.
+    #[test]
+    fn template_sourcemap_identifiers_map_correctly() {
+        let source = r#"<script setup>
+const msg = 'hello'
+const show = true
+</script>
+
+<template>
+  <div v-if="show">
+    <span>{{ msg }}</span>
+  </div>
+</template>
+"#;
+        let result = compile_with_sourcemap(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let tpl = result.template.as_ref().expect("template block");
+        assert!(!tpl.source_map.is_empty(), "template source map is empty");
+
+        let sm = oxc_sourcemap::SourceMap::from_json_string(&tpl.source_map)
+            .expect("valid source map JSON");
+        let lookup = build_lookup_table(&sm);
+
+        // Template expressions should map back to matching text in the SFC.
+        // 'show' appears in the v-if expression; 'msg' appears in interpolation.
+        assert_maps_to_source(&sm, &lookup, &tpl.code, source, "show", 0);
+        assert_maps_to_source(&sm, &lookup, &tpl.code, source, "msg", 0);
+    }
 }
 
 mod tsx_tests {
