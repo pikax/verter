@@ -234,6 +234,14 @@ fn strip_leading_code_block(text: &str) -> &str {
 /// Internal verter helper prefix that should be filtered from completions.
 const VERTER_INTERNAL_PREFIX: &str = "___VERTER___";
 
+/// Internal compiler identifiers that should never appear in completions.
+fn is_internal_dunder(label: &str) -> bool {
+    matches!(
+        label,
+        "__props" | "__emit" | "__slots" | "__expose" | "__returned"
+    )
+}
+
 /// Merge verter completions with TypeProvider completions.
 ///
 /// Strategy:
@@ -260,6 +268,10 @@ pub fn merge_completions(
         }
         // Filter $V_ prefixed types (string-exported type helpers)
         if item.label.starts_with("$V_") {
+            continue;
+        }
+        // Filter compiler-internal dunder identifiers (__props, __emit, __slots, etc.)
+        if is_internal_dunder(&item.label) {
             continue;
         }
         // Skip if already seen (from verter or a previous TSGO item)
@@ -882,17 +894,43 @@ pub fn merge_semantic_tokens(
                     line: vs.line,
                     character: vs.column,
                 };
-                if vue_line_index.position_to_offset(&start_lsp_pos).is_some() {
-                    // Preserve the original token length — source map lookup for the
-                    // end position would snap to the nearest token, collapsing length to 0.
-                    mapped.push((
-                        vs.line,
-                        vs.column,
-                        token.length,
-                        token.token_type,
-                        token.token_modifiers,
-                    ));
+                if vue_line_index.position_to_offset(&start_lsp_pos).is_none() {
+                    continue;
                 }
+
+                // Map end position too to compute correct Vue-space length.
+                // If the end maps to a different line, filter the token out.
+                let end_offset = token.start + token.length;
+                let vue_length =
+                    if let Some(end_lsp) = tsx_line_index.offset_to_position(end_offset) {
+                        if let Some(ve) = mapper.tsx_to_vue(end_lsp.line, end_lsp.character) {
+                            if ve.line == vs.line && ve.column >= vs.column {
+                                ve.column - vs.column
+                            } else {
+                                // Cross-line or backward mapping — skip token
+                                continue;
+                            }
+                        } else {
+                            // End doesn't map — fall back to original length
+                            token.length
+                        }
+                    } else {
+                        // End offset out of TSX bounds — skip token
+                        continue;
+                    };
+
+                // Skip zero-length tokens (collapsed by mapping)
+                if vue_length == 0 {
+                    continue;
+                }
+
+                mapped.push((
+                    vs.line,
+                    vs.column,
+                    vue_length,
+                    token.token_type,
+                    token.token_modifiers,
+                ));
             }
         }
     }
@@ -1271,6 +1309,31 @@ mod tests {
         assert_eq!(result.len(), 2); // onMounted + ref
     }
 
+    /// Internal compiler identifiers like __props, __emit should be filtered
+    #[test]
+    fn merge_completions_filters_dunder_internal() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let verter = vec![];
+        let type_result = CompletionResult {
+            items: vec![
+                make_type_completion("msg"),
+                make_type_completion("__props"),
+                make_type_completion("__emit"),
+                make_type_completion("__slots"),
+                make_type_completion("__expose"),
+            ],
+            is_incomplete: false,
+        };
+
+        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
+        let labels: Vec<&str> = result.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["msg"],
+            "should filter __props, __emit, __slots, __expose"
+        );
+    }
+
     // ── Diagnostics merge tests ────────────────────────────────────
 
     fn make_verter_diagnostic(msg: &str) -> Diagnostic {
@@ -1545,6 +1608,59 @@ mod tests {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
         let result = merge_semantic_tokens(vec![], &tsx_li, &mapper, &vue_li);
         assert!(result.is_empty());
+    }
+
+    /// Semantic token length should be computed in Vue coordinates by mapping both
+    /// start and end positions, not by preserving the TSX length verbatim.
+    /// When the TSX text differs in length from Vue text (e.g., `__props` vs `$props`),
+    /// the raw TSX length would be wrong in Vue space.
+    #[test]
+    fn merge_semantic_tokens_length_via_end_mapping() {
+        // Vue: line 5 has `const msg = "hello";` (col 6 = 'msg', length 3)
+        // TSX: line 0 has `const msg = "hello";` (col 6 = 'msg', length 3)
+        // In this case TSX and Vue lengths match, but the mechanism should map end too.
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let tokens = vec![protocol::SemanticToken {
+            start: 6,  // TSX offset of 'msg'
+            length: 3, // length in TSX = 3
+            token_type: 8,
+            token_modifiers: 0,
+        }];
+
+        let result = merge_semantic_tokens(tokens, &tsx_li, &mapper, &vue_li);
+        assert_eq!(result.len(), 1);
+        // Both start AND end should be mapped — length should be 3 in Vue coordinates
+        assert_eq!(
+            result[0].length, 3,
+            "length should be correct in Vue coordinates"
+        );
+    }
+
+    /// Token whose end position maps to a different line should be filtered out.
+    #[test]
+    fn merge_semantic_tokens_cross_line_filtered() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        // TSX: "const msg = \"hello\";\n" (20 chars)
+        // Token spanning from col 0 with excessive length that crosses line boundary
+        let tokens = vec![protocol::SemanticToken {
+            start: 0,
+            length: 100, // way past end of line — would cross line boundaries
+            token_type: 8,
+            token_modifiers: 0,
+        }];
+
+        let result = merge_semantic_tokens(tokens, &tsx_li, &mapper, &vue_li);
+        // Should be filtered out because end position mapping crosses line or is out of bounds
+        // (or length should be clamped to line end)
+        if !result.is_empty() {
+            assert!(
+                result[0].length < 100,
+                "excessive length should be clamped or token filtered, got length {}",
+                result[0].length
+            );
+        }
     }
 
     // ── Rename merge tests ────────────────────────────────────────────

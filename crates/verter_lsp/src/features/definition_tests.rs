@@ -1395,3 +1395,314 @@ fn test_path_alias_resolution_on_component_tag() {
         panic!("expected scalar location");
     }
 }
+
+// ========================================================================
+// Fix 3: Event handler navigation (Bug 6)
+// ========================================================================
+
+#[test]
+fn test_go_to_definition_event_handler_click() {
+    // CTRL+CLICK on `click` in `@click="handleClick"` → navigate to handleClick binding
+    let source = "<template>\n  <button @click=\"handleClick\">go</button>\n</template>\n\n<script setup>\nfunction handleClick() {}\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let click_offset = source.find("@click").unwrap();
+    let handler_offset = source.rfind("handleClick").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        bindings: vec![AnalyzedBinding {
+            name: "handleClick".to_string(),
+            kind: AnalyzedBindingKind::Function,
+            is_reactive: false,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(handler_offset as u32, (handler_offset + 11) as u32),
+        }],
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![TemplateElement {
+                tag: "button".into(),
+                is_component: false,
+                is_self_closing: false,
+                namespace: ElementNamespace::Html,
+                attributes: vec![],
+                directives: vec![TemplateDirective {
+                    name: "on".into(),
+                    raw_name: "@click".into(),
+                    argument: Some("click".into()),
+                    modifiers: vec![],
+                    expression: Some("handleClick".into()),
+                    span: verter_span::Span::new(click_offset as u32, (click_offset + 22) as u32),
+                    name_end: (click_offset + 6) as u32,
+                    arg_span: Some(verter_span::Span::new(
+                        (click_offset + 1) as u32,
+                        (click_offset + 6) as u32,
+                    )),
+                    expression_span: None,
+                    modifier_spans: vec![],
+                }],
+                v_for: None,
+                v_model: None,
+                has_v_if: false,
+                has_v_else: false,
+                has_v_else_if: false,
+                has_v_show: false,
+                has_v_html: false,
+                has_v_text: false,
+                has_text_content: true,
+                has_bare_text: true,
+                has_element_children: false,
+                nesting_depth: 0,
+                parent_tag: None,
+                parent_index: None,
+                dynamic_classes: vec![],
+                span: verter_span::Span::new(11, 60),
+                tag_span_end: 45,
+                content_end: 0,
+                text_children: Vec::new(),
+            }],
+            event_handlers: vec![verter_analysis::template::TemplateEventHandler {
+                event_name: "click".into(),
+                handler_binding: Some("handleClick".into()),
+                is_inline: false,
+                target_tag: "button".into(),
+                span: verter_span::Span::new(click_offset as u32, (click_offset + 22) as u32),
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // CTRL+CLICK on "click" part of @click
+    let pos = line_index
+        .offset_to_position((click_offset + 1) as u32)
+        .unwrap();
+    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+
+    assert!(
+        result.is_some(),
+        "should navigate from @click to handleClick binding"
+    );
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
+        assert_eq!(
+            loc.uri.as_str(),
+            SAME_FILE_URI,
+            "should navigate within same file"
+        );
+        let start_offset = line_index.position_to_offset(&loc.range.start).unwrap();
+        assert_eq!(
+            start_offset, handler_offset as u32,
+            "should navigate to handleClick function"
+        );
+    } else {
+        panic!("expected scalar definition");
+    }
+}
+
+#[test]
+fn test_go_to_definition_inline_event_no_binding() {
+    // CTRL+CLICK on `click` in `@click="count++"` → returns None (inline, no handler binding)
+    let source =
+        "<template>\n  <button @click=\"count++\">go</button>\n</template>\n\n<script setup>\nlet count = 0\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let click_offset = source.find("@click").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        bindings: vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Let,
+            is_reactive: false,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+        }],
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![TemplateElement {
+                tag: "button".into(),
+                is_component: false,
+                is_self_closing: false,
+                namespace: ElementNamespace::Html,
+                attributes: vec![],
+                directives: vec![TemplateDirective {
+                    name: "on".into(),
+                    raw_name: "@click".into(),
+                    argument: Some("click".into()),
+                    modifiers: vec![],
+                    expression: Some("count++".into()),
+                    span: verter_span::Span::new(click_offset as u32, (click_offset + 17) as u32),
+                    name_end: (click_offset + 6) as u32,
+                    arg_span: Some(verter_span::Span::new(
+                        (click_offset + 1) as u32,
+                        (click_offset + 6) as u32,
+                    )),
+                    expression_span: None,
+                    modifier_spans: vec![],
+                }],
+                v_for: None,
+                v_model: None,
+                has_v_if: false,
+                has_v_else: false,
+                has_v_else_if: false,
+                has_v_show: false,
+                has_v_html: false,
+                has_v_text: false,
+                has_text_content: true,
+                has_bare_text: true,
+                has_element_children: false,
+                nesting_depth: 0,
+                parent_tag: None,
+                parent_index: None,
+                dynamic_classes: vec![],
+                span: verter_span::Span::new(11, 55),
+                tag_span_end: 40,
+                content_end: 0,
+                text_children: Vec::new(),
+            }],
+            event_handlers: vec![verter_analysis::template::TemplateEventHandler {
+                event_name: "click".into(),
+                handler_binding: None, // inline expression, no binding
+                is_inline: true,
+                target_tag: "button".into(),
+                span: verter_span::Span::new(click_offset as u32, (click_offset + 17) as u32),
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // CTRL+CLICK on "click" in @click — inline expr, should return None
+    let pos = line_index
+        .offset_to_position((click_offset + 1) as u32)
+        .unwrap();
+    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+
+    assert!(
+        result.is_none(),
+        "inline @click expression should not navigate"
+    );
+}
+
+// ========================================================================
+// Fix 4: $props navigation (Bug 10)
+// ========================================================================
+
+#[test]
+fn test_go_to_definition_dollar_props() {
+    // CTRL+CLICK on `$props` → navigate to defineProps macro call
+    let source = "<template>\n  {{ $props.msg }}\n</template>\n\n<script setup>\nconst props = defineProps<{msg: string}>()\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let props_offset = source.find("$props").unwrap();
+    let define_offset = source.find("defineProps").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        macros: vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: true,
+            type_references: vec![],
+            binding_name: Some("props".into()),
+            model_name: None,
+            has_inherit_attrs_false: false,
+            span: verter_span::Span::new(define_offset as u32, (define_offset + 30) as u32),
+        }],
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let pos = line_index.offset_to_position(props_offset as u32).unwrap();
+    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+
+    assert!(
+        result.is_some(),
+        "should navigate from $props to defineProps"
+    );
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
+        let start_offset = line_index.position_to_offset(&loc.range.start).unwrap();
+        assert_eq!(
+            start_offset, define_offset as u32,
+            "should navigate to defineProps call"
+        );
+    } else {
+        panic!("expected scalar definition");
+    }
+}
+
+#[test]
+fn test_go_to_definition_dollar_emit() {
+    // CTRL+CLICK on `$emit` → navigate to defineEmits macro call
+    let source = "<template>\n  <button @click=\"$emit('done')\">go</button>\n</template>\n\n<script setup>\nconst emit = defineEmits(['done'])\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let emit_offset = source.find("$emit").unwrap();
+    let define_offset = source.find("defineEmits").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        macros: vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineEmits,
+            is_type_based: false,
+            type_references: vec![],
+            binding_name: Some("emit".into()),
+            model_name: None,
+            has_inherit_attrs_false: false,
+            span: verter_span::Span::new(define_offset as u32, (define_offset + 22) as u32),
+        }],
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let pos = line_index.offset_to_position(emit_offset as u32).unwrap();
+    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+
+    assert!(
+        result.is_some(),
+        "should navigate from $emit to defineEmits"
+    );
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
+        let start_offset = line_index.position_to_offset(&loc.range.start).unwrap();
+        assert_eq!(
+            start_offset, define_offset as u32,
+            "should navigate to defineEmits call"
+        );
+    } else {
+        panic!("expected scalar definition");
+    }
+}
+
+#[test]
+fn test_go_to_definition_dollar_props_without_macro() {
+    // CTRL+CLICK on `$props` without any defineProps → returns None
+    let source = "<template>\n  {{ $props.msg }}\n</template>\n\n<script setup>\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let props_offset = source.find("$props").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        macros: vec![],
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let pos = line_index.offset_to_position(props_offset as u32).unwrap();
+    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+
+    assert!(
+        result.is_none(),
+        "should return None when no defineProps exists"
+    );
+}

@@ -82,6 +82,85 @@ pub fn definition_at_position(
         }
 
         if in_template {
+            // Navigate $props → defineProps, $emit → defineEmits, $slots → defineSlots
+            let macro_kind = match word.as_str() {
+                "$props" => Some(verter_analysis::AnalyzedMacroKind::DefineProps),
+                "$emit" => Some(verter_analysis::AnalyzedMacroKind::DefineEmits),
+                "$slots" => Some(verter_analysis::AnalyzedMacroKind::DefineSlots),
+                _ => None,
+            };
+            if let Some(kind) = macro_kind {
+                for mac in &analysis.macros {
+                    if mac.kind == kind && (mac.span.start > 0 || mac.span.end > 0) {
+                        return span_definition(mac.span.start, mac.span.end, line_index);
+                    }
+                }
+            }
+
+            // Check if cursor is on a v-on directive argument (@click, @input, etc.)
+            // → navigate to the handler binding in script
+            if let Some(ref template) = analysis.template {
+                for el in &template.elements {
+                    for dir in &el.directives {
+                        if dir.name == "on" {
+                            if let Some(ref arg_span) = dir.arg_span {
+                                if (offset as u32) >= arg_span.start
+                                    && (offset as u32) < arg_span.end
+                                {
+                                    // Find matching event handler with a named binding
+                                    if let Some(handler) =
+                                        template.event_handlers.iter().find(|h| {
+                                            h.event_name == *dir.argument.as_deref().unwrap_or("")
+                                                && h.span.start >= dir.span.start
+                                                && h.span.end <= dir.span.end
+                                        })
+                                    {
+                                        if let Some(ref binding_name) = handler.handler_binding {
+                                            // Look up in bindings
+                                            if let Some(b) = analysis
+                                                .bindings
+                                                .iter()
+                                                .find(|b| b.name == *binding_name)
+                                            {
+                                                if b.span.start > 0 || b.span.end > 0 {
+                                                    return span_definition(
+                                                        b.span.start,
+                                                        b.span.end,
+                                                        line_index,
+                                                    );
+                                                }
+                                            }
+                                            // Look up in imports
+                                            for import in &analysis.imports {
+                                                for ib in &import.bindings {
+                                                    if ib.name == *binding_name {
+                                                        if let Some(ref cid) =
+                                                            import.resolved_canonical_id
+                                                        {
+                                                            return resolved_import_definition(cid);
+                                                        }
+                                                        if let Some(resolved) = resolve_path
+                                                            .as_ref()
+                                                            .and_then(|rp| rp(&import.source))
+                                                        {
+                                                            return resolved_import_definition(
+                                                                &resolved,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // No handler binding found → return None for this directive
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check if cursor is inside a class or id attribute — navigate to CSS selector
             if let Some(result) = css_definition_from_template(offset, source, analysis, line_index)
             {

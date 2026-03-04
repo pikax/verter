@@ -629,3 +629,283 @@ fn test_hover_on_custom_block_tag() {
     );
     assert!(!contents.contains("<script>"), "should not describe script");
 }
+
+// ========================================================================
+// Fix 1: Narrow hover span matching (Bugs 5, 2)
+// ========================================================================
+
+#[test]
+fn test_hover_on_component_attr_does_not_show_constness() {
+    // Hovering on `:icon` attribute inside <Popup :icon="x"> should NOT show
+    // the component prop constness hover — only the tag name should trigger it.
+    let source =
+        "<template>\n  <Popup :icon=\"x\">\n  </Popup>\n</template>\n\n<script setup>\nimport Popup from './Popup.vue'\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let comp_offset = source.find("<Popup").unwrap();
+    let icon_offset = source.find(":icon").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(TemplateAnalysisSnapshot {
+            components: vec![verter_analysis::template::TemplateComponentUsage {
+                name: "Popup".into(),
+                import_source: Some("./Popup.vue".into()),
+                is_dynamic: false,
+                props: vec![verter_analysis::template::TemplatePropUsage {
+                    name: "icon".into(),
+                    is_bound: true,
+                    constness: verter_analysis::template::PropValueConstness::Dynamic,
+                    referenced_bindings: vec!["x".into()],
+                    from_spread: false,
+                    span: verter_span::Span::new(icon_offset as u32, (icon_offset + 10) as u32),
+                }],
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_classes: vec![],
+                v_models: vec![],
+                span: verter_span::Span::new(comp_offset as u32, (comp_offset + 30) as u32),
+            }],
+            elements: vec![],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Hover on `:icon` — should NOT return constness hover
+    let pos = line_index.offset_to_position(icon_offset as u32).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index);
+
+    // Should be None (or at least not contain constness info)
+    if let Some(h) = hover {
+        let contents = match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(
+            !contents.contains("Props:"),
+            "hovering on :icon should NOT show prop constness, got: {}",
+            contents
+        );
+    }
+}
+
+#[test]
+fn test_hover_on_div_class_attr_does_not_show_css() {
+    // Hovering on `class` attribute name in <div class="foo"> should NOT show
+    // the CSS rules hover — only the tag name should trigger it.
+    let source = "<template>\n  <div class=\"foo\">hello</div>\n</template>\n\n<style scoped>\n.foo { color: red; }\n</style>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (content_start, content_end) = style_block.content_range();
+    let css_content = &source[content_start as usize..content_end as usize];
+
+    let style = verter_analysis::style::build_css_style_analysis(
+        css_content,
+        verter_analysis::style::VueStyleInput {
+            v_binds: vec![],
+            special_pseudos: vec![],
+        },
+        true,
+        false,
+        None,
+        content_start,
+    );
+
+    let div_offset = source.find("<div class").unwrap();
+    let class_offset = source.find("class=").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        styles: vec![style],
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![TemplateElement {
+                tag: "div".into(),
+                is_component: false,
+                is_self_closing: false,
+                namespace: ElementNamespace::Html,
+                attributes: vec![TemplateAttribute {
+                    name: "class".into(),
+                    value: Some("foo".into()),
+                    is_dynamic: false,
+                    span: verter_span::Span::new(class_offset as u32, (class_offset + 11) as u32),
+                    name_end: (class_offset + 5) as u32,
+                    value_span: None,
+                }],
+                directives: vec![],
+                v_for: None,
+                v_model: None,
+                has_v_if: false,
+                has_v_else: false,
+                has_v_else_if: false,
+                has_v_show: false,
+                has_v_html: false,
+                has_v_text: false,
+                has_text_content: false,
+                has_bare_text: false,
+                has_element_children: false,
+                nesting_depth: 0,
+                parent_tag: None,
+                parent_index: None,
+                dynamic_classes: vec![],
+                span: verter_span::Span::new(div_offset as u32, (div_offset + 30) as u32),
+                tag_span_end: (div_offset + 20) as u32,
+                content_end: 0,
+                text_children: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Hover on "class" attribute name — should NOT show CSS rules
+    let pos = line_index.offset_to_position(class_offset as u32).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index);
+
+    if let Some(h) = hover {
+        let contents = match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(
+            !contents.contains("CSS rules"),
+            "hovering on class attr name should NOT show CSS rules, got: {}",
+            contents
+        );
+    }
+}
+
+#[test]
+fn test_hover_on_ref_attr_does_not_show_import() {
+    // Hovering on `ref` as an attribute name in <span ref="el"> should NOT show
+    // the Vue `ref()` import info — it should return None.
+    let source = "<template>\n  <span ref=\"el\">text</span>\n</template>\n\n<script setup>\nimport { ref } from 'vue'\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let template_ref_offset = source.find("ref=\"el\"").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        imports: vec![AnalyzedImport {
+            source: "vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "ref".to_string(),
+                is_type_only: false,
+                vue_api: Some(VueApiClassification::Ref),
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: None,
+        }],
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![TemplateElement {
+                tag: "span".into(),
+                is_component: false,
+                is_self_closing: false,
+                namespace: ElementNamespace::Html,
+                attributes: vec![TemplateAttribute {
+                    name: "ref".into(),
+                    value: Some("el".into()),
+                    is_dynamic: false,
+                    span: verter_span::Span::new(
+                        template_ref_offset as u32,
+                        (template_ref_offset + 8) as u32,
+                    ),
+                    name_end: (template_ref_offset + 3) as u32,
+                    value_span: None,
+                }],
+                directives: vec![],
+                v_for: None,
+                v_model: None,
+                has_v_if: false,
+                has_v_else: false,
+                has_v_else_if: false,
+                has_v_show: false,
+                has_v_html: false,
+                has_v_text: false,
+                has_text_content: false,
+                has_bare_text: false,
+                has_element_children: false,
+                nesting_depth: 0,
+                parent_tag: None,
+                parent_index: None,
+                dynamic_classes: vec![],
+                span: verter_span::Span::new(0, 50),
+                tag_span_end: 30,
+                content_end: 0,
+                text_children: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Hover on "ref" attribute name — should NOT show import hover
+    let pos = line_index
+        .offset_to_position(template_ref_offset as u32)
+        .unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index);
+
+    if let Some(h) = hover {
+        let contents = match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(
+            !contents.contains("import"),
+            "hovering on ref attr should NOT show import hover, got: {}",
+            contents
+        );
+    }
+}
+
+#[test]
+fn test_hover_on_ref_in_interpolation_still_shows_import() {
+    // Hovering on `ref` in {{ ref(0) }} should still show the import hover.
+    let source = "<template>\n  {{ ref(0) }}\n</template>\n\n<script setup>\nimport { ref } from 'vue'\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = FileAnalysisSnapshot {
+        imports: vec![AnalyzedImport {
+            source: "vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "ref".to_string(),
+                is_type_only: false,
+                vue_api: Some(VueApiClassification::Ref),
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: None,
+        }],
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Find "ref" in the template interpolation
+    let ref_offset = source.find("ref(0)").unwrap();
+    let pos = line_index.offset_to_position(ref_offset as u32).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index);
+
+    assert!(
+        hover.is_some(),
+        "should show hover for ref in interpolation"
+    );
+    let contents = match hover.unwrap().contents {
+        HoverContents::Markup(m) => m.value,
+        _ => panic!("expected markup"),
+    };
+    assert!(
+        contents.contains("import"),
+        "should show import hover for ref in interpolation, got: {}",
+        contents
+    );
+}

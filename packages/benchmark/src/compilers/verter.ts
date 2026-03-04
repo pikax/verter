@@ -37,23 +37,19 @@ export function compileVerterHost(host: VerterHost, source: string, filename: st
     })
 
     let code = ''
-    try {
-      const scriptFile = (host as any).getVirtualFile({
-        canonicalId: result.canonicalId,
-        nodeKind: { kind: 'script' },
-        compileProfile: hostProfile
-      })
-      if (scriptFile) code += scriptFile.code
-    } catch { /* no script block */ }
+    const scriptFile = (host as any).getVirtualFile({
+      canonicalId: result.canonicalId,
+      nodeKind: { kind: 'script' },
+      compileProfile: hostProfile
+    })
+    if (scriptFile) code += scriptFile.code
 
-    try {
-      const templateFile = (host as any).getVirtualFile({
-        canonicalId: result.canonicalId,
-        nodeKind: { kind: 'template' },
-        compileProfile: hostProfile
-      })
-      if (templateFile) code += '\n\n' + templateFile.code
-    } catch { /* no template block */ }
+    const templateFile = (host as any).getVirtualFile({
+      canonicalId: result.canonicalId,
+      nodeKind: { kind: 'template' },
+      compileProfile: hostProfile
+    })
+    if (templateFile) code += '\n\n' + templateFile.code
 
     return {
       code,

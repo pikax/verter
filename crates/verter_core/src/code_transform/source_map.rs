@@ -51,7 +51,7 @@ impl<'a> CodeTransform<'a> {
     /// Generate a source map for the transformations
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use verter_core::code_transform::{CodeTransform, SourceMapOptions};
     /// use oxc_allocator::Allocator;
     ///

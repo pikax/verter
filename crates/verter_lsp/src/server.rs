@@ -2436,8 +2436,13 @@ impl LanguageServer for VerterLanguageServer {
                             after.replace('\n', "↵"),
                         );
                     }
-                    match tp.get_hover(&ctx.tsx_path, tsx_offset).await {
-                        Ok(type_hover) => {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        tp.get_hover(&ctx.tsx_path, tsx_offset),
+                    )
+                    .await
+                    {
+                        Ok(Ok(type_hover)) => {
                             tracing::info!(
                                 "hover type provider result: {}",
                                 if type_hover.is_some() {
@@ -2457,8 +2462,11 @@ impl LanguageServer for VerterLanguageServer {
                                 &ctx.vue_line_index,
                             ));
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             tracing::warn!("hover type provider error: {}", e);
+                        }
+                        Err(_) => {
+                            tracing::warn!("hover: type provider timed out");
                         }
                     }
                 } else {

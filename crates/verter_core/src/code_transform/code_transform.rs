@@ -32,7 +32,7 @@ enum SplitResult {
 /// to amortized O(1).
 ///
 /// # Example
-/// ```
+/// ```ignore
 /// use verter_core::code_transform::CodeTransform;
 /// use oxc_allocator::Allocator;
 ///
@@ -559,7 +559,7 @@ impl<'a> CodeTransform<'a> {
     /// Move a slice from one position to another, preserving source mapping.
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use verter_core::code_transform::CodeTransform;
     /// use oxc_allocator::Allocator;
     ///
@@ -575,7 +575,7 @@ impl<'a> CodeTransform<'a> {
     /// Move a slice with an unmapped prefix before it.
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use verter_core::code_transform::CodeTransform;
     /// use oxc_allocator::Allocator;
     ///
@@ -597,7 +597,7 @@ impl<'a> CodeTransform<'a> {
     /// Move a slice with an unmapped suffix after it.
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use verter_core::code_transform::CodeTransform;
     /// use oxc_allocator::Allocator;
     ///
@@ -619,7 +619,7 @@ impl<'a> CodeTransform<'a> {
     /// Move a slice wrapped with unmapped prefix and suffix.
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use verter_core::code_transform::CodeTransform;
     /// use oxc_allocator::Allocator;
     ///

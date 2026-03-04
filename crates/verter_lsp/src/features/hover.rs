@@ -143,31 +143,58 @@ fn hover_in_template(
         return None;
     }
 
-    // Check if cursor is on a template element — show matching CSS rules
+    // Check if cursor is on a template element tag name — show matching CSS rules
     if let Some(hover) = element_css_hover(offset as u32, analysis) {
         return Some(hover);
     }
 
-    // Check if cursor is on a component element — show prop constness info
-    if let Some(hover) = component_prop_constness_hover(offset as u32, analysis) {
+    // Check if cursor is on a component element tag name — show prop constness info
+    if let Some(hover) = component_prop_constness_hover(offset as u32, source, analysis) {
         return Some(hover);
     }
 
     // In template, look for bindings used in expressions like {{ myVar }}
     let word = word_at_offset(source, offset)?;
+
+    // Guard: don't show binding/import hover for attribute names (e.g., `ref` attr
+    // should not show Vue `ref()` import info). Let TSGO handle attribute names.
+    if is_on_attribute_name(offset as u32, analysis) {
+        return None;
+    }
+
     hover_for_word(&word, analysis)
 }
 
-/// When hovering on a template element, show matching CSS rules with specificity.
+/// Check if the given offset falls on an attribute name or directive name in the template.
+fn is_on_attribute_name(offset: u32, analysis: &FileAnalysisSnapshot) -> bool {
+    if let Some(ref template) = analysis.template {
+        for el in &template.elements {
+            for attr in &el.attributes {
+                if offset >= attr.span.start && offset < attr.name_end {
+                    return true;
+                }
+            }
+            for dir in &el.directives {
+                if offset >= dir.span.start && offset < dir.name_end {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// When hovering on a template element tag name, show matching CSS rules with specificity.
 fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
     let template = analysis.template.as_ref()?;
 
-    // Find element at cursor position (on the tag name)
-    let (el_idx, element) = template
-        .elements
-        .iter()
-        .enumerate()
-        .find(|(_, el)| offset >= el.span.start && offset <= el.span.end)?;
+    // Find element at cursor position — match only the tag name, not the full element span.
+    // Element span starts at '<', so tag name starts at span.start + 1.
+    let (el_idx, element) = template.elements.iter().enumerate().find(|(_, el)| {
+        let tag_start = el.span.start + 1; // skip '<'
+        let tag_end = tag_start + el.tag.len() as u32;
+        offset >= tag_start && offset < tag_end
+    })?;
 
     // Collect matching selectors from all style blocks
     let mut matches: Vec<(&str, (u32, u32, u32), verter_analysis::MatchResult)> = Vec::new();
@@ -232,18 +259,32 @@ fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hov
     })
 }
 
-/// When hovering on a component element in the template, show prop constness info.
+/// When hovering on a component element tag name in the template, show prop constness info.
 ///
 /// This helps visualize cross-file optimization: which props are always const
 /// (optimizable) vs dynamic (require reactive tracking).
-fn component_prop_constness_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
+fn component_prop_constness_hover(
+    offset: u32,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<Hover> {
     let template = analysis.template.as_ref()?;
 
-    // Find component usage at cursor position
-    let comp = template
-        .components
-        .iter()
-        .find(|c| offset >= c.span.start && offset <= c.span.end)?;
+    // Find component usage at cursor position — match only the tag name.
+    // c.name is PascalCase-normalized but the source tag may be kebab-case,
+    // so scan the source to find the actual tag name end.
+    let comp = template.components.iter().find(|c| {
+        let tag_start = c.span.start + 1; // skip '<'
+                                          // Scan source to find tag name end (handles kebab-case)
+        let tag_end = source
+            .get(tag_start as usize..)
+            .and_then(|s| {
+                s.find(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
+                    .map(|i| tag_start + i as u32)
+            })
+            .unwrap_or(c.span.end);
+        offset >= tag_start && offset < tag_end
+    })?;
 
     let mut lines = Vec::new();
     let source_info = comp
