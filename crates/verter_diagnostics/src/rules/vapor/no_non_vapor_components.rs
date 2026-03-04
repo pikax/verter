@@ -108,6 +108,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 30),
             tag_span_end: 30,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 

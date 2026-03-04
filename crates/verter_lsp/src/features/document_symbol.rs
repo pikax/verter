@@ -624,6 +624,8 @@ mod tests {
                         nesting_depth: 0,
                         dynamic_classes: vec![],
                         span: verter_span::Span::new(11, 42),
+                        content_end: 0,
+                        text_children: Vec::new(),
                         ..Default::default()
                     },
                     TemplateElement {
@@ -631,6 +633,8 @@ mod tests {
                         nesting_depth: 1,
                         dynamic_classes: vec![],
                         span: verter_span::Span::new(16, 35),
+                        content_end: 0,
+                        text_children: Vec::new(),
                         ..Default::default()
                     },
                 ],

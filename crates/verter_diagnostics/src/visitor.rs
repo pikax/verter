@@ -160,6 +160,8 @@ mod tests {
                     dynamic_classes: vec![],
                     span: Span::new(0, 10),
                     tag_span_end: 10,
+                    content_end: 0,
+                    text_children: Vec::new(),
                 },
                 verter_analysis::template::TemplateElement {
                     tag: "span".to_string(),
@@ -186,6 +188,8 @@ mod tests {
                     dynamic_classes: vec![],
                     span: Span::new(10, 20),
                     tag_span_end: 20,
+                    content_end: 0,
+                    text_children: Vec::new(),
                 },
             ],
             ..Default::default()

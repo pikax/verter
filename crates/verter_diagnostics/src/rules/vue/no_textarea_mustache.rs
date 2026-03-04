@@ -93,6 +93,8 @@ mod tests {
                 has_element_children: false,
                 span: verter_span::Span::new(0, 50),
                 tag_span_end: 50,
+                content_end: 0,
+                text_children: Vec::new(),
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {
                 name: "message".to_string(),
@@ -133,6 +135,8 @@ mod tests {
                 has_element_children: false,
                 span: verter_span::Span::new(0, 50),
                 tag_span_end: 50,
+                content_end: 0,
+                text_children: Vec::new(),
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {
                 name: "message".to_string(),

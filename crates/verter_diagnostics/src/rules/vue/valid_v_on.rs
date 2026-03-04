@@ -98,6 +98,10 @@ mod tests {
                 modifiers: modifiers.iter().map(|s| s.to_string()).collect(),
                 expression: expression.map(|s| s.to_string()),
                 span: Span::new(5, 20),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }],
             v_for: None,
             v_model: None,
@@ -116,6 +120,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 

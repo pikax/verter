@@ -105,6 +105,8 @@ mod tests {
             directives: vec![dir],
             span: Span::new(0, 50),
             tag_span_end: 45,
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -119,6 +121,10 @@ mod tests {
                 modifiers: vec![],
                 expression: Some("handler".to_string()),
                 span: Span::new(10, 28),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             })],
             ..Default::default()
         };
@@ -148,6 +154,10 @@ mod tests {
                 modifiers: vec![],
                 expression: Some("handler".to_string()),
                 span: Span::new(10, 30),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             })],
             ..Default::default()
         };
@@ -168,9 +178,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("handler".to_string()),
                     span: Span::new(5, 25),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(0, 40),
                 tag_span_end: 35,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -192,6 +208,10 @@ mod tests {
                 modifiers: vec![],
                 expression: Some("val".to_string()),
                 span: Span::new(10, 25),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             })],
             ..Default::default()
         };

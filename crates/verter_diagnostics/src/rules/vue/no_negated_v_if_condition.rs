@@ -103,9 +103,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("!isVisible".to_string()),
                     span: Span::new(5, 22),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(0, 50),
                 tag_span_end: 25,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -136,9 +142,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("isVisible".to_string()),
                     span: Span::new(5, 20),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(0, 50),
                 tag_span_end: 22,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -154,6 +166,8 @@ mod tests {
                 tag: "div".to_string(),
                 span: Span::new(0, 20),
                 tag_span_end: 5,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -175,9 +189,15 @@ mod tests {
                     modifiers: vec![],
                     expression: None,
                     span: Span::new(5, 10),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(0, 30),
                 tag_span_end: 12,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

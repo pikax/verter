@@ -97,9 +97,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("'hello'".to_string()),
                     span: Span::new(5, 22),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(0, 30),
                 tag_span_end: 25,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -129,9 +135,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("title".to_string()),
                     span: Span::new(5, 18),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(0, 30),
                 tag_span_end: 22,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -152,9 +164,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("100".to_string()),
                     span: Span::new(5, 15),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(0, 30),
                 tag_span_end: 20,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

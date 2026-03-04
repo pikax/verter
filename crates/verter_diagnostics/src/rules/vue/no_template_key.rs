@@ -71,6 +71,8 @@ mod tests {
                     value: Some("k".to_string()),
                     is_dynamic: true,
                     span: verter_span::Span::new(10, 20),
+                    name_end: 0,
+                    value_span: None,
                 }]
             } else {
                 vec![]
@@ -105,6 +107,8 @@ mod tests {
             dynamic_classes: vec![],
             span: verter_span::Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 

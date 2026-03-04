@@ -105,6 +105,8 @@ mod tests {
             attributes: attrs,
             span: Span::new(0, 50),
             tag_span_end: 45,
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -117,6 +119,8 @@ mod tests {
                 value: Some("val".to_string()),
                 is_dynamic: false,
                 span: Span::new(8, 20),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };
@@ -144,6 +148,8 @@ mod tests {
                 value: Some("val".to_string()),
                 is_dynamic: false,
                 span: Span::new(8, 22),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };
@@ -159,6 +165,8 @@ mod tests {
                 value: Some("val".to_string()),
                 is_dynamic: true,
                 span: Span::new(8, 22),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };
@@ -177,9 +185,13 @@ mod tests {
                     value: Some("val".to_string()),
                     is_dynamic: false,
                     span: Span::new(5, 18),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 span: Span::new(0, 30),
                 tag_span_end: 25,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -199,6 +211,8 @@ mod tests {
                 value: Some("val".to_string()),
                 is_dynamic: false,
                 span: Span::new(8, 26),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };

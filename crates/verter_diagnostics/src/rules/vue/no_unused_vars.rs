@@ -188,6 +188,8 @@ mod tests {
                 }),
                 span: Span::new(0, 50),
                 tag_span_end: 35,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![], // no usage of 'item'
@@ -222,6 +224,8 @@ mod tests {
                 }),
                 span: Span::new(0, 50),
                 tag_span_end: 35,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {
@@ -251,6 +255,8 @@ mod tests {
                 }),
                 span: Span::new(0, 50),
                 tag_span_end: 40,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![],
@@ -276,6 +282,8 @@ mod tests {
                 }),
                 span: Span::new(0, 50),
                 tag_span_end: 40,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {

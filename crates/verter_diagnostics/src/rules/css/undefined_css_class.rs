@@ -198,6 +198,8 @@ mod tests {
                     value: Some("foo".into()),
                     is_dynamic: false,
                     span: Span::new(class_start, class_end),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 directives: vec![],
                 v_for: None,
@@ -218,6 +220,8 @@ mod tests {
                 dynamic_classes: vec![],
                 span: Span::new(0, 10),
                 tag_span_end: 10,
+                content_end: 0,
+                text_children: Vec::new(),
             }],
             ..Default::default()
         };
@@ -262,6 +266,8 @@ mod tests {
                     value: Some("foo".into()),
                     is_dynamic: false,
                     span: Span::new(class_start, class_end),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 directives: vec![],
                 v_for: None,
@@ -282,6 +288,8 @@ mod tests {
                 dynamic_classes: vec![],
                 span: Span::new(0, 10),
                 tag_span_end: 10,
+                content_end: 0,
+                text_children: Vec::new(),
             }],
             ..Default::default()
         };
@@ -315,6 +323,8 @@ mod tests {
                     value: Some("foo".into()),
                     is_dynamic: false,
                     span: Span::new(15, 26),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 directives: vec![],
                 v_for: None,
@@ -335,6 +345,8 @@ mod tests {
                 dynamic_classes: vec![],
                 span: Span::new(0, 10),
                 tag_span_end: 10,
+                content_end: 0,
+                text_children: Vec::new(),
             }],
             ..Default::default()
         };
@@ -366,6 +378,8 @@ mod tests {
                     value: Some("foo".into()),
                     is_dynamic: false,
                     span: Span::new(15, 26),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 directives: vec![],
                 v_for: None,
@@ -386,6 +400,8 @@ mod tests {
                 dynamic_classes: vec![],
                 span: Span::new(0, 10),
                 tag_span_end: 10,
+                content_end: 0,
+                text_children: Vec::new(),
             }],
             ..Default::default()
         };

@@ -77,14 +77,20 @@ mod tests {
                         value: Some("/home".to_string()),
                         is_dynamic: false,
                         span: Span::new(13, 23),
+                        name_end: 0,
+                        value_span: None,
                     },
                     TemplateAttribute {
                         name: "tag".to_string(),
                         value: Some("button".to_string()),
                         is_dynamic: false,
                         span: Span::new(24, 36),
+                        name_end: 0,
+                        value_span: None,
                     },
                 ],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -118,7 +124,11 @@ mod tests {
                     value: Some("li".to_string()),
                     is_dynamic: false,
                     span: Span::new(12, 20),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -138,7 +148,11 @@ mod tests {
                     value: Some("/home".to_string()),
                     is_dynamic: false,
                     span: Span::new(13, 23),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -158,7 +172,11 @@ mod tests {
                     value: Some("div".to_string()),
                     is_dynamic: false,
                     span: Span::new(8, 18),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

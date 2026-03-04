@@ -167,6 +167,8 @@ mod tests {
                 }),
                 span: Span::new(0, 50),
                 tag_span_end: 35,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {
@@ -208,6 +210,8 @@ mod tests {
                 }),
                 span: Span::new(0, 50),
                 tag_span_end: 35,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {
@@ -236,10 +240,16 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("{ msg }".to_string()),
                     span: Span::new(10, 30),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 parent_index: Some(0),
                 span: Span::new(5, 60),
                 tag_span_end: 35,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {

@@ -79,6 +79,8 @@ mod tests {
                 value: None,
                 is_dynamic: false,
                 span: Span::new(10, 27),
+                name_end: 0,
+                value_span: None,
             }]
         } else {
             vec![]
@@ -107,6 +109,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 

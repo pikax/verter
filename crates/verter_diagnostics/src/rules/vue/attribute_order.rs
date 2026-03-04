@@ -91,6 +91,10 @@ mod tests {
                 modifiers: vec![],
                 expression: Some("cond".to_string()),
                 span: Span::new(31, 45),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }]
         } else {
             vec![]
@@ -119,6 +123,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 

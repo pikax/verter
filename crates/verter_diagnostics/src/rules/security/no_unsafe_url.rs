@@ -89,6 +89,8 @@ mod tests {
                 value: Some(href.to_string()),
                 is_dynamic,
                 span: Span::new(3, 3 + href.len() as u32 + 7),
+                name_end: 0,
+                value_span: None,
             }],
             directives: vec![],
             v_for: None,
@@ -108,6 +110,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 

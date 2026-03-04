@@ -81,6 +81,10 @@ mod tests {
             modifiers: vec![],
             expression: None,
             span: Span::new(0, 10),
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: Vec::new(),
         }
     }
 
@@ -110,6 +114,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 30),
             tag_span_end: 30,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 

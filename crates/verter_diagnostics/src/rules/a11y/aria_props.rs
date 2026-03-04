@@ -138,7 +138,11 @@ mod tests {
                 value: Some("true".to_string()),
                 is_dynamic: false,
                 span: Span::new(5, 25),
+                name_end: 0,
+                value_span: None,
             }],
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }

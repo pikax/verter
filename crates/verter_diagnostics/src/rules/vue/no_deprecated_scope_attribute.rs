@@ -72,7 +72,11 @@ mod tests {
                 value: Some("{ item }".to_string()),
                 is_dynamic: false,
                 span: Span::new(10, 30),
+                name_end: 0,
+                value_span: None,
             }],
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -107,7 +111,13 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("{ item }".to_string()),
                     span: Span::new(10, 30),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

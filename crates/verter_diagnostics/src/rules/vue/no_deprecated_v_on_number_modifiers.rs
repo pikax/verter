@@ -83,7 +83,13 @@ mod tests {
                     modifiers: vec!["13".to_string()],
                     expression: Some("handler".to_string()),
                     span: Span::new(7, 20),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -114,7 +120,13 @@ mod tests {
                     modifiers: vec!["enter".to_string()],
                     expression: Some("handler".to_string()),
                     span: Span::new(7, 23),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

@@ -84,6 +84,8 @@ mod tests {
                 key_uses_index,
                 span: Span::new(5, 35),
             }),
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }

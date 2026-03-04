@@ -605,3 +605,228 @@ fn bare_text_false_for_whitespace_around_interpolation() {
         "whitespace + interpolation should still set has_text_content"
     );
 }
+
+// ── Sub-span propagation (Step 0a) ──
+
+#[test]
+fn directive_has_expression_span() {
+    let source = r#"<template><div v-if="show">hello</div></template>"#;
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    let v_if = div.directives.iter().find(|d| d.name == "if").unwrap();
+    let expr_span = v_if
+        .expression_span
+        .expect("v-if should have expression_span");
+    assert_eq!(
+        &source[expr_span.start as usize..expr_span.end as usize],
+        "show"
+    );
+}
+
+#[test]
+fn directive_has_arg_span() {
+    let source = r#"<template><div @click.prevent="handler">x</div></template>"#;
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    let on = div.directives.iter().find(|d| d.name == "on").unwrap();
+    let arg_span = on.arg_span.expect("@click should have arg_span");
+    assert_eq!(
+        &source[arg_span.start as usize..arg_span.end as usize],
+        "click"
+    );
+}
+
+#[test]
+fn directive_has_modifier_spans() {
+    let source = r#"<template><div @click.stop.prevent="handler">x</div></template>"#;
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    let on = div.directives.iter().find(|d| d.name == "on").unwrap();
+    assert_eq!(on.modifier_spans.len(), 2, "should have 2 modifier spans");
+    assert_eq!(
+        &source[on.modifier_spans[0].start as usize..on.modifier_spans[0].end as usize],
+        "stop"
+    );
+    assert_eq!(
+        &source[on.modifier_spans[1].start as usize..on.modifier_spans[1].end as usize],
+        "prevent"
+    );
+}
+
+#[test]
+fn directive_has_name_end() {
+    // Use full SFC so spans are consistent
+    let source = r#"<script setup>
+import { ref } from 'vue'
+const visible = ref(true)
+</script>
+<template><div v-show="visible">x</div></template>"#;
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    let v_show = div.directives.iter().find(|d| d.name == "show").unwrap();
+    let name_text = &source[v_show.span.start as usize..v_show.name_end as usize];
+    assert_eq!(name_text, "v-show");
+}
+
+#[test]
+fn attribute_has_name_end_and_value_span() {
+    let source = r#"<template><div class="foo">x</div></template>"#;
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    let cls = div.attributes.iter().find(|a| a.name == "class").unwrap();
+    let name_text = &source[cls.span.start as usize..cls.name_end as usize];
+    assert_eq!(name_text, "class");
+    let val_span = cls.value_span.expect("class should have value_span");
+    assert_eq!(
+        &source[val_span.start as usize..val_span.end as usize],
+        "foo"
+    );
+}
+
+#[test]
+fn boolean_attribute_has_no_value_span() {
+    let source = r#"<template><input disabled /></template>"#;
+    let data = extract(source);
+    let input = data.elements.iter().find(|e| e.tag == "input").unwrap();
+    let disabled = input
+        .attributes
+        .iter()
+        .find(|a| a.name == "disabled")
+        .unwrap();
+    assert!(
+        disabled.value_span.is_none(),
+        "boolean attr should have no value_span"
+    );
+}
+
+// ── content_end (Step 0c) ──
+
+#[test]
+fn element_has_content_end() {
+    let source = r#"<template><div>hello</div></template>"#;
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    // content_end should point to the `<` of `</div>`
+    assert_eq!(
+        &source[div.content_end as usize..div.content_end as usize + 1],
+        "<"
+    );
+    // Content between tag_span_end and content_end should be "hello"
+    let content = &source[div.tag_span_end as usize..div.content_end as usize];
+    assert_eq!(content, "hello");
+}
+
+#[test]
+fn self_closing_element_content_end_equals_tag_span_end() {
+    let source = r#"<template><br /></template>"#;
+    let data = extract(source);
+    let br = data.elements.iter().find(|e| e.tag == "br").unwrap();
+    assert_eq!(
+        br.content_end, br.tag_span_end,
+        "self-closing content_end == tag_span_end"
+    );
+}
+
+// ── text_children (Step 0f) ──
+
+#[test]
+fn text_children_text_only() {
+    let source = r#"<template><div>hello world</div></template>"#;
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert_eq!(div.text_children.len(), 1, "should have 1 text child");
+    match &div.text_children[0] {
+        RawTextSegment::Text { span, .. } => {
+            assert_eq!(
+                &source[span.start as usize..span.end as usize],
+                "hello world"
+            );
+        }
+        _ => panic!("expected Text segment"),
+    }
+}
+
+#[test]
+fn text_children_interpolation_only() {
+    let source =
+        "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>";
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert_eq!(
+        div.text_children.len(),
+        1,
+        "should have 1 interpolation child"
+    );
+    match &div.text_children[0] {
+        RawTextSegment::Interpolation {
+            span,
+            expression_span,
+        } => {
+            assert!(source[span.start as usize..span.end as usize].contains("{{"));
+            assert_eq!(
+                source[expression_span.start as usize..expression_span.end as usize].trim(),
+                "msg"
+            );
+        }
+        _ => panic!("expected Interpolation segment"),
+    }
+}
+
+#[test]
+fn text_children_mixed() {
+    let source = "<script setup>\nimport { ref } from 'vue'\nconst count = ref(0)\n</script>\n<template><div>Count: {{ count }}</div></template>";
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert_eq!(
+        div.text_children.len(),
+        2,
+        "should have text + interpolation"
+    );
+    match &div.text_children[0] {
+        RawTextSegment::Text { span, .. } => {
+            assert_eq!(&source[span.start as usize..span.end as usize], "Count: ");
+        }
+        _ => panic!("expected Text segment first"),
+    }
+    match &div.text_children[1] {
+        RawTextSegment::Interpolation {
+            expression_span, ..
+        } => {
+            assert_eq!(
+                source[expression_span.start as usize..expression_span.end as usize].trim(),
+                "count"
+            );
+        }
+        _ => panic!("expected Interpolation segment second"),
+    }
+}
+
+#[test]
+fn text_children_skips_element_children() {
+    let source = r#"<template><div>text<span>inner</span>more</div></template>"#;
+    let data = extract(source);
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    // text_children should only have Text segments (skipping <span>)
+    assert_eq!(
+        div.text_children.len(),
+        2,
+        "should have 2 text segments (before + after span)"
+    );
+    for seg in &div.text_children {
+        match seg {
+            RawTextSegment::Text { .. } => {}
+            _ => panic!("div text_children should only be Text (element children skipped)"),
+        }
+    }
+}
+
+#[test]
+fn text_children_empty_for_self_closing() {
+    let source = r#"<template><br /></template>"#;
+    let data = extract(source);
+    let br = data.elements.iter().find(|e| e.tag == "br").unwrap();
+    assert!(
+        br.text_children.is_empty(),
+        "self-closing has no text children"
+    );
+}

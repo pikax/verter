@@ -74,7 +74,11 @@ mod tests {
                     value: Some("header".to_string()),
                     is_dynamic: false,
                     span: Span::new(5, 18),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -102,7 +106,13 @@ mod tests {
                     modifiers: vec![],
                     expression: None,
                     span: Span::new(10, 20),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

@@ -367,6 +367,8 @@ mod tests {
                 value: Some(class_val),
                 is_dynamic: false,
                 span: verter_span::Span::new(start, end),
+                name_end: 0,
+                value_span: None,
             });
         }
         verter_analysis::TemplateElement {
@@ -393,6 +395,8 @@ mod tests {
             dynamic_classes: vec![],
             span: verter_span::Span::new(0, 0),
             tag_span_end: 0,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 
@@ -465,6 +469,8 @@ mod tests {
             value: Some("app".into()),
             is_dynamic: false,
             span: verter_span::Span::new(id_start, id_end),
+            name_end: 0,
+            value_span: None,
         });
 
         let analysis = FileAnalysisSnapshot {

@@ -68,9 +68,13 @@ mod tests {
                     value: Some("color: red".to_string()),
                     is_dynamic: false,
                     span: Span::new(5, 22),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 span: Span::new(0, 30),
                 tag_span_end: 25,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -98,9 +102,13 @@ mod tests {
                     value: Some("{ color: myColor }".to_string()),
                     is_dynamic: true,
                     span: Span::new(5, 30),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 span: Span::new(0, 35),
                 tag_span_end: 32,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -119,9 +127,13 @@ mod tests {
                     value: Some("container".to_string()),
                     is_dynamic: false,
                     span: Span::new(5, 22),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 span: Span::new(0, 30),
                 tag_span_end: 25,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

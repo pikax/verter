@@ -70,6 +70,20 @@ pub struct RawBindingOccurrence {
     pub usage_kind: u8,
 }
 
+/// A text or interpolation segment within an element's content.
+#[derive(Debug, Clone)]
+pub enum RawTextSegment {
+    /// Literal text.
+    Text { span: Span, is_entity: bool },
+    /// Interpolation expression (e.g., `{{ count }}`).
+    Interpolation {
+        /// Full span including `{{ }}` delimiters.
+        span: Span,
+        /// Inner expression span (excludes `{{ }}` and whitespace).
+        expression_span: Span,
+    },
+}
+
 /// Raw element data for linter/analysis.
 #[derive(Debug, Clone)]
 pub struct RawElementData {
@@ -95,12 +109,16 @@ pub struct RawElementData {
     pub span: Span,
     /// Byte offset end of the opening tag only (past the `>`).
     pub tag_span_end: u32,
+    /// Byte offset of the `<` in the closing tag (or same as `tag_span_end` for self-closing).
+    pub content_end: u32,
     pub attributes: Vec<RawAttributeData>,
     pub directives: Vec<RawDirectiveData>,
     /// Index into `RawTemplateData::v_for_directives` if this element has v-for.
     pub v_for_idx: Option<usize>,
     /// Index into `RawTemplateData::v_model_directives` if this element has v-model.
     pub v_model_idx: Option<usize>,
+    /// Ordered text + interpolation children (excludes element/comment children).
+    pub text_children: Vec<RawTextSegment>,
 }
 
 /// A static or dynamic attribute on an element (non-directive).
@@ -110,6 +128,10 @@ pub struct RawAttributeData {
     pub value: Option<String>,
     pub is_dynamic: bool,
     pub span: Span,
+    /// Byte offset end of the attribute name.
+    pub name_end: u32,
+    /// Inner value span (excludes quotes). `None` for boolean attributes.
+    pub value_span: Option<Span>,
 }
 
 /// A directive on an element.
@@ -123,6 +145,14 @@ pub struct RawDirectiveData {
     pub modifiers: Vec<String>,
     pub expression: Option<String>,
     pub span: Span,
+    /// Byte offset end of the directive name (e.g., end of `v-show` or `@` or `:`).
+    pub name_end: u32,
+    /// Argument span (e.g., `click` in `@click`).
+    pub arg_span: Option<Span>,
+    /// Inner expression/value span (excludes quotes).
+    pub expression_span: Option<Span>,
+    /// Modifier spans (e.g., `stop`, `prevent` in `@click.stop.prevent`).
+    pub modifier_spans: Vec<Span>,
 }
 
 /// A slot defined in this component's template.
@@ -426,6 +456,32 @@ fn has_non_whitespace_text(ast: &TemplateAst, el: &ElementNode, source: &str) ->
     false
 }
 
+/// Extract text and interpolation children from an element's content.
+fn extract_text_children(ast: &TemplateAst, el: &ElementNode) -> Vec<RawTextSegment> {
+    let Some(ref content) = el.content else {
+        return Vec::new();
+    };
+    let mut segments = Vec::new();
+    for &child_id in &content.children {
+        match &ast.nodes[child_id.0].kind {
+            AstNodeKind::Text(text) => {
+                segments.push(RawTextSegment::Text {
+                    span: Span::new(text.start, text.end),
+                    is_entity: text.is_entity,
+                });
+            }
+            AstNodeKind::Interpolation(interp) => {
+                segments.push(RawTextSegment::Interpolation {
+                    span: Span::new(interp.start, interp.end),
+                    expression_span: Span::new(interp.inner_start, interp.inner_end),
+                });
+            }
+            _ => {} // Skip element/comment children
+        }
+    }
+    segments
+}
+
 fn extract_tag_name(el: &ElementNode, source: &str) -> String {
     let start = el.tag_open.start as usize + 1; // skip '<'
     let end = el.tag_open.name_end as usize;
@@ -470,6 +526,15 @@ fn extract_element_data(
                 .value_start
                 .zip(prop.value_end)
                 .map(|(s, e)| source[s as usize..e as usize].to_string());
+            let expression_span = prop
+                .value_start
+                .zip(prop.value_end)
+                .map(|(s, e)| Span::new(s, e));
+            let arg_span = prop
+                .arg_start
+                .zip(prop.arg_end)
+                .map(|(s, e)| Span::new(s, e));
+            let modifier_spans: Vec<Span> = prop.modifiers.iter().copied().collect();
             directives.push(RawDirectiveData {
                 name,
                 raw_name: normalized_raw,
@@ -477,6 +542,10 @@ fn extract_element_data(
                 modifiers,
                 expression,
                 span: Span::new(prop.start, prop_end),
+                name_end: prop.name_end,
+                arg_span,
+                expression_span,
+                modifier_spans,
             });
         } else {
             let name = source[prop.start as usize..prop.name_end as usize].to_string();
@@ -484,11 +553,17 @@ fn extract_element_data(
                 .value_start
                 .zip(prop.value_end)
                 .map(|(s, e)| source[s as usize..e as usize].to_string());
+            let value_span = prop
+                .value_start
+                .zip(prop.value_end)
+                .map(|(s, e)| Span::new(s, e));
             attributes.push(RawAttributeData {
                 name,
                 value,
                 is_dynamic: false,
                 span: Span::new(prop.start, prop_end),
+                name_end: prop.name_end,
+                value_span,
             });
         }
     }
@@ -505,6 +580,11 @@ fn extract_element_data(
             ElementNodeConditionKind::ElseIf => ("else-if".to_string(), "v-else-if".to_string()),
             ElementNodeConditionKind::Else => ("else".to_string(), "v-else".to_string()),
         };
+        let cond_expression_span = cond
+            .prop
+            .value_start
+            .zip(cond.prop.value_end)
+            .map(|(s, e)| Span::new(s, e));
         directives.push(RawDirectiveData {
             name,
             raw_name,
@@ -512,6 +592,10 @@ fn extract_element_data(
             modifiers: Vec::new(),
             expression,
             span: Span::new(cond.prop.start, prop_span_end(&cond.prop, source)),
+            name_end: cond.prop.name_end,
+            arg_span: None,
+            expression_span: cond_expression_span,
+            modifier_spans: Vec::new(),
         });
     }
 
@@ -520,6 +604,10 @@ fn extract_element_data(
             .value_start
             .zip(v_for.value_end)
             .map(|(s, e)| source[s as usize..e as usize].to_string());
+        let vfor_expression_span = v_for
+            .value_start
+            .zip(v_for.value_end)
+            .map(|(s, e)| Span::new(s, e));
         directives.push(RawDirectiveData {
             name: "for".to_string(),
             raw_name: "v-for".to_string(),
@@ -527,6 +615,10 @@ fn extract_element_data(
             modifiers: Vec::new(),
             expression,
             span: Span::new(v_for.start, prop_span_end(v_for, source)),
+            name_end: v_for.name_end,
+            arg_span: None,
+            expression_span: vfor_expression_span,
+            modifier_spans: Vec::new(),
         });
     }
 
@@ -540,6 +632,14 @@ fn extract_element_data(
             .value_start
             .zip(v_slot.value_end)
             .map(|(s, e)| source[s as usize..e as usize].to_string());
+        let slot_arg_span = v_slot
+            .arg_start
+            .zip(v_slot.arg_end)
+            .map(|(s, e)| Span::new(s, e));
+        let slot_expression_span = v_slot
+            .value_start
+            .zip(v_slot.value_end)
+            .map(|(s, e)| Span::new(s, e));
         directives.push(RawDirectiveData {
             name: "slot".to_string(),
             raw_name: raw_name_str.to_string(),
@@ -547,6 +647,10 @@ fn extract_element_data(
             modifiers: Vec::new(),
             expression,
             span: Span::new(v_slot.start, prop_span_end(v_slot, source)),
+            name_end: v_slot.name_end,
+            arg_span: slot_arg_span,
+            expression_span: slot_expression_span,
+            modifier_spans: Vec::new(),
         });
     }
 
@@ -558,6 +662,10 @@ fn extract_element_data(
             modifiers: Vec::new(),
             expression: None,
             span: Span::new(v_once.start, prop_span_end(v_once, source)),
+            name_end: v_once.name_end,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: Vec::new(),
         });
     }
 
@@ -567,13 +675,23 @@ fn extract_element_data(
             .value_start
             .zip(v_ref.value_end)
             .map(|(s, e)| source[s as usize..e as usize].to_string());
+        let ref_value_span = v_ref
+            .value_start
+            .zip(v_ref.value_end)
+            .map(|(s, e)| Span::new(s, e));
         attributes.push(RawAttributeData {
             name: "ref".to_string(),
             value,
             is_dynamic: false,
             span: Span::new(v_ref.start, prop_span_end(v_ref, source)),
+            name_end: v_ref.name_end,
+            value_span: ref_value_span,
         });
     }
+
+    // Compute content_end and text_children
+    let content_end = el.content.as_ref().map_or(tag_span_end, |c| c.end);
+    let text_children = extract_text_children(ast, el);
 
     data.elements.push(RawElementData {
         tag: tag_name.to_string(),
@@ -607,10 +725,12 @@ fn extract_element_data(
         parent_index: parent_element_index,
         span: Span::new(span_start, span_end),
         tag_span_end,
+        content_end,
         attributes,
         directives,
         v_for_idx: None,
         v_model_idx: None,
+        text_children,
     });
 }
 

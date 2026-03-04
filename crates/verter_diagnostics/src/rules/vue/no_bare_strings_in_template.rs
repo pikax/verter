@@ -47,10 +47,10 @@ impl LintRule for NoBareStringsInTemplate {
                      (e.g., `$t()`) for i18n support.",
                     el.tag
                 ),
-                el.span.start,
                 el.tag_span_end,
+                el.content_end,
                 self.default_severity(),
-                DiagnosticSpanKind::ElementOpenTag,
+                DiagnosticSpanKind::ElementContent,
             );
         }
     }
@@ -82,6 +82,8 @@ mod tests {
                 has_text_content: true,
                 span: Span::new(0, 30),
                 tag_span_end: 3,
+                content_end: 25,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -94,6 +96,14 @@ mod tests {
         assert!(
             diags[0].message.contains("translation"),
             "message should suggest translation"
+        );
+        // Span should cover the content area, not the open tag
+        assert_eq!(diags[0].span.start, 3, "span start should be tag_span_end");
+        assert_eq!(diags[0].span.end, 25, "span end should be content_end");
+        assert_eq!(
+            diags[0].span_kind,
+            DiagnosticSpanKind::ElementContent,
+            "span kind should be ElementContent"
         );
         assert!(
             !diags.iter().any(|d| d.rule == "no-v-html"),
@@ -111,6 +121,8 @@ mod tests {
                 has_bare_text: false,
                 span: Span::new(0, 40),
                 tag_span_end: 5,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -131,6 +143,8 @@ mod tests {
                 has_text_content: false,
                 span: Span::new(0, 20),
                 tag_span_end: 5,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -147,6 +161,8 @@ mod tests {
                 has_text_content: true,
                 span: Span::new(0, 30),
                 tag_span_end: 5,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -163,6 +179,8 @@ mod tests {
                 has_text_content: true,
                 span: Span::new(0, 30),
                 tag_span_end: 6,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

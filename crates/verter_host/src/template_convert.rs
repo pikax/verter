@@ -8,8 +8,8 @@ use verter_analysis::template::{
     BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace,
     IfChain, PropValueConstness, TemplateAnalysisSnapshot, TemplateAttribute,
     TemplateBindingOccurrence, TemplateComponentUsage, TemplateComponentVModel, TemplateDirective,
-    TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef, UnresolvedBinding,
-    VForDirective, VModelDirective,
+    TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef, TemplateTextSegment,
+    UnresolvedBinding, VForDirective, VModelDirective,
 };
 use verter_core::compile::template_data::RawTemplateData;
 
@@ -230,6 +230,8 @@ pub fn convert_raw_to_analysis(
                     value: a.value.clone(),
                     is_dynamic: a.is_dynamic,
                     span: a.span,
+                    name_end: a.name_end,
+                    value_span: a.value_span,
                 })
                 .collect();
 
@@ -243,6 +245,10 @@ pub fn convert_raw_to_analysis(
                     modifiers: d.modifiers.clone(),
                     expression: d.expression.clone(),
                     span: d.span,
+                    name_end: d.name_end,
+                    arg_span: d.arg_span,
+                    expression_span: d.expression_span,
+                    modifier_spans: d.modifier_spans.clone(),
                 })
                 .collect();
 
@@ -303,6 +309,27 @@ pub fn convert_raw_to_analysis(
                 dynamic_classes,
                 span: e.span,
                 tag_span_end: e.tag_span_end,
+                content_end: e.content_end,
+                text_children: e
+                    .text_children
+                    .iter()
+                    .map(|seg| match seg {
+                        verter_core::compile::template_data::RawTextSegment::Text {
+                            span,
+                            is_entity,
+                        } => TemplateTextSegment::Text {
+                            span: *span,
+                            is_entity: *is_entity,
+                        },
+                        verter_core::compile::template_data::RawTextSegment::Interpolation {
+                            span,
+                            expression_span,
+                        } => TemplateTextSegment::Interpolation {
+                            span: *span,
+                            expression_span: *expression_span,
+                        },
+                    })
+                    .collect(),
             }
         })
         .collect();

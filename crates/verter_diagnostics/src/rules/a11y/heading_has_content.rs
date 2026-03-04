@@ -100,6 +100,8 @@ mod tests {
                     value: Some(v.to_string()),
                     is_dynamic: false,
                     span: Span::new(0, 10),
+                    name_end: 0,
+                    value_span: None,
                 })
                 .collect(),
             directives: vec![],
@@ -121,6 +123,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 30),
             tag_span_end: 30,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 
@@ -134,6 +138,8 @@ mod tests {
             parent_index: Some(parent_idx),
             nesting_depth: 1,
             span: Span::new(5, 25),
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }

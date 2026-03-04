@@ -153,9 +153,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some(expr.to_string()),
                     span: Span::new(20, 50),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(15, 60),
                 tag_span_end: 55,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -228,9 +234,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("localVar = 5".to_string()),
                     span: Span::new(20, 45),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(15, 55),
                 tag_span_end: 50,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

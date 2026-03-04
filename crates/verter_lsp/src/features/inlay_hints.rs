@@ -252,6 +252,8 @@ mod tests {
                 value: Some(classes.join(" ")),
                 is_dynamic: false,
                 span: verter_span::Span::new(0, 0),
+                name_end: 0,
+                value_span: None,
             });
         }
         if let Some(id_val) = id {
@@ -260,11 +262,15 @@ mod tests {
                 value: Some(id_val.to_string()),
                 is_dynamic: false,
                 span: verter_span::Span::new(0, 0),
+                name_end: 0,
+                value_span: None,
             });
         }
         TemplateElement {
             tag: tag.to_string(),
             attributes: attrs,
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -277,6 +283,8 @@ mod tests {
                 value: Some(static_classes.join(" ")),
                 is_dynamic: false,
                 span: verter_span::Span::new(0, 0),
+                name_end: 0,
+                value_span: None,
             });
         }
         // Dynamic :class binding
@@ -285,10 +293,14 @@ mod tests {
             value: Some("{ 'active': isActive }".to_string()),
             is_dynamic: true,
             span: verter_span::Span::new(0, 0),
+            name_end: 0,
+            value_span: None,
         });
         TemplateElement {
             tag: tag.to_string(),
             attributes: attrs,
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }

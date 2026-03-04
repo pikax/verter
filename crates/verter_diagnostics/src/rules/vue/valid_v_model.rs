@@ -96,6 +96,8 @@ mod tests {
                 value: Some(t.to_string()),
                 is_dynamic: false,
                 span: Span::new(7, 20),
+                name_end: 0,
+                value_span: None,
             });
         }
         TemplateElement {
@@ -128,6 +130,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 
@@ -206,6 +210,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         };
         let template = TemplateAnalysisSnapshot {
             elements: vec![element],
@@ -255,6 +261,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         };
         let template = TemplateAnalysisSnapshot {
             elements: vec![element],

@@ -121,6 +121,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 
@@ -133,6 +135,8 @@ mod tests {
                     value: Some("foo".to_string()),
                     is_dynamic: false,
                     span: Span::new(10, 22),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 vec![],
             )],
@@ -161,6 +165,10 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("show".to_string()),
                     span: Span::new(10, 22),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
             )],
             ..Default::default()
@@ -181,6 +189,10 @@ mod tests {
                     modifiers: vec![],
                     expression: None,
                     span: Span::new(10, 30),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
             )],
             ..Default::default()
@@ -201,6 +213,10 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("myClass".to_string()),
                     span: Span::new(10, 25),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
             )],
             ..Default::default()
@@ -221,6 +237,8 @@ mod tests {
                 value: Some("foo".to_string()),
                 is_dynamic: false,
                 span: Span::new(5, 17),
+                name_end: 0,
+                value_span: None,
             }],
             directives: vec![],
             v_for: None,
@@ -240,6 +258,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         };
         let template = TemplateAnalysisSnapshot {
             elements: vec![element],

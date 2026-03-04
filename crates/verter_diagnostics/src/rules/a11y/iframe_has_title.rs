@@ -78,6 +78,8 @@ mod tests {
                     value: v.map(|s| s.to_string()),
                     is_dynamic: false,
                     span: Span::new(0, 10),
+                    name_end: 0,
+                    value_span: None,
                 })
                 .collect(),
             directives: vec![],
@@ -99,6 +101,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 30),
             tag_span_end: 30,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 

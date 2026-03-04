@@ -90,7 +90,13 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("true".to_string()),
                     span: Span::new(7, 22),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -118,7 +124,13 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("false".to_string()),
                     span: Span::new(7, 23),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -142,7 +154,13 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("isDisabled".to_string()),
                     span: Span::new(7, 28),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

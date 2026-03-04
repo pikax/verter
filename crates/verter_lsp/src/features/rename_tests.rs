@@ -203,6 +203,8 @@ fn make_element_with_attrs(
             value: Some(class_val),
             is_dynamic: false,
             span: verter_span::Span::new(start, end),
+            name_end: 0,
+            value_span: None,
         });
     }
     if let Some(id_val) = id {
@@ -214,6 +216,8 @@ fn make_element_with_attrs(
             value: Some(id_val.into()),
             is_dynamic: false,
             span: verter_span::Span::new(start, end),
+            name_end: 0,
+            value_span: None,
         });
     }
     verter_analysis::TemplateElement {
@@ -240,6 +244,8 @@ fn make_element_with_attrs(
         dynamic_classes: vec![],
         span: verter_span::Span::new(0, 0),
         tag_span_end: 0,
+        content_end: 0,
+        text_children: Vec::new(),
     }
 }
 

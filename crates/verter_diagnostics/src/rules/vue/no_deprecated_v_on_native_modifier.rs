@@ -76,6 +76,8 @@ mod tests {
             tag: "MyComp".to_string(),
             is_component: true,
             directives: vec![dir],
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -90,6 +92,10 @@ mod tests {
                 modifiers: vec!["native".to_string()],
                 expression: Some("handler".to_string()),
                 span: Span::new(10, 30),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             })],
             ..Default::default()
         };
@@ -114,6 +120,10 @@ mod tests {
                 modifiers: vec!["stop".to_string()],
                 expression: Some("handler".to_string()),
                 span: Span::new(10, 25),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             })],
             ..Default::default()
         };

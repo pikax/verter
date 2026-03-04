@@ -91,6 +91,8 @@ mod tests {
             is_component,
             span: Span::new(0, 20),
             tag_span_end: 20,
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }

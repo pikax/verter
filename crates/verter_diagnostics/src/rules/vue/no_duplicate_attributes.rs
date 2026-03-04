@@ -64,6 +64,8 @@ mod tests {
             value: Some("val".to_string()),
             is_dynamic: false,
             span: verter_span::Span::new(0, 10),
+            name_end: 0,
+            value_span: None,
         }
     }
 
@@ -92,6 +94,8 @@ mod tests {
             dynamic_classes: vec![],
             span: verter_span::Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 

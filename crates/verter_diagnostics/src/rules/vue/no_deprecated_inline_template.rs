@@ -72,7 +72,11 @@ mod tests {
                     value: None,
                     is_dynamic: false,
                     span: Span::new(8, 23),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -106,7 +110,11 @@ mod tests {
                     value: Some("foo".to_string()),
                     is_dynamic: false,
                     span: Span::new(8, 19),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

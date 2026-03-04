@@ -98,7 +98,13 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("value".to_string()),
                     span: Span::new(6, 18),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -124,7 +130,13 @@ mod tests {
                     modifiers: vec![],
                     expression: None,
                     span: Span::new(6, 11),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

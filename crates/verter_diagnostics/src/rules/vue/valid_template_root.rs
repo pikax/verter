@@ -77,6 +77,8 @@ mod tests {
             elements: vec![TemplateElement {
                 tag: "div".to_string(),
                 span: Span::new(0, 10),
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

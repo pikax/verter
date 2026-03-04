@@ -55,6 +55,8 @@ pub enum DiagnosticSpanKind {
     PropDefinition,
     /// File-level diagnostic (no specific span)
     FileLevel,
+    /// Element inner content area: text/interpolation between tags
+    ElementContent,
 }
 
 /// A single lint diagnostic emitted by a rule.

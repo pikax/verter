@@ -102,6 +102,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 
@@ -123,6 +125,8 @@ mod tests {
                 value: Some("'container'".to_string()),
                 is_dynamic: true,
                 span: Span::new(5, 25),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };
@@ -141,6 +145,8 @@ mod tests {
                 value: Some("\"container\"".to_string()),
                 is_dynamic: true,
                 span: Span::new(5, 25),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };
@@ -157,6 +163,8 @@ mod tests {
                 value: Some("isActive ? 'active' : ''".to_string()),
                 is_dynamic: true,
                 span: Span::new(5, 40),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };
@@ -173,6 +181,8 @@ mod tests {
                 value: Some("container".to_string()),
                 is_dynamic: false,
                 span: Span::new(5, 25),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };
@@ -189,6 +199,8 @@ mod tests {
                 value: Some("'my-id'".to_string()),
                 is_dynamic: true,
                 span: Span::new(5, 25),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };

@@ -196,6 +196,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 
@@ -326,7 +328,11 @@ mod tests {
                 argument: Some("foo".to_string()),
                 modifiers: vec![],
                 expression: None,
-                span: Span::new(5, 9), // :foo
+                span: Span::new(5, 9), // :foo,
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }])],
             ..Default::default()
         };
@@ -352,7 +358,11 @@ mod tests {
                 argument: Some("foo-bar".to_string()),
                 modifiers: vec![],
                 expression: None,
-                span: Span::new(5, 13), // :foo-bar
+                span: Span::new(5, 13), // :foo-bar,
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }])],
             ..Default::default()
         };
@@ -374,6 +384,10 @@ mod tests {
                 modifiers: vec![],
                 expression: Some("bar".to_string()),
                 span: Span::new(5, 15),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }])],
             ..Default::default()
         };
@@ -397,6 +411,10 @@ mod tests {
                 modifiers: vec![],
                 expression: Some("handler".to_string()),
                 span: Span::new(5, 21),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }])],
             ..Default::default()
         };
@@ -417,6 +435,10 @@ mod tests {
                 modifiers: vec![],
                 expression: None,
                 span: Span::new(5, 9),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }])],
             ..Default::default()
         };
@@ -449,6 +471,10 @@ mod tests {
                 modifiers: vec!["sync".to_string()],
                 expression: None,
                 span: Span::new(5, 14),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }])],
             ..Default::default()
         };

@@ -131,6 +131,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 
@@ -147,6 +149,10 @@ mod tests {
             modifiers: vec![],
             expression: expression.map(|s| s.to_string()),
             span,
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: Vec::new(),
         }
     }
 
@@ -158,6 +164,10 @@ mod tests {
             modifiers: vec![],
             expression: Some(expression.to_string()),
             span,
+            name_end: 0,
+            arg_span: None,
+            expression_span: None,
+            modifier_spans: Vec::new(),
         }
     }
 

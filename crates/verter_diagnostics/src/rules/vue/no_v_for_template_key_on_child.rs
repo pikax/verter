@@ -94,6 +94,8 @@ mod tests {
                     }),
                     span: Span::new(0, 80),
                     tag_span_end: 40,
+                    content_end: 0,
+                    text_children: Vec::new(),
                     ..Default::default()
                 },
                 TemplateElement {
@@ -107,9 +109,15 @@ mod tests {
                         modifiers: vec![],
                         expression: Some("item.id".to_string()),
                         span: Span::new(45, 60),
+                        name_end: 0,
+                        arg_span: None,
+                        expression_span: None,
+                        modifier_spans: Vec::new(),
                     }],
                     span: Span::new(41, 70),
                     tag_span_end: 62,
+                    content_end: 0,
+                    text_children: Vec::new(),
                     ..Default::default()
                 },
             ],
@@ -143,9 +151,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("item.id".to_string()),
                     span: Span::new(10, 25),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(5, 40),
                 tag_span_end: 30,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -166,6 +180,8 @@ mod tests {
                 parent_index: Some(0),
                 span: Span::new(41, 70),
                 tag_span_end: 46,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

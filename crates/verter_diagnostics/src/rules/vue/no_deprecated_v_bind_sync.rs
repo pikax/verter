@@ -83,7 +83,13 @@ mod tests {
                     modifiers: vec!["sync".to_string()],
                     expression: Some("value".to_string()),
                     span: Span::new(8, 25),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -110,7 +116,13 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("value".to_string()),
                     span: Span::new(8, 25),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

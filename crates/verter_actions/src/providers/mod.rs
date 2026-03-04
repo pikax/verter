@@ -1,6 +1,7 @@
 //! Built-in action providers.
 
 mod add_component_is;
+mod extract_bare_text;
 mod html_self_close;
 mod insert_attribute;
 mod prefer_script_attrs;
@@ -22,6 +23,7 @@ mod unwrap_binding;
 mod v_bind_shorthand;
 
 pub use add_component_is::AddComponentIs;
+pub use extract_bare_text::ExtractBareText;
 pub use html_self_close::HtmlSelfClose;
 pub use insert_attribute::InsertAttribute;
 pub use prefer_script_attrs::PreferScriptAttrs;
@@ -66,4 +68,5 @@ pub fn register_builtin_providers(engine: &mut ActionEngine) {
     engine.register(Box::new(ReplaceContent));
     engine.register(Box::new(RenameCasing));
     engine.register(Box::new(PreferScriptAttrs));
+    engine.register(Box::new(ExtractBareText));
 }

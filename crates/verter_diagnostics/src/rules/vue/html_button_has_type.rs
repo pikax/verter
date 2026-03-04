@@ -75,6 +75,8 @@ mod tests {
             attributes: attrs,
             span: Span::new(0, 20),
             tag_span_end: 20,
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -106,6 +108,8 @@ mod tests {
                 value: Some("button".to_string()),
                 is_dynamic: false,
                 span: Span::new(8, 22),
+                name_end: 0,
+                value_span: None,
             }])],
             ..Default::default()
         };
@@ -125,9 +129,15 @@ mod tests {
                     modifiers: vec![],
                     expression: Some("buttonType".to_string()),
                     span: Span::new(8, 30),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 span: Span::new(0, 40),
                 tag_span_end: 40,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -143,6 +153,8 @@ mod tests {
                 tag: "div".to_string(),
                 span: Span::new(0, 10),
                 tag_span_end: 10,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -159,6 +171,8 @@ mod tests {
                 is_component: true,
                 span: Span::new(0, 20),
                 tag_span_end: 20,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

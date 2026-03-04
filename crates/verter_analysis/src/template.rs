@@ -264,6 +264,14 @@ pub struct TemplateDirective {
     pub expression: Option<String>,
     /// Byte span in SFC source.
     pub span: Span,
+    /// Byte offset end of the directive name.
+    pub name_end: u32,
+    /// Argument span (e.g., `click` in `@click`).
+    pub arg_span: Option<Span>,
+    /// Inner expression/value span (excludes quotes).
+    pub expression_span: Option<Span>,
+    /// Modifier spans.
+    pub modifier_spans: Vec<Span>,
 }
 
 /// v-for analysis.
@@ -303,6 +311,20 @@ pub struct VModelDirective {
 // =============================================================================
 // Elements
 // =============================================================================
+
+/// A text or interpolation segment within an element's content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateTextSegment {
+    /// Literal text (e.g., `"Count: "`).
+    Text { span: Span, is_entity: bool },
+    /// Interpolation expression (e.g., `{{ count }}`).
+    Interpolation {
+        /// Full span including `{{ }}` delimiters.
+        span: Span,
+        /// Inner expression span (excludes `{{ }}`).
+        expression_span: Span,
+    },
+}
 
 /// Element-level analysis for accessibility and HTML conformance.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -358,6 +380,11 @@ pub struct TemplateElement {
     /// Byte offset end of the opening tag only (`>` after attributes).
     /// Use this for diagnostic squiggles — highlights just `<div class="x">`, not the whole element.
     pub tag_span_end: u32,
+    /// Byte offset of the `<` in the closing tag (or same as `tag_span_end` for self-closing).
+    pub content_end: u32,
+    /// Ordered text + interpolation children (excludes element/comment children).
+    /// Used by code actions (extract bare text) and i18n rules.
+    pub text_children: Vec<TemplateTextSegment>,
 }
 
 impl TemplateElement {
@@ -702,6 +729,10 @@ pub struct TemplateAttribute {
     pub is_dynamic: bool,
     /// Byte span in SFC source.
     pub span: Span,
+    /// Byte offset end of the attribute name.
+    pub name_end: u32,
+    /// Inner value span (excludes quotes). `None` for boolean attributes.
+    pub value_span: Option<Span>,
 }
 
 // =============================================================================
@@ -1211,6 +1242,20 @@ impl serde::Serialize for TemplateDirective {
         }
         map.serialize_entry("spanStart", &self.span.start)?;
         map.serialize_entry("spanEnd", &self.span.end)?;
+        if self.name_end != 0 {
+            map.serialize_entry("nameEnd", &self.name_end)?;
+        }
+        if let Some(ref arg) = self.arg_span {
+            map.serialize_entry("argSpanStart", &arg.start)?;
+            map.serialize_entry("argSpanEnd", &arg.end)?;
+        }
+        if let Some(ref expr) = self.expression_span {
+            map.serialize_entry("expressionSpanStart", &expr.start)?;
+            map.serialize_entry("expressionSpanEnd", &expr.end)?;
+        }
+        if !self.modifier_spans.is_empty() {
+            map.serialize_entry("modifierSpans", &self.modifier_spans)?;
+        }
         map.end()
     }
 }
@@ -1232,6 +1277,18 @@ impl<'de> serde::Deserialize<'de> for TemplateDirective {
             span_start: u32,
             #[serde(default)]
             span_end: u32,
+            #[serde(default)]
+            name_end: u32,
+            #[serde(default)]
+            arg_span_start: Option<u32>,
+            #[serde(default)]
+            arg_span_end: Option<u32>,
+            #[serde(default)]
+            expression_span_start: Option<u32>,
+            #[serde(default)]
+            expression_span_end: Option<u32>,
+            #[serde(default)]
+            modifier_spans: Vec<Span>,
         }
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
@@ -1241,6 +1298,16 @@ impl<'de> serde::Deserialize<'de> for TemplateDirective {
             modifiers: w.modifiers,
             expression: w.expression,
             span: Span::new(w.span_start, w.span_end),
+            name_end: w.name_end,
+            arg_span: w
+                .arg_span_start
+                .zip(w.arg_span_end)
+                .map(|(s, e)| Span::new(s, e)),
+            expression_span: w
+                .expression_span_start
+                .zip(w.expression_span_end)
+                .map(|(s, e)| Span::new(s, e)),
+            modifier_spans: w.modifier_spans,
         })
     }
 }
@@ -1389,6 +1456,10 @@ impl serde::Serialize for TemplateElement {
         if self.tag_span_end != 0 {
             map.serialize_entry("tagSpanEnd", &self.tag_span_end)?;
         }
+        if self.content_end != 0 {
+            map.serialize_entry("contentEnd", &self.content_end)?;
+        }
+        // text_children omitted from serialization (Rust-only, not crossing FFI)
         map.end()
     }
 }
@@ -1445,6 +1516,8 @@ impl<'de> serde::Deserialize<'de> for TemplateElement {
             span_end: u32,
             #[serde(default)]
             tag_span_end: u32,
+            #[serde(default)]
+            content_end: u32,
         }
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
@@ -1471,6 +1544,8 @@ impl<'de> serde::Deserialize<'de> for TemplateElement {
             dynamic_classes: w.dynamic_classes,
             span: Span::new(w.span_start, w.span_end),
             tag_span_end: w.tag_span_end,
+            content_end: w.content_end,
+            text_children: Vec::new(), // Not deserialized — Rust-only
         })
     }
 }
@@ -1486,6 +1561,13 @@ impl serde::Serialize for TemplateAttribute {
         map.serialize_entry("isDynamic", &self.is_dynamic)?;
         map.serialize_entry("spanStart", &self.span.start)?;
         map.serialize_entry("spanEnd", &self.span.end)?;
+        if self.name_end != 0 {
+            map.serialize_entry("nameEnd", &self.name_end)?;
+        }
+        if let Some(ref vs) = self.value_span {
+            map.serialize_entry("valueSpanStart", &vs.start)?;
+            map.serialize_entry("valueSpanEnd", &vs.end)?;
+        }
         map.end()
     }
 }
@@ -1504,6 +1586,12 @@ impl<'de> serde::Deserialize<'de> for TemplateAttribute {
             span_start: u32,
             #[serde(default)]
             span_end: u32,
+            #[serde(default)]
+            name_end: u32,
+            #[serde(default)]
+            value_span_start: Option<u32>,
+            #[serde(default)]
+            value_span_end: Option<u32>,
         }
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
@@ -1511,6 +1599,11 @@ impl<'de> serde::Deserialize<'de> for TemplateAttribute {
             value: w.value,
             is_dynamic: w.is_dynamic,
             span: Span::new(w.span_start, w.span_end),
+            name_end: w.name_end,
+            value_span: w
+                .value_span_start
+                .zip(w.value_span_end)
+                .map(|(s, e)| Span::new(s, e)),
         })
     }
 }
@@ -1897,6 +1990,8 @@ mod tests {
                 value: Some("container".to_string()),
                 is_dynamic: false,
                 span: Span::new(0, 20),
+                name_end: 0,
+                value_span: None,
             }],
             directives: vec![TemplateDirective {
                 name: "if".to_string(),
@@ -1905,6 +2000,10 @@ mod tests {
                 modifiers: vec![],
                 expression: Some("visible".to_string()),
                 span: Span::new(21, 35),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }],
             v_for: None,
             v_model: None,
@@ -1923,6 +2022,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         };
 
         let json = serde_json::to_string(&element).expect("serialize");

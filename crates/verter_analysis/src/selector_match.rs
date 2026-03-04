@@ -426,6 +426,8 @@ mod tests {
                 value: Some(classes.to_string()),
                 is_dynamic: false,
                 span: Span::new(0, 0),
+                name_end: 0,
+                value_span: None,
             });
         }
         if let Some(id_val) = id {
@@ -434,12 +436,16 @@ mod tests {
                 value: Some(id_val.to_string()),
                 is_dynamic: false,
                 span: Span::new(0, 0),
+                name_end: 0,
+                value_span: None,
             });
         }
         TemplateElement {
             tag: tag.to_string(),
             attributes,
             parent_index: None,
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -554,6 +560,8 @@ mod tests {
                 value: Some("expr".to_string()),
                 is_dynamic: true,
                 span: Span::new(0, 0),
+                name_end: 0,
+                value_span: None,
             });
             el
         }];
@@ -596,6 +604,8 @@ mod tests {
                 value: Some("text".to_string()),
                 is_dynamic: false,
                 span: Span::new(0, 0),
+                name_end: 0,
+                value_span: None,
             });
             el
         }];
@@ -668,6 +678,8 @@ mod tests {
                 value: None,
                 is_dynamic: false,
                 span: Span::new(0, 0),
+                name_end: 0,
+                value_span: None,
             });
             el
         }];

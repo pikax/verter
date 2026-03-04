@@ -407,6 +407,8 @@ fn test_hover_on_element_shows_css_rules() {
                     value: Some("foo".into()),
                     is_dynamic: false,
                     span: verter_span::Span::new(0, 0),
+                    name_end: 0,
+                    value_span: None,
                 }],
                 directives: vec![],
                 v_for: None,
@@ -426,6 +428,8 @@ fn test_hover_on_element_shows_css_rules() {
                 dynamic_classes: vec![],
                 span: verter_span::Span::new(div_offset as u32, (div_offset + 20) as u32),
                 tag_span_end: (div_offset + 20) as u32,
+                content_end: 0,
+                text_children: Vec::new(),
             }],
             ..Default::default()
         }),

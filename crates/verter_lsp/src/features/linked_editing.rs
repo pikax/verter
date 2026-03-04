@@ -165,6 +165,8 @@ mod tests {
             is_self_closing: false,
             dynamic_classes: vec![],
             span: verter_span::Span::new(11, 27),
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }]);
 
@@ -194,6 +196,8 @@ mod tests {
             is_self_closing: false,
             dynamic_classes: vec![],
             span: verter_span::Span::new(11, 27),
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }]);
 
@@ -215,6 +219,8 @@ mod tests {
             is_self_closing: true,
             dynamic_classes: vec![],
             span: verter_span::Span::new(11, 17),
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }]);
 
@@ -235,6 +241,8 @@ mod tests {
             is_self_closing: false,
             dynamic_classes: vec![],
             span: verter_span::Span::new(11, 27),
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }]);
 
@@ -268,6 +276,8 @@ mod tests {
             is_self_closing: false,
             dynamic_classes: vec![],
             span: verter_span::Span::new(11, 42),
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }]);
 

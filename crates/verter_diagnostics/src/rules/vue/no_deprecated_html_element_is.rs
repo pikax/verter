@@ -89,7 +89,11 @@ mod tests {
                     value: Some("my-row".to_string()),
                     is_dynamic: false,
                     span: Span::new(4, 17),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -120,7 +124,11 @@ mod tests {
                     value: Some("vue:my-row".to_string()),
                     is_dynamic: false,
                     span: Span::new(4, 21),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -143,7 +151,11 @@ mod tests {
                     value: Some("my-comp".to_string()),
                     is_dynamic: false,
                     span: Span::new(12, 25),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

@@ -72,6 +72,8 @@ mod tests {
                 value: Some("MyComp".to_string()),
                 is_dynamic,
                 span: Span::new(12, 25),
+                name_end: 0,
+                value_span: None,
             });
         }
         TemplateElement {
@@ -98,6 +100,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 30,
+            content_end: 0,
+            text_children: Vec::new(),
         }
     }
 
@@ -167,6 +171,8 @@ mod tests {
             dynamic_classes: vec![],
             span: Span::new(0, 50),
             tag_span_end: 50,
+            content_end: 0,
+            text_children: Vec::new(),
         };
         let template = TemplateAnalysisSnapshot {
             elements: vec![element],

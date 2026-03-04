@@ -90,7 +90,13 @@ mod tests {
                 modifiers: vec![],
                 expression: Some(expression.to_string()),
                 span: Span::new(5, 35),
+                name_end: 0,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: Vec::new(),
             }],
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }

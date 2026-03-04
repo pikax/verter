@@ -81,6 +81,8 @@ mod tests {
                 parent_tag: Some("div".to_string()),
                 span: Span::new(5, 40),
                 tag_span_end: 15,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -104,6 +106,8 @@ mod tests {
                 parent_tag: Some("div".to_string()),
                 span: Span::new(5, 40),
                 tag_span_end: 15,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -130,6 +134,8 @@ mod tests {
                 parent_tag: Some("div".to_string()),
                 span: Span::new(5, 40),
                 tag_span_end: 35,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -150,11 +156,17 @@ mod tests {
                     modifiers: vec![],
                     expression: None,
                     span: Span::new(15, 25),
+                    name_end: 0,
+                    arg_span: None,
+                    expression_span: None,
+                    modifier_spans: Vec::new(),
                 }],
                 parent_index: Some(0),
                 parent_tag: Some("MyComp".to_string()),
                 span: Span::new(5, 50),
                 tag_span_end: 30,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -171,6 +183,8 @@ mod tests {
                 parent_index: None,
                 span: Span::new(0, 50),
                 tag_span_end: 10,
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

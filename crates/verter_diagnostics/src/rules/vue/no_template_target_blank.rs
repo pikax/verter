@@ -96,8 +96,12 @@ mod tests {
                     value: Some(val.to_string()),
                     is_dynamic: false,
                     span: Span::new(3, 20),
+                    name_end: 0,
+                    value_span: None,
                 })
                 .collect(),
+            content_end: 0,
+            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -156,7 +160,11 @@ mod tests {
                     value: Some("_blank".to_string()),
                     is_dynamic: false,
                     span: Span::new(7, 22),
+                    name_end: 0,
+                    value_span: None,
                 }],
+                content_end: 0,
+                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

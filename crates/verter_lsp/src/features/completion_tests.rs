@@ -360,6 +360,8 @@ fn make_element_for_completion(
             value: Some(class_val),
             is_dynamic: false,
             span: verter_span::Span::new(attr_start, attr_end),
+            name_end: 0,
+            value_span: None,
         });
     }
     if let Some(id_val) = id {
@@ -371,6 +373,8 @@ fn make_element_for_completion(
             value: Some(id_val.into()),
             is_dynamic: false,
             span: verter_span::Span::new(attr_start, attr_end),
+            name_end: 0,
+            value_span: None,
         });
     }
     verter_analysis::TemplateElement {
@@ -397,6 +401,8 @@ fn make_element_for_completion(
         dynamic_classes: vec![],
         span: verter_span::Span::new(span_start, span_end),
         tag_span_end: span_end,
+        content_end: 0,
+        text_children: Vec::new(),
     }
 }
 
@@ -417,6 +423,8 @@ fn test_class_completions_in_dynamic_class() {
         value: Some("{ 'btn': active }".into()),
         is_dynamic: true,
         span: verter_span::Span::new(attr_start, attr_end),
+        name_end: 0,
+        value_span: None,
     });
 
     let analysis = FileAnalysisSnapshot {
@@ -476,6 +484,8 @@ fn test_no_class_completions_outside_dynamic_string() {
         value: Some("{ btn: active }".into()),
         is_dynamic: true,
         span: verter_span::Span::new(attr_start, attr_end),
+        name_end: 0,
+        value_span: None,
     });
 
     let analysis = FileAnalysisSnapshot {
