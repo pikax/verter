@@ -295,6 +295,7 @@ pub fn convert_raw_to_analysis(
                 has_v_html: e.has_v_html,
                 has_v_text: e.has_v_text,
                 has_text_content: e.has_text_content,
+                has_bare_text: e.has_bare_text,
                 has_element_children: e.has_element_children,
                 nesting_depth: e.nesting_depth,
                 parent_tag: e.parent_tag.clone(),

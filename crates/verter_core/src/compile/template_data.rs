@@ -84,6 +84,8 @@ pub struct RawElementData {
     pub has_v_text: bool,
     /// Whether this element has non-whitespace text or interpolation children.
     pub has_text_content: bool,
+    /// Whether this element has non-whitespace literal text children (NOT interpolation).
+    pub has_bare_text: bool,
     /// Whether this element has direct child elements (non-text, non-comment children).
     pub has_element_children: bool,
     pub nesting_depth: u16,
@@ -592,6 +594,7 @@ fn extract_element_data(
         has_v_show: el.prop_flag.has(crate::ast::types::PropFlags::HasShow),
         has_v_html: el.prop_flag.has(crate::ast::types::PropFlags::HasVHtml),
         has_v_text: el.prop_flag.has(crate::ast::types::PropFlags::HasVText),
+        has_bare_text: has_non_whitespace_text(ast, el, source),
         has_text_content: has_non_whitespace_text(ast, el, source)
             || el
                 .children_flag

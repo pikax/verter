@@ -123,6 +123,7 @@ mod tests {
             has_v_html: false,
             has_v_text: false,
             has_text_content: false,
+            has_bare_text: false,
             has_element_children: false,
             nesting_depth: 0,
             parent_tag: None,

@@ -531,3 +531,77 @@ fn nested_element_with_whitespace_only_no_text_content() {
         "span with 'hello' should have text content"
     );
 }
+
+// ── has_bare_text (literal text vs interpolation) ──
+
+#[test]
+fn bare_text_true_for_literal_text() {
+    let data = extract("<template><div>hello</div></template>");
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(div.has_bare_text, "literal text should set has_bare_text");
+    assert!(
+        div.has_text_content,
+        "literal text should also set has_text_content"
+    );
+}
+
+#[test]
+fn bare_text_false_for_interpolation_only() {
+    let data = extract_with_script(
+        "<template><div>{{ msg }}</div></template>",
+        "const msg = 'hi'",
+    );
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(
+        !div.has_bare_text,
+        "interpolation-only should NOT set has_bare_text"
+    );
+    assert!(
+        div.has_text_content,
+        "interpolation should still set has_text_content"
+    );
+}
+
+#[test]
+fn bare_text_true_for_mixed_text_and_interpolation() {
+    let data = extract_with_script(
+        "<template><div>hello {{ msg }}</div></template>",
+        "const msg = 'hi'",
+    );
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(
+        div.has_bare_text,
+        "mixed literal text + interpolation should set has_bare_text"
+    );
+    assert!(
+        div.has_text_content,
+        "mixed content should set has_text_content"
+    );
+}
+
+#[test]
+fn bare_text_false_for_whitespace_only() {
+    let data = extract("<template><div>   </div></template>");
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(
+        !div.has_bare_text,
+        "whitespace-only should NOT set has_bare_text"
+    );
+}
+
+#[test]
+fn bare_text_false_for_whitespace_around_interpolation() {
+    let data = extract_with_script(
+        "<template><div>\n  {{ msg }}\n</div></template>",
+        "const msg = 'hi'",
+    );
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(
+        !div.has_bare_text,
+        "whitespace + interpolation should NOT set has_bare_text"
+    );
+    assert!(
+        div.has_text_content,
+        "whitespace + interpolation should still set has_text_content"
+    );
+}

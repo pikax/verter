@@ -103,6 +103,7 @@ mod tests {
             has_v_html,
             has_v_text,
             has_text_content,
+            has_bare_text: false,
             has_element_children,
             nesting_depth: 0,
             parent_tag: None,

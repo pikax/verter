@@ -29,7 +29,7 @@ impl LintRule for NoBareStringsInTemplate {
 
     fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {
         for el in &tpl.elements {
-            if !el.has_text_content {
+            if !el.has_bare_text {
                 continue;
             }
 
@@ -78,6 +78,7 @@ mod tests {
         let template = TemplateAnalysisSnapshot {
             elements: vec![TemplateElement {
                 tag: "p".to_string(),
+                has_bare_text: true,
                 has_text_content: true,
                 span: Span::new(0, 30),
                 tag_span_end: 3,
@@ -97,6 +98,28 @@ mod tests {
         assert!(
             !diags.iter().any(|d| d.rule == "no-v-html"),
             "must not trigger unrelated rule"
+        );
+    }
+
+    #[test]
+    fn interpolation_only_passes() {
+        // {{ message }} is NOT a bare string — should not trigger
+        let template = TemplateAnalysisSnapshot {
+            elements: vec![TemplateElement {
+                tag: "div".to_string(),
+                has_text_content: true,
+                has_bare_text: false,
+                span: Span::new(0, 40),
+                tag_span_end: 5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let diags = run(&template);
+        assert!(
+            diags.is_empty(),
+            "interpolation-only content should NOT trigger no-bare-strings: {:?}",
+            diags
         );
     }
 

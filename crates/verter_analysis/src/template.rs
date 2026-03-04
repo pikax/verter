@@ -338,6 +338,9 @@ pub struct TemplateElement {
     /// Whether this element has non-whitespace text or interpolation children.
     /// Used by a11y rules to detect content (e.g., `<h1>text</h1>` has text content).
     pub has_text_content: bool,
+    /// Whether this element has non-whitespace literal text children (NOT interpolation).
+    /// Used by `no-bare-strings-in-template` to distinguish hardcoded strings from `{{ expr }}`.
+    pub has_bare_text: bool,
     /// Whether this element has direct child elements (non-text, non-comment children).
     /// Used by `no-child-content` rule to detect children alongside v-html/v-text.
     pub has_element_children: bool,
@@ -1365,6 +1368,9 @@ impl serde::Serialize for TemplateElement {
         map.serialize_entry("hasVHtml", &self.has_v_html)?;
         map.serialize_entry("hasVText", &self.has_v_text)?;
         map.serialize_entry("hasTextContent", &self.has_text_content)?;
+        if self.has_bare_text {
+            map.serialize_entry("hasBareText", &self.has_bare_text)?;
+        }
         if self.has_element_children {
             map.serialize_entry("hasElementChildren", &self.has_element_children)?;
         }
@@ -1422,6 +1428,8 @@ impl<'de> serde::Deserialize<'de> for TemplateElement {
             #[serde(default)]
             has_text_content: bool,
             #[serde(default)]
+            has_bare_text: bool,
+            #[serde(default)]
             has_element_children: bool,
             #[serde(default)]
             nesting_depth: u16,
@@ -1455,6 +1463,7 @@ impl<'de> serde::Deserialize<'de> for TemplateElement {
             has_v_html: w.has_v_html,
             has_v_text: w.has_v_text,
             has_text_content: w.has_text_content,
+            has_bare_text: w.has_bare_text,
             has_element_children: w.has_element_children,
             nesting_depth: w.nesting_depth,
             parent_tag: w.parent_tag,
