@@ -171,6 +171,9 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
         enabled: workspace.getConfiguration("verter").get<boolean>("lint.enabled", false),
         preset: workspace.getConfiguration("verter").get<string>("lint.preset", "recommended"),
       },
+      viteConfig: {
+        enabled: workspace.getConfiguration("verter").get<boolean>("viteConfig.enabled", true),
+      },
     },
     outputChannel: log,
     traceOutputChannel: log,

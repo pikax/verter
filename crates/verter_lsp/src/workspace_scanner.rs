@@ -45,8 +45,8 @@ pub enum ScannerSignal {
 
 /// Configuration for the workspace scanner background task.
 pub struct WorkspaceScannerConfig {
-    /// Workspace root directory.
-    pub root_path: PathBuf,
+    /// Workspace root directories (one per workspace folder).
+    pub root_paths: Vec<PathBuf>,
     /// Shared host for upserting and compiling files.
     pub host: Arc<VerterHost>,
     /// Optional project sync for sending files to the type provider.
@@ -221,13 +221,19 @@ async fn scanner_loop(
     config: WorkspaceScannerConfig,
     mut rx: mpsc::UnboundedReceiver<ScannerSignal>,
 ) {
-    let root = config.root_path.clone();
+    let roots = config.root_paths.clone();
     let tsconfig_patterns = config.tsconfig_patterns.clone();
 
-    // Step 1: FS walk (blocking)
-    let paths = tokio::task::spawn_blocking(move || collect_vue_paths(&root))
-        .await
-        .unwrap_or_default();
+    // Step 1: FS walk all roots (blocking)
+    let paths = tokio::task::spawn_blocking(move || {
+        let mut all_paths = Vec::new();
+        for root in &roots {
+            all_paths.extend(collect_vue_paths(root));
+        }
+        all_paths
+    })
+    .await
+    .unwrap_or_default();
 
     if paths.is_empty() {
         tracing::info!("workspace_scanner: no .vue files found");

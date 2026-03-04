@@ -1675,6 +1675,27 @@ impl TypeProvider for TsgoTypeProvider {
         })
     }
 
+    fn update_workspace_folders(
+        &self,
+        added: Vec<serde_json::Value>,
+        removed: Vec<serde_json::Value>,
+    ) -> ProviderFuture<'_, ()> {
+        let transport = Arc::clone(&self.transport);
+        Box::pin(async move {
+            transport
+                .notify(
+                    "workspace/didChangeWorkspaceFolders",
+                    serde_json::json!({
+                        "event": {
+                            "added": added,
+                            "removed": removed,
+                        }
+                    }),
+                )
+                .await
+        })
+    }
+
     fn child_pid(&self) -> Option<u32> {
         self.child.id()
     }

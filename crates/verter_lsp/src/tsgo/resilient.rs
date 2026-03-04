@@ -24,6 +24,8 @@ struct CrashMonitorState {
     inner: Arc<RwLock<Option<Arc<TsgoTypeProvider>>>>,
     client: Arc<OnceCell<Client>>,
     file_cache: Arc<RwLock<HashMap<String, String>>>,
+    /// Workspace folders for replay after restart.
+    workspace_folders: Arc<RwLock<Vec<serde_json::Value>>>,
     restart_count: AtomicU32,
     restart_lock: Mutex<()>,
     tsgo_bin: String,
@@ -57,6 +59,7 @@ impl ResilientTypeProvider {
             inner: Arc::new(RwLock::new(Some(Arc::new(provider)))),
             client,
             file_cache: Arc::new(RwLock::new(HashMap::new())),
+            workspace_folders: Arc::new(RwLock::new(Vec::new())),
             restart_count: AtomicU32::new(0),
             restart_lock: Mutex::new(()),
             tsgo_bin,
@@ -149,6 +152,12 @@ fn spawn_crash_monitor(state: Arc<CrashMonitorState>, crash_notify: Arc<Notify>)
         {
             Ok(new_provider) => {
                 let new_provider = Arc::new(new_provider);
+
+                // Replay workspace folders so multi-root support works
+                let folders = state.workspace_folders.read().await.clone();
+                if !folders.is_empty() {
+                    let _ = new_provider.update_workspace_folders(folders, vec![]).await;
+                }
 
                 // Re-open all cached files to restore state.
                 let cache_snapshot = state.file_cache.read().await.clone();
@@ -368,6 +377,33 @@ impl TypeProvider for ResilientTypeProvider {
         })
     }
 
+    fn update_workspace_folders(
+        &self,
+        added: Vec<serde_json::Value>,
+        removed: Vec<serde_json::Value>,
+    ) -> ProviderFuture<'_, ()> {
+        let added_clone = added.clone();
+        Box::pin(async move {
+            // Store for replay on restart
+            {
+                let mut folders = self.state.workspace_folders.write().await;
+                for folder in &removed {
+                    if let Some(uri) = folder.get("uri").and_then(|v| v.as_str()) {
+                        folders.retain(|f| f.get("uri").and_then(|v| v.as_str()) != Some(uri));
+                    }
+                }
+                for folder in &added_clone {
+                    folders.push(folder.clone());
+                }
+            }
+
+            if let Ok(provider) = self.get_inner().await {
+                provider.update_workspace_folders(added, removed).await?;
+            }
+            Ok(())
+        })
+    }
+
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         Box::pin(async {
             if let Ok(provider) = self.get_inner().await {
@@ -407,6 +443,7 @@ mod tests {
             inner: Arc::clone(&inner),
             client: Arc::new(OnceCell::new()),
             file_cache: Arc::new(RwLock::new(HashMap::new())),
+            workspace_folders: Arc::new(RwLock::new(Vec::new())),
             restart_count: AtomicU32::new(0),
             restart_lock: Mutex::new(()),
             tsgo_bin: "tsgo".to_string(),

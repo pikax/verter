@@ -116,6 +116,19 @@ pub trait TypeProvider: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    /// Notify the provider about workspace folder changes (for multi-root support).
+    ///
+    /// For TSGO, forwards the `workspace/didChangeWorkspaceFolders` notification.
+    /// For tsserver, updates the stored project roots for per-file `projectRootPath`.
+    /// Default: no-op for providers that don't support multi-root.
+    fn update_workspace_folders(
+        &self,
+        _added: Vec<serde_json::Value>,
+        _removed: Vec<serde_json::Value>,
+    ) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Return the PID of the child process, if any.
     ///
     /// Used by the server to report the TSGO PID to the extension for orphan cleanup.

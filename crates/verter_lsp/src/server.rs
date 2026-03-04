@@ -345,29 +345,36 @@ struct TypeProviderContext {
 ///
 /// Wraps `verter_host` for SFC analysis and optionally a `TypeProvider`
 /// (e.g., TSGO) for richer type information.
+///
+/// ## Lock Ordering (to prevent deadlocks)
+///
+/// 1. `workspace_roots` (tokio::sync::Mutex — async, never held across sync locks)
+/// 2. `project_registry` (parking_lot::RwLock — sync read lock, never nested with fallback_linter)
+/// 3. `fallback_linter` (parking_lot::RwLock — only acquired after project_registry is released)
+///
+/// Rule: Never acquire `fallback_linter` while holding `project_registry`.
+/// Pattern: check project_registry → drop guard → acquire fallback_linter if needed.
 pub struct VerterLanguageServer {
     client: Client,
     documents: DocumentRegistry,
     type_provider: Option<Arc<dyn TypeProvider>>,
     project_sync: Option<ProjectSync>,
-    workspace_root: tokio::sync::Mutex<Option<String>>,
+    workspace_roots: tokio::sync::Mutex<Vec<String>>,
     statistics: Arc<Statistics>,
     /// Negotiated position encoding (LSP 3.17). Set during `initialize()`.
     /// Shared with SyncCoordinator so it can compute diagnostics with the correct encoding.
     position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
-    /// Resolves aliased imports via tsconfig.json `compilerOptions.paths`.
-    /// Initialized during `initialized()` when a workspace root is available.
-    path_resolver: parking_lot::RwLock<Option<crate::config::TsConfigPathResolver>>,
-    /// Diagnostics engine — runs all lint rules to produce a DiagnosticSet.
-    /// Wrapped in RwLock because config is resolved during `initialized()`.
-    linter: parking_lot::RwLock<verter_diagnostics::Linter>,
+    /// Per-project configuration registry (path aliases, lint config, linters).
+    /// Initialized during `initialized()` from workspace roots.
+    project_registry: parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
+    /// Fallback linter for files outside any project. Uses default config.
+    fallback_linter: parking_lot::RwLock<verter_diagnostics::Linter>,
     /// Action engine — produces quick fixes and refactoring code actions.
     action_engine: verter_actions::ActionEngine,
-    /// Whether linting was explicitly configured via .verterrc.json, eslint, or VS Code.
-    /// When false, only error-severity diagnostics are shown.
-    lint_explicitly_configured: std::sync::atomic::AtomicBool,
     /// Lint options from initializationOptions, stored during initialize() for use in initialized().
     init_lint_options: tokio::sync::Mutex<Option<serde_json::Value>>,
+    /// Whether vite config alias discovery is enabled (from initializationOptions).
+    vite_config_enabled: std::sync::atomic::AtomicBool,
     /// Cached verter diagnostics per document: URI → (version, diagnostics).
     /// Avoids re-running the linter when both push and pull paths request diagnostics
     /// for the same document version.
@@ -444,14 +451,14 @@ impl VerterLanguageServer {
             documents,
             type_provider: config.type_provider,
             project_sync,
-            workspace_root: tokio::sync::Mutex::new(None),
+            workspace_roots: tokio::sync::Mutex::new(Vec::new()),
             statistics: Arc::new(Statistics::new(500)),
             position_encoding,
-            path_resolver: parking_lot::RwLock::new(None),
-            linter: parking_lot::RwLock::new(verter_diagnostics::Linter::default()),
+            project_registry: parking_lot::RwLock::new(None),
+            fallback_linter: parking_lot::RwLock::new(verter_diagnostics::Linter::default()),
             action_engine: verter_actions::ActionEngine::default(),
-            lint_explicitly_configured: std::sync::atomic::AtomicBool::new(false),
             init_lint_options: tokio::sync::Mutex::new(None),
+            vite_config_enabled: std::sync::atomic::AtomicBool::new(true),
             cached_verter_diags: DashMap::new(),
             background_synced_files: Arc::new(DashMap::new()),
             type_provider_kind: config.type_provider_kind,
@@ -492,13 +499,49 @@ impl VerterLanguageServer {
         // Run the diagnostics engine (lint rules: CSS, template, a11y, etc.)
         if let Some(doc) = self.documents.get(uri) {
             if let Some(analysis) = self.documents.get_analysis(uri) {
-                let linter = self.linter.read();
-                diags.extend(crate::features::diagnostics_bridge::run_linter(
-                    &linter,
-                    &analysis,
-                    &doc.source,
-                    &doc.line_index,
-                ));
+                let canonical_id = uri_to_canonical_id(uri);
+
+                // Look up per-project lint config (determines which linter + suppress behavior)
+                let lint_explicitly_configured = {
+                    let registry_guard = self.project_registry.read();
+                    registry_guard
+                        .as_ref()
+                        .and_then(|r| r.linter_for(&canonical_id))
+                        .map(|p| p.lint_explicitly_configured)
+                        .unwrap_or(false)
+                };
+
+                // Run lint rules using per-project linter.
+                // Lock ordering: project_registry → release → fallback_linter (never nested).
+                {
+                    let used_project = {
+                        let registry_guard = self.project_registry.read();
+                        if let Some(project) = registry_guard
+                            .as_ref()
+                            .and_then(|r| r.linter_for(&canonical_id))
+                        {
+                            diags.extend(crate::features::diagnostics_bridge::run_linter(
+                                &project.linter,
+                                &analysis,
+                                &doc.source,
+                                &doc.line_index,
+                            ));
+                            true
+                        } else {
+                            false
+                        }
+                    }; // registry_guard dropped here
+
+                    if !used_project {
+                        let fl = self.fallback_linter.read();
+                        diags.extend(crate::features::diagnostics_bridge::run_linter(
+                            &fl,
+                            &analysis,
+                            &doc.source,
+                            &doc.line_index,
+                        ));
+                    }
+                }
 
                 // Component usage diagnostics (unknown props, unknown v-models).
                 diags.extend(
@@ -508,20 +551,15 @@ impl VerterLanguageServer {
                         &|import_source| self.resolve_component(uri, import_source),
                     ),
                 );
-            }
-        }
 
-        // When lint is not explicitly configured, suppress all lint diagnostics.
-        // Lint diagnostics have codes like "verter/rule-name"; host diagnostics use
-        // plain codes like "PARSE_ERROR". This keeps host errors while hiding lint noise.
-        if !self
-            .lint_explicitly_configured
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            diags.retain(|d| match &d.code {
-                Some(NumberOrString::String(code)) => !code.starts_with("verter/"),
-                _ => true,
-            });
+                // When lint is not explicitly configured, suppress all lint diagnostics.
+                if !lint_explicitly_configured {
+                    diags.retain(|d| match &d.code {
+                        Some(NumberOrString::String(code)) => !code.starts_with("verter/"),
+                        _ => true,
+                    });
+                }
+            }
         }
 
         // Cache the result
@@ -830,16 +868,17 @@ impl VerterLanguageServer {
             }
         }
 
-        // Try 2: Path alias resolution
-        let pr_guard = self.path_resolver.read();
-        if let Some(ref resolver) = *pr_guard {
-            if let Some(resolved_path) = resolver.resolve(import_source) {
-                if let Some(a) = self.documents.host().get_analysis(&resolved_path) {
-                    return Some(a);
+        // Try 2: Path alias resolution (per-project)
+        {
+            let registry_guard = self.project_registry.read();
+            if let Some(ref registry) = *registry_guard {
+                if let Some(resolved_path) = registry.resolve_alias(&canonical_id, import_source) {
+                    if let Some(a) = self.documents.host().get_analysis(&resolved_path) {
+                        return Some(a);
+                    }
                 }
             }
         }
-        drop(pr_guard);
 
         // Try 3: Direct lookup
         self.documents.host().get_analysis(import_source)
@@ -860,10 +899,10 @@ impl VerterLanguageServer {
             let dir = parts[..parts.len().saturating_sub(1)].join("/");
             resolve_import_path(&dir, import_source)
         } else {
-            let pr_guard = self.path_resolver.read();
-            if let Some(ref resolver) = *pr_guard {
-                resolver
-                    .resolve(import_source)
+            let registry_guard = self.project_registry.read();
+            if let Some(ref registry) = *registry_guard {
+                registry
+                    .resolve_alias(&canonical_id, import_source)
                     .unwrap_or_else(|| import_source.to_string())
             } else {
                 import_source.to_string()
@@ -1508,9 +1547,11 @@ impl VerterLanguageServer {
                         if let Some(src) = &comp.import_source {
                             // Resolve the import source to an absolute path
                             let resolved = if !src.starts_with('.') {
-                                // Non-relative: use TsConfigPathResolver (reads tsconfig paths/aliases)
-                                let pr_guard = self.path_resolver.read();
-                                let r = pr_guard.as_ref().and_then(|r| r.resolve(src));
+                                // Non-relative: use per-project path alias resolution
+                                let registry_guard = self.project_registry.read();
+                                let r = registry_guard
+                                    .as_ref()
+                                    .and_then(|reg| reg.resolve_alias(&normalized_id, src));
                                 tracing::info!(
                                     "  [{}] component '{}' import='{}' (non-relative) → resolved={:?}",
                                     normalized_id.rsplit('/').next().unwrap_or("?"), comp.name, src, r
@@ -1783,14 +1824,14 @@ impl LanguageServer for VerterLanguageServer {
         *self.position_encoding.write() = encoding.clone();
         self.documents.set_encoding(encoding.clone());
 
-        // Extract and store workspace root
+        // Extract and store all workspace roots
         if let Some(folders) = &params.workspace_folders {
+            let mut roots = Vec::new();
             for folder in folders {
                 tracing::info!("workspace folder: {}", folder.uri.as_str());
+                roots.push(folder.uri.as_str().to_string());
             }
-            if let Some(first) = folders.first() {
-                *self.workspace_root.lock().await = Some(first.uri.as_str().to_string());
-            }
+            *self.workspace_roots.lock().await = roots;
         }
 
         // Parse initialization options (statistics config, lint config, etc.)
@@ -1810,6 +1851,19 @@ impl LanguageServer for VerterLanguageServer {
             // Store lint options for use in initialized()
             if opts.get("lint").is_some() {
                 *self.init_lint_options.lock().await = Some(opts.clone());
+            }
+            // Read viteConfig.enabled setting (default: true)
+            if let Some(vite_enabled) = opts
+                .get("viteConfig")
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool())
+            {
+                self.vite_config_enabled
+                    .store(vite_enabled, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(
+                    "vite config alias discovery: {}",
+                    if vite_enabled { "enabled" } else { "disabled" }
+                );
             }
         }
 
@@ -1835,102 +1889,86 @@ impl LanguageServer for VerterLanguageServer {
             )
             .await;
 
-        // Build path alias resolver from tsconfig.json (if workspace root is available)
+        // Build per-project configuration registry (path aliases + lint configs + vite aliases)
+        let node_path = crate::tsserver::find_node();
+        let vite_config_enabled = self
+            .vite_config_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
         {
-            let root = self.workspace_root.lock().await;
-            if let Some(root_uri) = root.as_ref() {
-                let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
-                let root_path = std::path::PathBuf::from(&canonical);
+            let roots = self.workspace_roots.lock().await;
+            if !roots.is_empty() {
+                let registry = crate::config::ProjectRegistry::from_workspace_roots(
+                    &roots,
+                    node_path.as_deref(),
+                    vite_config_enabled,
+                );
 
-                // Discover tsconfig.json files (including tsconfig.app.json, etc.)
-                let mut discovery = crate::config::TsConfigDiscovery::new();
-                discovery.discover(&root_path);
-
-                // Try to find a tsconfig with path aliases.
-                // First try the most specific config for src/, then fall back to any discovered config.
-                let mut best_entry = None;
-                let candidates = [
-                    discovery.find_config_for(&root_path.join("src/dummy.ts")),
-                    discovery.configs().first(),
-                ];
-                for candidate in candidates.into_iter().flatten() {
-                    let resolver =
-                        crate::config::TsConfigPathResolver::from_tsconfig(&candidate.config_path);
-                    if !resolver.is_empty() {
-                        best_entry = Some((candidate.config_path.clone(), resolver));
-                        break;
-                    }
+                // Log discovered projects
+                for project in registry.projects() {
+                    tracing::info!(
+                        "project config: root={}, aliases={}, lint_explicit={}",
+                        project.root,
+                        !project.path_resolver.is_empty(),
+                        project.lint_explicitly_configured,
+                    );
                 }
 
-                if let Some((config_path, resolver)) = best_entry {
-                    tracing::info!(
-                        "path resolver: loaded aliases from {}",
-                        config_path.display()
-                    );
+                // Send discovered paths to tsserver for each project (inferred project fallback)
+                if let Some(tp) = &self.type_provider {
+                    for project in registry.projects() {
+                        let project_root_path = std::path::PathBuf::from(&project.root);
+                        let mut discovery = crate::config::TsConfigDiscovery::new();
+                        discovery.discover(&project_root_path);
 
-                    // Send discovered paths to tsserver for inferred project fallback
-                    if let Some(tp) = &self.type_provider {
-                        if let Some((base_url, paths)) =
-                            crate::config::TsConfigPathResolver::raw_paths_json(&config_path)
-                        {
-                            tracing::info!(
-                                "configuring tsserver inferred project paths (baseUrl: {})",
-                                base_url
-                            );
-                            if let Err(e) = tp.configure_paths(&base_url, paths).await {
-                                tracing::warn!("failed to configure tsserver paths: {e}");
+                        // Find the best tsconfig for this project
+                        let candidates = [
+                            discovery.find_config_for(&project_root_path.join("src/dummy.ts")),
+                            discovery.configs().first(),
+                        ];
+                        for candidate in candidates.into_iter().flatten() {
+                            if let Some((base_url, paths)) =
+                                crate::config::TsConfigPathResolver::raw_paths_json(
+                                    &candidate.config_path,
+                                )
+                            {
+                                tracing::info!(
+                                    "configuring tsserver paths for {} (baseUrl: {})",
+                                    project.root,
+                                    base_url,
+                                );
+                                if let Err(e) = tp.configure_paths(&base_url, paths).await {
+                                    tracing::warn!("failed to configure tsserver paths: {e}");
+                                }
+                                break;
                             }
                         }
                     }
-
-                    *self.path_resolver.write() = Some(resolver);
                 }
+
+                // Merge VS Code initializationOptions into the fallback linter
+                if let Some(init_opts) = self.init_lint_options.lock().await.take() {
+                    let mut resolved = crate::config::ResolvedLintConfig::default();
+                    crate::config::merge_init_options(&mut resolved, &init_opts);
+                    if resolved.explicitly_configured {
+                        *self.fallback_linter.write() =
+                            verter_diagnostics::Linter::new(resolved.config);
+                    }
+                }
+
+                *self.project_registry.write() = Some(registry);
             }
-        }
-
-        // Discover project lint configuration (.verterrc.json, eslint, VS Code settings)
-        {
-            let root = self.workspace_root.lock().await;
-            let mut resolved = if let Some(root_uri) = root.as_ref() {
-                let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
-                let root_path = std::path::PathBuf::from(&canonical);
-                crate::config::discover_lint_config(&root_path)
-            } else {
-                crate::config::ResolvedLintConfig::default()
-            };
-
-            // Merge VS Code initializationOptions (overrides file-based config)
-            if let Some(init_opts) = self.init_lint_options.lock().await.take() {
-                crate::config::merge_init_options(&mut resolved, &init_opts);
-            }
-
-            self.lint_explicitly_configured.store(
-                resolved.explicitly_configured,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            *self.linter.write() = verter_diagnostics::Linter::new(resolved.config);
-
-            tracing::info!(
-                "lint config: explicitly_configured={}",
-                resolved.explicitly_configured,
-            );
         }
 
         // Ensure @verter/types is available for TSGO module resolution.
-        // If the package is not installed, materialise a minimal version in
-        // node_modules so that `import { ... } from "@verter/types"` resolves.
-        // This replaces the old `embed_ambient_types` approach which used
-        // `declare module` blocks that TSGO cannot resolve.
+        // Materialise in all workspace roots that don't already have it.
         {
-            let root = self.workspace_root.lock().await;
-            if let Some(root_uri) = root.as_ref() {
-                // Use the same URI→path conversion as uri_to_canonical_id (handles
-                // percent-encoded characters like %3A for ':' on Windows).
+            let roots = self.workspace_roots.lock().await;
+            let mut any_failed = false;
+            for root_uri in roots.iter() {
                 let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
                 let root_path = std::path::PathBuf::from(&canonical);
                 let types_index = root_path.join("node_modules/@verter/types/index.d.ts");
                 if !types_index.exists() {
-                    // Write a minimal @verter/types package to node_modules
                     let types_dir = root_path.join("node_modules/@verter/types");
                     match std::fs::create_dir_all(&types_dir) {
                         Ok(()) => {
@@ -1938,8 +1976,7 @@ impl LanguageServer for VerterLanguageServer {
                             let pkg = r#"{"name":"@verter/types","types":"index.d.ts"}"#;
                             if let Err(e) = std::fs::write(types_dir.join("index.d.ts"), dts) {
                                 tracing::warn!("failed to write @verter/types index.d.ts: {e}");
-                                // Fall back to embedded ambient types
-                                self.documents.set_embed_ambient_types(true);
+                                any_failed = true;
                             } else if let Err(e) =
                                 std::fs::write(types_dir.join("package.json"), pkg)
                             {
@@ -1955,35 +1992,37 @@ impl LanguageServer for VerterLanguageServer {
                             tracing::warn!(
                                 "failed to create @verter/types dir: {e} — falling back to embed"
                             );
-                            self.documents.set_embed_ambient_types(true);
+                            any_failed = true;
                         }
                     }
                 }
             }
+            if any_failed {
+                self.documents.set_embed_ambient_types(true);
+            }
         }
 
         // Spawn async workspace scanner to find, compile, and sync .vue files
-        // in the background. This replaces the old synchronous scan that blocked
-        // initialized() for seconds on large workspaces.
+        // in the background. Scans all workspace roots.
         {
-            let root = self.workspace_root.lock().await;
-            if let Some(root_uri) = root.as_ref() {
-                let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
-                let root_path = std::path::PathBuf::from(&canonical);
-
-                // Reuse TsConfigDiscovery from the path alias section above.
-                // Re-discover here (fast — just glob) to extract coverage patterns.
-                let mut ts_discovery = crate::config::TsConfigDiscovery::new();
-                ts_discovery.discover(&root_path);
-                let tsconfig_patterns: Vec<String> = ts_discovery
-                    .configs()
-                    .iter()
-                    .map(|e| e.pattern.clone())
-                    .collect();
+            let roots = self.workspace_roots.lock().await;
+            if !roots.is_empty() {
+                // Collect tsconfig patterns from all workspace roots
+                let mut tsconfig_patterns = Vec::new();
+                let mut root_paths = Vec::new();
+                for root_uri in roots.iter() {
+                    let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
+                    let root_path = std::path::PathBuf::from(&canonical);
+                    let mut ts_discovery = crate::config::TsConfigDiscovery::new();
+                    ts_discovery.discover(&root_path);
+                    tsconfig_patterns
+                        .extend(ts_discovery.configs().iter().map(|e| e.pattern.clone()));
+                    root_paths.push(root_path);
+                }
 
                 let scanner = crate::workspace_scanner::spawn_workspace_scanner(
                     crate::workspace_scanner::WorkspaceScannerConfig {
-                        root_path,
+                        root_paths,
                         host: Arc::clone(&self.documents.host),
                         project_sync: self.project_sync.clone(),
                         background_synced_files: Arc::clone(&self.background_synced_files),
@@ -2235,6 +2274,100 @@ impl LanguageServer for VerterLanguageServer {
 
     async fn did_save(&self, _params: DidSaveTextDocumentParams) {
         // No-op; document content is already tracked via did_change
+    }
+
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        let _hg = HandlerGuard::new("did_change_workspace_folders");
+        let event = &params.event;
+
+        // Update workspace_roots
+        {
+            let mut roots = self.workspace_roots.lock().await;
+            // Remove closed folders
+            for removed in &event.removed {
+                let uri_str = removed.uri.as_str().to_string();
+                roots.retain(|r| r != &uri_str);
+                tracing::info!("workspace folder removed: {}", uri_str);
+            }
+            // Add new folders
+            for added in &event.added {
+                let uri_str = added.uri.as_str().to_string();
+                if !roots.contains(&uri_str) {
+                    tracing::info!("workspace folder added: {}", uri_str);
+                    roots.push(uri_str);
+                }
+            }
+        }
+
+        // Rebuild ProjectRegistry from updated roots
+        let node_path = crate::tsserver::find_node();
+        let vite_config_enabled = self
+            .vite_config_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        {
+            let roots = self.workspace_roots.lock().await;
+            if !roots.is_empty() {
+                let registry = crate::config::ProjectRegistry::from_workspace_roots(
+                    &roots,
+                    node_path.as_deref(),
+                    vite_config_enabled,
+                );
+                for project in registry.projects() {
+                    tracing::info!(
+                        "project config (rebuilt): root={}, aliases={}, lint_explicit={}",
+                        project.root,
+                        !project.path_resolver.is_empty(),
+                        project.lint_explicitly_configured,
+                    );
+                }
+                *self.project_registry.write() = Some(registry);
+            }
+        }
+
+        // Forward to type provider (TSGO supports workspace/didChangeWorkspaceFolders)
+        if let Some(tp) = &self.type_provider {
+            let added: Vec<serde_json::Value> = event
+                .added
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "uri": f.uri.as_str(),
+                        "name": f.name
+                    })
+                })
+                .collect();
+            let removed: Vec<serde_json::Value> = event
+                .removed
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "uri": f.uri.as_str(),
+                        "name": f.name
+                    })
+                })
+                .collect();
+            let _ = tp.update_workspace_folders(added, removed).await;
+        }
+
+        // Materialise @verter/types in newly added roots
+        for added in &event.added {
+            let canonical = crate::documents::uri_to_canonical_id_from_str(added.uri.as_str());
+            let root_path = std::path::PathBuf::from(&canonical);
+            let types_index = root_path.join("node_modules/@verter/types/index.d.ts");
+            if !types_index.exists() {
+                let types_dir = root_path.join("node_modules/@verter/types");
+                if let Ok(()) = std::fs::create_dir_all(&types_dir) {
+                    let dts = verter_host::VERTER_TYPES_STANDALONE_DTS;
+                    let pkg = r#"{"name":"@verter/types","types":"index.d.ts"}"#;
+                    let _ = std::fs::write(types_dir.join("index.d.ts"), dts);
+                    let _ = std::fs::write(types_dir.join("package.json"), pkg);
+                    tracing::info!(
+                        "@verter/types materialised in new root: {}",
+                        types_dir.display()
+                    );
+                }
+            }
+        }
     }
 
     async fn did_create_files(&self, params: CreateFilesParams) {
@@ -2608,16 +2741,20 @@ impl LanguageServer for VerterLanguageServer {
                         }
                     }
 
-                    // Try 2: Path alias resolution (tsconfig paths)
-                    let pr_guard = self.path_resolver.read();
-                    if let Some(ref resolver) = *pr_guard {
-                        if let Some(resolved_path) = resolver.resolve(import_source) {
-                            if let Some(a) = self.documents.host().get_analysis(&resolved_path) {
-                                return Some(a);
+                    // Try 2: Path alias resolution (per-project)
+                    {
+                        let registry_guard = self.project_registry.read();
+                        if let Some(ref registry) = *registry_guard {
+                            if let Some(resolved_path) =
+                                registry.resolve_alias(&canonical_id, import_source)
+                            {
+                                if let Some(a) = self.documents.host().get_analysis(&resolved_path)
+                                {
+                                    return Some(a);
+                                }
                             }
                         }
                     }
-                    drop(pr_guard);
 
                     // Try 3: Direct lookup (bare specifiers, already-resolved)
                     self.documents.host().get_analysis(import_source)
@@ -2895,10 +3032,12 @@ impl LanguageServer for VerterLanguageServer {
             let doc = self.documents.get(uri)?;
             let analysis = self.documents.get_analysis(uri);
             let blocks = scan_sfc_blocks(&doc.source);
-            let pr_guard = self.path_resolver.read();
-            let resolve_path = pr_guard
-                .as_ref()
-                .map(|r| move |specifier: &str| r.resolve(specifier));
+            let canonical_id = uri_to_canonical_id(uri);
+            let registry_guard = self.project_registry.read();
+            let resolve_path = registry_guard.as_ref().map(|reg| {
+                let canonical_id = canonical_id.clone();
+                move |specifier: &str| reg.resolve_alias(&canonical_id, specifier)
+            });
             #[allow(clippy::type_complexity)]
             let resolve_fn: Option<&dyn Fn(&str) -> Option<String>> = resolve_path
                 .as_ref()
@@ -3507,32 +3646,72 @@ impl LanguageServer for VerterLanguageServer {
                 fix_placeholder_uris(&mut event_actions, uri);
                 all_actions.extend(event_actions);
 
-                // Action engine quick fixes (e.g., remove unused CSS selector)
+                // Action engine quick fixes (e.g., remove unused CSS selector).
+                // Lock ordering: project_registry → release → fallback_linter (never nested).
                 {
-                    let linter = self.linter.read();
-                    all_actions.extend(crate::features::diagnostics_bridge::action_engine_fixes(
-                        &self.action_engine,
-                        analysis,
-                        &doc.source,
-                        &doc.line_index,
-                        &linter,
-                        &params.context.diagnostics,
-                        uri,
-                    ));
+                    let canonical_id = uri_to_canonical_id(uri);
+                    let used_project = {
+                        let registry_guard = self.project_registry.read();
+                        if let Some(project) = registry_guard
+                            .as_ref()
+                            .and_then(|r| r.linter_for(&canonical_id))
+                        {
+                            all_actions.extend(
+                                crate::features::diagnostics_bridge::action_engine_fixes(
+                                    &self.action_engine,
+                                    analysis,
+                                    &doc.source,
+                                    &doc.line_index,
+                                    &project.linter,
+                                    &params.context.diagnostics,
+                                    uri,
+                                ),
+                            );
+                            if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
+                                all_actions.extend(
+                                    crate::features::diagnostics_bridge::action_engine_refactorings(
+                                        &self.action_engine,
+                                        analysis,
+                                        &doc.source,
+                                        &doc.line_index,
+                                        &project.linter,
+                                        offset,
+                                        uri,
+                                    ),
+                                );
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }; // registry_guard dropped here
 
-                    // Action engine position-based refactorings (e.g., expand v-bind shorthand)
-                    if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
+                    if !used_project {
+                        let fl = self.fallback_linter.read();
                         all_actions.extend(
-                            crate::features::diagnostics_bridge::action_engine_refactorings(
+                            crate::features::diagnostics_bridge::action_engine_fixes(
                                 &self.action_engine,
                                 analysis,
                                 &doc.source,
                                 &doc.line_index,
-                                &linter,
-                                offset,
+                                &fl,
+                                &params.context.diagnostics,
                                 uri,
                             ),
                         );
+                        if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
+                            all_actions.extend(
+                                crate::features::diagnostics_bridge::action_engine_refactorings(
+                                    &self.action_engine,
+                                    analysis,
+                                    &doc.source,
+                                    &doc.line_index,
+                                    &fl,
+                                    offset,
+                                    uri,
+                                ),
+                            );
+                        }
                     }
                 }
             }

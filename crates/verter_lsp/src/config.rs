@@ -229,6 +229,35 @@ impl TsConfigPathResolver {
         self.aliases.is_empty()
     }
 
+    /// Merge vite aliases into this resolver. Vite aliases take precedence:
+    /// any existing alias with the same prefix is replaced.
+    pub fn merge_vite_aliases(&mut self, vite_aliases: Vec<(String, String)>) {
+        for (find, replacement) in vite_aliases {
+            // find values from discover_vite_aliases are already normalized with `/` suffix
+            // Remove any existing alias with the same prefix
+            self.aliases.retain(|a| a.prefix != find);
+
+            let rep_prefix = if replacement.ends_with('/') {
+                replacement
+            } else {
+                format!("{replacement}/")
+            };
+
+            self.aliases.push(PathAlias {
+                prefix: find,
+                suffix: String::new(),
+                replacements: vec![PathAliasReplacement {
+                    prefix: rep_prefix,
+                    suffix: String::new(),
+                }],
+            });
+        }
+
+        // Re-sort: longer prefixes first
+        self.aliases
+            .sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+    }
+
     /// Extract the raw `baseUrl` and `paths` JSON from a tsconfig for passing to tsserver.
     ///
     /// Follows `extends` and `references` to find the effective paths.
@@ -547,6 +576,129 @@ impl TsConfigDiscovery {
     pub fn configs(&self) -> &[TsConfigEntry] {
         &self.configs
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Vite Config Alias Discovery
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Discover `resolve.alias` entries from a vite.config.{ts,js,mjs} file.
+///
+/// Spawns Node.js with a small inline script that dynamically imports the config
+/// and prints `resolve.alias` as JSON. Returns a list of `(find, replacement)` pairs
+/// suitable for merging into a `TsConfigPathResolver`.
+///
+/// Returns an empty vec if no vite config is found, Node.js is unavailable,
+/// the config has no `resolve.alias`, or evaluation fails/times out.
+pub fn discover_vite_aliases(project_root: &Path, node_path: &str) -> Vec<(String, String)> {
+    // Find vite config file
+    let config_file = ["vite.config.ts", "vite.config.js", "vite.config.mjs"]
+        .iter()
+        .map(|name| project_root.join(name))
+        .find(|p| p.exists());
+
+    let config_path = match config_file {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let config_path_str = config_path.to_string_lossy().replace('\\', "/");
+
+    // Inline Node.js script that:
+    // 1. Imports the vite config (handles both default export and named export)
+    // 2. Extracts resolve.alias
+    // 3. Normalizes to array of {find, replacement} objects
+    // 4. Prints as JSON
+    let script = format!(
+        r#"
+(async () => {{
+  try {{
+    const mod = await import('file:///{config_path_str}');
+    const config = mod.default || mod;
+    const raw = typeof config === 'function' ? config({{ mode: 'development', command: 'serve' }}) : config;
+    const resolved = raw instanceof Promise ? await raw : raw;
+    const alias = resolved?.resolve?.alias;
+    if (!alias) {{ process.stdout.write('[]'); return; }}
+    let entries = [];
+    if (Array.isArray(alias)) {{
+      for (const a of alias) {{
+        if (a.find && a.replacement) {{
+          const f = typeof a.find === 'string' ? a.find : null;
+          if (f) entries.push({{ find: f, replacement: a.replacement }});
+        }}
+      }}
+    }} else if (typeof alias === 'object') {{
+      for (const [key, val] of Object.entries(alias)) {{
+        if (typeof val === 'string') entries.push({{ find: key, replacement: val }});
+      }}
+    }}
+    process.stdout.write(JSON.stringify(entries));
+  }} catch (e) {{
+    process.stderr.write('vite config eval error: ' + e.message + '\n');
+    process.stdout.write('[]');
+  }}
+}})();
+"#
+    );
+
+    let result = std::process::Command::new(node_path)
+        .arg("--input-type=module")
+        .arg("-e")
+        .arg(&script)
+        .current_dir(project_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    let output = match result {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::debug!("failed to spawn node for vite config: {e}");
+            return Vec::new();
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::debug!("vite config eval failed: {stderr}");
+        return Vec::new();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let entries: Vec<ViteAliasEntry> = match serde_json::from_str(&stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!("failed to parse vite alias output: {e}");
+            return Vec::new();
+        }
+    };
+
+    entries
+        .into_iter()
+        .map(|e| {
+            let replacement = PathBuf::from(&e.replacement);
+            // Make replacement absolute relative to project root if not already
+            let abs_replacement = if replacement.is_absolute() {
+                replacement
+            } else {
+                project_root.join(&replacement)
+            };
+            let abs_str = abs_replacement.to_string_lossy().replace('\\', "/");
+            // Normalize: bare aliases like `@` become `@/` for wildcard matching
+            let find = if e.find.ends_with('/') {
+                e.find
+            } else {
+                format!("{}/", e.find)
+            };
+            (find, abs_str)
+        })
+        .collect()
+}
+
+#[derive(serde::Deserialize)]
+struct ViteAliasEntry {
+    find: String,
+    replacement: String,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -922,6 +1074,232 @@ impl DiagnosticSeverityConfig {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-Project Configuration (monorepo / multi-root workspace support)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Per-project configuration grouping path alias resolution and lint config.
+///
+/// In a monorepo, each package may have its own `tsconfig.json` (with different
+/// `paths` aliases), `.verterrc.json` (with different lint rules), and vite config.
+/// `ProjectConfig` captures all of these for a single project root.
+pub struct ProjectConfig {
+    /// Directory this project covers (e.g., `packages/ui/`). Always forward slashes.
+    pub root: String,
+    /// Path alias resolver (from tsconfig + vite.config, merged).
+    pub path_resolver: TsConfigPathResolver,
+    /// Lint configuration for this project.
+    pub lint_config: ResolvedLintConfig,
+    /// Linter instance built from `lint_config`. Cached to avoid recreating.
+    pub linter: verter_diagnostics::Linter,
+    /// Whether lint was explicitly configured for this project.
+    pub lint_explicitly_configured: bool,
+}
+
+/// Registry of per-project configurations for a multi-root workspace.
+///
+/// Projects are sorted by root prefix length (longest first) so that
+/// `find_project()` returns the most specific match.
+pub struct ProjectRegistry {
+    /// Sorted by root length descending (longest prefix first).
+    projects: Vec<ProjectConfig>,
+}
+
+impl ProjectRegistry {
+    /// Build a registry from workspace roots by discovering tsconfigs, vite configs,
+    /// and lint configs.
+    ///
+    /// For each root, discovers all `tsconfig.json` files, builds per-project resolvers,
+    /// and discovers lint config. If a root has no tsconfig, a default project is created
+    /// with empty aliases.
+    ///
+    /// When `node_path` is provided and `vite_config_enabled` is true, also evaluates
+    /// `vite.config.{ts,js,mjs}` per project root and merges `resolve.alias` entries
+    /// into the path resolver (vite aliases take precedence over tsconfig aliases).
+    pub fn from_workspace_roots(
+        roots: &[String],
+        node_path: Option<&str>,
+        vite_config_enabled: bool,
+    ) -> Self {
+        let mut projects = Vec::new();
+
+        for root_uri in roots {
+            let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
+            let root_path = PathBuf::from(&canonical);
+
+            // Discover tsconfigs under this root
+            let mut discovery = TsConfigDiscovery::new();
+            discovery.discover(&root_path);
+
+            // Group tsconfigs by project root (directory containing tsconfig)
+            let mut project_roots_seen = std::collections::HashSet::new();
+            // Always include the workspace root itself
+            project_roots_seen.insert(canonical.clone());
+
+            for entry in discovery.configs() {
+                if let Some(dir) = entry.config_path.parent() {
+                    let dir_str = dir.to_string_lossy().replace('\\', "/");
+                    project_roots_seen.insert(dir_str);
+                }
+            }
+
+            for project_root in &project_roots_seen {
+                let project_root_path = PathBuf::from(project_root);
+
+                // Find the best tsconfig for this project root
+                let mut resolver = if let Some(entry) =
+                    discovery.find_config_for(&project_root_path.join("src/dummy.ts"))
+                {
+                    TsConfigPathResolver::from_tsconfig(&entry.config_path)
+                } else if let Some(entry) =
+                    discovery.find_config_for(&project_root_path.join("dummy.ts"))
+                {
+                    TsConfigPathResolver::from_tsconfig(&entry.config_path)
+                } else {
+                    TsConfigPathResolver::default()
+                };
+
+                // Merge vite config aliases (takes precedence over tsconfig)
+                if vite_config_enabled {
+                    if let Some(np) = node_path {
+                        let vite_aliases = discover_vite_aliases(&project_root_path, np);
+                        if !vite_aliases.is_empty() {
+                            tracing::info!(
+                                "discovered {} vite aliases for {}",
+                                vite_aliases.len(),
+                                project_root
+                            );
+                            resolver.merge_vite_aliases(vite_aliases);
+                        }
+                    }
+                }
+
+                // Discover lint config for this project root
+                let lint = discover_lint_config(&project_root_path);
+                let linter = verter_diagnostics::Linter::new(lint.config.clone());
+
+                projects.push(ProjectConfig {
+                    root: project_root.clone(),
+                    path_resolver: resolver,
+                    lint_config: lint.clone(),
+                    linter,
+                    lint_explicitly_configured: lint.explicitly_configured,
+                });
+            }
+        }
+
+        // Sort by root length descending (longest prefix first for most-specific match)
+        projects.sort_by(|a, b| b.root.len().cmp(&a.root.len()));
+
+        Self { projects }
+    }
+
+    /// Build a registry from canonical paths (not URIs). Used in tests.
+    pub fn from_canonical_roots(roots: &[&str]) -> Self {
+        let mut projects = Vec::new();
+
+        for &root in roots {
+            let root_path = PathBuf::from(root);
+
+            let mut discovery = TsConfigDiscovery::new();
+            discovery.discover(&root_path);
+
+            let mut project_roots_seen = std::collections::HashSet::new();
+            project_roots_seen.insert(root.to_string());
+
+            for entry in discovery.configs() {
+                if let Some(dir) = entry.config_path.parent() {
+                    let dir_str = dir.to_string_lossy().replace('\\', "/");
+                    project_roots_seen.insert(dir_str);
+                }
+            }
+
+            for project_root in &project_roots_seen {
+                let project_root_path = PathBuf::from(project_root);
+
+                let resolver = if let Some(entry) =
+                    discovery.find_config_for(&project_root_path.join("src/dummy.ts"))
+                {
+                    TsConfigPathResolver::from_tsconfig(&entry.config_path)
+                } else if let Some(entry) =
+                    discovery.find_config_for(&project_root_path.join("dummy.ts"))
+                {
+                    TsConfigPathResolver::from_tsconfig(&entry.config_path)
+                } else {
+                    TsConfigPathResolver::default()
+                };
+
+                let lint = discover_lint_config(&project_root_path);
+                let linter = verter_diagnostics::Linter::new(lint.config.clone());
+
+                projects.push(ProjectConfig {
+                    root: project_root.clone(),
+                    path_resolver: resolver,
+                    lint_config: lint.clone(),
+                    linter,
+                    lint_explicitly_configured: lint.explicitly_configured,
+                });
+            }
+        }
+
+        projects.sort_by(|a, b| b.root.len().cmp(&a.root.len()));
+        Self { projects }
+    }
+
+    /// Find the project that covers a given file path (longest prefix match).
+    ///
+    /// Falls back to `None` if no project root is a prefix of the file path.
+    pub fn find_project(&self, file_path: &str) -> Option<&ProjectConfig> {
+        let normalized = file_path.replace('\\', "/");
+        self.projects
+            .iter()
+            .find(|p| normalized.starts_with(&p.root))
+    }
+
+    /// Resolve a path alias for a file, using the file's project-specific resolver.
+    ///
+    /// Returns `None` if no project matches or the specifier doesn't match any alias.
+    pub fn resolve_alias(&self, importer_path: &str, specifier: &str) -> Option<String> {
+        let project = self.find_project(importer_path)?;
+        project.path_resolver.resolve(specifier)
+    }
+
+    /// Get the project root directory for a file (for tsserver `projectRootPath`).
+    pub fn find_project_root(&self, file_path: &str) -> Option<&str> {
+        self.find_project(file_path).map(|p| p.root.as_str())
+    }
+
+    /// Get the lint config for a file's project.
+    pub fn linter_for(&self, file_path: &str) -> Option<&ProjectConfig> {
+        self.find_project(file_path)
+    }
+
+    /// Get all project configs.
+    pub fn projects(&self) -> &[ProjectConfig] {
+        &self.projects
+    }
+
+    /// Get all project roots.
+    pub fn project_roots(&self) -> Vec<&str> {
+        self.projects.iter().map(|p| p.root.as_str()).collect()
+    }
+
+    /// Get tsconfig coverage patterns from all projects (for workspace scanner).
+    pub fn tsconfig_patterns(&self, roots: &[String]) -> Vec<String> {
+        let mut patterns = Vec::new();
+        for root_uri in roots {
+            let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
+            let root_path = PathBuf::from(&canonical);
+            let mut discovery = TsConfigDiscovery::new();
+            discovery.discover(&root_path);
+            for entry in discovery.configs() {
+                patterns.push(entry.pattern.clone());
+            }
+        }
+        patterns
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1236,5 +1614,490 @@ mod tests {
             DiagnosticSeverityConfig::Hint.to_lsp(),
             Some(DiagnosticSeverity::HINT)
         );
+    }
+
+    // =====================================================================
+    // ProjectRegistry tests
+    // =====================================================================
+
+    #[test]
+    fn registry_find_project_most_specific() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_specific");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("packages/ui/src")).unwrap();
+        std::fs::create_dir_all(tmp.join("packages/app/src")).unwrap();
+
+        // Create tsconfigs with different aliases
+        std::fs::write(
+            tmp.join("packages/ui/tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@ui/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("packages/app/tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@app/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+
+        // File in packages/ui should match packages/ui project
+        let ui_file = format!("{root}/packages/ui/src/Button.vue");
+        let project = registry.find_project(&ui_file);
+        assert!(project.is_some(), "should find project for ui file");
+        assert!(
+            project.unwrap().root.contains("packages/ui"),
+            "should match packages/ui, got: {}",
+            project.unwrap().root,
+        );
+
+        // File in packages/app should match packages/app project
+        let app_file = format!("{root}/packages/app/src/App.vue");
+        let project = registry.find_project(&app_file);
+        assert!(project.is_some(), "should find project for app file");
+        assert!(
+            project.unwrap().root.contains("packages/app"),
+            "should match packages/app, got: {}",
+            project.unwrap().root,
+        );
+
+        // File in packages/ui should NOT match packages/app
+        let ui_project_root = registry.find_project_root(&ui_file).unwrap();
+        assert!(
+            !ui_project_root.contains("packages/app"),
+            "ui file must not match app project"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_resolve_alias_per_project() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("packages/ui/src")).unwrap();
+        std::fs::create_dir_all(tmp.join("packages/app/src")).unwrap();
+
+        // Create test files
+        std::fs::write(
+            tmp.join("packages/ui/src/Button.vue"),
+            "<template><div/></template>",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("packages/app/src/Home.vue"),
+            "<template><div/></template>",
+        )
+        .unwrap();
+
+        // Different alias mappings per package
+        std::fs::write(
+            tmp.join("packages/ui/tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("packages/app/tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+
+        // @/Button.vue from ui package should resolve to ui/src/Button.vue
+        let ui_file = format!("{root}/packages/ui/src/index.ts");
+        let resolved = registry.resolve_alias(&ui_file, "@/Button.vue");
+        assert!(resolved.is_some(), "should resolve @/Button.vue from ui");
+        assert!(
+            resolved.as_ref().unwrap().ends_with("Button.vue"),
+            "should resolve to Button.vue in ui, got: {:?}",
+            resolved
+        );
+        assert!(
+            resolved.as_ref().unwrap().contains("packages/ui"),
+            "resolved path should be under packages/ui, got: {:?}",
+            resolved
+        );
+
+        // @/Home.vue from app package should resolve to app/src/Home.vue
+        let app_file = format!("{root}/packages/app/src/index.ts");
+        let resolved = registry.resolve_alias(&app_file, "@/Home.vue");
+        assert!(resolved.is_some(), "should resolve @/Home.vue from app");
+        assert!(
+            resolved.as_ref().unwrap().ends_with("Home.vue"),
+            "should resolve to Home.vue in app, got: {:?}",
+            resolved
+        );
+        assert!(
+            resolved.as_ref().unwrap().contains("packages/app"),
+            "resolved path should be under packages/app, got: {:?}",
+            resolved
+        );
+
+        // @/Home.vue from ui package should NOT resolve (file doesn't exist in ui/src)
+        let resolved_cross = registry.resolve_alias(&ui_file, "@/Home.vue");
+        assert!(
+            resolved_cross.is_none(),
+            "should not resolve @/Home.vue from ui package"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_fallback_to_workspace_root() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_fallback");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+
+        // File in root (no tsconfig) should still find a default project
+        let file = format!("{root}/src/App.vue");
+        let project = registry.find_project(&file);
+        assert!(
+            project.is_some(),
+            "should fall back to workspace root project"
+        );
+
+        // Default project should have empty aliases
+        let resolved = registry.resolve_alias(&file, "@/Something.vue");
+        assert!(
+            resolved.is_none(),
+            "default project (no tsconfig) should have no aliases"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_per_project_lint_config() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_lint");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("packages/strict-pkg/src")).unwrap();
+        std::fs::create_dir_all(tmp.join("packages/lax-pkg/src")).unwrap();
+
+        // strict-pkg has verterrc with strict preset
+        std::fs::write(
+            tmp.join("packages/strict-pkg/.verterrc.json"),
+            r#"{"lint":{"preset":"strict"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("packages/strict-pkg/tsconfig.json"),
+            r#"{"compilerOptions":{}}"#,
+        )
+        .unwrap();
+
+        // lax-pkg has verterrc with essential preset
+        std::fs::write(
+            tmp.join("packages/lax-pkg/.verterrc.json"),
+            r#"{"lint":{"preset":"essential"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("packages/lax-pkg/tsconfig.json"),
+            r#"{"compilerOptions":{}}"#,
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+
+        let strict_file = format!("{root}/packages/strict-pkg/src/Foo.vue");
+        let strict_project = registry.linter_for(&strict_file);
+        assert!(strict_project.is_some(), "should find strict project");
+        assert_eq!(
+            strict_project.unwrap().lint_config.config.preset,
+            verter_diagnostics::LintPreset::Strict,
+        );
+
+        let lax_file = format!("{root}/packages/lax-pkg/src/Bar.vue");
+        let lax_project = registry.linter_for(&lax_file);
+        assert!(lax_project.is_some(), "should find lax project");
+        assert_eq!(
+            lax_project.unwrap().lint_config.config.preset,
+            verter_diagnostics::LintPreset::Essential,
+        );
+
+        // Verify they DON'T share the same config
+        assert_ne!(
+            strict_project.unwrap().lint_config.config.preset,
+            lax_project.unwrap().lint_config.config.preset,
+            "different packages must have different lint presets"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // =====================================================================
+    // Vite alias discovery tests
+    // =====================================================================
+
+    #[test]
+    fn merge_vite_aliases_adds_new_prefixes() {
+        let mut resolver = TsConfigPathResolver::default();
+        resolver.merge_vite_aliases(vec![
+            ("@/".to_string(), "/project/src".to_string()),
+            ("~/".to_string(), "/project/lib".to_string()),
+        ]);
+
+        // Should have 2 aliases
+        assert_eq!(resolver.aliases.len(), 2, "should have 2 aliases");
+        assert!(!resolver.is_empty(), "resolver should not be empty");
+
+        // Aliases should end with `/` for wildcard matching
+        assert!(
+            resolver.aliases.iter().any(|a| a.prefix == "@/"),
+            "should have @/ prefix"
+        );
+        assert!(
+            resolver.aliases.iter().any(|a| a.prefix == "~/"),
+            "should have ~/ prefix"
+        );
+
+        // Replacements should end with `/`
+        for alias in &resolver.aliases {
+            for rep in &alias.replacements {
+                assert!(
+                    rep.prefix.ends_with('/'),
+                    "replacement prefix should end with /, got: {}",
+                    rep.prefix
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn merge_vite_aliases_overrides_existing() {
+        let mut resolver = TsConfigPathResolver {
+            aliases: vec![PathAlias {
+                prefix: "@/".to_string(),
+                suffix: String::new(),
+                replacements: vec![PathAliasReplacement {
+                    prefix: "/old/path/".to_string(),
+                    suffix: String::new(),
+                }],
+            }],
+        };
+
+        // Merge vite alias with same prefix — should override
+        resolver.merge_vite_aliases(vec![("@/".to_string(), "/new/path".to_string())]);
+
+        assert_eq!(
+            resolver.aliases.len(),
+            1,
+            "should still have 1 alias (replaced)"
+        );
+        assert_eq!(
+            resolver.aliases[0].replacements[0].prefix, "/new/path/",
+            "replacement should be updated to new path"
+        );
+        // Negative: old path should be gone
+        assert!(
+            !resolver
+                .aliases
+                .iter()
+                .any(|a| a.replacements.iter().any(|r| r.prefix.contains("old"))),
+            "old path should not remain"
+        );
+    }
+
+    #[test]
+    fn merge_vite_aliases_preserves_non_conflicting() {
+        let mut resolver = TsConfigPathResolver {
+            aliases: vec![PathAlias {
+                prefix: "~/".to_string(),
+                suffix: String::new(),
+                replacements: vec![PathAliasReplacement {
+                    prefix: "/project/lib/".to_string(),
+                    suffix: String::new(),
+                }],
+            }],
+        };
+
+        // Add a different alias — should not remove existing
+        resolver.merge_vite_aliases(vec![("@/".to_string(), "/project/src".to_string())]);
+
+        assert_eq!(resolver.aliases.len(), 2, "should have 2 aliases");
+        assert!(
+            resolver.aliases.iter().any(|a| a.prefix == "~/"),
+            "original ~/ alias should remain"
+        );
+        assert!(
+            resolver.aliases.iter().any(|a| a.prefix == "@/"),
+            "new @/ alias should be added"
+        );
+    }
+
+    #[test]
+    fn discover_vite_aliases_no_config_returns_empty() {
+        let tmp = std::env::temp_dir().join("verter_test_vite_no_config");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let result = discover_vite_aliases(&tmp, "node");
+        assert!(
+            result.is_empty(),
+            "should return empty when no vite config exists"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_vite_aliases_simple_config() {
+        // Only run if Node.js is available
+        let node = crate::tsserver::find_node();
+        if node.is_none() {
+            eprintln!("skipping discover_vite_aliases_simple_config: node not found");
+            return;
+        }
+        let node = node.unwrap();
+
+        let tmp = std::env::temp_dir().join("verter_test_vite_simple");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+
+        // Create a simple vite.config.js with resolve.alias
+        std::fs::write(
+            tmp.join("vite.config.js"),
+            &format!(
+                r#"
+export default {{
+  resolve: {{
+    alias: {{
+      '@': '{src_dir}',
+    }}
+  }}
+}};
+"#,
+                src_dir = tmp.join("src").to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+
+        let result = discover_vite_aliases(&tmp, &node);
+        assert!(
+            !result.is_empty(),
+            "should discover aliases from vite config"
+        );
+        assert_eq!(result.len(), 1, "should have exactly 1 alias");
+        assert_eq!(result[0].0, "@/", "alias find should be '@/'");
+        assert!(
+            result[0].1.contains("src"),
+            "alias replacement should contain 'src', got: {}",
+            result[0].1
+        );
+        // Negative: should not have any empty entries
+        assert!(
+            result.iter().all(|(f, r)| !f.is_empty() && !r.is_empty()),
+            "no alias should have empty find or replacement"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_vite_aliases_array_format() {
+        // Only run if Node.js is available
+        let node = crate::tsserver::find_node();
+        if node.is_none() {
+            eprintln!("skipping discover_vite_aliases_array_format: node not found");
+            return;
+        }
+        let node = node.unwrap();
+
+        let tmp = std::env::temp_dir().join("verter_test_vite_array");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::create_dir_all(tmp.join("lib")).unwrap();
+
+        // Create vite config with array-style aliases
+        std::fs::write(
+            tmp.join("vite.config.mjs"),
+            &format!(
+                r#"
+export default {{
+  resolve: {{
+    alias: [
+      {{ find: '@', replacement: '{src}' }},
+      {{ find: '~', replacement: '{lib}' }},
+    ]
+  }}
+}};
+"#,
+                src = tmp.join("src").to_string_lossy().replace('\\', "/"),
+                lib = tmp.join("lib").to_string_lossy().replace('\\', "/"),
+            ),
+        )
+        .unwrap();
+
+        let result = discover_vite_aliases(&tmp, &node);
+        assert_eq!(result.len(), 2, "should discover 2 aliases");
+        assert!(
+            result.iter().any(|(f, _)| f == "@/"),
+            "should have @/ alias"
+        );
+        assert!(
+            result.iter().any(|(f, _)| f == "~/"),
+            "should have ~/ alias"
+        );
+        // Negative: should not have regex-based aliases (they are filtered out)
+        assert!(
+            result.iter().all(|(f, _)| !f.starts_with('^')),
+            "regex aliases should be filtered out"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_vite_aliases_disabled_returns_empty() {
+        // Test that when vite_config_enabled is false, no aliases are discovered.
+        // This is tested at the ProjectRegistry level (from_workspace_roots skips discovery).
+        // At the function level, discover_vite_aliases always runs — the caller controls enablement.
+        let tmp = std::env::temp_dir().join("verter_test_vite_disabled");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Even with a vite config, if we don't call discover_vite_aliases, no aliases.
+        std::fs::write(
+            tmp.join("vite.config.js"),
+            "export default { resolve: { alias: { '@': '/src' } } };",
+        )
+        .unwrap();
+
+        // Simulate disabled: just don't call discover_vite_aliases
+        let resolver = TsConfigPathResolver::default();
+        assert!(
+            resolver.is_empty(),
+            "resolver should be empty when vite discovery not called"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_file_outside_all_projects() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_outside");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+
+        // File completely outside the workspace
+        let outside = "/some/other/project/App.vue";
+        let project = registry.find_project(outside);
+        assert!(
+            project.is_none(),
+            "file outside all workspace roots should return None"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

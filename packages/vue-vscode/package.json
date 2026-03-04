@@ -195,6 +195,11 @@
           ],
           "description": "Lint rule preset. Only applies when verter.lint.enabled is true."
         },
+        "verter.viteConfig.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Discover resolve.alias from vite.config.{ts,js,mjs} for path alias resolution. Requires Node.js on PATH. Disable if vite config evaluation causes issues."
+        },
         "verter.mcp.enabled": {
           "type": "boolean",
           "default": true,

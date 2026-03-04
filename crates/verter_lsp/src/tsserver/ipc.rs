@@ -383,6 +383,10 @@ pub struct TsserverTypeProvider {
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     /// Workspace root path (forward slashes) for `projectRootPath` in open commands.
     workspace_root: String,
+    /// Per-project roots for per-file `projectRootPath` matching.
+    /// Sorted by length descending (longest prefix first).
+    /// When non-empty, per-file matching takes priority over the global `workspace_root`.
+    project_roots: Arc<parking_lot::RwLock<Vec<String>>>,
 }
 
 impl Drop for TsserverTypeProvider {
@@ -531,12 +535,25 @@ impl TsserverTypeProvider {
             opened_files: Arc::new(Mutex::new(HashSet::new())),
             diagnostics_cache,
             workspace_root: ws_root,
+            project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
         })
     }
 
     /// Normalize a file path for tsserver (forward slashes, no file:// prefix).
     fn normalize_path(path: &str) -> String {
         path.replace('\\', "/")
+    }
+
+    /// Find the best project root for a file path (longest prefix match).
+    /// Falls back to the global `workspace_root` if no project root matches.
+    fn project_root_for(&self, file: &str) -> String {
+        let roots = self.project_roots.read();
+        for root in roots.iter() {
+            if file.starts_with(root.as_str()) {
+                return root.clone();
+            }
+        }
+        self.workspace_root.clone()
     }
 }
 
@@ -547,7 +564,7 @@ impl TypeProvider for TsserverTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
-        let ws_root = self.workspace_root.clone();
+        let project_root = self.project_root_for(&file);
         Box::pin(async move {
             contents_cache
                 .lock()
@@ -566,7 +583,7 @@ impl TypeProvider for TsserverTypeProvider {
                             else if file.ends_with(".jsx") { "JSX" }
                             else if file.ends_with(".js") { "JS" }
                             else { "TS" },
-                        "projectRootPath": ws_root,
+                        "projectRootPath": project_root,
                     }),
                 )
                 .await
@@ -595,7 +612,7 @@ impl TypeProvider for TsserverTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
-        let ws_root = self.workspace_root.clone();
+        let project_root = self.project_root_for(&file);
         Box::pin(async move {
             contents_cache
                 .lock()
@@ -640,7 +657,7 @@ impl TypeProvider for TsserverTypeProvider {
                                 else if file.ends_with(".jsx") { "JSX" }
                                 else if file.ends_with(".js") { "JS" }
                                 else { "TS" },
-                            "projectRootPath": ws_root,
+                            "projectRootPath": project_root,
                         }),
                     )
                     .await
@@ -1359,6 +1376,40 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn child_pid(&self) -> Option<u32> {
         self.child.id()
+    }
+
+    fn update_workspace_folders(
+        &self,
+        added: Vec<serde_json::Value>,
+        removed: Vec<serde_json::Value>,
+    ) -> ProviderFuture<'_, ()> {
+        let project_roots = Arc::clone(&self.project_roots);
+        Box::pin(async move {
+            let mut roots = project_roots.write();
+
+            // Remove closed folders
+            for folder in &removed {
+                if let Some(uri) = folder.get("uri").and_then(|v| v.as_str()) {
+                    let canonical = crate::documents::uri_to_canonical_id_from_str(uri);
+                    roots.retain(|r| r != &canonical);
+                }
+            }
+
+            // Add new folders
+            for folder in &added {
+                if let Some(uri) = folder.get("uri").and_then(|v| v.as_str()) {
+                    let canonical = crate::documents::uri_to_canonical_id_from_str(uri);
+                    if !roots.contains(&canonical) {
+                        roots.push(canonical);
+                    }
+                }
+            }
+
+            // Re-sort: longest prefix first for correct matching
+            roots.sort_by_key(|r| std::cmp::Reverse(r.len()));
+
+            Ok(())
+        })
     }
 
     fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {

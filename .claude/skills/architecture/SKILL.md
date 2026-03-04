@@ -112,8 +112,14 @@ css/             → CSS-specific language features
 tsgo/            → TSGO type provider integration (LSP protocol)
 tsserver/        → tsserver type provider integration (JSON protocol)
 capabilities.rs  → Server capability registration
-config.rs        → Server configuration
+config.rs        → Server configuration, ProjectConfig, ProjectRegistry, vite alias discovery
+workspace_scanner.rs → Async priority-based workspace file scanner
+sync_coordinator.rs  → Debounced type provider sync during typing
 ```
+
+### Per-Project Configuration (`config.rs`)
+
+`ProjectRegistry` groups per-project config for multi-root workspaces. Each `ProjectConfig` has: root path, `TsConfigPathResolver` (merged tsconfig + vite aliases), `ResolvedLintConfig`, and a `Linter` instance. `discover_vite_aliases()` spawns Node.js to evaluate `vite.config.{ts,js,mjs}` and extract `resolve.alias`.
 
 ### TypeProvider Trait (`tsgo/traits.rs`)
 

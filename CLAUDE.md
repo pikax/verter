@@ -140,6 +140,20 @@ TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner r
 
 **Key module**: `crates/verter_lsp/src/workspace_scanner.rs` — `WorkspaceScannerHandle`, `spawn_workspace_scanner()`, priority sorting, throttled sync loop.
 
+### Multi-Root Workspace & Per-Project Configuration
+
+In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` that groups per-project configuration.
+
+**Key types** (`crates/verter_lsp/src/config.rs`):
+- `ProjectConfig` — per-project: root path, `TsConfigPathResolver`, `ResolvedLintConfig`, `Linter` instance
+- `ProjectRegistry` — sorted by root length (longest prefix first), provides `find_project()`, `resolve_alias()`, `find_project_root()`, `linter_for()`
+
+**Path alias resolution**: Each project's `TsConfigPathResolver` is built from its `tsconfig.json`. When `verter.viteConfig.enabled` is true (default), `discover_vite_aliases()` spawns Node.js to evaluate `vite.config.{ts,js,mjs}` and merges `resolve.alias` entries (vite aliases take precedence).
+
+**Type provider integration**: TSGO receives `workspace/didChangeWorkspaceFolders` notifications. tsserver uses per-file `projectRootPath` from the project registry. Both resilient wrappers store workspace folders for restart replay.
+
+**Lock ordering** (prevents deadlocks): `workspace_roots` (async) → `project_registry` (sync read) → release → `fallback_linter` (sync read). Never acquire `fallback_linter` while holding `project_registry`.
+
 ### Cached Directive Fields on ElementNode
 
 The parser extracts structural directives from `el.props` via `prop.take()` and caches them as dedicated fields on `ElementNode` (`ast/types.rs`):
