@@ -466,3 +466,68 @@ fn element_parent_tag_tracked() {
     let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
     assert!(div.parent_tag.is_none()); // Root child has no parent tag
 }
+
+// ── has_text_content whitespace handling ──
+
+#[test]
+fn whitespace_only_element_has_no_text_content() {
+    // Whitespace between tags should NOT count as text content
+    let data = extract("<template>\n  <div class=\"app\">\n  </div>\n</template>");
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(
+        !div.has_text_content,
+        "whitespace-only content should not set has_text_content"
+    );
+}
+
+#[test]
+fn actual_text_element_has_text_content() {
+    let data = extract("<template><div>hello</div></template>");
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(
+        div.has_text_content,
+        "non-whitespace text should set has_text_content"
+    );
+}
+
+#[test]
+fn interpolation_counts_as_text_content() {
+    let data = extract_with_script(
+        "<template><div>{{ msg }}</div></template>",
+        "const msg = 'hi'",
+    );
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(
+        div.has_text_content,
+        "interpolation should count as text content"
+    );
+}
+
+#[test]
+fn mixed_whitespace_and_interpolation_has_text_content() {
+    let data = extract_with_script(
+        "<template><div>\n  {{ msg }}\n</div></template>",
+        "const msg = 'hi'",
+    );
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(
+        div.has_text_content,
+        "interpolation with surrounding whitespace should count"
+    );
+}
+
+#[test]
+fn nested_element_with_whitespace_only_no_text_content() {
+    // Parent div contains only child elements and whitespace
+    let data = extract("<template><div>\n  <span>hello</span>\n</div></template>");
+    let div = data.elements.iter().find(|e| e.tag == "div").unwrap();
+    assert!(
+        !div.has_text_content,
+        "div with only whitespace + child elements should not have text content"
+    );
+    let span = data.elements.iter().find(|e| e.tag == "span").unwrap();
+    assert!(
+        span.has_text_content,
+        "span with 'hello' should have text content"
+    );
+}

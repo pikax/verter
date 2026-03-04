@@ -81,22 +81,24 @@ pub struct LintDiagnostic {
 
 impl serde::Serialize for LintDiagnostic {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        // 7 fields always + tags conditionally = up to 8 entries
+        use serde::ser::SerializeStruct;
+        // serde-wasm-bindgen v0.6 turns serialize_map into a JS Map (not a plain object),
+        // so property access like `d.message` returns undefined. serialize_struct produces
+        // a plain JS object, fixing both Lint and Diagnostics panels in the playground.
         let has_tags = !self.tags.is_empty();
         let len = if has_tags { 8 } else { 7 };
-        let mut map = serializer.serialize_map(Some(len))?;
-        map.serialize_entry("rule", &self.rule)?;
-        map.serialize_entry("category", &self.category)?;
-        map.serialize_entry("severity", &self.severity)?;
-        map.serialize_entry("message", &self.message)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
+        let mut state = serializer.serialize_struct("LintDiagnostic", len)?;
+        state.serialize_field("rule", &self.rule)?;
+        state.serialize_field("category", &self.category)?;
+        state.serialize_field("severity", &self.severity)?;
+        state.serialize_field("message", &self.message)?;
+        state.serialize_field("spanStart", &self.span.start)?;
+        state.serialize_field("spanEnd", &self.span.end)?;
         if has_tags {
-            map.serialize_entry("tags", &self.tags)?;
+            state.serialize_field("tags", &self.tags)?;
         }
-        map.serialize_entry("spanKind", &self.span_kind)?;
-        map.end()
+        state.serialize_field("spanKind", &self.span_kind)?;
+        state.end()
     }
 }
 
@@ -180,6 +182,73 @@ mod tests {
             json.contains("unnecessary"),
             "tag should serialize as camelCase"
         );
+    }
+
+    /// Verify that serialize_struct produces a JSON object with direct field access.
+    /// This is critical for serde-wasm-bindgen: serialize_map produces a JS Map
+    /// (property access returns undefined), while serialize_struct produces a
+    /// plain JS object. This test ensures the JSON structure is a `{...}` object.
+    #[test]
+    fn lint_diagnostic_serializes_as_json_object() {
+        let diag = LintDiagnostic {
+            rule: "no-unused-vars".to_string(),
+            category: "recommended".to_string(),
+            severity: Severity::Warning,
+            message: "Variable 'x' is defined but never used.".to_string(),
+            span: verter_span::Span::new(42, 50),
+            tags: vec![DiagnosticTag::Unnecessary],
+            span_kind: DiagnosticSpanKind::ScriptCallSite,
+        };
+
+        let json = serde_json::to_string(&diag).expect("serialize");
+
+        // Must be a JSON object, not an array or other structure
+        assert!(json.starts_with('{'), "serialized output must be a JSON object");
+        assert!(json.ends_with('}'), "serialized output must end with }}");
+
+        // Verify all expected fields are present as direct keys
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert!(parsed.is_object(), "parsed value must be an object");
+        let obj = parsed.as_object().unwrap();
+
+        assert_eq!(obj.get("rule").unwrap(), "no-unused-vars");
+        assert_eq!(obj.get("category").unwrap(), "recommended");
+        assert_eq!(obj.get("severity").unwrap(), "warning");
+        assert_eq!(
+            obj.get("message").unwrap(),
+            "Variable 'x' is defined but never used."
+        );
+        assert_eq!(obj.get("spanStart").unwrap(), 42);
+        assert_eq!(obj.get("spanEnd").unwrap(), 50);
+        assert_eq!(obj.get("spanKind").unwrap(), "scriptCallSite");
+        assert!(obj.get("tags").unwrap().is_array());
+    }
+
+    /// Verify that empty tags are NOT included in the output (conditional field).
+    #[test]
+    fn lint_diagnostic_omits_empty_tags() {
+        let diag = LintDiagnostic {
+            rule: "test-rule".to_string(),
+            category: "test".to_string(),
+            severity: Severity::Error,
+            message: "test".to_string(),
+            span: verter_span::Span::new(0, 5),
+            tags: vec![],
+            span_kind: DiagnosticSpanKind::Attribute,
+        };
+
+        let json = serde_json::to_string(&diag).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        let obj = parsed.as_object().unwrap();
+
+        // Empty tags should NOT appear
+        assert!(obj.get("tags").is_none(), "empty tags must be omitted");
+        // Other required fields must still be present
+        assert!(obj.get("rule").is_some());
+        assert!(obj.get("message").is_some());
+        assert!(obj.get("spanStart").is_some());
+        assert!(obj.get("spanEnd").is_some());
+        assert!(obj.get("spanKind").is_some());
     }
 
     #[test]

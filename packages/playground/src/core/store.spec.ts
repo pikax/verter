@@ -8,13 +8,21 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("./compiler", () => ({
   initCompilers: vi.fn().mockResolvedValue(undefined),
   compileFile: vi.fn().mockResolvedValue({
-    verterNew: null,
     verterNewJs: null,
+    parseDurationMs: null,
+    scriptMs: null,
+    templateMs: null,
+    styleMs: null,
+    tsxMs: null,
+    tscMs: null,
+    lintMs: null,
   }),
+  relintFile: vi.fn().mockReturnValue(0.5),
   switchWasmVersion: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { useStore, IMPORT_MAP_FILENAME, type Store } from "./store";
+import { relintFile } from "./compiler";
 import { File } from "./types";
 
 describe("store", () => {
@@ -52,8 +60,18 @@ describe("store", () => {
     });
 
     it("starts with null compile timing", () => {
-      expect(store.compileTiming.verterNew).toBeNull();
       expect(store.compileTiming.verterNewJs).toBeNull();
+      expect(store.compileTiming.parseDurationMs).toBeNull();
+      expect(store.compileTiming.scriptMs).toBeNull();
+      expect(store.compileTiming.templateMs).toBeNull();
+      expect(store.compileTiming.styleMs).toBeNull();
+      expect(store.compileTiming.tsxMs).toBeNull();
+      expect(store.compileTiming.tscMs).toBeNull();
+      expect(store.compileTiming.lintMs).toBeNull();
+    });
+
+    it("starts with active type checker status", () => {
+      expect(store.typeCheckerStatus).toBe("active");
     });
   });
 
@@ -186,14 +204,51 @@ describe("store", () => {
       expect(store.outputMode).toBe("preview");
     });
 
-    it("sets to js", () => {
-      store.setOutputMode("js");
-      expect(store.outputMode).toBe("js");
+    it("sets to files", () => {
+      store.setOutputMode("files");
+      expect(store.outputMode).toBe("files");
     });
 
-    it("sets to css", () => {
+    it("redirects types to files", () => {
+      store.setOutputMode("types");
+      expect(store.outputMode).toBe("files");
+    });
+
+    it("sets to analysis", () => {
+      store.setOutputMode("analysis");
+      expect(store.outputMode).toBe("analysis");
+    });
+
+    it("redirects js to files", () => {
+      store.setOutputMode("js");
+      expect(store.outputMode).toBe("files");
+    });
+
+    it("redirects css to files", () => {
       store.setOutputMode("css");
-      expect(store.outputMode).toBe("css");
+      expect(store.outputMode).toBe("files");
+    });
+
+    it("redirects tsc to files", () => {
+      store.setOutputMode("tsc");
+      expect(store.outputMode).toBe("files");
+    });
+  });
+
+  describe("setTypeCheckerStatus", () => {
+    it("sets status to active", () => {
+      store.setTypeCheckerStatus("active");
+      expect(store.typeCheckerStatus).toBe("active");
+    });
+
+    it("sets status to unavailable", () => {
+      store.setTypeCheckerStatus("unavailable");
+      expect(store.typeCheckerStatus).toBe("unavailable");
+    });
+
+    it("sets status to initializing", () => {
+      store.setTypeCheckerStatus("initializing");
+      expect(store.typeCheckerStatus).toBe("initializing");
     });
   });
 
@@ -224,6 +279,49 @@ describe("store", () => {
       expect(store.compilerOptions.ssr).toBe(false);
       store.toggleSSR();
       expect(store.compilerOptions.ssr).toBe(true);
+    });
+  });
+
+  describe("disabledRules", () => {
+    it("starts with empty disabled rules set", () => {
+      expect(store.disabledRules).toBeDefined();
+      expect(store.disabledRules.size).toBe(0);
+    });
+
+    it("toggleLintRule adds a rule to disabled set", () => {
+      store.toggleLintRule("no-bare-strings-in-template");
+      expect(store.disabledRules.has("no-bare-strings-in-template")).toBe(true);
+    });
+
+    it("toggleLintRule removes a previously disabled rule", () => {
+      store.toggleLintRule("no-bare-strings-in-template");
+      expect(store.disabledRules.has("no-bare-strings-in-template")).toBe(true);
+      store.toggleLintRule("no-bare-strings-in-template");
+      expect(store.disabledRules.has("no-bare-strings-in-template")).toBe(false);
+    });
+
+    it("toggleLintRule supports multiple disabled rules", () => {
+      store.toggleLintRule("no-bare-strings-in-template");
+      store.toggleLintRule("html-button-has-type");
+      expect(store.disabledRules.size).toBe(2);
+      expect(store.disabledRules.has("no-bare-strings-in-template")).toBe(true);
+      expect(store.disabledRules.has("html-button-has-type")).toBe(true);
+    });
+
+    it("relint calls relintFile with disabled rules", () => {
+      store.files["App.vue"] = new File("App.vue", "<template><div>hello</div></template>");
+      store.activeFilename = "App.vue";
+      store.toggleLintRule("no-bare-strings-in-template");
+      store.relint();
+      expect(relintFile).toHaveBeenCalledWith(
+        store.activeFile,
+        store.disabledRules,
+      );
+    });
+
+    it("relint does not crash when no active file", () => {
+      store.activeFilename = IMPORT_MAP_FILENAME;
+      store.relint(); // should not throw
     });
   });
 

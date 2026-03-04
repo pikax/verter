@@ -130,6 +130,7 @@ export class TsgoService implements TypeScriptServiceBridge {
 
         // Request/response
         const { id, result, error } = data;
+        console.debug("[tsgo] <-", { id, error: error ?? undefined, hasResult: result != null });
         const pending = this.pending.get(id);
         if (pending) {
           this.pending.delete(id);
@@ -161,13 +162,8 @@ export class TsgoService implements TypeScriptServiceBridge {
       }
       const id = ++this.requestId;
       this.pending.set(id, { resolve, reject });
-
-      // For init, transfer SharedArrayBuffer
-      if (type === "init" && payload && (payload as Record<string, unknown>).sharedBuffer) {
-        this.worker.postMessage({ id, type, payload });
-      } else {
-        this.worker.postMessage({ id, type, payload });
-      }
+      console.debug("[tsgo] ->", type, { id });
+      this.worker.postMessage({ id, type, payload });
     });
   }
 

@@ -18,14 +18,10 @@ const props = defineProps<{
 
 const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "preview", label: "Preview" },
-  { mode: "js", label: "JS" },
-  { mode: "css", label: "CSS" },
-  { mode: "types", label: "Types" },
-  { mode: "tsc", label: "TSC" },
+  { mode: "files", label: "Files" },
   { mode: "analysis", label: "Analysis" },
   { mode: "lint", label: "Lint" },
   { mode: "outline", label: "Outline" },
-  { mode: "files", label: "Files" },
   { mode: "cssMatch", label: "CSS Match" },
   { mode: "map", label: "Map" },
   { mode: "diagnostics", label: "Diagnostics" },
@@ -34,8 +30,8 @@ const allTabs: { mode: OutputMode; label: string }[] = [
 const tabs = computed(() => {
   if (props.store.compilerOptions.ssr) {
     const list = [...allTabs];
-    const jsIdx = list.findIndex((t) => t.mode === "js");
-    list.splice(jsIdx + 1, 0, { mode: "ssr", label: "SSR" });
+    const filesIdx = list.findIndex((t) => t.mode === "files");
+    list.splice(filesIdx + 1, 0, { mode: "ssr", label: "SSR" });
     return list;
   }
   return allTabs;
@@ -45,18 +41,10 @@ function openSourceMapVisualization() {
   const file = props.store.activeFile;
   if (!file) return;
 
-  const mode = props.store.outputMode;
-  let code: string;
-  let map: string;
-  if (mode === "types") {
-    code = file.compiled.types;
-    map = file.compiled.typesSourceMap;
-  } else {
-    // The combined source map covers the full assembled JS (file.compiled.js),
-    // matching exactly what's displayed in the JS tab.
-    code = file.compiled.js;
-    map = file.compiled.verterSourceMap;
-  }
+  // The combined source map covers the full assembled JS (file.compiled.js),
+  // matching exactly what's displayed in the Files tab (script node).
+  const code = file.compiled.js;
+  const map = file.compiled.verterSourceMap;
   if (!map) return;
 
   // evanw's source-map-visualization uses length-prefixed format:
@@ -79,11 +67,7 @@ function openSourceMapVisualization() {
 const showSourceMapButton = computed(() => {
   const file = props.store.activeFile;
   if (!file) return false;
-  const mode = props.store.outputMode;
-  return (
-    (mode === "js" && !!file.compiled.verterSourceMap) ||
-    (mode === "types" && !!file.compiled.typesSourceMap)
-  );
+  return props.store.outputMode === "files" && !!file.compiled.verterSourceMap;
 });
 
 const lintCount = computed(() => {
@@ -101,12 +85,12 @@ const diagnosticCount = computed(() => {
 });
 
 function getTabTiming(mode: OutputMode): string | null {
-  const { verterNew, parseDurationMs } = props.store.compileTiming;
+  const { verterNewJs } = props.store.compileTiming;
   switch (mode) {
-    case "js":
-      return verterNew !== null ? `${verterNew.toFixed(1)}ms` : null;
+    case "files":
+      return verterNewJs !== null ? `${verterNewJs.toFixed(1)}ms` : null;
     case "analysis":
-      return parseDurationMs !== null ? `${parseDurationMs.toFixed(1)}ms` : null;
+      return verterNewJs !== null ? `${verterNewJs.toFixed(1)}ms` : null;
     default:
       return null;
   }
@@ -122,12 +106,12 @@ function getTabBadge(mode: OutputMode): string | null {
   return null;
 }
 
-function isEditableMode(mode: OutputMode): boolean {
-  return props.store.editableOutput && (mode === "types" || mode === "tsc");
+function isEditableMode(_mode: OutputMode): boolean {
+  return false;
 }
 
-function isEditedMode(mode: OutputMode): boolean {
-  return mode === "types" && props.store.tsxUserEdited;
+function isEditedMode(_mode: OutputMode): boolean {
+  return false;
 }
 </script>
 

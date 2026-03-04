@@ -26,10 +26,10 @@ const virtualFiles = computed<VirtualNode[]>(() => {
     nodes.push({ kind: "style", index: 0, label: "style[0]" });
   }
   if (file.compiled.types) {
-    nodes.push({ kind: "tsx", label: "TSX types" });
+    nodes.push({ kind: "tsx", label: "IDE (TSX)" });
   }
   if (file.compiled.tscCode) {
-    nodes.push({ kind: "tsc", label: "TSC decl" });
+    nodes.push({ kind: "tsc", label: "API (.d.ts)" });
   }
   if (file.compiled.ssrCode) {
     nodes.push({ kind: "ssr", label: "SSR" });

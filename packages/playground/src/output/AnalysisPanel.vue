@@ -51,18 +51,41 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
       <!-- Timing -->
       <section class="analysis-section">
         <div class="timing-row">
-          <span class="timing-label">Parse:</span>
-          <span class="timing-value">
-            {{ store.compileTiming.parseDurationMs !== null
-              ? store.compileTiming.parseDurationMs.toFixed(2) + 'ms'
-              : '—' }}
-          </span>
-          <span class="timing-sep">|</span>
-          <span class="timing-label">Total JS:</span>
-          <span class="timing-value">
+          <span class="timing-label">Total:</span>
+          <span class="timing-value timing-total">
             {{ store.compileTiming.verterNewJs !== null
               ? store.compileTiming.verterNewJs.toFixed(2) + 'ms'
               : '—' }}
+          </span>
+        </div>
+        <div class="timing-breakdown">
+          <span class="timing-step">
+            <span class="timing-label">Parse</span>
+            <span class="timing-value">{{ store.compileTiming.parseDurationMs !== null ? store.compileTiming.parseDurationMs.toFixed(2) + 'ms' : '—' }}</span>
+          </span>
+          <span class="timing-step">
+            <span class="timing-label">Script</span>
+            <span class="timing-value">{{ store.compileTiming.scriptMs !== null ? store.compileTiming.scriptMs.toFixed(2) + 'ms' : '—' }}</span>
+          </span>
+          <span class="timing-step">
+            <span class="timing-label">Template</span>
+            <span class="timing-value">{{ store.compileTiming.templateMs !== null ? store.compileTiming.templateMs.toFixed(2) + 'ms' : '—' }}</span>
+          </span>
+          <span class="timing-step">
+            <span class="timing-label">Style</span>
+            <span class="timing-value">{{ store.compileTiming.styleMs !== null ? store.compileTiming.styleMs.toFixed(2) + 'ms' : '—' }}</span>
+          </span>
+          <span class="timing-step">
+            <span class="timing-label">TSX</span>
+            <span class="timing-value">{{ store.compileTiming.tsxMs !== null ? store.compileTiming.tsxMs.toFixed(2) + 'ms' : '—' }}</span>
+          </span>
+          <span class="timing-step">
+            <span class="timing-label">TSC</span>
+            <span class="timing-value">{{ store.compileTiming.tscMs !== null ? store.compileTiming.tscMs.toFixed(2) + 'ms' : '—' }}</span>
+          </span>
+          <span class="timing-step">
+            <span class="timing-label">Lint</span>
+            <span class="timing-value">{{ store.compileTiming.lintMs !== null ? store.compileTiming.lintMs.toFixed(2) + 'ms' : '—' }}</span>
           </span>
         </div>
       </section>
@@ -237,23 +260,38 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
   gap: 6px;
   padding: 8px 10px;
   background: var(--bg-secondary);
-  border-radius: 4px;
-  margin-bottom: 4px;
+  border-radius: 4px 4px 0 0;
+}
+
+.timing-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  padding: 6px 10px 8px;
+  background: var(--bg-secondary);
+  border-radius: 0 0 4px 4px;
+  border-top: 1px solid var(--border-color);
+}
+
+.timing-step {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .timing-label {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .timing-value {
   font-weight: 600;
+  font-size: 11px;
   color: var(--accent-color, #4299e1);
 }
 
-.timing-sep {
-  color: var(--text-secondary);
-  opacity: 0.4;
+.timing-total {
+  font-size: 13px;
 }
 
 .flag-chips {

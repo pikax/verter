@@ -96,6 +96,15 @@ const firedRules = computed(() => {
   return set;
 });
 
+function isRuleEnabled(name: string): boolean {
+  return !props.store.disabledRules.has(name);
+}
+
+function toggleRule(name: string) {
+  props.store.toggleLintRule(name);
+  props.store.relint();
+}
+
 function severityBadgeClass(severity: string): string {
   switch (severity) {
     case "Error":
@@ -194,12 +203,18 @@ function severityBadgeClass(severity: string): string {
             {{ category }} ({{ rules.length }})
           </summary>
           <div class="lint-list">
-            <div
+            <label
               v-for="rule in rules"
               :key="rule.name"
               class="rule-item"
-              :class="{ 'rule-fired': firedRules.has(rule.name) }"
+              :class="{ 'rule-fired': firedRules.has(rule.name), 'rule-disabled': !isRuleEnabled(rule.name) }"
             >
+              <input
+                type="checkbox"
+                class="rule-toggle"
+                :checked="isRuleEnabled(rule.name)"
+                @change="toggleRule(rule.name)"
+              />
               <code class="rule-name">{{ rule.name }}</code>
               <span
                 class="severity-badge"
@@ -208,7 +223,7 @@ function severityBadgeClass(severity: string): string {
                 {{ rule.defaultSeverity.toLowerCase() }}
               </span>
               <span v-if="firedRules.has(rule.name)" class="fired-indicator">active</span>
-            </div>
+            </label>
           </div>
         </details>
       </div>
@@ -408,14 +423,31 @@ code {
   gap: 6px;
   padding: 4px 0;
   border-bottom: 1px solid var(--border-color);
+  cursor: pointer;
 }
 
 .rule-item:last-child {
   border-bottom: none;
 }
 
+.rule-item:hover {
+  background: var(--bg-secondary);
+}
+
 .rule-item.rule-fired {
   background: rgba(59, 130, 246, 0.05);
+}
+
+.rule-item.rule-disabled {
+  opacity: 0.45;
+}
+
+.rule-toggle {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+  accent-color: #3b82f6;
 }
 
 .rule-name {

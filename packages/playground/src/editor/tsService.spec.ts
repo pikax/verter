@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { TypeScriptService } from "./tsService";
+import { TypeScriptService, resolveOffsetComment } from "./tsService";
 import { SourceMapMapper } from "./sourceMapMapper";
 
 async function generateRealTsxOutput(vueSource: string): Promise<{ code: string; sourceMap: string }> {
@@ -721,5 +721,417 @@ describe("multi-file support", () => {
     await service.closeFile("Comp.vue");
 
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+// ── Offset comment resolution and diagnostic mapping ──
+
+describe("resolveOffsetComment", () => {
+  it("resolves offset comment directly before the identifier", () => {
+    const tsxCode = `const { /*125,134*/\n    increment } = ___VERTER___unwrapped;`;
+    const vueCode = "x".repeat(200);
+
+    const incrementIdx = tsxCode.indexOf("increment");
+    const result = resolveOffsetComment(tsxCode, vueCode, incrementIdx);
+    expect(result).not.toBeNull();
+    expect(result!.start).toBe(125);
+    expect(result!.end).toBe(134);
+  });
+
+  it("returns null when no offset comment is found before the position", () => {
+    const tsxCode = `const x = 1;`;
+    const vueCode = "hello";
+    const result = resolveOffsetComment(tsxCode, vueCode, 6);
+    expect(result).toBeNull();
+  });
+
+  it("returns null when comment end is at or after position", () => {
+    // The comment `*​/` must end BEFORE the tsxOffset
+    const tsxCode = `/*10,15*/ y`;
+    const vueCode = "x".repeat(20);
+    // tsxOffset at index 2 is inside the comment — resolving should fail
+    const result = resolveOffsetComment(tsxCode, vueCode, 2);
+    expect(result).toBeNull();
+  });
+
+  it("returns null for non-numeric comment content", () => {
+    const tsxCode = `/* hello */ const x = 1;`;
+    const vueCode = "test";
+    const result = resolveOffsetComment(tsxCode, vueCode, 15);
+    expect(result).toBeNull();
+  });
+
+  it("handles multiple offset comments and picks the closest one before position", () => {
+    const tsxCode = `{ const { /*10,15*/\n    count, /*30,37*/\n    message } = ___VERTER___unwrapped; }`;
+    const vueCode = "x".repeat(50);
+
+    const messageIdx = tsxCode.indexOf("message");
+    const result = resolveOffsetComment(tsxCode, vueCode, messageIdx);
+    expect(result).not.toBeNull();
+    expect(result!.start).toBe(30);
+    expect(result!.end).toBe(37);
+
+    const countIdx = tsxCode.indexOf("count");
+    const countResult = resolveOffsetComment(tsxCode, vueCode, countIdx);
+    expect(countResult).not.toBeNull();
+    expect(countResult!.start).toBe(10);
+    expect(countResult!.end).toBe(15);
+  });
+
+  it("handles UTF-8 multi-byte characters in Vue source", () => {
+    // "日本語" = 3 chars, 3 bytes each = 9 bytes
+    const tsxCode = `{ const { /*9,14*/\n    count } = ___VERTER___unwrapped; }`;
+    const vueCode = "日本語count = ref(0)";
+
+    const countIdx = tsxCode.indexOf("count");
+    const result = resolveOffsetComment(tsxCode, vueCode, countIdx);
+    expect(result).not.toBeNull();
+    // utf8ByteOffsetToJsOffset: byte 9 = JS index 3 (after 3 CJK chars)
+    expect(result!.start).toBe(3);
+    // byte 14 = JS index 8 ("count" = 5 chars, 3+5=8)
+    expect(result!.end).toBe(8);
+  });
+});
+
+describe("syncTsx diagnostic offset comment fallback", () => {
+  it("maps TS6133 on destructured binding to original declaration via offset comment", async () => {
+    const vueCode = `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+function increment() {
+  count.value++
+}
+</script>
+<template><div class="app"></div></template>`;
+
+    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
+
+    // Find the offset comment for "increment" in the destructuring
+    const offsetCommentMatch = tsxCode.match(/\/\*(\d+),(\d+)\*\/\s*\n\s*increment/);
+    expect(offsetCommentMatch).not.toBeNull();
+    const sfcStart = parseInt(offsetCommentMatch![1]);
+    const sfcEnd = parseInt(offsetCommentMatch![2]);
+    // Verify offset comment points to the original declaration
+    expect(vueCode.slice(sfcStart, sfcEnd)).toBe("increment");
+
+    // Find "increment" position in the destructuring block
+    const destructBlock = tsxCode.indexOf("___VERTER___unwrapped;");
+    expect(destructBlock).toBeGreaterThan(-1);
+    const incrementInDestruct = tsxCode.lastIndexOf("increment", destructBlock);
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async (type: string) => {
+      if (type === "updateFile") return undefined;
+      if (type === "getDiagnostics") {
+        return [
+          {
+            message: "'increment' is declared but its value is never read.",
+            start: incrementInDestruct,
+            length: "increment".length,
+            category: 1,
+            code: 6133,
+          },
+        ];
+      }
+    });
+
+    // Use null source map to force offset comment fallback
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+
+    // Should map to the original declaration, NOT the raw TSX offset
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].start).toBe(sfcStart);
+    expect(diagnostics[0].end).toBe(sfcEnd);
+    expect(diagnostics[0].code).toBe(6133);
+  });
+
+  it("expands TS6198 on single-element destructuring to TS6133 for that binding", async () => {
+    const vueCode = `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+function increment() {
+  count.value++
+}
+</script>
+<template><div class="app"></div></template>`;
+
+    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
+
+    expect(tsxCode).toContain("/* verter-destructured-start */");
+    expect(tsxCode).toContain("/* verter-destructured-end */");
+
+    const startMarker = tsxCode.indexOf("/* verter-destructured-start */");
+    const endMarker = tsxCode.indexOf("/* verter-destructured-end */");
+    const incrementInDestruct = tsxCode.indexOf("increment", startMarker);
+    expect(incrementInDestruct).toBeGreaterThan(startMarker);
+    expect(incrementInDestruct).toBeLessThan(endMarker);
+
+    // Find the expected SFC position for "increment"
+    const sfcIncrementStart = vueCode.indexOf("increment");
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async (type: string) => {
+      if (type === "updateFile") return undefined;
+      if (type === "getDiagnostics") {
+        return [
+          {
+            message: "All destructured elements are unused.",
+            start: incrementInDestruct,
+            length: "increment".length,
+            category: 1,
+            code: 6198,
+          },
+        ];
+      }
+    });
+
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+
+    // TS6198 should be expanded into a TS6133-like diagnostic for "increment"
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].code).toBe(6133);
+    expect(diagnostics[0].start).toBe(sfcIncrementStart);
+    expect(diagnostics[0].message).toContain("increment");
+    expect(diagnostics[0].message).toContain("declared but");
+  });
+
+  it("expands TS6198 on multi-element destructuring to TS6133 for each binding", async () => {
+    const vueCode = `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+const message = ref('Hello from Verter!')
+function increment() {
+  count.value++
+}
+</script>
+<template><div class="app"></div></template>`;
+
+    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
+
+    const startMarker = tsxCode.indexOf("/* verter-destructured-start */");
+    const endMarker = tsxCode.indexOf("/* verter-destructured-end */");
+
+    // TS would report two TS6198 diagnostics:
+    // 1. For "const { increment }" (single element, all unused)
+    // 2. For "let { count, message }" (all elements unused, start at "count")
+    const incrementInDestruct = tsxCode.indexOf("increment", startMarker);
+    const countInDestruct = tsxCode.indexOf("count", startMarker + 30);
+    // Make sure both are inside the markers
+    expect(incrementInDestruct).toBeGreaterThan(startMarker);
+    expect(incrementInDestruct).toBeLessThan(endMarker);
+    expect(countInDestruct).toBeGreaterThan(startMarker);
+    expect(countInDestruct).toBeLessThan(endMarker);
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async (type: string) => {
+      if (type === "updateFile") return undefined;
+      if (type === "getDiagnostics") {
+        return [
+          {
+            message: "All destructured elements are unused.",
+            start: incrementInDestruct,
+            length: "increment".length,
+            category: 1,
+            code: 6198,
+          },
+          {
+            message: "All destructured elements are unused.",
+            start: countInDestruct,
+            length: "count".length,
+            category: 1,
+            code: 6198,
+          },
+        ];
+      }
+    });
+
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+
+    // Should expand to 3 individual diagnostics: increment, count, message
+    expect(diagnostics).toHaveLength(3);
+    const names = diagnostics.map((d: any) => vueCode.slice(d.start, d.end));
+    expect(names).toContain("increment");
+    expect(names).toContain("count");
+    expect(names).toContain("message");
+    // All should be TS6133 with proper messages
+    for (const d of diagnostics) {
+      expect(d.code).toBe(6133);
+      expect(d.message).toContain("declared but");
+    }
+  });
+
+  it("keeps TS6133 inside verter-destructured markers (mapped via offset comment)", async () => {
+    const vueCode = `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+function increment() {
+  count.value++
+}
+</script>
+<template><div class="app"></div></template>`;
+
+    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
+
+    const startMarker = tsxCode.indexOf("/* verter-destructured-start */");
+    const endMarker = tsxCode.indexOf("/* verter-destructured-end */");
+    const incrementInDestruct = tsxCode.indexOf("increment", startMarker);
+    expect(incrementInDestruct).toBeGreaterThan(startMarker);
+    expect(incrementInDestruct).toBeLessThan(endMarker);
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async (type: string) => {
+      if (type === "updateFile") return undefined;
+      if (type === "getDiagnostics") {
+        return [
+          {
+            message: "'increment' is declared but its value is never read.",
+            start: incrementInDestruct,
+            length: "increment".length,
+            category: 1,
+            code: 6133,
+          },
+        ];
+      }
+    });
+
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+
+    // TS6133 should be KEPT — individual unused binding diagnostics are valuable
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].code).toBe(6133);
+  });
+
+  it("keeps diagnostics that map through source map even when offset comment fails", async () => {
+    const vueCode = `<script setup lang="ts">
+const count: number = "wrong"
+</script>
+<template><div>{{ count }}</div></template>`;
+
+    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+
+    // The type error on 'count' in the script section IS source-mapped
+    const countInTsx = tsxCode.indexOf("count: number");
+    expect(countInTsx).toBeGreaterThan(-1);
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async (type: string) => {
+      if (type === "updateFile") return undefined;
+      if (type === "getDiagnostics") {
+        return [
+          {
+            message: "Type 'string' is not assignable to type 'number'.",
+            start: countInTsx,
+            length: 5,
+            category: 1,
+            code: 2322,
+          },
+        ];
+      }
+    });
+
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, sourceMap);
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].code).toBe(2322);
+    // The mapped position should point to "count" in the Vue source (not raw TSX offset)
+    const vueCount = vueCode.indexOf("count");
+    expect(diagnostics[0].start).toBe(vueCount);
+  });
+
+  it("maps TS6133 inside destructured block via offset comment even with real source map", async () => {
+    const vueCode = `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+function increment() {
+  count.value++
+}
+</script>
+<template><div class="app"></div></template>`;
+
+    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+
+    // Verify we have boundary markers and offset comments
+    const startMarker = tsxCode.indexOf("/* verter-destructured-start */");
+    const endMarker = tsxCode.indexOf("/* verter-destructured-end */");
+    expect(startMarker).toBeGreaterThan(-1);
+    expect(endMarker).toBeGreaterThan(startMarker);
+
+    // Find the offset comment for "increment" in the destructuring
+    const offsetCommentMatch = tsxCode.match(/\/\*(\d+),(\d+)\*\/\s*\n\s*increment/);
+    expect(offsetCommentMatch).not.toBeNull();
+    const sfcStart = parseInt(offsetCommentMatch![1]);
+    const sfcEnd = parseInt(offsetCommentMatch![2]);
+    expect(vueCode.slice(sfcStart, sfcEnd)).toBe("increment");
+
+    // Find "increment" position inside the destructured block
+    const incrementInDestruct = tsxCode.indexOf("increment", startMarker);
+    expect(incrementInDestruct).toBeGreaterThan(startMarker);
+    expect(incrementInDestruct).toBeLessThan(endMarker);
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async (type: string) => {
+      if (type === "updateFile") return undefined;
+      if (type === "getDiagnostics") {
+        return [
+          {
+            message: "'increment' is declared but its value is never read.",
+            start: incrementInDestruct,
+            length: "increment".length,
+            category: 1,
+            code: 6133,
+          },
+        ];
+      }
+    });
+
+    // Key difference: use the REAL source map (not null)
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, sourceMap);
+
+    // Must map to the ORIGINAL declaration via offset comment, not a wrong source-map position
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].code).toBe(6133);
+    expect(diagnostics[0].start).toBe(sfcStart);
+    expect(diagnostics[0].end).toBe(sfcEnd);
+  });
+
+  it("drops diagnostics pointing to unmappable synthetic code", async () => {
+    const vueCode = `<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>`;
+
+    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
+
+    // Diagnostic on ___VERTER___shallowUnwrapRef — purely synthetic
+    const syntheticPos = tsxCode.indexOf("shallowUnwrapRef");
+    expect(syntheticPos).toBeGreaterThan(-1);
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.send = vi.fn(async (type: string) => {
+      if (type === "updateFile") return undefined;
+      if (type === "getDiagnostics") {
+        return [
+          {
+            message: "Some hypothetical error in synthetic code",
+            start: syntheticPos,
+            length: 15,
+            category: 1,
+            code: 9999,
+          },
+        ];
+      }
+    });
+
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+
+    // Should be dropped — unmappable synthetic code
+    expect(diagnostics).toHaveLength(0);
   });
 });

@@ -52,7 +52,7 @@ function verterTimingTitle(): string {
       >
         Auto {{ store.autoSave ? "ON" : "OFF" }}
       </button>
-      <div class="type-checker-toggle" title="Type checker engine">
+      <div class="type-checker-toggle" :title="`Type checker: ${store.typeChecker} (${store.typeCheckerStatus})`">
         <button
           class="tc-btn"
           :class="{ active: store.typeChecker === 'tsc' }"
@@ -67,24 +67,24 @@ function verterTimingTitle(): string {
         >
           tsgo
         </button>
+        <span
+          v-if="store.typeCheckerStatus !== 'active'"
+          class="tc-status"
+          :class="'tc-status-' + store.typeCheckerStatus"
+          :title="store.typeCheckerStatus === 'unavailable' ? 'Type checker unavailable (SharedArrayBuffer requires COOP/COEP headers)' : 'Initializing...'"
+        >
+          {{ store.typeCheckerStatus === 'unavailable' ? '!' : '...' }}
+        </span>
       </div>
-      <button
-        class="toggle-btn"
-        :class="{ active: store.editableOutput }"
-        @click="store.toggleEditableOutput"
-        title="Toggle editable output (Types/TSC tabs)"
-      >
-        Edit Output {{ store.editableOutput ? "ON" : "OFF" }}
-      </button>
       <div
         class="timing"
-        v-if="store.compileTiming.verterNew !== null"
+        v-if="store.compileTiming.verterNewJs !== null"
       >
         <span
           class="timing-item"
           :title="verterTimingTitle()"
         >
-          V: {{ store.compileTiming.verterNew.toFixed(1) }}ms
+          V: {{ store.compileTiming.verterNewJs.toFixed(1) }}ms
         </span>
       </div>
       <a
@@ -250,5 +250,25 @@ function verterTimingTitle(): string {
 .tc-btn.active {
   background: var(--accent-color);
   color: white;
+}
+
+.tc-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 700;
+  border-left: 1px solid var(--border-color);
+}
+
+.tc-status-unavailable {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.tc-status-initializing {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
 }
 </style>

@@ -62,8 +62,8 @@ impl LintRule for UnusedCssSelector {
                 }
 
                 if !any_match {
-                    let abs_start = selector.span.start;
-                    let abs_end = selector.span.end;
+                    let abs_start = selector.span.start + style.content_offset;
+                    let abs_end = selector.span.end + style.content_offset;
 
                     ctx.report_with_tags(
                         self.name(),
@@ -140,7 +140,9 @@ mod tests {
     }
 
     fn build_style(css_content: &str, scoped: bool, content_offset: u32) -> StyleBlockAnalysis {
-        let mut analysis = style::build_css_style_analysis(
+        // Note: CSS spans from the scanner are content-relative.
+        // The rule adds style.content_offset when reporting diagnostics.
+        style::build_css_style_analysis(
             css_content,
             style::VueStyleInput {
                 v_binds: vec![],
@@ -150,22 +152,7 @@ mod tests {
             false,
             None,
             content_offset,
-        );
-        if let Some(ref mut css) = analysis.css {
-            for sel in &mut css.selectors {
-                sel.span.start += content_offset;
-                sel.span.end += content_offset;
-            }
-            for cls in &mut css.classes {
-                cls.span.start += content_offset;
-                cls.span.end += content_offset;
-            }
-            for id in &mut css.ids {
-                id.span.start += content_offset;
-                id.span.end += content_offset;
-            }
-        }
-        analysis
+        )
     }
 
     fn run_rule(file: &FileContext<'_>) -> Vec<crate::diagnostic::LintDiagnostic> {

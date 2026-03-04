@@ -29,9 +29,9 @@
 //!   const count = ref(0)
 //!
 //!   // Block scope: destructure from temp with offset comments, then template JSX
-//!   { const {
+//!   { /* verter-destructured-start */const {
 //!     /*45,50*/
-//!     count } = ___VERTER___unwrapped;
+//!     count } = ___VERTER___unwrapped; /* verter-destructured-end */
 //!     <div>{ count }</div>
 //!   } // close block scope
 //! } // close templateBindingFN
@@ -545,7 +545,7 @@ fn process_tsx_script_setup<'alloc>(
                     .join(",")
             };
 
-            let mut destruct_block = String::from("{ ");
+            let mut destruct_block = String::from("{ /* verter-destructured-start */");
             if !const_names.is_empty() {
                 destruct_block.push_str(&format!(
                     "const {{ {} }} = {P}unwrapped;",
@@ -563,7 +563,7 @@ fn process_tsx_script_setup<'alloc>(
                     P = PREFIX,
                 ));
             }
-            destruct_block.push('\n');
+            destruct_block.push_str(" /* verter-destructured-end */\n");
             wrapper_end.push_str(&destruct_block);
         } else {
             wrapper_end.push_str("\n{\n");

@@ -208,10 +208,19 @@ Skip this for purely internal refactors that don't change any public behavior, m
 
 ### Testing Requirements
 
-**IMPORTANT — TDD (Test-Driven Development) is mandatory**:
-1. **Write failing tests first** — before implementing any feature or fix, write one or more tests that demonstrate the expected behavior and verify they fail
-2. **Implement the minimum code** to make the failing tests pass
-3. **Refactor** if needed while keeping tests green
+**MANDATORY RULE — TDD (Test-Driven Development) must be followed for EVERY code change. This is non-negotiable. All agents, subagents, and automated workflows MUST comply. Skipping TDD is never acceptable, regardless of task size or urgency.**
+
+**TDD workflow (strict order — no exceptions):**
+1. **Write failing tests FIRST** — before writing ANY implementation code, write one or more tests that demonstrate the expected behavior. Run the tests and **verify they fail**. Do not proceed to step 2 until you have confirmed test failure.
+2. **Implement the minimum code** to make the failing tests pass. Do not write implementation code before tests exist.
+3. **Run the tests again** and verify they pass.
+4. **Refactor** if needed while keeping tests green.
+
+**Violation examples (DO NOT do these):**
+- Writing implementation code and then adding tests after the fact
+- Writing tests and implementation simultaneously without verifying the tests fail first
+- Skipping tests for "small" or "trivial" changes
+- Delegating implementation to a subagent without requiring TDD compliance
 
 Coverage expectations:
 - New features: Add tests covering the new functionality

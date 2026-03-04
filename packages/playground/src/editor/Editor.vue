@@ -26,6 +26,7 @@ const props = defineProps<{
 const editorContainer = ref<HTMLElement>();
 const editor = shallowRef<monaco.editor.IStandaloneCodeEditor>();
 const pendingCode = ref<string | null>(null);
+let suppressExternalSync = false;
 let lspDisposables: monaco.IDisposable[] = [];
 let tsService: TypeScriptServiceBridge & { init(): Promise<void>; dispose(): void; syncTsx: TypeScriptService["syncTsx"] } = new TypeScriptService();
 let tsgoService: TsgoService | null = null;
@@ -170,14 +171,17 @@ function updateMarkers() {
   for (const d of tsDiagnostics) {
     const startPos = model.getPositionAt(d.start);
     const endPos = model.getPositionAt(d.end);
+    // TS6133/6196 = unused variable/parameter → show as hint with dimmed text
+    const isUnused = d.code === 6133 || d.code === 6196;
     tsMarkers.push({
-      severity: tsSeverityToMarkerSeverity(d.severity),
+      severity: isUnused ? monaco.MarkerSeverity.Hint : tsSeverityToMarkerSeverity(d.severity),
       message: `TS${d.code}: ${d.message}`,
       startLineNumber: startPos.lineNumber,
       startColumn: startPos.column,
       endLineNumber: endPos.lineNumber,
       endColumn: endPos.column,
       source: "typescript",
+      tags: isUnused ? [1] : undefined, // MarkerTag.Unnecessary = 1 → dims text
     });
   }
   monaco.editor.setModelMarkers(model, "typescript", tsMarkers);
@@ -371,6 +375,7 @@ onMounted(() => {
   editor.value.onDidChangeModelContent(() => {
     const value = editor.value?.getValue();
     if (value !== undefined) {
+      suppressExternalSync = true;
       if (props.store.activeFilename === IMPORT_MAP_FILENAME) {
         props.store.updateImportMap(value);
       } else if (props.store.autoSave) {
@@ -381,6 +386,7 @@ onMounted(() => {
         // Still update the file code for display, but compilation won't auto-trigger
         props.store.updateCode(value);
       }
+      suppressExternalSync = false;
     }
   });
 
@@ -388,6 +394,18 @@ onMounted(() => {
   decorationStyleEl = document.createElement("style");
   decorationStyleEl.textContent = getDecorationStyles();
   document.head.appendChild(decorationStyleEl);
+
+  // Sync external code changes (e.g. applyFix from LintPanel) back to the editor
+  watch(
+    () => props.store.activeFile?.code,
+    (newCode) => {
+      if (suppressExternalSync || !editor.value || newCode === undefined) return;
+      const model = editor.value.getModel();
+      if (model && model.getValue() !== newCode) {
+        model.setValue(newCode);
+      }
+    },
+  );
 
   // Watch diagnostics and update markers (Verter lint + compiler)
   watch(
@@ -457,6 +475,8 @@ onMounted(() => {
   watch(
     () => props.store.typeChecker,
     async (mode) => {
+      console.log(`[type-checker] Switching to ${mode}`);
+      props.store.setTypeCheckerStatus("initializing");
       // Dispose current providers
       lspDisposables.forEach((d) => d.dispose());
       lspDisposables = [];
@@ -468,6 +488,13 @@ onMounted(() => {
         }
         tsService = tsgoService as unknown as typeof tsService;
         await tsgoService.init();
+        if (tsgoService.isAvailable) {
+          console.log("[type-checker] tsgo initialized successfully");
+          props.store.setTypeCheckerStatus("active");
+        } else {
+          console.warn("[type-checker] tsgo unavailable (SharedArrayBuffer missing or init failed)");
+          props.store.setTypeCheckerStatus("unavailable");
+        }
       } else {
         if (tsgoService) {
           tsgoService.dispose();
@@ -477,6 +504,8 @@ onMounted(() => {
         tsService = newTsService;
         const curVueVersion = extractVueVersion(props.store.importMap) ?? "3.5";
         await newTsService.init({ vueVersion: curVueVersion, verterTypesContent: typeHelpersSource });
+        console.log("[type-checker] tsc initialized successfully");
+        props.store.setTypeCheckerStatus("active");
       }
 
       // Re-register LSP providers with new service

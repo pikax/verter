@@ -124,6 +124,103 @@ const TS_KIND_TO_MONACO: Record<string, number> = {
   link: 0,
 };
 
+/**
+ * Convert a UTF-8 byte offset to a JavaScript string index (UTF-16 code units).
+ */
+function utf8ByteOffsetToJsOffset(source: string, byteOffset: number): number {
+  let jsIdx = 0;
+  let byteIdx = 0;
+  while (byteIdx < byteOffset && jsIdx < source.length) {
+    const codePoint = source.codePointAt(jsIdx)!;
+    const charByteLen =
+      codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+    byteIdx += charByteLen;
+    jsIdx += codePoint > 0xffff ? 2 : 1; // surrogate pair = 2 UTF-16 code units
+  }
+  return jsIdx;
+}
+
+/**
+ * Search backward from a TSX offset for a `/*start,end*​/` offset comment pattern.
+ * These comments are emitted by the Rust IDE codegen in the `___VERTER___unwrapped`
+ * destructuring block, and encode the SFC-absolute byte offsets of the original
+ * declaration. Returns the mapped Vue span (JS string indices) or null.
+ */
+export function resolveOffsetComment(
+  tsxCode: string,
+  vueCode: string,
+  tsxOffset: number,
+): MappedSpan | null {
+  const before = tsxCode.lastIndexOf("/*", tsxOffset);
+  if (before === -1) return null;
+  const commentEnd = tsxCode.indexOf("*/", before);
+  if (commentEnd === -1 || commentEnd >= tsxOffset) return null;
+  const content = tsxCode.slice(before + 2, commentEnd);
+  const match = /^(\d+),(\d+)$/.exec(content);
+  if (!match) return null;
+  return {
+    start: utf8ByteOffsetToJsOffset(vueCode, parseInt(match[1], 10)),
+    end: utf8ByteOffsetToJsOffset(vueCode, parseInt(match[2], 10)),
+  };
+}
+
+const DESTRUCTURED_START = "/* verter-destructured-start */";
+const DESTRUCTURED_END = "/* verter-destructured-end */";
+
+/** Check if a TSX offset falls inside the verter-destructured boundary markers. */
+function isInsideDestructuredBlock(tsxCode: string, tsxOffset: number): boolean {
+  const start = tsxCode.indexOf(DESTRUCTURED_START);
+  if (start === -1) return false;
+  const end = tsxCode.indexOf(DESTRUCTURED_END, start);
+  if (end === -1) return false;
+  return tsxOffset >= start && tsxOffset < end + DESTRUCTURED_END.length;
+}
+
+/**
+ * Expand a TS6198 ("All destructured elements are unused") diagnostic into
+ * individual TS6133-like diagnostics for each binding in the same destructuring
+ * statement. Finds the destructuring statement containing `tsxStart` by scanning
+ * backward for `const {` / `let {` and forward for `___VERTER___unwrapped`.
+ */
+function expandTs6198ToIndividualDiagnostics(
+  tsxCode: string,
+  vueCode: string,
+  tsxStart: number,
+  severity: MappedDiagnostic["severity"],
+): MappedDiagnostic[] {
+  // Find the end of this destructuring statement
+  const unwrappedMarker = "___VERTER___unwrapped";
+  const stmtEnd = tsxCode.indexOf(unwrappedMarker, tsxStart);
+  if (stmtEnd === -1) return [];
+
+  // Find the start: search backward for "const {" or "let {"
+  const constIdx = tsxCode.lastIndexOf("const {", tsxStart);
+  const letIdx = tsxCode.lastIndexOf("let {", tsxStart);
+  const stmtStart = Math.max(constIdx, letIdx);
+  if (stmtStart === -1) return [];
+
+  // Find all offset comments /*start,end*/ in this statement
+  const stmtText = tsxCode.slice(stmtStart, stmtEnd);
+  const offsetCommentRegex = /\/\*(\d+),(\d+)\*\//g;
+  const diagnostics: MappedDiagnostic[] = [];
+  let match;
+  while ((match = offsetCommentRegex.exec(stmtText)) !== null) {
+    const byteStart = parseInt(match[1], 10);
+    const byteEnd = parseInt(match[2], 10);
+    const jsStart = utf8ByteOffsetToJsOffset(vueCode, byteStart);
+    const jsEnd = utf8ByteOffsetToJsOffset(vueCode, byteEnd);
+    const name = vueCode.slice(jsStart, jsEnd);
+    diagnostics.push({
+      message: `'${name}' is declared but its value is never read.`,
+      start: jsStart,
+      end: jsEnd,
+      severity,
+      code: 6133,
+    });
+  }
+  return diagnostics;
+}
+
 export class TypeScriptService implements TypeScriptServiceBridge {
   private worker: Worker | null = null;
   private requestId = 0;
@@ -152,6 +249,9 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
     this.worker.onmessage = (e: MessageEvent<{ id: number; result?: unknown; error?: string }>) => {
       const { id, result, error } = e.data;
+      if (typeof console !== "undefined") {
+        console.debug("[tsc] <-", { id, error: error ?? undefined, hasResult: result != null });
+      }
       const pending = this.pending.get(id);
       if (pending) {
         this.pending.delete(id);
@@ -180,6 +280,9 @@ export class TypeScriptService implements TypeScriptServiceBridge {
       }
       const id = ++this.requestId;
       this.pending.set(id, { resolve, reject });
+      if (typeof console !== "undefined") {
+        console.debug("[tsc] ->", type, { id });
+      }
       this.worker.postMessage({ id, type, payload });
     });
   }
@@ -217,28 +320,59 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
     const diagnostics = (await this.send("getDiagnostics", { path: tsxPath })) as TsDiagnostic[];
 
-    return diagnostics.map((d) => {
+    const mapped: MappedDiagnostic[] = [];
+    for (const d of diagnostics) {
       const tsxStart = d.start;
       const tsxEnd = d.start + d.length;
 
-      let vueStart = tsxStart;
-      let vueEnd = tsxEnd;
-
-      if (this.currentMapper) {
-        const mappedStart = this.currentMapper.tsxOffsetToVueOffset(tsxStart);
-        const mappedEnd = this.currentMapper.tsxOffsetToVueOffset(tsxEnd);
-        if (mappedStart != null) vueStart = mappedStart;
-        if (mappedEnd != null) vueEnd = mappedEnd;
+      // Expand TS6198 ("All destructured elements are unused") inside the
+      // verter-destructured block into individual TS6133-like diagnostics for
+      // each binding, mapped to original declarations via offset comments.
+      if (d.code === 6198 && tsxCode && isInsideDestructuredBlock(tsxCode, tsxStart)) {
+        const expanded = expandTs6198ToIndividualDiagnostics(
+          tsxCode,
+          vueCode,
+          tsxStart,
+          d.category === 1 ? "error" : d.category === 0 ? "warning" : "info",
+        );
+        mapped.push(...expanded);
+        continue;
       }
 
-      return {
+      let vueStart: number | null = null;
+      let vueEnd: number | null = null;
+
+      // For positions inside the destructured block, skip the source map —
+      // it can't properly map synthetic code. Use offset comments instead,
+      // which encode the original declaration's SFC-absolute position.
+      const inDestructuredBlock = tsxCode && isInsideDestructuredBlock(tsxCode, tsxStart);
+
+      if (!inDestructuredBlock && this.currentMapper) {
+        vueStart = this.currentMapper.tsxOffsetToVueOffset(tsxStart);
+        vueEnd = this.currentMapper.tsxOffsetToVueOffset(tsxEnd);
+      }
+
+      // Fall back to offset comment when source map fails or was skipped
+      if (vueStart == null && this.currentTsxCode && this.currentVueCode) {
+        const resolved = resolveOffsetComment(this.currentTsxCode, this.currentVueCode, tsxStart);
+        if (resolved) {
+          vueStart = resolved.start;
+          vueEnd = resolved.end;
+        }
+      }
+
+      // Drop diagnostics that can't be mapped — they're in synthetic code
+      if (vueStart == null) continue;
+
+      mapped.push({
         message: d.message,
         start: vueStart,
-        end: vueEnd,
+        end: vueEnd ?? tsxEnd,
         severity: d.category === 1 ? "error" : d.category === 0 ? "warning" : "info",
         code: d.code,
-      };
-    });
+      });
+    }
+    return mapped;
   }
 
   /**
@@ -511,39 +645,12 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   }
 
   /**
-   * Convert a UTF-8 byte offset to a JavaScript string index (UTF-16 code units).
-   */
-  private utf8ByteOffsetToJsOffset(source: string, byteOffset: number): number {
-    let jsIdx = 0;
-    let byteIdx = 0;
-    while (byteIdx < byteOffset && jsIdx < source.length) {
-      const codePoint = source.codePointAt(jsIdx)!;
-      const charByteLen =
-        codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
-      byteIdx += charByteLen;
-      jsIdx += codePoint > 0xffff ? 2 : 1; // surrogate pair = 2 UTF-16 code units
-    }
-    return jsIdx;
-  }
-
-  /**
-   * Search backward from a TSX offset for a /*start,end*​/ offset comment pattern.
-   * Returns the mapped Vue span if found, or null.
+   * Search backward from a TSX offset for a `/*start,end*​/` offset comment pattern.
+   * Delegates to the standalone `resolveOffsetComment` function.
    */
   private resolveFromOffsetComment(tsxOffset: number): MappedSpan | null {
     if (!this.currentTsxCode || !this.currentVueCode) return null;
-    // Search backward from tsxOffset for the closest /* comment
-    const before = this.currentTsxCode.lastIndexOf("/*", tsxOffset);
-    if (before === -1) return null;
-    const commentEnd = this.currentTsxCode.indexOf("*/", before);
-    if (commentEnd === -1 || commentEnd >= tsxOffset) return null;
-    const content = this.currentTsxCode.slice(before + 2, commentEnd);
-    const match = /^(\d+),(\d+)$/.exec(content);
-    if (!match) return null;
-    return {
-      start: this.utf8ByteOffsetToJsOffset(this.currentVueCode, parseInt(match[1], 10)),
-      end: this.utf8ByteOffsetToJsOffset(this.currentVueCode, parseInt(match[2], 10)),
-    };
+    return resolveOffsetComment(this.currentTsxCode, this.currentVueCode, tsxOffset);
   }
 
   dispose(): void {

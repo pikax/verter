@@ -282,6 +282,7 @@ fn walk_node_for_extraction(
 
             let this_element_index = data.elements.len() as u32;
             extract_element_data(
+                ctx.ast,
                 el,
                 &tag_name,
                 depth,
@@ -395,6 +396,34 @@ fn walk_node_for_extraction(
     }
 }
 
+/// Check whether an element has at least one text child with non-whitespace content.
+/// Whitespace-only text nodes (indentation, newlines) are not considered "text content"
+/// for lint purposes, matching Vue's whitespace condensation behavior.
+fn has_non_whitespace_text(ast: &TemplateAst, el: &ElementNode, source: &str) -> bool {
+    if !el
+        .children_flag
+        .has(crate::ast::types::ChildrenFlags::HasText)
+    {
+        return false;
+    }
+    let Some(ref content) = el.content else {
+        return false;
+    };
+    for &child_id in &content.children {
+        if let AstNodeKind::Text(ref text) = ast.nodes[child_id.0].kind {
+            let s = text.start as usize;
+            let e = text.end as usize;
+            if s < e && e <= source.len() {
+                let text_content = &source[s..e];
+                if !text_content.trim().is_empty() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn extract_tag_name(el: &ElementNode, source: &str) -> String {
     let start = el.tag_open.start as usize + 1; // skip '<'
     let end = el.tag_open.name_end as usize;
@@ -403,6 +432,7 @@ fn extract_tag_name(el: &ElementNode, source: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn extract_element_data(
+    ast: &TemplateAst,
     el: &ElementNode,
     tag_name: &str,
     depth: u16,
@@ -562,9 +592,7 @@ fn extract_element_data(
         has_v_show: el.prop_flag.has(crate::ast::types::PropFlags::HasShow),
         has_v_html: el.prop_flag.has(crate::ast::types::PropFlags::HasVHtml),
         has_v_text: el.prop_flag.has(crate::ast::types::PropFlags::HasVText),
-        has_text_content: el
-            .children_flag
-            .has(crate::ast::types::ChildrenFlags::HasText)
+        has_text_content: has_non_whitespace_text(ast, el, source)
             || el
                 .children_flag
                 .has(crate::ast::types::ChildrenFlags::HasInterpolation),

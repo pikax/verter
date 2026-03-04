@@ -9650,6 +9650,37 @@ const message = ref('hello')
         "Old combined destructure+call pattern must not appear (causes TDZ).\nTSX:\n{}",
         tsx.code
     );
+
+    // Positive: boundary markers around the destructuring block
+    assert!(
+        tsx.code.contains("/* verter-destructured-start */"),
+        "Destructuring block must be wrapped with start marker.\nTSX:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("/* verter-destructured-end */"),
+        "Destructuring block must be wrapped with end marker.\nTSX:\n{}",
+        tsx.code
+    );
+
+    // The start marker must come before the destructuring, end marker after
+    let start_marker_pos = tsx
+        .code
+        .find("/* verter-destructured-start */")
+        .unwrap();
+    let end_marker_pos = tsx
+        .code
+        .find("/* verter-destructured-end */")
+        .unwrap();
+    let destruct_pos = tsx.code.find("} = ___VERTER___unwrapped;").unwrap();
+    assert!(
+        start_marker_pos < destruct_pos && destruct_pos < end_marker_pos,
+        "Markers must bracket the destructuring: start={}, destruct={}, end={}\nTSX:\n{}",
+        start_marker_pos,
+        destruct_pos,
+        end_marker_pos,
+        tsx.code
+    );
 }
 
 // ── TSX source map round-trip integration tests ───────────────────

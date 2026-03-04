@@ -261,7 +261,30 @@ export function applyTsxOutput(file: File, tsx: HostIdeResponse | null | undefin
   file.compiled.typesSourceMap = tsx?.sourceMap ?? "";
 }
 
-function compileVueWithHost(file: File, options: CompilerOptions | undefined): CompileTiming {
+/** Build a LintConfig object with disabled rules for the WASM host. */
+function buildLintConfig(disabledRules?: ReadonlySet<string>): Record<string, unknown> | undefined {
+  if (!disabledRules || disabledRules.size === 0) return undefined;
+  const rules: Record<string, null> = {};
+  for (const name of disabledRules) {
+    rules[name] = null;
+  }
+  return { preset: "All", rules, vaporMode: false, ssrMode: false };
+}
+
+/** Re-run only the lint pass for a file (avoids full recompile). */
+export function relintFile(file: File, disabledRules?: ReadonlySet<string>): number | null {
+  if (!wasmHost || typeof wasmHost.lint !== "function") return null;
+  try {
+    const t0 = performance.now();
+    file.compiled.lintDiagnostics = wasmHost.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
+    return performance.now() - t0;
+  } catch {
+    file.compiled.lintDiagnostics = [];
+    return null;
+  }
+}
+
+function compileVueWithHost(file: File, options: CompilerOptions | undefined, disabledRules?: ReadonlySet<string>): CompileTiming {
   const start = performance.now();
   // Always compile client output with ssr: false
   const profile = toHostProfile(file, options);
@@ -285,11 +308,17 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   let templateCode = "";
   let templateSourceMap = "";
 
+  let scriptMs: number | null = null;
+  let templateMs: number | null = null;
+  let styleMs: number | null = null;
+
   if (nodeKinds.has("script")) {
+    const t0 = performance.now();
     const script = wasmHost!.getVirtualFile({
       rawId: `${file.filename}?vue&type=script`,
       compileProfile: profile,
     });
+    scriptMs = performance.now() - t0;
     diagnosticsSnapshots.push(script.diagnostics);
     scriptCode = script.code;
     scriptSourceMap = script.sourceMap ?? "";
@@ -297,10 +326,12 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   }
 
   if (nodeKinds.has("template")) {
+    const t0 = performance.now();
     const template = wasmHost!.getVirtualFile({
       rawId: `${file.filename}?vue&type=template`,
       compileProfile: profile,
     });
+    templateMs = performance.now() - t0;
     diagnosticsSnapshots.push(template.diagnostics);
     if (assembledJs) assembledJs += "\n";
     assembledJs += template.code;
@@ -323,6 +354,7 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
     .map((node) => node.index as number)
     .sort((a, b) => a - b);
 
+  const styleStart = performance.now();
   const styleChunks: string[] = [];
   for (const index of styleIndices) {
     const style = wasmHost!.getVirtualFile({
@@ -332,6 +364,7 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
     diagnosticsSnapshots.push(style.diagnostics);
     styleChunks.push(style.code);
   }
+  styleMs = styleIndices.length > 0 ? performance.now() - styleStart : null;
 
   const allDiagnostics = collectUniqueHostDiagnostics(diagnosticsSnapshots);
   file.compiled.js = mergeRenderIntoComponent(assembledJs);
@@ -361,9 +394,12 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   file.compiled.analysis = analysis;
 
   // Run linter (backward compat: older WASM may lack lint)
+  let lintMs: number | null = null;
   if (typeof wasmHost!.lint === "function") {
     try {
-      file.compiled.lintDiagnostics = wasmHost!.lint(file.filename) ?? [];
+      const t0 = performance.now();
+      file.compiled.lintDiagnostics = wasmHost!.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
+      lintMs = performance.now() - t0;
     } catch {
       file.compiled.lintDiagnostics = [];
     }
@@ -372,9 +408,12 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   }
 
   // Retrieve TSX types output via dedicated API (backward compat: older WASM may lack getIde)
+  let tsxMs: number | null = null;
   if (typeof wasmHost!.getIde === "function") {
     try {
+      const t0 = performance.now();
       const tsx = wasmHost!.getIde(file.filename, profile);
+      tsxMs = performance.now() - t0;
       applyTsxOutput(file, tsx);
     } catch {
       applyTsxOutput(file, null);
@@ -384,9 +423,12 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   }
 
   // Retrieve public API output (minimal .d.ts declarations)
+  let tscMs: number | null = null;
   if (typeof wasmHost!.getPublicApi === "function") {
     try {
+      const t0 = performance.now();
       const tsc = wasmHost!.getPublicApi(file.filename);
+      tscMs = performance.now() - t0;
       file.compiled.tscCode = tsc?.code ?? "";
     } catch {
       file.compiled.tscCode = "";
@@ -440,13 +482,18 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   }
 
   return {
-    verterNew: null,
     verterNewJs: performance.now() - start,
     parseDurationMs: upsertResult.parseDurationMs ?? null,
+    scriptMs,
+    templateMs,
+    styleMs,
+    tsxMs,
+    tscMs,
+    lintMs,
   };
 }
 
-function compileTsWithHost(file: File, options: CompilerOptions | undefined): CompileTiming {
+function compileTsWithHost(file: File, options: CompilerOptions | undefined, disabledRules?: ReadonlySet<string>): CompileTiming {
   const start = performance.now();
   const vueFilename = file.filename.replace(/\.ts$/, ".vue");
   const sfc = `<script setup lang="ts">\n${file.code}\n</script>`;
@@ -488,7 +535,7 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
   // Run linter
   if (typeof wasmHost!.lint === "function") {
     try {
-      file.compiled.lintDiagnostics = wasmHost!.lint(vueFilename) ?? [];
+      file.compiled.lintDiagnostics = wasmHost!.lint(vueFilename, buildLintConfig(disabledRules)) ?? [];
     } catch {
       file.compiled.lintDiagnostics = [];
     }
@@ -521,9 +568,14 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
   }
 
   return {
-    verterNew: null,
     verterNewJs: performance.now() - start,
     parseDurationMs: upsertResult.parseDurationMs ?? null,
+    scriptMs: null,
+    templateMs: null,
+    styleMs: null,
+    tsxMs: null,
+    tscMs: null,
+    lintMs: null,
   };
 }
 
@@ -533,23 +585,24 @@ const HOST_UNAVAILABLE_ERROR =
 export async function compileFile(
   file: File,
   options?: CompilerOptions,
+  disabledRules?: ReadonlySet<string>,
 ): Promise<CompileTiming> {
   await initCompilers();
-  const timing: CompileTiming = { verterNew: null, verterNewJs: null, parseDurationMs: null };
+  const timing: CompileTiming = { verterNewJs: null, parseDurationMs: null, scriptMs: null, templateMs: null, styleMs: null, tsxMs: null, tscMs: null, lintMs: null };
 
   if (file.filename.endsWith(".vue")) {
     if (!wasmHost) {
       file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
       return timing;
     }
-    return compileVueWithHost(file, options);
+    return compileVueWithHost(file, options, disabledRules);
   } else if (file.filename.endsWith(".ts")) {
     if (!wasmHost) {
       file.compiled.js = "";
       file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
       return timing;
     }
-    return compileTsWithHost(file, options);
+    return compileTsWithHost(file, options, disabledRules);
   } else if (file.filename.endsWith(".js")) {
     file.compiled.js = file.code;
     file.compiled.errors = [];

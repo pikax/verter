@@ -82,12 +82,18 @@ export interface CompilerOptions {
 }
 
 export interface CompileTiming {
-  verterNew: number | null; // ms for new_impl codegen pipeline (reported by Rust)
-  verterNewJs: number | null; // ms for new_impl codegen (JS-measured)
+  verterNewJs: number | null; // ms for total compilation (JS-measured)
   parseDurationMs: number | null; // ms for Rust parse phase
+  scriptMs: number | null; // ms for script codegen
+  templateMs: number | null; // ms for template codegen
+  styleMs: number | null; // ms for style codegen (total)
+  tsxMs: number | null; // ms for IDE/TSX codegen
+  tscMs: number | null; // ms for public API codegen
+  lintMs: number | null; // ms for lint execution
 }
 
 export type TypeCheckerMode = "tsc" | "tsgo";
+export type TypeCheckerStatus = "active" | "unavailable" | "initializing";
 
 export interface StoreState {
   files: Record<string, File>;
@@ -101,6 +107,7 @@ export interface StoreState {
   compilerOptions: CompilerOptions;
   compileTiming: CompileTiming;
   typeChecker: TypeCheckerMode;
+  typeCheckerStatus: TypeCheckerStatus;
   currentProjectName: string | null;
   editableOutput: boolean;
   tsxUserEdited: boolean;

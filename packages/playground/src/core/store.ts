@@ -6,9 +6,10 @@ import {
   type CompilerOptions,
   type CompileTiming,
   type TypeCheckerMode,
+  type TypeCheckerStatus,
   type TsDiagnosticEntry,
 } from "./types";
-import { compileFile, initCompilers, switchWasmVersion } from "./compiler";
+import { compileFile, relintFile, initCompilers, switchWasmVersion } from "./compiler";
 import { getDefaultImportMap, extractVueVersion, type ImportMap } from "./importMap";
 import { serializeToHash, deserializeFromHash, type SerializedState } from "./urlState";
 import type { VersionEntry } from "./versions";
@@ -66,6 +67,10 @@ export interface Store extends StoreState {
   toggleProduction(): void;
   toggleSSR(): void;
   setTypeChecker(mode: TypeCheckerMode): void;
+  setTypeCheckerStatus(status: TypeCheckerStatus): void;
+  disabledRules: Set<string>;
+  toggleLintRule(name: string): void;
+  relint(): void;
   recompile(): Promise<void>;
   switchVerterVersion(entry: VersionEntry): Promise<void>;
   setVueVersion(version: string): void;
@@ -96,15 +101,23 @@ export function useStore(): Store {
     ssr: false,
   });
   const compileTiming = reactive<CompileTiming>({
-    verterNew: null,
     verterNewJs: null,
     parseDurationMs: null,
+    scriptMs: null,
+    templateMs: null,
+    styleMs: null,
+    tsxMs: null,
+    tscMs: null,
+    lintMs: null,
   });
   const typeChecker = ref<TypeCheckerMode>("tsc");
+  const typeCheckerStatus = ref<TypeCheckerStatus>("active");
 
   const verterVersion = ref("local");
   const versionLoading = ref(false);
   const tsDiagnostics: Ref<TsDiagnosticEntry[]> = ref([]);
+
+  const disabledRules = reactive(new Set<string>());
 
   const currentProjectName = ref<string | null>(null);
   const editableOutput = ref(false);
@@ -138,7 +151,12 @@ export function useStore(): Store {
         activeFilename.value = savedState.activeFile;
       }
       if (savedState.outputMode) {
-        outputMode.value = savedState.outputMode;
+        // Redirect removed tabs from old URLs
+        if (savedState.outputMode === "js" || savedState.outputMode === "css" || savedState.outputMode === "tsc" || savedState.outputMode === "types") {
+          outputMode.value = "files";
+        } else {
+          outputMode.value = savedState.outputMode;
+        }
       }
       if (savedState.compilerOptions) {
         Object.assign(compilerOptions, savedState.compilerOptions);
@@ -171,12 +189,17 @@ export function useStore(): Store {
 
     // Compile all files on init and capture timing from the last one compiled
     let lastTiming: CompileTiming = {
-      verterNew: null,
       verterNewJs: null,
       parseDurationMs: null,
+      scriptMs: null,
+      templateMs: null,
+      styleMs: null,
+      tsxMs: null,
+      tscMs: null,
+      lintMs: null,
     };
     for (const file of Object.values(files.value)) {
-      lastTiming = await compileFile(file, compilerOptions);
+      lastTiming = await compileFile(file, compilerOptions, disabledRules);
     }
     Object.assign(compileTiming, lastTiming);
     loading.value = false;
@@ -202,7 +225,7 @@ export function useStore(): Store {
         if (activeFilename.value === IMPORT_MAP_FILENAME) return;
         const file = activeFile.value;
         if (file) {
-          const timing = await compileFile(file, compilerOptions);
+          const timing = await compileFile(file, compilerOptions, disabledRules);
           Object.assign(compileTiming, timing);
           errors.value = file.compiled.errors;
           clearTsxOverride();
@@ -288,7 +311,12 @@ export function useStore(): Store {
   }
 
   function setOutputMode(mode: OutputMode) {
-    outputMode.value = mode;
+    // Redirect removed tabs to files
+    if (mode === "js" || mode === "css" || mode === "tsc" || mode === "types") {
+      outputMode.value = "files";
+    } else {
+      outputMode.value = mode;
+    }
   }
 
   function toggleDarkMode() {
@@ -314,6 +342,10 @@ export function useStore(): Store {
     typeChecker.value = mode;
   }
 
+  function setTypeCheckerStatus(status: TypeCheckerStatus) {
+    typeCheckerStatus.value = status;
+  }
+
   function setVueVersion(version: string) {
     const defaults = getDefaultImportMap(version);
     Object.assign(importMap, defaults);
@@ -323,7 +355,7 @@ export function useStore(): Store {
     if (activeFilename.value === IMPORT_MAP_FILENAME) return;
     const file = activeFile.value;
     if (file) {
-      const timing = await compileFile(file, compilerOptions);
+      const timing = await compileFile(file, compilerOptions, disabledRules);
       Object.assign(compileTiming, timing);
       errors.value = file.compiled.errors;
     }
@@ -382,9 +414,18 @@ export function useStore(): Store {
     clearTsxOverride();
 
     // Recompile all files
-    let lastTiming: CompileTiming = { verterNew: null, verterNewJs: null, parseDurationMs: null };
+    let lastTiming: CompileTiming = {
+      verterNewJs: null,
+      parseDurationMs: null,
+      scriptMs: null,
+      templateMs: null,
+      styleMs: null,
+      tsxMs: null,
+      tscMs: null,
+      lintMs: null,
+    };
     for (const file of Object.values(files.value)) {
-      lastTiming = await compileFile(file, compilerOptions);
+      lastTiming = await compileFile(file, compilerOptions, disabledRules);
     }
     Object.assign(compileTiming, lastTiming);
   }
@@ -393,6 +434,24 @@ export function useStore(): Store {
     projectStorage.deleteProject(name);
     if (currentProjectName.value === name) {
       currentProjectName.value = null;
+    }
+  }
+
+  function toggleLintRule(name: string) {
+    if (disabledRules.has(name)) {
+      disabledRules.delete(name);
+    } else {
+      disabledRules.add(name);
+    }
+  }
+
+  function relint() {
+    if (activeFilename.value === IMPORT_MAP_FILENAME) return;
+    const file = activeFile.value;
+    if (!file) return;
+    const lintMs = relintFile(file, disabledRules);
+    if (lintMs != null) {
+      compileTiming.lintMs = lintMs;
     }
   }
 
@@ -453,7 +512,12 @@ export function useStore(): Store {
     toggleProduction,
     toggleSSR,
     typeChecker,
+    typeCheckerStatus,
     setTypeChecker,
+    setTypeCheckerStatus,
+    disabledRules,
+    toggleLintRule,
+    relint,
     recompile,
     tsDiagnostics,
     switchVerterVersion: switchVersion,
