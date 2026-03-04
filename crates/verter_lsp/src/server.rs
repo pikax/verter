@@ -1890,73 +1890,95 @@ impl LanguageServer for VerterLanguageServer {
             .await;
 
         // Build per-project configuration registry (path aliases + lint configs + vite aliases)
+        // Clone roots out of the mutex before expensive work (Node.js spawn for vite
+        // config, type provider calls) to avoid holding the async mutex across .await points.
         let node_path = crate::tsserver::find_node();
         let vite_config_enabled = self
             .vite_config_enabled
             .load(std::sync::atomic::Ordering::Relaxed);
-        {
-            let roots = self.workspace_roots.lock().await;
-            if !roots.is_empty() {
-                let registry = crate::config::ProjectRegistry::from_workspace_roots(
-                    &roots,
-                    node_path.as_deref(),
-                    vite_config_enabled,
+        let roots_snapshot = self.workspace_roots.lock().await.clone();
+        if !roots_snapshot.is_empty() {
+            let mut registry = crate::config::ProjectRegistry::from_workspace_roots(
+                &roots_snapshot,
+                node_path.as_deref(),
+                vite_config_enabled,
+            );
+
+            // Log discovered projects
+            for project in registry.projects() {
+                tracing::info!(
+                    "project config: root={}, aliases={}, lint_explicit={}",
+                    project.root,
+                    !project.path_resolver.is_empty(),
+                    project.lint_explicitly_configured,
                 );
+            }
 
-                // Log discovered projects
+            // Populate type provider's workspace folders (tsserver uses these
+            // for per-file projectRootPath). Without this, tsserver falls back
+            // to the global workspace root for all files until
+            // did_change_workspace_folders fires.
+            if let Some(tp) = &self.type_provider {
+                let added: Vec<serde_json::Value> = roots_snapshot
+                    .iter()
+                    .map(|uri| {
+                        serde_json::json!({
+                            "uri": uri,
+                            "name": uri.rsplit('/').next().unwrap_or(uri)
+                        })
+                    })
+                    .collect();
+                let _ = tp.update_workspace_folders(added, vec![]).await;
+            }
+
+            // Send discovered paths to tsserver for each project (inferred project fallback)
+            if let Some(tp) = &self.type_provider {
                 for project in registry.projects() {
-                    tracing::info!(
-                        "project config: root={}, aliases={}, lint_explicit={}",
-                        project.root,
-                        !project.path_resolver.is_empty(),
-                        project.lint_explicitly_configured,
-                    );
-                }
+                    let project_root_path = std::path::PathBuf::from(&project.root);
+                    let mut discovery = crate::config::TsConfigDiscovery::new();
+                    discovery.discover(&project_root_path);
 
-                // Send discovered paths to tsserver for each project (inferred project fallback)
-                if let Some(tp) = &self.type_provider {
-                    for project in registry.projects() {
-                        let project_root_path = std::path::PathBuf::from(&project.root);
-                        let mut discovery = crate::config::TsConfigDiscovery::new();
-                        discovery.discover(&project_root_path);
-
-                        // Find the best tsconfig for this project
-                        let candidates = [
-                            discovery.find_config_for(&project_root_path.join("src/dummy.ts")),
-                            discovery.configs().first(),
-                        ];
-                        for candidate in candidates.into_iter().flatten() {
-                            if let Some((base_url, paths)) =
-                                crate::config::TsConfigPathResolver::raw_paths_json(
-                                    &candidate.config_path,
-                                )
-                            {
-                                tracing::info!(
-                                    "configuring tsserver paths for {} (baseUrl: {})",
-                                    project.root,
-                                    base_url,
-                                );
-                                if let Err(e) = tp.configure_paths(&base_url, paths).await {
-                                    tracing::warn!("failed to configure tsserver paths: {e}");
-                                }
-                                break;
+                    // Find the best tsconfig for this project
+                    let candidates = [
+                        discovery.find_config_for(&project_root_path.join("src/dummy.ts")),
+                        discovery.configs().first(),
+                    ];
+                    for candidate in candidates.into_iter().flatten() {
+                        if let Some((base_url, paths)) =
+                            crate::config::TsConfigPathResolver::raw_paths_json(
+                                &candidate.config_path,
+                            )
+                        {
+                            tracing::info!(
+                                "configuring tsserver paths for {} (baseUrl: {})",
+                                project.root,
+                                base_url,
+                            );
+                            if let Err(e) = tp.configure_paths(&base_url, paths).await {
+                                tracing::warn!("failed to configure tsserver paths: {e}");
                             }
+                            break;
                         }
                     }
                 }
+            }
 
-                // Merge VS Code initializationOptions into the fallback linter
+            // Merge VS Code initializationOptions into per-project linters
+            // (for projects without explicit config) and the fallback linter.
+            {
                 if let Some(init_opts) = self.init_lint_options.lock().await.take() {
                     let mut resolved = crate::config::ResolvedLintConfig::default();
                     crate::config::merge_init_options(&mut resolved, &init_opts);
                     if resolved.explicitly_configured {
                         *self.fallback_linter.write() =
-                            verter_diagnostics::Linter::new(resolved.config);
+                            verter_diagnostics::Linter::new(resolved.config.clone());
+                        // Also apply to per-project linters that don't have their own config
+                        registry.apply_default_lint(&resolved.config);
                     }
                 }
-
-                *self.project_registry.write() = Some(registry);
             }
+
+            *self.project_registry.write() = Some(registry);
         }
 
         // Ensure @verter/types is available for TSGO module resolution.
@@ -2299,29 +2321,28 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
-        // Rebuild ProjectRegistry from updated roots
+        // Rebuild ProjectRegistry from updated roots.
+        // Clone roots to release the mutex before expensive work (vite config eval).
         let node_path = crate::tsserver::find_node();
         let vite_config_enabled = self
             .vite_config_enabled
             .load(std::sync::atomic::Ordering::Relaxed);
-        {
-            let roots = self.workspace_roots.lock().await;
-            if !roots.is_empty() {
-                let registry = crate::config::ProjectRegistry::from_workspace_roots(
-                    &roots,
-                    node_path.as_deref(),
-                    vite_config_enabled,
+        let roots_snapshot = self.workspace_roots.lock().await.clone();
+        if !roots_snapshot.is_empty() {
+            let registry = crate::config::ProjectRegistry::from_workspace_roots(
+                &roots_snapshot,
+                node_path.as_deref(),
+                vite_config_enabled,
+            );
+            for project in registry.projects() {
+                tracing::info!(
+                    "project config (rebuilt): root={}, aliases={}, lint_explicit={}",
+                    project.root,
+                    !project.path_resolver.is_empty(),
+                    project.lint_explicitly_configured,
                 );
-                for project in registry.projects() {
-                    tracing::info!(
-                        "project config (rebuilt): root={}, aliases={}, lint_explicit={}",
-                        project.root,
-                        !project.path_resolver.is_empty(),
-                        project.lint_explicitly_configured,
-                    );
-                }
-                *self.project_registry.write() = Some(registry);
             }
+            *self.project_registry.write() = Some(registry);
         }
 
         // Forward to type provider (TSGO supports workspace/didChangeWorkspaceFolders)
@@ -2347,6 +2368,36 @@ impl LanguageServer for VerterLanguageServer {
                 })
                 .collect();
             let _ = tp.update_workspace_folders(added, removed).await;
+        }
+
+        // Scan newly added roots for .vue files in background (so imports resolve)
+        if !event.added.is_empty() {
+            let mut new_root_paths = Vec::new();
+            let mut tsconfig_patterns = Vec::new();
+            for folder in &event.added {
+                let canonical = crate::documents::uri_to_canonical_id_from_str(folder.uri.as_str());
+                let root_path = std::path::PathBuf::from(&canonical);
+                let mut ts_discovery = crate::config::TsConfigDiscovery::new();
+                ts_discovery.discover(&root_path);
+                tsconfig_patterns
+                    .extend(ts_discovery.configs().iter().map(|e| e.pattern.clone()));
+                new_root_paths.push(root_path);
+            }
+            if !new_root_paths.is_empty() {
+                let scanner = crate::workspace_scanner::spawn_workspace_scanner(
+                    crate::workspace_scanner::WorkspaceScannerConfig {
+                        root_paths: new_root_paths,
+                        host: Arc::clone(&self.documents.host),
+                        project_sync: self.project_sync.clone(),
+                        background_synced_files: Arc::clone(&self.background_synced_files),
+                        is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
+                        tsx_profile: self.documents.tsx_profile.read().clone(),
+                        tsconfig_patterns,
+                    },
+                );
+                // Replace the scanner handle so did_open priority signals go to the new one
+                *self.workspace_scanner.lock().await = Some(scanner);
+            }
         }
 
         // Materialise @verter/types in newly added roots

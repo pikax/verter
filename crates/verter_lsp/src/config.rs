@@ -529,11 +529,11 @@ fn strip_trailing_commas(input: &str) -> String {
                 // Trailing comma — skip it, keep the whitespace
                 i += 1;
             } else {
-                result.push(bytes[i] as char);
+                result.push_str(&input[i..i + 1]);
                 i += 1;
             }
         } else {
-            result.push(bytes[i] as char);
+            result.push_str(&input[i..i + 1]);
             i += 1;
         }
     }
@@ -1331,9 +1331,12 @@ impl ProjectRegistry {
     /// Falls back to `None` if no project root is a prefix of the file path.
     pub fn find_project(&self, file_path: &str) -> Option<&ProjectConfig> {
         let normalized = file_path.replace('\\', "/");
-        self.projects
-            .iter()
-            .find(|p| normalized.starts_with(&p.root))
+        self.projects.iter().find(|p| {
+            normalized.starts_with(&p.root)
+                && (normalized.len() == p.root.len()
+                    || p.root.ends_with('/')
+                    || normalized.as_bytes().get(p.root.len()) == Some(&b'/'))
+        })
     }
 
     /// Resolve a path alias for a file, using the file's project-specific resolver.
@@ -1352,6 +1355,19 @@ impl ProjectRegistry {
     /// Get the lint config for a file's project.
     pub fn linter_for(&self, file_path: &str) -> Option<&ProjectConfig> {
         self.find_project(file_path)
+    }
+
+    /// Apply default lint config to projects that don't have explicit lint config.
+    ///
+    /// Used to propagate VS Code `verter.lint` settings to per-project linters
+    /// when those projects don't have their own `.verterrc.json`.
+    pub fn apply_default_lint(&mut self, config: &verter_diagnostics::LintConfig) {
+        for project in &mut self.projects {
+            if !project.lint_explicitly_configured {
+                project.lint_config.config = config.clone();
+                project.linter = verter_diagnostics::Linter::new(config.clone());
+            }
+        }
     }
 
     /// Get all project configs.
@@ -2187,6 +2203,134 @@ export default {{
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn strip_trailing_commas_preserves_multibyte_utf8() {
+        // Multi-byte UTF-8: non-ASCII chars in string values
+        let input = r#"{"desc": "Compilé avec succès", "ok": true,}"#;
+        let result = strip_trailing_commas(input);
+        // Positive: valid JSON after stripping trailing comma
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&result);
+        assert!(parsed.is_ok(), "should produce valid JSON: {result}");
+        let v = parsed.unwrap();
+        assert_eq!(
+            v["desc"].as_str().unwrap(),
+            "Compilé avec succès",
+            "multi-byte chars must be preserved"
+        );
+        // Negative: no trailing comma before }
+        assert!(
+            !result.contains(",}"),
+            "trailing comma should be removed: {result}"
+        );
+    }
+
+    #[test]
+    fn strip_trailing_commas_preserves_cjk_chars() {
+        let input = r#"{"名前": "テスト",}"#;
+        let result = strip_trailing_commas(input);
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&result);
+        assert!(parsed.is_ok(), "should produce valid JSON: {result}");
+        let v = parsed.unwrap();
+        assert_eq!(v["名前"].as_str().unwrap(), "テスト");
+    }
+
+    #[test]
+    fn strip_trailing_commas_roundtrip_bytes() {
+        // Verify that strip_trailing_commas preserves byte-exact content
+        // for any input that has no trailing commas.
+        let input = r#"{"key": "café", "num": 42}"#;
+        let result = strip_trailing_commas(input);
+        assert_eq!(result, input, "no-op input should be byte-exact preserved");
+    }
+
+    #[test]
+    fn strip_trailing_commas_bare_multibyte_outside_strings() {
+        // strip_json_comments may produce output with non-ASCII chars in
+        // positions outside JSON strings (e.g., replaced comments leaving stubs).
+        // Also tests that the full pipeline works: strip_json_comments calls
+        // strip_trailing_commas, so multi-byte content must survive both passes.
+        let input = "{ \"path\": \"@/*\", } // résumé";
+        let result = strip_json_comments(input);
+        // The comment is stripped; trailing comma is stripped
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&result);
+        assert!(parsed.is_ok(), "should produce valid JSON: {result}");
+    }
+
+    #[test]
+    fn find_project_enforces_path_boundary() {
+        // Only /workspace/app exists — NOT /workspace/app-admin.
+        // Without path boundary enforcement, /workspace/app-admin/src/Foo.vue
+        // would incorrectly match /workspace/app because it starts_with "/workspace/app".
+        let registry = ProjectRegistry {
+            projects: vec![ProjectConfig {
+                root: "/workspace/app".to_string(),
+                path_resolver: TsConfigPathResolver::default(),
+                lint_config: ResolvedLintConfig::default(),
+                linter: verter_diagnostics::Linter::default(),
+                lint_explicitly_configured: false,
+            }],
+        };
+
+        // Positive: file in /workspace/app/ should match
+        let project = registry.find_project("/workspace/app/src/Baz.vue");
+        assert!(project.is_some(), "file in /workspace/app/ should match");
+
+        // Negative: file in /workspace/app-admin/ should NOT match /workspace/app
+        let project2 = registry.find_project("/workspace/app-admin/src/Foo.vue");
+        assert!(
+            project2.is_none(),
+            "file in /workspace/app-admin/ must not match /workspace/app"
+        );
+    }
+
+    #[test]
+    fn apply_default_lint_only_affects_non_explicit_projects() {
+        let mut registry = ProjectRegistry {
+            projects: vec![
+                ProjectConfig {
+                    root: "/workspace/explicit/".to_string(),
+                    path_resolver: TsConfigPathResolver::default(),
+                    lint_config: ResolvedLintConfig {
+                        config: verter_diagnostics::LintConfig {
+                            preset: verter_diagnostics::LintPreset::Strict,
+                            ..Default::default()
+                        },
+                        explicitly_configured: true,
+                    },
+                    linter: verter_diagnostics::Linter::default(),
+                    lint_explicitly_configured: true,
+                },
+                ProjectConfig {
+                    root: "/workspace/default/".to_string(),
+                    path_resolver: TsConfigPathResolver::default(),
+                    lint_config: ResolvedLintConfig::default(),
+                    linter: verter_diagnostics::Linter::default(),
+                    lint_explicitly_configured: false,
+                },
+            ],
+        };
+
+        let new_config = verter_diagnostics::LintConfig {
+            preset: verter_diagnostics::LintPreset::All,
+            ..Default::default()
+        };
+        registry.apply_default_lint(&new_config);
+
+        // Positive: non-explicit project gets the default config
+        assert_eq!(
+            registry.projects[1].lint_config.config.preset,
+            verter_diagnostics::LintPreset::All,
+            "non-explicit project should get default lint config"
+        );
+
+        // Negative: explicit project should NOT be overridden
+        assert_eq!(
+            registry.projects[0].lint_config.config.preset,
+            verter_diagnostics::LintPreset::Strict,
+            "explicitly configured project must keep its own config"
+        );
     }
 
     #[test]
