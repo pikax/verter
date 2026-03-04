@@ -612,6 +612,112 @@ pub fn lint_rule_to_ffi_metadata(rule: &dyn verter_diagnostics::LintRule) -> Ffi
     }
 }
 
+// ── Offset encoding conversion ──────────────────────────────────
+
+/// Target encoding for offset conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffsetEncoding {
+    /// UTF-8 byte offsets (no conversion needed).
+    Utf8,
+    /// UTF-16 code units (JavaScript, default LSP).
+    Utf16,
+    /// Unicode scalar values (codepoints).
+    Utf32,
+}
+
+/// Convert a UTF-8 byte offset to the target encoding's offset.
+///
+/// The `text` must be the string the byte offset refers to (either SFC source
+/// or generated TSX). The function counts encoding units from the start of
+/// `text` up to `byte_offset`.
+pub fn convert_offset(text: &str, byte_offset: u32, encoding: OffsetEncoding) -> u32 {
+    match encoding {
+        OffsetEncoding::Utf8 => byte_offset,
+        OffsetEncoding::Utf16 => utf8_to_utf16_offset(text, byte_offset),
+        OffsetEncoding::Utf32 => utf8_to_utf32_offset(text, byte_offset),
+    }
+}
+
+/// Convert a UTF-8 byte offset to UTF-16 code unit offset.
+pub fn utf8_to_utf16_offset(text: &str, byte_offset: u32) -> u32 {
+    let bytes = text.as_bytes();
+    let limit = (byte_offset as usize).min(bytes.len());
+    let mut utf16_offset: u32 = 0;
+    let mut i = 0;
+    while i < limit {
+        let b = bytes[i];
+        let char_len = if b < 0x80 {
+            1
+        } else if b < 0xE0 {
+            2
+        } else if b < 0xF0 {
+            3
+        } else {
+            4
+        };
+        // 4-byte UTF-8 sequences (astral plane) encode as 2 UTF-16 code units (surrogate pair)
+        utf16_offset += if char_len == 4 { 2 } else { 1 };
+        i += char_len;
+    }
+    utf16_offset
+}
+
+/// Convert a UTF-8 byte offset to UTF-32 (codepoint) offset.
+fn utf8_to_utf32_offset(text: &str, byte_offset: u32) -> u32 {
+    let bytes = text.as_bytes();
+    let limit = (byte_offset as usize).min(bytes.len());
+    let mut codepoints: u32 = 0;
+    let mut i = 0;
+    while i < limit {
+        let b = bytes[i];
+        let char_len = if b < 0x80 {
+            1
+        } else if b < 0xE0 {
+            2
+        } else if b < 0xF0 {
+            3
+        } else {
+            4
+        };
+        codepoints += 1;
+        i += char_len;
+    }
+    codepoints
+}
+
+/// Input for a single binding's source span conversion.
+pub struct DestructuredBindingInput<'a> {
+    pub name: &'a str,
+    pub source_start: u32,
+    pub source_end: u32,
+}
+
+/// Convert destructured block metadata from UTF-8 to the target encoding.
+///
+/// `sfc_source` is the original SFC text (for converting source spans).
+/// `tsx_code` is the generated TSX text (for converting block_start/block_end).
+pub fn convert_destructured_block_meta(
+    bindings: &[DestructuredBindingInput<'_>],
+    block_start: u32,
+    block_end: u32,
+    sfc_source: &str,
+    tsx_code: &str,
+    encoding: OffsetEncoding,
+) -> FfiDestructuredBlockMeta {
+    FfiDestructuredBlockMeta {
+        bindings: bindings
+            .iter()
+            .map(|b| FfiDestructuredBinding {
+                name: b.name.to_string(),
+                source_start: convert_offset(sfc_source, b.source_start, encoding),
+                source_end: convert_offset(sfc_source, b.source_end, encoding),
+            })
+            .collect(),
+        block_start: convert_offset(tsx_code, block_start, encoding),
+        block_end: convert_offset(tsx_code, block_end, encoding),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1738,5 +1844,46 @@ mod tests {
             "continuation byte of é clamps to its char start"
         );
         assert_eq!(byte_offset_to_utf16(source, 3), 2); // after 'é'
+    }
+
+    // ── Offset encoding conversion tests ────────────────────────
+
+    #[test]
+    fn utf8_to_utf16_ascii_identity() {
+        assert_eq!(utf8_to_utf16_offset("hello world", 5), 5);
+    }
+
+    #[test]
+    fn utf8_to_utf16_cjk() {
+        // "日本" = 2 CJK chars, 3 bytes each = 6 bytes
+        let text = "日本abc";
+        assert_eq!(utf8_to_utf16_offset(text, 0), 0);
+        assert_eq!(utf8_to_utf16_offset(text, 3), 1); // after first CJK
+        assert_eq!(utf8_to_utf16_offset(text, 6), 2); // after second CJK
+        assert_eq!(utf8_to_utf16_offset(text, 7), 3); // after 'a'
+    }
+
+    #[test]
+    fn utf8_to_utf16_emoji_surrogate() {
+        // 😀 = 4 bytes UTF-8, 2 code units UTF-16
+        let text = "a😀b";
+        assert_eq!(utf8_to_utf16_offset(text, 0), 0);
+        assert_eq!(utf8_to_utf16_offset(text, 1), 1); // after 'a'
+        assert_eq!(utf8_to_utf16_offset(text, 5), 3); // after emoji (1+2)
+        assert_eq!(utf8_to_utf16_offset(text, 6), 4); // after 'b'
+    }
+
+    #[test]
+    fn convert_offset_utf8_passthrough() {
+        assert_eq!(convert_offset("hello", 3, OffsetEncoding::Utf8), 3);
+    }
+
+    #[test]
+    fn utf8_to_utf32_basic() {
+        let text = "a😀b";
+        assert_eq!(utf8_to_utf32_offset(text, 0), 0);
+        assert_eq!(utf8_to_utf32_offset(text, 1), 1); // after 'a'
+        assert_eq!(utf8_to_utf32_offset(text, 5), 2); // after emoji (1 codepoint)
+        assert_eq!(utf8_to_utf32_offset(text, 6), 3); // after 'b'
     }
 }

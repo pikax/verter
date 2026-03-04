@@ -203,7 +203,10 @@ mod tests {
         let json = serde_json::to_string(&diag).expect("serialize");
 
         // Must be a JSON object, not an array or other structure
-        assert!(json.starts_with('{'), "serialized output must be a JSON object");
+        assert!(
+            json.starts_with('{'),
+            "serialized output must be a JSON object"
+        );
         assert!(json.ends_with('}'), "serialized output must end with }}");
 
         // Verify all expected fields are present as direct keys

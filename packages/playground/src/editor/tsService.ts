@@ -124,51 +124,37 @@ const TS_KIND_TO_MONACO: Record<string, number> = {
   link: 0,
 };
 
-/**
- * Convert a UTF-8 byte offset to a JavaScript string index (UTF-16 code units).
- */
-function utf8ByteOffsetToJsOffset(source: string, byteOffset: number): number {
-  let jsIdx = 0;
-  let byteIdx = 0;
-  while (byteIdx < byteOffset && jsIdx < source.length) {
-    const codePoint = source.codePointAt(jsIdx)!;
-    const charByteLen =
-      codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
-    byteIdx += charByteLen;
-    jsIdx += codePoint > 0xffff ? 2 : 1; // surrogate pair = 2 UTF-16 code units
-  }
-  return jsIdx;
+/** Structured metadata for the destructured block, provided by the Rust compiler. */
+export interface DestructuredBinding {
+  name: string;
+  /** SFC-absolute start offset (UTF-16 code units). */
+  sourceStart: number;
+  /** SFC-absolute end offset (UTF-16 code units). */
+  sourceEnd: number;
 }
 
-/**
- * Search backward from a TSX offset for a `/*start,end*​/` offset comment pattern.
- * These comments are emitted by the Rust IDE codegen in the `___VERTER___unwrapped`
- * destructuring block, and encode the SFC-absolute byte offsets of the original
- * declaration. Returns the mapped Vue span (JS string indices) or null.
- */
-export function resolveOffsetComment(
-  tsxCode: string,
-  vueCode: string,
-  tsxOffset: number,
-): MappedSpan | null {
-  const before = tsxCode.lastIndexOf("/*", tsxOffset);
-  if (before === -1) return null;
-  const commentEnd = tsxCode.indexOf("*/", before);
-  if (commentEnd === -1 || commentEnd >= tsxOffset) return null;
-  const content = tsxCode.slice(before + 2, commentEnd);
-  const match = /^(\d+),(\d+)$/.exec(content);
-  if (!match) return null;
-  return {
-    start: utf8ByteOffsetToJsOffset(vueCode, parseInt(match[1], 10)),
-    end: utf8ByteOffsetToJsOffset(vueCode, parseInt(match[2], 10)),
-  };
+/** Metadata for the destructured block region in the generated TSX. */
+export interface DestructuredBlockMeta {
+  bindings: DestructuredBinding[];
+  /** Start offset of the destructured block in the generated TSX (UTF-16). */
+  blockStart: number;
+  /** End offset of the destructured block in the generated TSX (UTF-16). */
+  blockEnd: number;
 }
 
 const DESTRUCTURED_START = "/* verter-destructured-start */";
 const DESTRUCTURED_END = "/* verter-destructured-end */";
 
-/** Check if a TSX offset falls inside the verter-destructured boundary markers. */
-function isInsideDestructuredBlock(tsxCode: string, tsxOffset: number): boolean {
+/** Check if a TSX offset falls inside the destructured block. */
+function isInsideDestructuredBlock(
+  meta: DestructuredBlockMeta | null,
+  tsxCode: string,
+  tsxOffset: number,
+): boolean {
+  if (meta) {
+    return tsxOffset >= meta.blockStart && tsxOffset < meta.blockEnd;
+  }
+  // Fallback: string search for boundary markers
   const start = tsxCode.indexOf(DESTRUCTURED_START);
   if (start === -1) return false;
   const end = tsxCode.indexOf(DESTRUCTURED_END, start);
@@ -177,46 +163,65 @@ function isInsideDestructuredBlock(tsxCode: string, tsxOffset: number): boolean 
 }
 
 /**
+ * Resolve a TSX offset inside the destructured block to its SFC source span.
+ * Uses structured metadata (pre-converted to UTF-16) — no comment parsing needed.
+ */
+function resolveDestructuredBinding(
+  meta: DestructuredBlockMeta | null,
+  tsxCode: string,
+  tsxOffset: number,
+): MappedSpan | null {
+  if (!meta) return null;
+  // Find the closest binding whose name appears before tsxOffset
+  // by searching for each binding name near the offset
+  for (let i = meta.bindings.length - 1; i >= 0; i--) {
+    const b = meta.bindings[i];
+    const namePos = tsxCode.lastIndexOf(b.name, tsxOffset);
+    if (namePos !== -1 && namePos + b.name.length >= tsxOffset && namePos >= meta.blockStart) {
+      return { start: b.sourceStart, end: b.sourceEnd };
+    }
+  }
+  return null;
+}
+
+/**
  * Expand a TS6198 ("All destructured elements are unused") diagnostic into
- * individual TS6133-like diagnostics for each binding in the same destructuring
- * statement. Finds the destructuring statement containing `tsxStart` by scanning
- * backward for `const {` / `let {` and forward for `___VERTER___unwrapped`.
+ * individual TS6133-like diagnostics for each binding, using structured metadata.
  */
 function expandTs6198ToIndividualDiagnostics(
+  meta: DestructuredBlockMeta | null,
   tsxCode: string,
-  vueCode: string,
   tsxStart: number,
   severity: MappedDiagnostic["severity"],
+  vueCode: string,
 ): MappedDiagnostic[] {
-  // Find the end of this destructuring statement
+  if (!meta || meta.bindings.length === 0) return [];
+
+  // Find which destructuring statement this diagnostic belongs to.
+  // Look for the "const {" or "let {" before tsxStart and the "___VERTER___unwrapped" after.
   const unwrappedMarker = "___VERTER___unwrapped";
   const stmtEnd = tsxCode.indexOf(unwrappedMarker, tsxStart);
   if (stmtEnd === -1) return [];
 
-  // Find the start: search backward for "const {" or "let {"
   const constIdx = tsxCode.lastIndexOf("const {", tsxStart);
   const letIdx = tsxCode.lastIndexOf("let {", tsxStart);
   const stmtStart = Math.max(constIdx, letIdx);
   if (stmtStart === -1) return [];
 
-  // Find all offset comments /*start,end*/ in this statement
+  // Collect all bindings whose names appear in this statement range
   const stmtText = tsxCode.slice(stmtStart, stmtEnd);
-  const offsetCommentRegex = /\/\*(\d+),(\d+)\*\//g;
   const diagnostics: MappedDiagnostic[] = [];
-  let match;
-  while ((match = offsetCommentRegex.exec(stmtText)) !== null) {
-    const byteStart = parseInt(match[1], 10);
-    const byteEnd = parseInt(match[2], 10);
-    const jsStart = utf8ByteOffsetToJsOffset(vueCode, byteStart);
-    const jsEnd = utf8ByteOffsetToJsOffset(vueCode, byteEnd);
-    const name = vueCode.slice(jsStart, jsEnd);
-    diagnostics.push({
-      message: `'${name}' is declared but its value is never read.`,
-      start: jsStart,
-      end: jsEnd,
-      severity,
-      code: 6133,
-    });
+  for (const b of meta.bindings) {
+    if (stmtText.includes(b.name)) {
+      const name = vueCode.slice(b.sourceStart, b.sourceEnd);
+      diagnostics.push({
+        message: `'${name}' is declared but its value is never read.`,
+        start: b.sourceStart,
+        end: b.sourceEnd,
+        severity,
+        code: 6133,
+      });
+    }
   }
   return diagnostics;
 }
@@ -233,6 +238,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   private currentTsxPath: string | null = null;
   private currentTsxCode: string | null = null;
   private currentVueCode: string | null = null;
+  private currentDestructuredBlock: DestructuredBlockMeta | null = null;
 
   async init(options?: { verterTypesContent?: string; vueVersion?: string }): Promise<void> {
     if (this.initialized) return;
@@ -295,6 +301,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     tsxCode: string,
     vueCode: string,
     sourceMapJson: string | null,
+    destructuredBlock?: DestructuredBlockMeta | null,
   ): Promise<MappedDiagnostic[]> {
     if (!this.initialized) return [];
 
@@ -302,6 +309,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     this.currentTsxPath = tsxPath;
     this.currentTsxCode = tsxCode;
     this.currentVueCode = vueCode;
+    this.currentDestructuredBlock = destructuredBlock ?? null;
 
     // Create mapper if source map is available
     if (sourceMapJson && sourceMapJson.length > 2) {
@@ -327,13 +335,14 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
       // Expand TS6198 ("All destructured elements are unused") inside the
       // verter-destructured block into individual TS6133-like diagnostics for
-      // each binding, mapped to original declarations via offset comments.
-      if (d.code === 6198 && tsxCode && isInsideDestructuredBlock(tsxCode, tsxStart)) {
+      // each binding, using structured metadata.
+      if (d.code === 6198 && tsxCode && isInsideDestructuredBlock(this.currentDestructuredBlock, tsxCode, tsxStart)) {
         const expanded = expandTs6198ToIndividualDiagnostics(
+          this.currentDestructuredBlock,
           tsxCode,
-          vueCode,
           tsxStart,
           d.category === 1 ? "error" : d.category === 0 ? "warning" : "info",
+          vueCode,
         );
         mapped.push(...expanded);
         continue;
@@ -343,18 +352,17 @@ export class TypeScriptService implements TypeScriptServiceBridge {
       let vueEnd: number | null = null;
 
       // For positions inside the destructured block, skip the source map —
-      // it can't properly map synthetic code. Use offset comments instead,
-      // which encode the original declaration's SFC-absolute position.
-      const inDestructuredBlock = tsxCode && isInsideDestructuredBlock(tsxCode, tsxStart);
+      // it can't properly map synthetic code. Use structured metadata instead.
+      const inDestructuredBlock = tsxCode && isInsideDestructuredBlock(this.currentDestructuredBlock, tsxCode, tsxStart);
 
       if (!inDestructuredBlock && this.currentMapper) {
         vueStart = this.currentMapper.tsxOffsetToVueOffset(tsxStart);
         vueEnd = this.currentMapper.tsxOffsetToVueOffset(tsxEnd);
       }
 
-      // Fall back to offset comment when source map fails or was skipped
-      if (vueStart == null && this.currentTsxCode && this.currentVueCode) {
-        const resolved = resolveOffsetComment(this.currentTsxCode, this.currentVueCode, tsxStart);
+      // Fall back to structured metadata when source map fails or was skipped
+      if (vueStart == null && this.currentTsxCode) {
+        const resolved = resolveDestructuredBinding(this.currentDestructuredBlock, this.currentTsxCode, tsxStart);
         if (resolved) {
           vueStart = resolved.start;
           vueEnd = resolved.end;
@@ -385,6 +393,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     tsxCode: string,
     vueCode: string,
     sourceMapJson: string | null,
+    destructuredBlock?: DestructuredBlockMeta | null,
   ): Promise<void> {
     if (!this.initialized) return;
     // Skip if nothing changed
@@ -394,6 +403,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     this.currentTsxPath = tsxPath;
     this.currentTsxCode = tsxCode;
     this.currentVueCode = vueCode;
+    this.currentDestructuredBlock = destructuredBlock ?? null;
 
     if (sourceMapJson && sourceMapJson.length > 2) {
       this.currentMapper = new SourceMapMapper(sourceMapJson, tsxCode, vueCode);
@@ -637,20 +647,13 @@ export class TypeScriptService implements TypeScriptServiceBridge {
       if (mappedEnd != null) return { start: mappedStart ?? start, end: mappedEnd };
     }
 
-    // Source map failed — try offset comment fallback
-    const resolved = this.resolveFromOffsetComment(start);
-    if (resolved) return resolved;
+    // Source map failed — try structured metadata fallback
+    if (this.currentTsxCode && this.currentDestructuredBlock) {
+      const resolved = resolveDestructuredBinding(this.currentDestructuredBlock, this.currentTsxCode, start);
+      if (resolved) return resolved;
+    }
 
     return null;
-  }
-
-  /**
-   * Search backward from a TSX offset for a `/*start,end*​/` offset comment pattern.
-   * Delegates to the standalone `resolveOffsetComment` function.
-   */
-  private resolveFromOffsetComment(tsxOffset: number): MappedSpan | null {
-    if (!this.currentTsxCode || !this.currentVueCode) return null;
-    return resolveOffsetComment(this.currentTsxCode, this.currentVueCode, tsxOffset);
   }
 
   dispose(): void {
@@ -663,5 +666,6 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     this.currentTsxPath = null;
     this.currentTsxCode = null;
     this.currentVueCode = null;
+    this.currentDestructuredBlock = null;
   }
 }

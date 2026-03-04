@@ -49,6 +49,7 @@ export interface TypeScriptServiceBridge {
     tsxCode: string,
     vueCode: string,
     sourceMapJson: string | null,
+    destructuredBlock?: import("../core/types").DestructuredBlockMeta | null,
   ) => Promise<void>;
 }
 
@@ -132,7 +133,7 @@ export function registerLspProviders(
     const tsxCode = file.compiled.types;
     if (!tsxCode) return;
     const sourceMap = file.compiled.typesSourceMap || null;
-    await tsBridge.ensureTsxCurrent(file.filename, tsxCode, file.code, sourceMap);
+    await tsBridge.ensureTsxCurrent(file.filename, tsxCode, file.code, sourceMap, file.compiled.destructuredBlock);
   }
 
   // Hover provider

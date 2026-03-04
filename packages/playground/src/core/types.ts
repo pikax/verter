@@ -6,11 +6,18 @@ export interface HostDiagnostic {
   spanEnd?: number;
 }
 
+export interface DestructuredBlockMeta {
+  bindings: Array<{ name: string; sourceStart: number; sourceEnd: number }>;
+  blockStart: number;
+  blockEnd: number;
+}
+
 export interface CompiledFile {
   js: string;
   css: string;
   types: string;
   typesSourceMap: string;
+  destructuredBlock: DestructuredBlockMeta | null;
   /** Raw template render function code (before merging into assembled JS). */
   templateCode: string;
   verterSourceMap: string;
@@ -32,6 +39,7 @@ export class File {
     css: "",
     types: "",
     typesSourceMap: "",
+    destructuredBlock: null,
     templateCode: "",
     verterSourceMap: "",
     tscCode: "",

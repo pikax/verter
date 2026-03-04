@@ -241,6 +241,29 @@ pub struct FfiVirtualFileResponse {
     pub meta: FfiVirtualMeta,
 }
 
+/// A single destructured binding's source mapping (target encoding).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiDestructuredBinding {
+    /// Binding identifier name.
+    pub name: String,
+    /// SFC-absolute start offset of the original declaration (target encoding).
+    pub source_start: u32,
+    /// SFC-absolute end offset of the original declaration (target encoding).
+    pub source_end: u32,
+}
+
+/// Metadata for the destructured block region in the generated TSX (target encoding).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiDestructuredBlockMeta {
+    pub bindings: Vec<FfiDestructuredBinding>,
+    /// Start offset of the destructured block in the generated TSX (target encoding).
+    pub block_start: u32,
+    /// End offset of the destructured block in the generated TSX (target encoding).
+    pub block_end: u32,
+}
+
 /// IDE output for type checking (TSX or JSX, dedicated API, not a virtual file).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -248,6 +271,7 @@ pub struct FfiIdeResponse {
     pub code: String,
     pub source_map: Option<String>,
     pub is_jsx: bool,
+    pub destructured_block: Option<FfiDestructuredBlockMeta>,
 }
 
 /// Result of removing a file from the host.

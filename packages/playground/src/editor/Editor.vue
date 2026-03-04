@@ -228,6 +228,7 @@ async function syncTypeScript() {
       tsxCode,
       file.code,
       diagnosticsSourceMap,
+      file.compiled.destructuredBlock,
     );
 
     // Discard results if a newer sync was requested while we were waiting

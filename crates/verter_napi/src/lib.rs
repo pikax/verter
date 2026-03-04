@@ -431,12 +431,29 @@ pub struct NapiVirtualFileResponse {
     pub meta: NapiVirtualMeta,
 }
 
+/// A single destructured binding's source mapping (UTF-16 for JS).
+#[napi(object)]
+pub struct NapiDestructuredBinding {
+    pub name: String,
+    pub sourceStart: u32,
+    pub sourceEnd: u32,
+}
+
+/// Metadata for the destructured block region in the generated TSX (UTF-16 for JS).
+#[napi(object)]
+pub struct NapiDestructuredBlockMeta {
+    pub bindings: Vec<NapiDestructuredBinding>,
+    pub blockStart: u32,
+    pub blockEnd: u32,
+}
+
 /// IDE output for type checking (dedicated API, not a virtual file).
 #[napi(object)]
 pub struct NapiIdeResponse {
     pub code: String,
     pub sourceMap: Option<String>,
     pub isJsx: bool,
+    pub destructuredBlock: Option<NapiDestructuredBlockMeta>,
 }
 
 /// TSC output for TypeScript declaration generation (macro-extraction only).
@@ -1058,10 +1075,47 @@ impl NapiVerterHost {
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.get_ide(&canonical_id, &host_profile)
         }))?;
-        Ok(result.map(|r| NapiIdeResponse {
-            code: r.code.to_string(),
-            sourceMap: r.source_map.map(|s| s.to_string()),
-            isJsx: r.is_jsx,
+        let sfc_source = self.inner.get_source(&canonical_id);
+        Ok(result.map(|r| {
+            let destructured_block = r.destructured_block.as_ref().map(|meta| {
+                let sfc = sfc_source.as_deref().unwrap_or("");
+                let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
+                    .bindings
+                    .iter()
+                    .map(|b| verter_ffi::convert::DestructuredBindingInput {
+                        name: &b.name,
+                        source_start: b.source_span.start,
+                        source_end: b.source_span.end,
+                    })
+                    .collect();
+                let ffi = verter_ffi::convert::convert_destructured_block_meta(
+                    &bindings,
+                    meta.block_start,
+                    meta.block_end,
+                    sfc,
+                    &r.code,
+                    verter_ffi::convert::OffsetEncoding::Utf16,
+                );
+                NapiDestructuredBlockMeta {
+                    bindings: ffi
+                        .bindings
+                        .into_iter()
+                        .map(|b| NapiDestructuredBinding {
+                            name: b.name,
+                            sourceStart: b.source_start,
+                            sourceEnd: b.source_end,
+                        })
+                        .collect(),
+                    blockStart: ffi.block_start,
+                    blockEnd: ffi.block_end,
+                }
+            });
+            NapiIdeResponse {
+                code: r.code.to_string(),
+                sourceMap: r.source_map.map(|s| s.to_string()),
+                isJsx: r.is_jsx,
+                destructuredBlock: destructured_block,
+            }
         }))
     }
 

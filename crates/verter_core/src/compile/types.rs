@@ -333,6 +333,28 @@ pub struct VerterCustomBlock {
     pub attrs: Vec<(String, String)>,
 }
 
+/// A single destructured binding's source mapping.
+/// All offsets are UTF-8 byte offsets (Rust-internal).
+#[derive(Debug, Clone)]
+pub struct DestructuredBindingInfo {
+    /// Binding identifier name (e.g. "count").
+    pub name: String,
+    /// SFC-absolute source span of the original declaration identifier.
+    pub source_span: crate::common::Span,
+}
+
+/// Metadata for the destructured block region in the generated TSX.
+/// Enables direct diagnostic-to-SFC mapping without parsing offset comments.
+#[derive(Debug, Clone)]
+pub struct DestructuredBlockMeta {
+    /// Bindings in declaration order.
+    pub bindings: Vec<DestructuredBindingInfo>,
+    /// UTF-8 byte offset of the destructured block start in the generated TSX.
+    pub block_start: u32,
+    /// UTF-8 byte offset of the destructured block end in the generated TSX.
+    pub block_end: u32,
+}
+
 /// Generated IDE block for type checking (TSX or JSX).
 pub struct VerterTsxBlock {
     /// The generated TSX/JSX code.
@@ -343,4 +365,7 @@ pub struct VerterTsxBlock {
     pub duration_ms: f64,
     /// `true` for JavaScript SFCs (.jsx output), `false` for TypeScript (.tsx output).
     pub is_jsx: bool,
+    /// Structured metadata for the destructured block region, if present.
+    /// Enables direct diagnostic-to-SFC mapping without parsing offset comments.
+    pub destructured_block: Option<DestructuredBlockMeta>,
 }

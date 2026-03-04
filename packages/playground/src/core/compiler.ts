@@ -67,6 +67,11 @@ interface HostVirtualNodeKind {
 interface HostIdeResponse {
   code: string;
   sourceMap?: string;
+  destructuredBlock?: {
+    bindings: Array<{ name: string; sourceStart: number; sourceEnd: number }>;
+    blockStart: number;
+    blockEnd: number;
+  } | null;
 }
 
 interface HostDiagnosticsSnapshot {
@@ -259,6 +264,7 @@ export function mergeRenderIntoComponent(code: string): string {
 export function applyTsxOutput(file: File, tsx: HostIdeResponse | null | undefined): void {
   file.compiled.types = tsx?.code ?? "";
   file.compiled.typesSourceMap = tsx?.sourceMap ?? "";
+  file.compiled.destructuredBlock = tsx?.destructuredBlock ?? null;
 }
 
 /** Build a LintConfig object with disabled rules for the WASM host. */

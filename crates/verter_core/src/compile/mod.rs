@@ -827,11 +827,25 @@ pub fn compile(
             tsx_code.push_str(&tsx_script_result.type_constructs);
         }
 
+        // Compute block_start/block_end from boundary markers in the final TSX code
+        let mut destructured_block = tsx_script_result.destructured_block;
+        if let Some(ref mut meta) = destructured_block {
+            const START_MARKER: &str = "/* verter-destructured-start */";
+            const END_MARKER: &str = "/* verter-destructured-end */";
+            if let Some(start) = tsx_code.find(START_MARKER) {
+                meta.block_start = start as u32;
+                if let Some(end) = tsx_code.find(END_MARKER) {
+                    meta.block_end = (end + END_MARKER.len()) as u32;
+                }
+            }
+        }
+
         Some(VerterTsxBlock {
             code: tsx_code,
             source_map: tsx_sm,
             duration_ms: tsx_dur,
             is_jsx,
+            destructured_block,
         })
     } else {
         None
@@ -848,6 +862,7 @@ pub fn compile(
             source_map: tsc_out.source_map,
             duration_ms: tsc_dur,
             is_jsx: false,
+            destructured_block: None,
         })
     } else {
         None

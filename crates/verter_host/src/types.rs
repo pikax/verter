@@ -744,6 +744,7 @@ pub(crate) struct CachedTsx {
     pub(crate) code: Arc<str>,
     pub(crate) source_map: Option<Arc<str>>,
     pub(crate) is_jsx: bool,
+    pub(crate) destructured_block: Option<verter_core::compile::types::DestructuredBlockMeta>,
 }
 
 /// Response from [`VerterHost::get_ide`].
@@ -755,6 +756,8 @@ pub struct IdeResponse {
     pub source_map: Option<Arc<str>>,
     /// `true` for JavaScript SFCs (.jsx output), `false` for TypeScript (.tsx output).
     pub is_jsx: bool,
+    /// Structured metadata for the destructured block region, if present.
+    pub destructured_block: Option<verter_core::compile::types::DestructuredBlockMeta>,
 }
 
 /// Response from [`VerterHost::get_public_api`].

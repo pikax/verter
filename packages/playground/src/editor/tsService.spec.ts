@@ -3,10 +3,11 @@ import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { TypeScriptService, resolveOffsetComment } from "./tsService";
+import { TypeScriptService } from "./tsService";
+import type { DestructuredBlockMeta } from "./tsService";
 import { SourceMapMapper } from "./sourceMapMapper";
 
-async function generateRealTsxOutput(vueSource: string): Promise<{ code: string; sourceMap: string }> {
+async function generateRealTsxOutput(vueSource: string): Promise<{ code: string; sourceMap: string; destructuredBlock: DestructuredBlockMeta | null }> {
   const thisDir = dirname(fileURLToPath(import.meta.url));
   const wasmJs = resolve(thisDir, "../../../wasm/wasm/verter_wasm.js");
   const wasmBin = resolve(thisDir, "../../../wasm/wasm/verter_wasm_bg.wasm");
@@ -40,7 +41,7 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
     throw new Error("expected host.getIde() to return code + sourceMap");
   }
 
-  return { code: tsx.code, sourceMap: tsx.sourceMap };
+  return { code: tsx.code, sourceMap: tsx.sourceMap, destructuredBlock: tsx.destructuredBlock ?? null };
 }
 
 describe("TypeScriptService mapping", () => {
@@ -378,33 +379,33 @@ describe("TypeScriptService mapping", () => {
     expect(rejected.rejectReason).toContain("Cannot rename");
   });
 
-  it("getDefinition falls back to offset comment when source map fails", async () => {
+  it("getDefinition falls back to destructured metadata when source map fails", async () => {
     const vueCode = `<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
 </script>
 <template><div>{{ count }}</div></template>`;
-    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+    const { code: tsxCode, destructuredBlock } = await generateRealTsxOutput(vueCode);
 
-    // Find offset comment pattern /*start,end*/ before "count" in destructuring
-    const offsetCommentMatch = tsxCode.match(/\/\*(\d+),(\d+)\*\/\s*\n\s*count/);
-    expect(offsetCommentMatch).not.toBeNull();
-    const byteStart = parseInt(offsetCommentMatch![1]);
-    const byteEnd = parseInt(offsetCommentMatch![2]);
+    // Metadata should have "count" binding with correct source span
+    expect(destructuredBlock).not.toBeNull();
+    const countBinding = destructuredBlock!.bindings.find((b) => b.name === "count");
+    expect(countBinding).toBeDefined();
 
-    // For ASCII content, byte offsets === JS string indices
-    expect(vueCode.slice(byteStart, byteEnd)).toBe("count");
+    // For ASCII content, UTF-16 offsets === JS string indices
+    expect(vueCode.slice(countBinding!.sourceStart, countBinding!.sourceEnd)).toBe("count");
 
-    // Test the mapTsxSpanToVueSpan offset comment fallback directly
+    // Test the mapTsxSpanToVueSpan metadata fallback directly
     const service = new TypeScriptService() as any;
     service.initialized = true;
     service.currentTsxPath = "/App.vue.tsx";
     service.currentTsxCode = tsxCode;
     service.currentVueCode = vueCode;
-    // Mapper that always fails TSX→Vue (forces offset comment fallback)
+    service.currentDestructuredBlock = destructuredBlock;
+    // Mapper that always fails TSX→Vue (forces metadata fallback)
     service.currentMapper = { tsxOffsetToVueOffset: () => null };
 
-    // Find the count identifier in the destructuring block (after "let {" or "const {")
+    // Find the count identifier in the destructuring block
     const letBrace = tsxCode.indexOf("let {");
     const constBrace = tsxCode.indexOf("{ const {");
     const braceStart = letBrace >= 0 ? letBrace : constBrace;
@@ -418,8 +419,8 @@ const count = ref(0)
     });
 
     expect(mapped).not.toBeNull();
-    expect(mapped!.start).toBe(byteStart);
-    expect(mapped!.end).toBe(byteEnd);
+    expect(mapped!.start).toBe(countBinding!.sourceStart);
+    expect(mapped!.end).toBe(countBinding!.sourceEnd);
   });
 
   it("mapTsxSpanToVueSpan returns null when both mappings fail", async () => {
@@ -724,77 +725,62 @@ describe("multi-file support", () => {
   });
 });
 
-// ── Offset comment resolution and diagnostic mapping ──
+// ── Destructured block metadata tests ──
 
-describe("resolveOffsetComment", () => {
-  it("resolves offset comment directly before the identifier", () => {
-    const tsxCode = `const { /*125,134*/\n    increment } = ___VERTER___unwrapped;`;
-    const vueCode = "x".repeat(200);
+describe("destructured block metadata", () => {
+  it("metadata is populated with binding names and source spans", async () => {
+    const vueCode = `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+const message = ref('hello')
+</script>
+<template><div>{{ count }} {{ message }}</div></template>`;
+    const { destructuredBlock } = await generateRealTsxOutput(vueCode);
 
-    const incrementIdx = tsxCode.indexOf("increment");
-    const result = resolveOffsetComment(tsxCode, vueCode, incrementIdx);
-    expect(result).not.toBeNull();
-    expect(result!.start).toBe(125);
-    expect(result!.end).toBe(134);
+    expect(destructuredBlock).not.toBeNull();
+    const names = destructuredBlock!.bindings.map((b) => b.name);
+    expect(names).toContain("count");
+    expect(names).toContain("message");
+
+    // Source spans point to correct identifiers in the Vue source
+    for (const b of destructuredBlock!.bindings) {
+      expect(vueCode.slice(b.sourceStart, b.sourceEnd)).toBe(b.name);
+    }
   });
 
-  it("returns null when no offset comment is found before the position", () => {
-    const tsxCode = `const x = 1;`;
-    const vueCode = "hello";
-    const result = resolveOffsetComment(tsxCode, vueCode, 6);
-    expect(result).toBeNull();
+  it("block range brackets the destructured block in TSX", async () => {
+    const vueCode = `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>`;
+    const { code: tsxCode, destructuredBlock } = await generateRealTsxOutput(vueCode);
+
+    expect(destructuredBlock).not.toBeNull();
+    expect(destructuredBlock!.blockStart).toBeGreaterThan(0);
+    expect(destructuredBlock!.blockEnd).toBeGreaterThan(destructuredBlock!.blockStart);
+    // The block range should contain the boundary markers
+    const blockSlice = tsxCode.slice(destructuredBlock!.blockStart, destructuredBlock!.blockEnd);
+    // The block range starts near the start marker and ends at the end marker
+    expect(tsxCode.indexOf("/* verter-destructured-start */")).toBeLessThanOrEqual(destructuredBlock!.blockStart);
+    expect(tsxCode.indexOf("/* verter-destructured-end */")).toBeLessThan(destructuredBlock!.blockEnd);
   });
 
-  it("returns null when comment end is at or after position", () => {
-    // The comment `*​/` must end BEFORE the tsxOffset
-    const tsxCode = `/*10,15*/ y`;
-    const vueCode = "x".repeat(20);
-    // tsxOffset at index 2 is inside the comment — resolving should fail
-    const result = resolveOffsetComment(tsxCode, vueCode, 2);
-    expect(result).toBeNull();
-  });
+  it("no offset comments in TSX output", async () => {
+    const vueCode = `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>`;
+    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
 
-  it("returns null for non-numeric comment content", () => {
-    const tsxCode = `/* hello */ const x = 1;`;
-    const vueCode = "test";
-    const result = resolveOffsetComment(tsxCode, vueCode, 15);
-    expect(result).toBeNull();
-  });
-
-  it("handles multiple offset comments and picks the closest one before position", () => {
-    const tsxCode = `{ const { /*10,15*/\n    count, /*30,37*/\n    message } = ___VERTER___unwrapped; }`;
-    const vueCode = "x".repeat(50);
-
-    const messageIdx = tsxCode.indexOf("message");
-    const result = resolveOffsetComment(tsxCode, vueCode, messageIdx);
-    expect(result).not.toBeNull();
-    expect(result!.start).toBe(30);
-    expect(result!.end).toBe(37);
-
-    const countIdx = tsxCode.indexOf("count");
-    const countResult = resolveOffsetComment(tsxCode, vueCode, countIdx);
-    expect(countResult).not.toBeNull();
-    expect(countResult!.start).toBe(10);
-    expect(countResult!.end).toBe(15);
-  });
-
-  it("handles UTF-8 multi-byte characters in Vue source", () => {
-    // "日本語" = 3 chars, 3 bytes each = 9 bytes
-    const tsxCode = `{ const { /*9,14*/\n    count } = ___VERTER___unwrapped; }`;
-    const vueCode = "日本語count = ref(0)";
-
-    const countIdx = tsxCode.indexOf("count");
-    const result = resolveOffsetComment(tsxCode, vueCode, countIdx);
-    expect(result).not.toBeNull();
-    // utf8ByteOffsetToJsOffset: byte 9 = JS index 3 (after 3 CJK chars)
-    expect(result!.start).toBe(3);
-    // byte 14 = JS index 8 ("count" = 5 chars, 3+5=8)
-    expect(result!.end).toBe(8);
+    // No /*digits,digits*/ offset comments
+    expect(tsxCode).not.toMatch(/\/\*\d+,\d+\*\//);
   });
 });
 
-describe("syncTsx diagnostic offset comment fallback", () => {
-  it("maps TS6133 on destructured binding to original declaration via offset comment", async () => {
+describe("syncTsx diagnostic metadata-based mapping", () => {
+  it("maps TS6133 on destructured binding to original declaration via metadata", async () => {
     const vueCode = `<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
@@ -804,15 +790,12 @@ function increment() {
 </script>
 <template><div class="app"></div></template>`;
 
-    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
+    const { code: tsxCode, destructuredBlock } = await generateRealTsxOutput(vueCode);
+    expect(destructuredBlock).not.toBeNull();
 
-    // Find the offset comment for "increment" in the destructuring
-    const offsetCommentMatch = tsxCode.match(/\/\*(\d+),(\d+)\*\/\s*\n\s*increment/);
-    expect(offsetCommentMatch).not.toBeNull();
-    const sfcStart = parseInt(offsetCommentMatch![1]);
-    const sfcEnd = parseInt(offsetCommentMatch![2]);
-    // Verify offset comment points to the original declaration
-    expect(vueCode.slice(sfcStart, sfcEnd)).toBe("increment");
+    const incrementBinding = destructuredBlock!.bindings.find((b) => b.name === "increment");
+    expect(incrementBinding).toBeDefined();
+    expect(vueCode.slice(incrementBinding!.sourceStart, incrementBinding!.sourceEnd)).toBe("increment");
 
     // Find "increment" position in the destructuring block
     const destructBlock = tsxCode.indexOf("___VERTER___unwrapped;");
@@ -836,13 +819,13 @@ function increment() {
       }
     });
 
-    // Use null source map to force offset comment fallback
-    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+    // Pass metadata to syncTsx
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null, destructuredBlock);
 
-    // Should map to the original declaration, NOT the raw TSX offset
+    // Should map to the original declaration via metadata
     expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0].start).toBe(sfcStart);
-    expect(diagnostics[0].end).toBe(sfcEnd);
+    expect(diagnostics[0].start).toBe(incrementBinding!.sourceStart);
+    expect(diagnostics[0].end).toBe(incrementBinding!.sourceEnd);
     expect(diagnostics[0].code).toBe(6133);
   });
 
@@ -856,10 +839,8 @@ function increment() {
 </script>
 <template><div class="app"></div></template>`;
 
-    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
-
-    expect(tsxCode).toContain("/* verter-destructured-start */");
-    expect(tsxCode).toContain("/* verter-destructured-end */");
+    const { code: tsxCode, destructuredBlock } = await generateRealTsxOutput(vueCode);
+    expect(destructuredBlock).not.toBeNull();
 
     const startMarker = tsxCode.indexOf("/* verter-destructured-start */");
     const endMarker = tsxCode.indexOf("/* verter-destructured-end */");
@@ -867,7 +848,6 @@ function increment() {
     expect(incrementInDestruct).toBeGreaterThan(startMarker);
     expect(incrementInDestruct).toBeLessThan(endMarker);
 
-    // Find the expected SFC position for "increment"
     const sfcIncrementStart = vueCode.indexOf("increment");
 
     const service = new TypeScriptService() as any;
@@ -887,9 +867,8 @@ function increment() {
       }
     });
 
-    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null, destructuredBlock);
 
-    // TS6198 should be expanded into a TS6133-like diagnostic for "increment"
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe(6133);
     expect(diagnostics[0].start).toBe(sfcIncrementStart);
@@ -908,17 +887,13 @@ function increment() {
 </script>
 <template><div class="app"></div></template>`;
 
-    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
+    const { code: tsxCode, destructuredBlock } = await generateRealTsxOutput(vueCode);
+    expect(destructuredBlock).not.toBeNull();
 
     const startMarker = tsxCode.indexOf("/* verter-destructured-start */");
     const endMarker = tsxCode.indexOf("/* verter-destructured-end */");
-
-    // TS would report two TS6198 diagnostics:
-    // 1. For "const { increment }" (single element, all unused)
-    // 2. For "let { count, message }" (all elements unused, start at "count")
     const incrementInDestruct = tsxCode.indexOf("increment", startMarker);
     const countInDestruct = tsxCode.indexOf("count", startMarker + 30);
-    // Make sure both are inside the markers
     expect(incrementInDestruct).toBeGreaterThan(startMarker);
     expect(incrementInDestruct).toBeLessThan(endMarker);
     expect(countInDestruct).toBeGreaterThan(startMarker);
@@ -948,7 +923,7 @@ function increment() {
       }
     });
 
-    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null, destructuredBlock);
 
     // Should expand to 3 individual diagnostics: increment, count, message
     expect(diagnostics).toHaveLength(3);
@@ -956,14 +931,13 @@ function increment() {
     expect(names).toContain("increment");
     expect(names).toContain("count");
     expect(names).toContain("message");
-    // All should be TS6133 with proper messages
     for (const d of diagnostics) {
       expect(d.code).toBe(6133);
       expect(d.message).toContain("declared but");
     }
   });
 
-  it("keeps TS6133 inside verter-destructured markers (mapped via offset comment)", async () => {
+  it("keeps TS6133 inside destructured markers (mapped via metadata)", async () => {
     const vueCode = `<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
@@ -973,7 +947,7 @@ function increment() {
 </script>
 <template><div class="app"></div></template>`;
 
-    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
+    const { code: tsxCode, destructuredBlock } = await generateRealTsxOutput(vueCode);
 
     const startMarker = tsxCode.indexOf("/* verter-destructured-start */");
     const endMarker = tsxCode.indexOf("/* verter-destructured-end */");
@@ -998,22 +972,20 @@ function increment() {
       }
     });
 
-    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null, destructuredBlock);
 
-    // TS6133 should be KEPT — individual unused binding diagnostics are valuable
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe(6133);
   });
 
-  it("keeps diagnostics that map through source map even when offset comment fails", async () => {
+  it("keeps diagnostics that map through source map", async () => {
     const vueCode = `<script setup lang="ts">
 const count: number = "wrong"
 </script>
 <template><div>{{ count }}</div></template>`;
 
-    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+    const { code: tsxCode, sourceMap, destructuredBlock } = await generateRealTsxOutput(vueCode);
 
-    // The type error on 'count' in the script section IS source-mapped
     const countInTsx = tsxCode.indexOf("count: number");
     expect(countInTsx).toBeGreaterThan(-1);
 
@@ -1034,16 +1006,15 @@ const count: number = "wrong"
       }
     });
 
-    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, sourceMap);
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, sourceMap, destructuredBlock);
 
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe(2322);
-    // The mapped position should point to "count" in the Vue source (not raw TSX offset)
     const vueCount = vueCode.indexOf("count");
     expect(diagnostics[0].start).toBe(vueCount);
   });
 
-  it("maps TS6133 inside destructured block via offset comment even with real source map", async () => {
+  it("maps TS6133 inside destructured block via metadata even with real source map", async () => {
     const vueCode = `<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
@@ -1053,22 +1024,17 @@ function increment() {
 </script>
 <template><div class="app"></div></template>`;
 
-    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+    const { code: tsxCode, sourceMap, destructuredBlock } = await generateRealTsxOutput(vueCode);
+    expect(destructuredBlock).not.toBeNull();
 
-    // Verify we have boundary markers and offset comments
     const startMarker = tsxCode.indexOf("/* verter-destructured-start */");
     const endMarker = tsxCode.indexOf("/* verter-destructured-end */");
     expect(startMarker).toBeGreaterThan(-1);
     expect(endMarker).toBeGreaterThan(startMarker);
 
-    // Find the offset comment for "increment" in the destructuring
-    const offsetCommentMatch = tsxCode.match(/\/\*(\d+),(\d+)\*\/\s*\n\s*increment/);
-    expect(offsetCommentMatch).not.toBeNull();
-    const sfcStart = parseInt(offsetCommentMatch![1]);
-    const sfcEnd = parseInt(offsetCommentMatch![2]);
-    expect(vueCode.slice(sfcStart, sfcEnd)).toBe("increment");
+    const incrementBinding = destructuredBlock!.bindings.find((b) => b.name === "increment");
+    expect(incrementBinding).toBeDefined();
 
-    // Find "increment" position inside the destructured block
     const incrementInDestruct = tsxCode.indexOf("increment", startMarker);
     expect(incrementInDestruct).toBeGreaterThan(startMarker);
     expect(incrementInDestruct).toBeLessThan(endMarker);
@@ -1090,14 +1056,12 @@ function increment() {
       }
     });
 
-    // Key difference: use the REAL source map (not null)
-    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, sourceMap);
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, sourceMap, destructuredBlock);
 
-    // Must map to the ORIGINAL declaration via offset comment, not a wrong source-map position
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe(6133);
-    expect(diagnostics[0].start).toBe(sfcStart);
-    expect(diagnostics[0].end).toBe(sfcEnd);
+    expect(diagnostics[0].start).toBe(incrementBinding!.sourceStart);
+    expect(diagnostics[0].end).toBe(incrementBinding!.sourceEnd);
   });
 
   it("drops diagnostics pointing to unmappable synthetic code", async () => {
@@ -1106,9 +1070,8 @@ const msg = 'hello'
 </script>
 <template><div>{{ msg }}</div></template>`;
 
-    const { code: tsxCode } = await generateRealTsxOutput(vueCode);
+    const { code: tsxCode, destructuredBlock } = await generateRealTsxOutput(vueCode);
 
-    // Diagnostic on ___VERTER___shallowUnwrapRef — purely synthetic
     const syntheticPos = tsxCode.indexOf("shallowUnwrapRef");
     expect(syntheticPos).toBeGreaterThan(-1);
 
@@ -1129,9 +1092,8 @@ const msg = 'hello'
       }
     });
 
-    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null);
+    const diagnostics = await service.syncTsx("App.vue", tsxCode, vueCode, null, destructuredBlock);
 
-    // Should be dropped — unmappable synthetic code
     expect(diagnostics).toHaveLength(0);
   });
 });

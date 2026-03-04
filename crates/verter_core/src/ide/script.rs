@@ -113,6 +113,9 @@ struct MacroSourceCtx<'a, 'alloc> {
     is_jsx: bool,
 }
 
+// Re-export from compile::types for internal use.
+pub use crate::compile::types::{DestructuredBindingInfo, DestructuredBlockMeta};
+
 /// Result of TSX script generation (internal, before building string).
 pub struct IdeScriptGenResult<'alloc> {
     /// Binding metadata for template TSX generation.
@@ -124,6 +127,8 @@ pub struct IdeScriptGenResult<'alloc> {
     /// When `template_end` is `Some(...)`, this contains the return+close string
     /// to be applied to the CT AFTER template codegen (to avoid interleaving).
     pub return_close: Option<String>,
+    /// Structured metadata for the destructured block, if present.
+    pub destructured_block: Option<DestructuredBlockMeta>,
 }
 
 /// Generate TSX script output from script blocks.
@@ -146,9 +151,11 @@ pub fn generate_ide_script<'alloc>(
     let builtin_components = collect_builtin_components(template_ast, source);
     let mut return_close: Option<String> = None;
 
+    let mut destructured_block: Option<DestructuredBlockMeta> = None;
+
     match (script, script_setup) {
         (_, Some(setup)) => {
-            return_close = process_tsx_script_setup(
+            let result = process_tsx_script_setup(
                 setup,
                 script,
                 template_ast,
@@ -162,6 +169,8 @@ pub fn generate_ide_script<'alloc>(
                 &builtin_components,
                 template_end,
             );
+            return_close = result.0;
+            destructured_block = result.1;
         }
         (Some(normal), None) => {
             process_tsx_script_only(
@@ -198,6 +207,7 @@ pub fn generate_ide_script<'alloc>(
         bindings,
         type_constructs,
         return_close,
+        destructured_block,
     }
 }
 
@@ -217,16 +227,20 @@ fn process_tsx_script_setup<'alloc>(
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_end: Option<u32>,
-) -> Option<String> {
+) -> (Option<String>, Option<DestructuredBlockMeta>) {
     let content_span = match &setup.content {
         Some(span) => span,
         None => {
             // Self-closing <script setup />
-            return emit_minimal_wrapper(out, options, setup.tag_open.start, template_end);
+            return (
+                emit_minimal_wrapper(out, options, setup.tag_open.start, template_end),
+                None,
+            );
         }
     };
 
     let mut deferred_return_close: Option<String> = None;
+    let mut destructured_block_meta: Option<DestructuredBlockMeta> = None;
     let content_start = content_span.start;
     let content_str = &source[content_span.start as usize..content_span.end as usize];
     // Hoist position: earliest of companion/setup tag starts so imports appear at top.
@@ -268,15 +282,18 @@ fn process_tsx_script_setup<'alloc>(
         let ts_alloc = Allocator::default();
         let ts_check = Parser::new(&ts_alloc, content_str, SourceType::ts()).parse();
         if !ts_check.errors.is_empty() {
-            return process_tsx_script_setup_error_mode(
-                setup,
-                source,
-                out,
-                type_constructs,
-                options,
-                builtin_components,
-                template_end,
-                hoist_pos,
+            return (
+                process_tsx_script_setup_error_mode(
+                    setup,
+                    source,
+                    out,
+                    type_constructs,
+                    options,
+                    builtin_components,
+                    template_end,
+                    hoist_pos,
+                ),
+                None,
             );
         }
     }
@@ -509,8 +526,7 @@ fn process_tsx_script_setup<'alloc>(
                 entries = entries,
             ));
             // Block scope with destructuring FROM the temp variable.
-            // Each binding gets an offset comment /*sfc_start,sfc_end*/ for go-to-definition
-            // AND for the LSP to remap "unused variable" diagnostics to the declaration site.
+            // Binding source positions are stored in DestructuredBlockMeta (no inline comments).
             //
             // Split into `const` (truly immutable: SetupConst, LiteralConst) and
             // `let` (assignable: SetupRef, SetupLet, SetupReactiveConst, SetupMaybeRef)
@@ -531,19 +547,21 @@ fn process_tsx_script_setup<'alloc>(
             let format_destruct_entries = |names: &[&str]| -> String {
                 names
                     .iter()
-                    .map(|name| {
-                        if let Some(info) = binding_source_info.get(name) {
-                            format!(
-                                "\n    /*{},{}*/\n    {}",
-                                info.sfc_start, info.sfc_end, name
-                            )
-                        } else {
-                            format!("\n    {}", name)
-                        }
-                    })
+                    .map(|name| format!("\n    {}", name))
                     .collect::<Vec<_>>()
                     .join(",")
             };
+
+            // Collect binding metadata from binding_source_info
+            let mut destruct_bindings: Vec<DestructuredBindingInfo> = Vec::new();
+            for name in const_names.iter().chain(let_names.iter()) {
+                if let Some(info) = binding_source_info.get(name) {
+                    destruct_bindings.push(DestructuredBindingInfo {
+                        name: name.to_string(),
+                        source_span: verter_span::Span::new(info.sfc_start, info.sfc_end),
+                    });
+                }
+            }
 
             let mut destruct_block = String::from("{ /* verter-destructured-start */");
             if !const_names.is_empty() {
@@ -565,6 +583,15 @@ fn process_tsx_script_setup<'alloc>(
             }
             destruct_block.push_str(" /* verter-destructured-end */\n");
             wrapper_end.push_str(&destruct_block);
+
+            // Store metadata (block_start/block_end computed later from final TSX)
+            if !destruct_bindings.is_empty() {
+                destructured_block_meta = Some(DestructuredBlockMeta {
+                    bindings: destruct_bindings,
+                    block_start: 0,
+                    block_end: 0,
+                });
+            }
         } else {
             wrapper_end.push_str("\n{\n");
         }
@@ -672,7 +699,7 @@ fn process_tsx_script_setup<'alloc>(
         has_get_current_instance,
     );
 
-    deferred_return_close
+    (deferred_return_close, destructured_block_meta)
 }
 
 // ── Script Setup Error Recovery ─────────────────────────────────

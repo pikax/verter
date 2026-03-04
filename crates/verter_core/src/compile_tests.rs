@@ -1,5 +1,35 @@
 use super::*;
 
+/// Check if a string contains a `/*digits,digits*/` offset comment pattern.
+fn has_offset_comment(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i + 4 < len {
+        if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            // Found /*, look for digits,digits*/
+            let start = i + 2;
+            let mut j = start;
+            // Skip digits
+            while j < len && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > start && j < len && bytes[j] == b',' {
+                let comma = j;
+                j += 1;
+                while j < len && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > comma + 1 && j + 1 < len && bytes[j] == b'*' && bytes[j + 1] == b'/' {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 fn compile_sfc(source: &str) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
@@ -9664,14 +9694,8 @@ const message = ref('hello')
     );
 
     // The start marker must come before the destructuring, end marker after
-    let start_marker_pos = tsx
-        .code
-        .find("/* verter-destructured-start */")
-        .unwrap();
-    let end_marker_pos = tsx
-        .code
-        .find("/* verter-destructured-end */")
-        .unwrap();
+    let start_marker_pos = tsx.code.find("/* verter-destructured-start */").unwrap();
+    let end_marker_pos = tsx.code.find("/* verter-destructured-end */").unwrap();
     let destruct_pos = tsx.code.find("} = ___VERTER___unwrapped;").unwrap();
     assert!(
         start_marker_pos < destruct_pos && destruct_pos < end_marker_pos,
@@ -11066,7 +11090,7 @@ const plain = "hello"
 }
 
 #[test]
-fn tsx_offset_comments_on_destructuring() {
+fn tsx_destructured_block_has_no_offset_comments() {
     let source = r#"<script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
@@ -11077,60 +11101,107 @@ const message = ref("hi")
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
 
-    // Find the byte offset of "count" identifier in the SFC source
-    let count_decl_pos = source.find("const count").unwrap();
-    let count_ident_start = count_decl_pos + "const ".len();
-    let count_ident_end = count_ident_start + "count".len();
-
-    // Positive: destructuring should have offset comment before count
-    let expected_comment = format!("/*{},{}*/", count_ident_start, count_ident_end);
+    // Negative: NO /*digits,digits*/ offset comments in the output
     assert!(
-        tsx.code.contains(&expected_comment),
-        "Destructuring should have offset comment {} for 'count', got:\n{}",
-        expected_comment,
+        !has_offset_comment(&tsx.code),
+        "Offset comments /*start,end*/ must NOT appear in TSX output.\nTSX:\n{}",
         tsx.code
     );
 
-    // Find message's byte offset
-    let msg_decl_pos = source.find("const message").unwrap();
-    let msg_ident_start = msg_decl_pos + "const ".len();
-    let msg_ident_end = msg_ident_start + "message".len();
-    let expected_msg_comment = format!("/*{},{}*/", msg_ident_start, msg_ident_end);
+    // Positive: boundary markers still present
+    assert!(tsx.code.contains("/* verter-destructured-start */"));
+    assert!(tsx.code.contains("/* verter-destructured-end */"));
+
+    // Positive: destructured_block metadata is populated
+    let meta = tsx
+        .destructured_block
+        .as_ref()
+        .expect("destructured_block metadata should be populated");
+
+    // Should have bindings for count and message
+    let names: Vec<&str> = meta.bindings.iter().map(|b| b.name.as_str()).collect();
     assert!(
-        tsx.code.contains(&expected_msg_comment),
-        "Destructuring should have offset comment {} for 'message', got:\n{}",
-        expected_msg_comment,
-        tsx.code
+        names.contains(&"count"),
+        "bindings should include 'count', got: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"message"),
+        "bindings should include 'message', got: {:?}",
+        names
     );
 
-    // Verify the offset comments point to the correct identifier text
-    assert_eq!(&source[count_ident_start..count_ident_end], "count");
-    assert_eq!(&source[msg_ident_start..msg_ident_end], "message");
+    // Verify source spans point to correct identifiers in SFC
+    for binding in &meta.bindings {
+        let span_text =
+            &source[binding.source_span.start as usize..binding.source_span.end as usize];
+        assert_eq!(
+            span_text, binding.name,
+            "source_span for '{}' should point to identifier in SFC",
+            binding.name
+        );
+    }
+
+    // Block range should bracket the destructured block in TSX
+    let start_marker = tsx.code.find("/* verter-destructured-start */").unwrap();
+    let end_marker = tsx.code.find("/* verter-destructured-end */").unwrap()
+        + "/* verter-destructured-end */".len();
+    assert!(
+        meta.block_start as usize <= start_marker + "/* verter-destructured-start */".len() + 10,
+        "block_start should be near the start marker"
+    );
+    assert!(
+        (meta.block_end as usize) >= end_marker - 10,
+        "block_end should be near the end marker"
+    );
 }
 
 #[test]
-fn tsx_offset_comments_non_ascii_are_byte_offsets() {
+fn tsx_destructured_block_meta_non_ascii_spans() {
     // Emoji 😀 is 4 UTF-8 bytes, 2 UTF-16 code units
     let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\n// 😀\nconst name = ref('')\n</script>\n<template><div>{{ name }}</div></template>";
     let result = compile_tsx(source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
 
-    // "name" identifier starts after "const " in the line after the emoji comment
+    // Negative: NO offset comments
+    assert!(
+        !has_offset_comment(&tsx.code),
+        "Offset comments must NOT appear in TSX output.\nTSX:\n{}",
+        tsx.code
+    );
+
+    // Positive: metadata has the binding with correct SFC byte span
+    let meta = tsx
+        .destructured_block
+        .as_ref()
+        .expect("destructured_block metadata");
+    let name_binding = meta
+        .bindings
+        .iter()
+        .find(|b| b.name == "name")
+        .expect("should have 'name' binding");
+
     let name_decl_pos = source.find("const name").unwrap();
     let name_ident_start = name_decl_pos + "const ".len();
     let name_ident_end = name_ident_start + "name".len();
-
-    // Verify it's the correct identifier in the source
     assert_eq!(&source[name_ident_start..name_ident_end], "name");
+    assert_eq!(name_binding.source_span.start, name_ident_start as u32);
+    assert_eq!(name_binding.source_span.end, name_ident_end as u32);
+}
 
-    // The offset comment should use UTF-8 byte offsets
-    let expected_comment = format!("/*{},{}*/", name_ident_start, name_ident_end);
+#[test]
+fn tsx_no_destructured_block_meta_without_setup() {
+    // No <script setup> = no destructured block
+    let source = r#"<script lang="ts">
+export default { setup() { return { x: 1 } } }
+</script>
+<template><div>{{ x }}</div></template>"#;
+    let result = compile_tsx(source);
+    let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains(&expected_comment),
-        "Offset comment should be UTF-8 byte offsets {}, got:\n{}",
-        expected_comment,
-        tsx.code
+        tsx.destructured_block.is_none(),
+        "destructured_block should be None without <script setup>"
     );
 }
 

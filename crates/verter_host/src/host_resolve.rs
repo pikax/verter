@@ -369,6 +369,7 @@ impl VerterHost {
             code: tsx.code.clone(),
             source_map: tsx.source_map.clone(),
             is_jsx: tsx.is_jsx,
+            destructured_block: tsx.destructured_block.clone(),
         })
     }
 
@@ -701,6 +702,7 @@ impl VerterHost {
                 Some(Arc::from(tsx.source_map))
             },
             is_jsx: tsx.is_jsx,
+            destructured_block: tsx.destructured_block,
         });
 
         // Convert raw template data into analysis types when available

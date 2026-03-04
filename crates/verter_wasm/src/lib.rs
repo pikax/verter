@@ -286,10 +286,34 @@ impl WasmVerterHost {
         };
         let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
         let result = catch_panic(|| self.inner.get_ide(canonical_id, &host_profile))?;
-        to_wasm_value(&result.map(|r| FfiIdeResponse {
-            code: r.code.to_string(),
-            source_map: r.source_map.map(|s| s.to_string()),
-            is_jsx: r.is_jsx,
+        let sfc_source = self.inner.get_source(canonical_id);
+        to_wasm_value(&result.map(|r| {
+            let destructured_block = r.destructured_block.as_ref().map(|meta| {
+                let sfc = sfc_source.as_deref().unwrap_or("");
+                let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
+                    .bindings
+                    .iter()
+                    .map(|b| verter_ffi::convert::DestructuredBindingInput {
+                        name: &b.name,
+                        source_start: b.source_span.start,
+                        source_end: b.source_span.end,
+                    })
+                    .collect();
+                verter_ffi::convert::convert_destructured_block_meta(
+                    &bindings,
+                    meta.block_start,
+                    meta.block_end,
+                    sfc,
+                    &r.code,
+                    verter_ffi::convert::OffsetEncoding::Utf16,
+                )
+            });
+            FfiIdeResponse {
+                code: r.code.to_string(),
+                source_map: r.source_map.map(|s| s.to_string()),
+                is_jsx: r.is_jsx,
+                destructured_block,
+            }
         }))
     }
 
@@ -306,6 +330,7 @@ impl WasmVerterHost {
             code: r.code.to_string(),
             source_map: r.source_map.map(|s| s.to_string()),
             is_jsx: false,
+            destructured_block: None,
         }))
     }
 

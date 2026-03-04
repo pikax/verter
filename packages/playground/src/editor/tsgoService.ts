@@ -211,6 +211,7 @@ export class TsgoService implements TypeScriptServiceBridge {
     tsxCode: string,
     vueCode: string,
     sourceMapJson: string | null,
+    _destructuredBlock?: unknown,
   ): Promise<void> {
     if (!this.initialized || !this.available) return;
     if (this.currentTsxCode === tsxCode && this.currentVueCode === vueCode) return;
