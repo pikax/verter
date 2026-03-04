@@ -270,7 +270,6 @@ mod tests {
             tag: tag.to_string(),
             attributes: attrs,
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -300,7 +299,6 @@ mod tests {
             tag: tag.to_string(),
             attributes: attrs,
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }

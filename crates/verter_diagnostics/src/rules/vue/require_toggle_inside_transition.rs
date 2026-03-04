@@ -84,7 +84,6 @@ mod tests {
                     span: Span::new(0, 60),
                     tag_span_end: 12,
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 },
                 TemplateElement {
@@ -94,7 +93,6 @@ mod tests {
                     span: Span::new(13, 50),
                     tag_span_end: 18,
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 },
             ],
@@ -128,7 +126,6 @@ mod tests {
                     span: Span::new(0, 60),
                     tag_span_end: 12,
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 },
                 TemplateElement {
@@ -139,7 +136,6 @@ mod tests {
                     span: Span::new(13, 50),
                     tag_span_end: 30,
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 },
             ],
@@ -159,7 +155,6 @@ mod tests {
                     span: Span::new(0, 60),
                     tag_span_end: 12,
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 },
                 TemplateElement {
@@ -170,7 +165,6 @@ mod tests {
                     span: Span::new(13, 50),
                     tag_span_end: 28,
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 },
             ],
@@ -190,7 +184,6 @@ mod tests {
                 span: Span::new(10, 30),
                 tag_span_end: 15,
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

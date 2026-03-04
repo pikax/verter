@@ -3025,3 +3025,77 @@ fn list_virtual_nodes_multiple_styles() {
 
 // Note: FileAnalysisSnapshot JSON serialization tests are in verter_lsp integration_tests.rs
 // where serde_json is available as a dependency.
+
+/// @ai-generated - v-bind() expressions in style blocks populate generated_var_name in analysis
+#[test]
+fn v_bind_css_analysis_has_generated_var_name() {
+    let host = VerterHost::new(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/test/VBindComp.vue",
+        r#"<script setup>
+import { ref } from 'vue'
+const color = ref('red')
+</script>
+<template><div class="box">hello</div></template>
+<style scoped>
+.box { color: v-bind(color); }
+</style>"#,
+    );
+
+    let analysis = host
+        .get_analysis("/test/VBindComp.vue")
+        .expect("should have analysis");
+    assert!(!analysis.styles.is_empty(), "should have style analysis");
+
+    let style = &analysis.styles[0];
+    assert!(!style.v_binds.is_empty(), "should have v-bind entries");
+
+    let vb = &style.v_binds[0];
+    assert_eq!(vb.expression, "color");
+    assert!(
+        vb.generated_var_name.is_some(),
+        "generated_var_name should be populated"
+    );
+    let gen_name = vb.generated_var_name.as_ref().unwrap();
+    assert!(
+        gen_name.starts_with("--"),
+        "generated var name should start with --, got: {}",
+        gen_name
+    );
+    assert!(
+        gen_name.contains("color"),
+        "generated var name should contain the expression, got: {}",
+        gen_name
+    );
+}
+
+/// @ai-generated - css_var_flow scans across multiple files
+#[test]
+fn css_var_flow_across_files() {
+    let host = VerterHost::new(HostConfig::default());
+
+    // File A defines --theme-color in style
+    host.upsert(UpsertRequest {
+        canonical_id: None,
+        input_id: "src/A.vue".to_string(),
+        source: Arc::from(
+            r#"<template><div>A</div></template>
+<style>
+:root { --theme-color: blue; }
+.container { color: var(--theme-color); }
+</style>"#,
+        ),
+        file_kind: FileKind::VueSfc,
+        aliases: Vec::new(),
+    });
+
+    let flow = host.css_var_flow("--theme-color");
+    assert_eq!(flow.name, "--theme-color");
+    assert_eq!(
+        flow.style_definitions.len(),
+        1,
+        "should have 1 style definition"
+    );
+    assert_eq!(flow.style_var_usages.len(), 1, "should have 1 var() usage");
+}

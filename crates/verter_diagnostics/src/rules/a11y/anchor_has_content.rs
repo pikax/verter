@@ -123,7 +123,7 @@ mod tests {
             span: Span::new(0, 30),
             tag_span_end: 30,
             content_end: 0,
-            text_children: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -138,7 +138,6 @@ mod tests {
             nesting_depth: 1,
             span: Span::new(5, 25),
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }

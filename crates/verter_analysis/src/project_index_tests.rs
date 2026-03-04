@@ -657,3 +657,188 @@ fn validate_file_injects_unindexed_file() {
     assert!(result.missing_providers.is_empty());
     assert!(result.dynamic_keys.is_empty());
 }
+
+// --- CSS Variable Flow Tests ---
+
+#[test]
+fn var_reference_index_tracks_usages() {
+    let mut index = ProjectIndex::new();
+    let info = FileUsageInfoOwned {
+        styles: vec![StyleUsageInfoOwned {
+            var_reference_names: vec!["--primary".to_string(), "--spacing".to_string()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    index.add_file(PathBuf::from("src/App.vue"), info);
+
+    let refs: Vec<_> = index
+        .files_referencing_custom_property("--primary")
+        .collect();
+    assert_eq!(refs.len(), 1);
+    assert!(refs[0].ends_with("App.vue"));
+
+    // Non-existent reference
+    assert_eq!(
+        index
+            .files_referencing_custom_property("--nonexistent")
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn template_css_var_index_tracks_style_bindings() {
+    let mut index = ProjectIndex::new();
+    let info = FileUsageInfoOwned {
+        template_css_var_names: vec!["--color".to_string()],
+        ..Default::default()
+    };
+    index.add_file(PathBuf::from("src/Comp.vue"), info);
+
+    let files: Vec<_> = index.files_setting_css_var_in_template("--color").collect();
+    assert_eq!(files.len(), 1);
+}
+
+#[test]
+fn script_css_var_index_tracks_dom_manipulations() {
+    let mut index = ProjectIndex::new();
+    let info = FileUsageInfoOwned {
+        script_css_var_names: vec!["--theme-bg".to_string()],
+        ..Default::default()
+    };
+    index.add_file(PathBuf::from("src/Theme.vue"), info);
+
+    let files: Vec<_> = index
+        .files_manipulating_css_var_in_script("--theme-bg")
+        .collect();
+    assert_eq!(files.len(), 1);
+}
+
+#[test]
+fn css_var_flow_cross_component() {
+    let mut index = ProjectIndex::new();
+
+    // Component A defines --theme-color in style
+    index.add_file(
+        PathBuf::from("src/A.vue"),
+        FileUsageInfoOwned {
+            styles: vec![StyleUsageInfoOwned {
+                custom_property_names: vec!["--theme-color".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+
+    // Component B uses var(--theme-color) in style and sets it in template
+    index.add_file(
+        PathBuf::from("src/B.vue"),
+        FileUsageInfoOwned {
+            styles: vec![StyleUsageInfoOwned {
+                var_reference_names: vec!["--theme-color".to_string()],
+                ..Default::default()
+            }],
+            template_css_var_names: vec!["--theme-color".to_string()],
+            ..Default::default()
+        },
+    );
+
+    // Component C manipulates it via script
+    index.add_file(
+        PathBuf::from("src/C.vue"),
+        FileUsageInfoOwned {
+            script_css_var_names: vec!["--theme-color".to_string()],
+            ..Default::default()
+        },
+    );
+
+    let flow = index.css_var_flow("--theme-color");
+    assert_eq!(flow.name, "--theme-color");
+    assert_eq!(flow.style_definitions.len(), 1);
+    assert!(flow.style_definitions[0].ends_with("A.vue"));
+    assert_eq!(flow.style_var_usages.len(), 1);
+    assert!(flow.style_var_usages[0].ends_with("B.vue"));
+    assert_eq!(flow.template_definitions.len(), 1);
+    assert!(flow.template_definitions[0].ends_with("B.vue"));
+    assert_eq!(flow.script_manipulations.len(), 1);
+    assert!(flow.script_manipulations[0].ends_with("C.vue"));
+}
+
+#[test]
+fn css_var_flow_empty_for_unknown() {
+    let index = ProjectIndex::new();
+    let flow = index.css_var_flow("--nonexistent");
+    assert_eq!(flow.name, "--nonexistent");
+    assert!(flow.style_definitions.is_empty());
+    assert!(flow.style_var_usages.is_empty());
+    assert!(flow.template_definitions.is_empty());
+    assert!(flow.script_manipulations.is_empty());
+}
+
+#[test]
+fn stats_include_var_reference_counts() {
+    let mut index = ProjectIndex::new();
+
+    // File defines --a and --b, references --a and --c
+    index.add_file(
+        PathBuf::from("src/A.vue"),
+        FileUsageInfoOwned {
+            styles: vec![StyleUsageInfoOwned {
+                custom_property_names: vec!["--a".to_string(), "--b".to_string()],
+                var_reference_names: vec!["--a".to_string(), "--c".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+
+    let stats = index.stats();
+    assert_eq!(stats.unique_custom_properties, 2); // --a, --b
+    assert_eq!(stats.unique_var_references, 2); // --a, --c
+    assert_eq!(stats.unreferenced_custom_properties, 1); // --b (defined but not referenced)
+    assert_eq!(stats.unresolved_var_references, 1); // --c (referenced but not defined)
+}
+
+#[test]
+fn remove_file_cleans_up_var_indexes() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("src/A.vue"),
+        FileUsageInfoOwned {
+            styles: vec![StyleUsageInfoOwned {
+                var_reference_names: vec!["--color".to_string()],
+                ..Default::default()
+            }],
+            template_css_var_names: vec!["--size".to_string()],
+            script_css_var_names: vec!["--offset".to_string()],
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        index.files_referencing_custom_property("--color").count(),
+        1
+    );
+    assert_eq!(index.files_setting_css_var_in_template("--size").count(), 1);
+    assert_eq!(
+        index
+            .files_manipulating_css_var_in_script("--offset")
+            .count(),
+        1
+    );
+
+    index.remove_file(Path::new("src/A.vue"));
+
+    assert_eq!(
+        index.files_referencing_custom_property("--color").count(),
+        0
+    );
+    assert_eq!(index.files_setting_css_var_in_template("--size").count(), 0);
+    assert_eq!(
+        index
+            .files_manipulating_css_var_in_script("--offset")
+            .count(),
+        0
+    );
+}

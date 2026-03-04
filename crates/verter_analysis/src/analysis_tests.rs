@@ -972,3 +972,70 @@ export function useTimer() {
     assert!(!comp.lifecycle_hooks.is_empty());
     assert!(comp.has_watchers);
 }
+
+// --- CSS Variable Manipulation Detection ---
+
+#[test]
+fn css_var_set_property_detected() {
+    let result = analyze("el.style.setProperty('--color', val);");
+    assert_eq!(result.css_var_manipulations.len(), 1);
+    let m = &result.css_var_manipulations[0];
+    assert_eq!(m.kind, CssVarManipulationKind::SetProperty);
+    assert_eq!(m.var_name, "--color");
+    assert_eq!(m.value_expr.as_deref(), Some("val"));
+    // No non-CSS-var setProperty calls
+    let result2 = analyze("el.style.setProperty('color', 'red');");
+    assert!(result2.css_var_manipulations.is_empty());
+}
+
+#[test]
+fn css_var_get_property_value_detected() {
+    let result = analyze("getComputedStyle(el).getPropertyValue('--theme-bg');");
+    assert_eq!(result.css_var_manipulations.len(), 1);
+    let m = &result.css_var_manipulations[0];
+    assert_eq!(m.kind, CssVarManipulationKind::GetPropertyValue);
+    assert_eq!(m.var_name, "--theme-bg");
+    assert!(m.value_expr.is_none());
+}
+
+#[test]
+fn css_var_remove_property_detected() {
+    let result = analyze("el.style.removeProperty('--size');");
+    assert_eq!(result.css_var_manipulations.len(), 1);
+    let m = &result.css_var_manipulations[0];
+    assert_eq!(m.kind, CssVarManipulationKind::RemoveProperty);
+    assert_eq!(m.var_name, "--size");
+    assert!(m.value_expr.is_none());
+}
+
+#[test]
+fn css_var_manipulation_ignores_non_var_names() {
+    // Only string literals starting with "--" are tracked
+    let result = analyze("el.style.setProperty('color', 'red');");
+    assert!(result.css_var_manipulations.is_empty());
+    let result2 = analyze("el.style.removeProperty('margin');");
+    assert!(result2.css_var_manipulations.is_empty());
+}
+
+#[test]
+fn css_var_manipulation_ignores_non_string_args() {
+    let result = analyze("el.style.setProperty(varName, val);");
+    assert!(result.css_var_manipulations.is_empty());
+}
+
+#[test]
+fn css_var_manipulation_in_variable_init() {
+    let result = analyze("const val = getComputedStyle(el).getPropertyValue('--offset');");
+    assert_eq!(result.css_var_manipulations.len(), 1);
+    assert_eq!(result.css_var_manipulations[0].var_name, "--offset");
+}
+
+#[test]
+fn css_var_set_property_value_expr_is_source_text() {
+    let result = analyze("el.style.setProperty('--x', computedColor.value);");
+    assert_eq!(result.css_var_manipulations.len(), 1);
+    assert_eq!(
+        result.css_var_manipulations[0].value_expr.as_deref(),
+        Some("computedColor.value")
+    );
+}

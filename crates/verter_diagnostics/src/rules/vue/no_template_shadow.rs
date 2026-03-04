@@ -168,7 +168,6 @@ mod tests {
                 span: Span::new(0, 50),
                 tag_span_end: 35,
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {
@@ -211,7 +210,6 @@ mod tests {
                 span: Span::new(0, 50),
                 tag_span_end: 35,
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {
@@ -249,7 +247,6 @@ mod tests {
                 span: Span::new(5, 60),
                 tag_span_end: 35,
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             binding_occurrences: vec![TemplateBindingOccurrence {

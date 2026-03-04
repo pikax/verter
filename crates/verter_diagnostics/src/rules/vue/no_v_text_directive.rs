@@ -80,7 +80,6 @@ mod tests {
                     modifier_spans: Vec::new(),
                 }],
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -116,7 +115,6 @@ mod tests {
                     modifier_spans: Vec::new(),
                 }],
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -131,7 +129,6 @@ mod tests {
             elements: vec![TemplateElement {
                 tag: "div".to_string(),
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

@@ -402,7 +402,7 @@ fn make_element_for_completion(
         span: verter_span::Span::new(span_start, span_end),
         tag_span_end: span_end,
         content_end: 0,
-        text_children: Vec::new(),
+        ..Default::default()
     }
 }
 

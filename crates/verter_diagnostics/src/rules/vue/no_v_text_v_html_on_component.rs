@@ -118,7 +118,7 @@ mod tests {
             span: Span::new(0, 50),
             tag_span_end: 50,
             content_end: 0,
-            text_children: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -188,7 +188,7 @@ mod tests {
             span: Span::new(0, 50),
             tag_span_end: 50,
             content_end: 0,
-            text_children: Vec::new(),
+            ..Default::default()
         };
         let template = TemplateAnalysisSnapshot {
             elements: vec![el],

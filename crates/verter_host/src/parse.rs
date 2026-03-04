@@ -356,7 +356,7 @@ pub(crate) fn parse_vue_snapshot(
             syntax
                 .style_nodes()
                 .iter()
-                .map(|style| build_single_style_analysis(style, source))
+                .map(|style| build_single_style_analysis(style, source, canonical_id))
                 .collect()
         } else {
             Vec::new()
@@ -515,17 +515,41 @@ fn build_preprocessor_requests(
 fn build_single_style_analysis(
     style: &verter_core::parser::types::RootNodeStyle,
     source: &str,
+    canonical_id: &str,
 ) -> verter_analysis::StyleBlockAnalysis {
     let module_name =
         find_attr(&extract_attrs(&style.attributes, source), "module").filter(|v| v != "true");
-    let vue_input = verter_analysis::VueStyleInput::default();
     let content_offset = style.content.map(|span| span.start).unwrap_or(0);
+
+    // Extract CSS content from the SFC source
+    let css_content = style
+        .content
+        .map(|span| &source[span.start as usize..span.end as usize])
+        .unwrap_or("");
+
+    // Run CSS prepass to extract v-bind() expressions and their generated variable names
+    let component_name = verter_core::compile::extract_component_name(canonical_id);
+    let scope_id = verter_core::compile::get_hash(&component_name);
+    let prepass_result = verter_core::css::prepass::prepass(css_content, &scope_id);
+
+    // Build VueStyleInput from prepass results
+    let vue_input = verter_analysis::VueStyleInput {
+        v_binds: prepass_result
+            .v_bind_vars
+            .iter()
+            .map(|vb| verter_analysis::VBindInput {
+                expression: vb.expression.clone(),
+                quoted: false,
+                start: content_offset,
+                end: content_offset,
+                generated_var_name: Some(vb.var_name.clone()),
+            })
+            .collect(),
+        special_pseudos: vec![],
+    };
+
     let analysis_lang = match style.lang {
         Some(verter_core::parser::types::StyleLang::Css) | None => {
-            let css_content = style
-                .content
-                .map(|span| &source[span.start as usize..span.end as usize])
-                .unwrap_or("");
             return verter_analysis::build_css_style_analysis(
                 css_content,
                 vue_input,
@@ -689,6 +713,10 @@ fn adjust_analysis_spans(
         call.arg_span.start = map(call.arg_span.start);
         call.arg_span.end = map(call.arg_span.end);
     }
+    for manip in &mut analysis.css_var_manipulations {
+        manip.span.start = map(manip.span.start);
+        manip.span.end = map(manip.span.end);
+    }
     if let Some(ref mut offset) = analysis.first_await_offset {
         *offset = map(*offset);
     }
@@ -716,6 +744,7 @@ pub(crate) fn build_script_analysis_from_source(
 /// when eager_analysis was false during upsert().
 pub(crate) fn build_style_analyses_from_source(
     source: &str,
+    canonical_id: &str,
 ) -> Vec<verter_analysis::StyleBlockAnalysis> {
     let opts = SyntaxPluginOptions::default();
     let ctx = SyntaxPluginContext {
@@ -729,7 +758,7 @@ pub(crate) fn build_style_analyses_from_source(
     syntax
         .style_nodes()
         .iter()
-        .map(|style| build_single_style_analysis(style, source))
+        .map(|style| build_single_style_analysis(style, source, canonical_id))
         .collect()
 }
 

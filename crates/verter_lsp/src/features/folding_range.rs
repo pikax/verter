@@ -126,7 +126,6 @@ mod tests {
                     dynamic_classes: vec![],
                     span: verter_span::Span::new(13, 44),
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -159,7 +158,6 @@ mod tests {
                     dynamic_classes: vec![],
                     span: verter_span::Span::new(13, 19),
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -186,7 +184,6 @@ mod tests {
                     dynamic_classes: vec![],
                     span: verter_span::Span::new(13, 30), // same line
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 }],
                 ..Default::default()

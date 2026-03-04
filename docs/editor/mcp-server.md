@@ -110,6 +110,7 @@ The MCP server exposes 36+ tools organized by category:
 - `find_component_usage` — Find where a component is used across the project
 - `get_import_graph` — Dependency graph for loaded files
 - `get_type_deps` — Cross-file type dependencies for a component
+- `css_var_flow` — Track CSS variable definitions, `var()` references, template `:style` bindings, and script DOM API manipulations across all loaded files
 
 ### Scoring & Quality
 - `score_file` — Quality score for a single file

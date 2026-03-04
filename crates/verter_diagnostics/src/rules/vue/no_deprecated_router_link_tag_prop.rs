@@ -90,7 +90,6 @@ mod tests {
                     },
                 ],
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -128,7 +127,6 @@ mod tests {
                     value_span: None,
                 }],
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -152,7 +150,6 @@ mod tests {
                     value_span: None,
                 }],
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -176,7 +173,6 @@ mod tests {
                     value_span: None,
                 }],
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

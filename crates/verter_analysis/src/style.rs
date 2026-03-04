@@ -28,6 +28,8 @@ pub struct VBindInput {
     pub quoted: bool,
     pub start: u32,
     pub end: u32,
+    /// Generated CSS variable name from the prepass (e.g. `"--a4f2eed6-color"`).
+    pub generated_var_name: Option<String>,
 }
 
 /// A Vue special pseudo-class (`:deep`, `:global`, `:slotted`).
@@ -85,11 +87,15 @@ impl StyleBlockAnalysis {
 
 /// Analyzed `v-bind()` expression from a style block.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AnalyzedVBind {
     pub expression: String,
     pub quoted: bool,
     pub start: u32,
     pub end: u32,
+    /// Generated CSS variable name from the prepass (e.g. `"--a4f2eed6-color"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_var_name: Option<String>,
 }
 
 /// Analyzed Vue special pseudo-class.
@@ -110,6 +116,9 @@ pub struct CssAnalysis {
     pub ids: Vec<AnalyzedCssId>,
     pub custom_properties: Vec<AnalyzedCustomProperty>,
     pub at_rules: Vec<AnalyzedAtRule>,
+    /// `var()` usages in non-custom-property declarations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub var_usages: Vec<AnalyzedVarUsage>,
     pub rule_count: u32,
 }
 
@@ -344,9 +353,63 @@ impl<'de> serde::Deserialize<'de> for AnalyzedCssId {
 
 /// A CSS custom property (variable) declaration.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AnalyzedCustomProperty {
     /// Includes the `--` prefix.
     pub name: String,
+    /// SFC-absolute span of the `--name` portion.
+    pub name_span: Span,
+    /// Raw trimmed value text (e.g. `"red"`, `"var(--other) 10px"`).
+    pub value: String,
+    /// SFC-absolute span of the value text.
+    pub value_span: Span,
+    /// `var()` references within the value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub var_references: Vec<CssVarReference>,
+    /// Index into `CssAnalysis.selectors` for the enclosing rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector_index: Option<u32>,
+}
+
+/// A `var(--name)` or `var(--name, fallback)` reference in a CSS value.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CssVarReference {
+    /// Variable name including `--` prefix.
+    pub name: String,
+    /// SFC-absolute span of the entire `var(...)` expression.
+    pub span: Span,
+    /// SFC-absolute span of the variable name within `var()`.
+    pub name_span: Span,
+    /// Optional fallback value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<CssVarFallback>,
+}
+
+/// The fallback portion of a `var(--name, fallback)` expression.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CssVarFallback {
+    /// Raw text of the fallback value.
+    pub text: String,
+    /// SFC-absolute span of the fallback text.
+    pub span: Span,
+    /// Nested `var()` references within the fallback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_var_references: Vec<CssVarReference>,
+}
+
+/// A `var()` usage in a non-custom-property CSS declaration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedVarUsage {
+    /// The CSS property name (e.g. `"color"`, `"background"`).
+    pub property_name: String,
+    /// The `var()` reference details.
+    pub reference: CssVarReference,
+    /// Index into `CssAnalysis.selectors` for the enclosing rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector_index: Option<u32>,
 }
 
 /// A CSS at-rule occurrence.
@@ -418,7 +481,7 @@ pub fn build_css_style_analysis(
     module_name: Option<&str>,
     content_offset: u32,
 ) -> StyleBlockAnalysis {
-    let css = scan_css(css_content);
+    let css = scan_css(css_content, content_offset);
 
     let v_binds = convert_v_binds(&vue_input);
     let special_pseudos = convert_special_pseudos(&vue_input);
@@ -478,6 +541,7 @@ fn convert_v_binds(input: &VueStyleInput) -> Vec<AnalyzedVBind> {
             quoted: vb.quoted,
             start: vb.start,
             end: vb.end,
+            generated_var_name: vb.generated_var_name.clone(),
         })
         .collect()
 }
@@ -538,6 +602,151 @@ fn derive_flags(
     }
 
     flags
+}
+
+// =============================================================================
+// CSS Variable Reference Extraction
+// =============================================================================
+
+/// Maximum nesting depth for `var()` in fallbacks (prevents runaway recursion).
+const MAX_VAR_NESTING_DEPTH: u8 = 8;
+
+/// Extract all `var(--name)` and `var(--name, fallback)` references from a CSS value string.
+///
+/// `offset_in_css` is the byte offset of `value_text` within the CSS content.
+/// `content_offset` is the SFC-absolute offset of the style block content start.
+/// All returned spans are SFC-absolute.
+pub fn extract_var_references(
+    value_text: &str,
+    offset_in_css: u32,
+    content_offset: u32,
+) -> Vec<CssVarReference> {
+    let mut refs = Vec::new();
+    extract_var_references_inner(value_text, offset_in_css, content_offset, 0, &mut refs);
+    refs
+}
+
+fn extract_var_references_inner(
+    text: &str,
+    base_offset: u32,
+    content_offset: u32,
+    depth: u8,
+    out: &mut Vec<CssVarReference>,
+) {
+    if depth >= MAX_VAR_NESTING_DEPTH {
+        return;
+    }
+
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i + 4 <= len {
+        // Look for "var("
+        if bytes[i] == b'v' && bytes[i + 1] == b'a' && bytes[i + 2] == b'r' && bytes[i + 3] == b'('
+        {
+            let var_start = i;
+            i += 4; // skip "var("
+
+            // Skip whitespace
+            while i < len && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+
+            // Expect --
+            if i + 1 >= len || bytes[i] != b'-' || bytes[i + 1] != b'-' {
+                i += 1;
+                continue;
+            }
+
+            let name_start = i;
+            i += 2; // skip --
+            while i < len && is_css_ident_char(bytes[i]) {
+                i += 1;
+            }
+            let name_end = i;
+            let var_name = &text[name_start..name_end];
+
+            // Skip whitespace after name
+            while i < len && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+
+            // Check for fallback (comma) or close paren
+            let fallback = if i < len && bytes[i] == b',' {
+                i += 1; // skip comma
+                        // Skip whitespace after comma
+                while i < len && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                let fallback_start = i;
+
+                // Find matching close paren, tracking nesting
+                let mut paren_depth = 1u32;
+                while i < len && paren_depth > 0 {
+                    match bytes[i] {
+                        b'(' => paren_depth += 1,
+                        b')' => paren_depth -= 1,
+                        _ => {}
+                    }
+                    if paren_depth > 0 {
+                        i += 1;
+                    }
+                }
+                let fallback_end = i;
+                let fallback_text = text[fallback_start..fallback_end].trim();
+
+                // Extract nested var() from fallback
+                let mut nested = Vec::new();
+                if !fallback_text.is_empty() {
+                    let fb_offset_in_text =
+                        fallback_text.as_ptr() as usize - text.as_ptr() as usize;
+                    extract_var_references_inner(
+                        fallback_text,
+                        base_offset + fb_offset_in_text as u32,
+                        content_offset,
+                        depth + 1,
+                        &mut nested,
+                    );
+                }
+
+                let fb_abs_start = base_offset + fallback_start as u32 + content_offset;
+                let fb_abs_end = base_offset + fallback_end as u32 + content_offset;
+
+                Some(CssVarFallback {
+                    text: fallback_text.to_string(),
+                    span: Span::new(fb_abs_start, fb_abs_end),
+                    nested_var_references: nested,
+                })
+            } else {
+                // Find closing paren
+                while i < len && bytes[i] != b')' {
+                    i += 1;
+                }
+                None
+            };
+
+            // Skip closing paren
+            let var_end = if i < len && bytes[i] == b')' {
+                i += 1;
+                i
+            } else {
+                i
+            };
+
+            let abs = |local: usize| -> u32 { base_offset + local as u32 + content_offset };
+
+            out.push(CssVarReference {
+                name: var_name.to_string(),
+                span: Span::new(abs(var_start), abs(var_end)),
+                name_span: Span::new(abs(name_start), abs(name_end)),
+                fallback,
+            });
+            continue;
+        }
+
+        i += 1;
+    }
 }
 
 // =============================================================================
@@ -986,7 +1195,7 @@ pub fn compute_structured_specificity(selector: &StructuredSelector) -> (u32, u3
 
 /// Scan CSS content with a byte-level scanner and extract analysis data.
 /// Returns `None` only for completely empty input.
-fn scan_css(css_content: &str) -> Option<CssAnalysis> {
+fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
     let bytes = css_content.as_bytes();
     let len = bytes.len();
 
@@ -1010,6 +1219,8 @@ fn scan_css(css_content: &str) -> Option<CssAnalysis> {
     // Track end of last statement (`;`) inside rule blocks, so nested selectors
     // start after the last property declaration, not from the opening `{`.
     let mut last_statement_end: usize = 0;
+    // Track the selector index for the current rule block (for linking custom properties)
+    let mut current_selector_index: Option<u32> = None;
     // At-rule depth stack: at_rule_entry_depths[i] = brace_depth where the at-rule block began
     // This lets us know when we're inside an at-rule block (not at selector level)
     let mut pending_at_rule: Option<(AtRuleKind, String)> = None;
@@ -1179,6 +1390,13 @@ fn scan_css(css_content: &str) -> Option<CssAnalysis> {
                         selector_offset,
                         &mut analysis,
                     );
+
+                    // Record the first selector index for this rule block
+                    // (for linking custom properties back to their selector)
+                    if !analysis.selectors.is_empty() {
+                        current_selector_index =
+                            Some((analysis.selectors.len() - individual_selectors.len()) as u32);
+                    }
                 }
             }
 
@@ -1191,10 +1409,16 @@ fn scan_css(css_content: &str) -> Option<CssAnalysis> {
 
         // Closing brace
         if b == b'}' {
-            // Scan for custom properties in the declaration block we're closing
+            // Scan for declarations in the block we're closing
             if keyframes_depth == 0 && brace_depth > 0 {
                 let decl_content = &css_content[decl_block_start..i];
-                scan_custom_properties(decl_content, &mut analysis);
+                scan_declarations(
+                    decl_content,
+                    decl_block_start as u32,
+                    content_offset,
+                    current_selector_index,
+                    &mut analysis,
+                );
             }
 
             brace_depth = brace_depth.saturating_sub(1);
@@ -1202,6 +1426,7 @@ fn scan_css(css_content: &str) -> Option<CssAnalysis> {
                 keyframes_entry_depths.pop();
                 keyframes_depth = keyframes_depth.saturating_sub(1);
             }
+            current_selector_index = None;
             selector_start = i + 1;
             decl_block_start = i + 1;
             i += 1;
@@ -1738,8 +1963,21 @@ fn extract_classes_and_ids_from_selector(
     }
 }
 
-/// Scan declaration block content for custom property declarations (`--name: value`).
-fn scan_custom_properties(decl_content: &str, analysis: &mut CssAnalysis) {
+/// Scan a declaration block for custom property declarations and var() usages.
+///
+/// - Custom property declarations (`--name: value`) are added to `analysis.custom_properties`
+///   with full details (value, spans, var_references, selector_index).
+/// - Non-custom-property declarations containing `var()` are added to `analysis.var_usages`.
+///
+/// `decl_block_offset` is the byte offset of `decl_content` within `css_content`.
+/// `content_offset` is the SFC-absolute offset of the style block content start.
+fn scan_declarations(
+    decl_content: &str,
+    decl_block_offset: u32,
+    content_offset: u32,
+    selector_index: Option<u32>,
+    analysis: &mut CssAnalysis,
+) {
     let bytes = decl_content.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -1809,13 +2047,7 @@ fn scan_custom_properties(decl_content: &str, analysis: &mut CssAnalysis) {
             continue;
         }
 
-        if b == b':' {
-            at_prop_start = false;
-            i += 1;
-            continue;
-        }
-
-        // At property-name position, check for `--`
+        // At property-name position, check for `--` (custom property declaration)
         if at_prop_start && b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
             // Found custom property declaration
             let name_start = i;
@@ -1823,11 +2055,173 @@ fn scan_custom_properties(decl_content: &str, analysis: &mut CssAnalysis) {
             while i < len && is_css_ident_char(bytes[i]) {
                 i += 1;
             }
-            let name = &decl_content[name_start..i];
+            let name_end = i;
+            let name = &decl_content[name_start..name_end];
+
+            // Skip whitespace and colon to get to value
+            while i < len && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < len && bytes[i] == b':' {
+                i += 1; // skip ':'
+                while i < len && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+            }
+
+            // Extract value until `;` or `}` or end, respecting strings/comments/nested parens
+            let value_start = i;
+            let mut val_in_string = false;
+            let mut val_string_char = b'"';
+            let mut val_paren_depth = 0u32;
+            while i < len {
+                let vb = bytes[i];
+                if val_in_string {
+                    if vb == b'\\' && i + 1 < len {
+                        i += 2;
+                        continue;
+                    }
+                    if vb == val_string_char {
+                        val_in_string = false;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if vb == b'"' || vb == b'\'' {
+                    val_in_string = true;
+                    val_string_char = vb;
+                    i += 1;
+                    continue;
+                }
+                if vb == b'(' {
+                    val_paren_depth += 1;
+                    i += 1;
+                    continue;
+                }
+                if vb == b')' {
+                    val_paren_depth = val_paren_depth.saturating_sub(1);
+                    i += 1;
+                    continue;
+                }
+                if val_paren_depth == 0 && (vb == b';' || vb == b'}') {
+                    break;
+                }
+                i += 1;
+            }
+            let value_end = i;
+            let value_raw = decl_content[value_start..value_end].trim();
+
+            let abs_name_start = decl_block_offset + name_start as u32 + content_offset;
+            let abs_name_end = decl_block_offset + name_end as u32 + content_offset;
+            let abs_value_start = decl_block_offset
+                + (value_raw.as_ptr() as usize - decl_content.as_ptr() as usize) as u32
+                + content_offset;
+            let abs_value_end = abs_value_start + value_raw.len() as u32;
+
+            // Extract var() references from the value
+            let value_offset_in_css = decl_block_offset
+                + (value_raw.as_ptr() as usize - decl_content.as_ptr() as usize) as u32;
+            let var_refs = extract_var_references(value_raw, value_offset_in_css, content_offset);
+
             analysis.custom_properties.push(AnalyzedCustomProperty {
                 name: name.to_string(),
+                name_span: Span::new(abs_name_start, abs_name_end),
+                value: value_raw.to_string(),
+                value_span: Span::new(abs_value_start, abs_value_end),
+                var_references: var_refs,
+                selector_index,
             });
+
             at_prop_start = false;
+            continue;
+        }
+
+        // At property-name position, scan for a regular property that may contain var()
+        if at_prop_start && b.is_ascii_alphabetic() && brace_depth == 0 {
+            let prop_name_start = i;
+            // Scan property name (letters, hyphens, digits)
+            while i < len
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-' || bytes[i] == b'_')
+            {
+                i += 1;
+            }
+            let prop_name = decl_content[prop_name_start..i].trim();
+
+            // Skip whitespace and colon
+            while i < len && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < len && bytes[i] == b':' {
+                i += 1;
+                while i < len && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+
+                // Scan value for var()
+                let value_start = i;
+                let mut val_in_string = false;
+                let mut val_string_char = b'"';
+                let mut val_paren_depth = 0u32;
+                while i < len {
+                    let vb = bytes[i];
+                    if val_in_string {
+                        if vb == b'\\' && i + 1 < len {
+                            i += 2;
+                            continue;
+                        }
+                        if vb == val_string_char {
+                            val_in_string = false;
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    if vb == b'"' || vb == b'\'' {
+                        val_in_string = true;
+                        val_string_char = vb;
+                        i += 1;
+                        continue;
+                    }
+                    if vb == b'(' {
+                        val_paren_depth += 1;
+                        i += 1;
+                        continue;
+                    }
+                    if vb == b')' {
+                        val_paren_depth = val_paren_depth.saturating_sub(1);
+                        i += 1;
+                        continue;
+                    }
+                    if val_paren_depth == 0 && (vb == b';' || vb == b'}') {
+                        break;
+                    }
+                    i += 1;
+                }
+                let value_end = i;
+                let value_raw = decl_content[value_start..value_end].trim();
+
+                // Check if value contains var()
+                if value_raw.contains("var(") {
+                    let value_offset_in_css = decl_block_offset
+                        + (value_raw.as_ptr() as usize - decl_content.as_ptr() as usize) as u32;
+                    let var_refs =
+                        extract_var_references(value_raw, value_offset_in_css, content_offset);
+                    for var_ref in var_refs {
+                        analysis.var_usages.push(AnalyzedVarUsage {
+                            property_name: prop_name.to_string(),
+                            reference: var_ref,
+                            selector_index,
+                        });
+                    }
+                }
+            }
+
+            at_prop_start = false;
+            continue;
+        }
+
+        if b == b':' {
+            at_prop_start = false;
+            i += 1;
             continue;
         }
 

@@ -189,7 +189,7 @@ CSS analysis uses a lightweight byte-level scanner (no external CSS parser depen
 ```
 style.rs              # CSS scanner, structured selector parser, specificity computation
 selector_match.rs     # Three-valued selector matching against template elements
-template.rs           # Template element analysis, dynamic class extraction
+template.rs           # Template element analysis, dynamic class extraction, :style CSS var extraction
 ```
 
 **Key types:**
@@ -202,6 +202,19 @@ template.rs           # Template element analysis, dynamic class extraction
 | `MatchResult` | `selector_match.rs` | Three-valued: `Matches`, `MaybeMatches`, `NoMatch` |
 | `DomQueryCallSite` | `types.rs` | DOM query call with parsed selector and spans |
 | `StyleBlockAnalysis` | `style.rs` | Per-`<style>` block analysis with nested `CssAnalysis` |
+| `AnalyzedCustomProperty` | `style.rs` | CSS custom property with name/value spans, var references, selector index |
+| `CssVarReference` | `style.rs` | `var()` call with name, span, optional fallback (recursive) |
+| `AnalyzedVarUsage` | `style.rs` | Regular CSS property using `var()` with property name and selector index |
+| `CssVarManipulation` | `types.rs` | Script-side CSS variable manipulation via DOM APIs |
+| `DynamicStyleVar` | `template.rs` | CSS variable set via `:style` binding in template |
+| `StaticStyleVar` | `template.rs` | CSS variable set via static `style` attribute in template |
+| `CssVarFlow` | `project_index.rs` | Cross-component CSS variable flow (definitions + usages + manipulations) |
+
+**CSS Variable Analysis (three-block tracking):**
+- **Style**: `scan_declarations()` extracts `AnalyzedCustomProperty` (definitions with values/spans) and `AnalyzedVarUsage` (var() references). `extract_var_references()` handles nested var() fallbacks.
+- **Template**: `extract_dynamic_style_vars()` extracts CSS vars from `:style="{ '--color': val }"`. `extract_static_style_vars()` extracts from `style="--color: red"`.
+- **Script**: `try_extract_css_var_manipulation()` detects `el.style.setProperty('--x', val)`, `getPropertyValue('--x')`, `removeProperty('--x')`.
+- **Cross-component**: `ProjectIndex.css_var_flow(name)` and `VerterHost.css_var_flow(name)` return `CssVarFlow` with all files defining/referencing/manipulating a variable.
 
 **Selector matching algorithm** (`match_selector()`):
 1. Match rightmost compound against target element

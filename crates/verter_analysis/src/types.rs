@@ -78,6 +78,10 @@ pub struct ScriptAnalysisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dom_query_calls: Vec<DomQueryCallSite>,
 
+    /// CSS variable manipulations via DOM style APIs (setProperty, getPropertyValue, removeProperty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub css_var_manipulations: Vec<CssVarManipulation>,
+
     /// SFC-absolute byte offset of the first top-level `await` expression (if any).
     /// Used by lint rules to detect lifecycle hooks/watchers called after await.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -881,4 +885,70 @@ pub struct ResolvedTypeInfo {
     /// For object types: member name → type string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members: Option<Vec<(String, String)>>,
+}
+
+/// A CSS variable manipulation via DOM style APIs in script.
+///
+/// Tracks calls like `el.style.setProperty('--color', val)`,
+/// `getComputedStyle(el).getPropertyValue('--color')`, and
+/// `el.style.removeProperty('--color')`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CssVarManipulation {
+    /// The kind of manipulation (set, get, remove).
+    pub kind: CssVarManipulationKind,
+    /// The CSS variable name (e.g., "--color").
+    pub var_name: String,
+    /// The value expression for setProperty (e.g., "val", "'red'").
+    pub value_expr: Option<String>,
+    /// SFC-absolute byte span of the entire call expression.
+    pub span: verter_span::Span,
+}
+
+impl serde::Serialize for CssVarManipulation {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let count = 4 + usize::from(self.value_expr.is_some());
+        let mut s = serializer.serialize_struct("CssVarManipulation", count)?;
+        s.serialize_field("kind", &self.kind)?;
+        s.serialize_field("varName", &self.var_name)?;
+        if self.value_expr.is_some() {
+            s.serialize_field("valueExpr", &self.value_expr)?;
+        }
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CssVarManipulation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            kind: CssVarManipulationKind,
+            var_name: String,
+            #[serde(default)]
+            value_expr: Option<String>,
+            span_start: u32,
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            kind: w.kind,
+            var_name: w.var_name,
+            value_expr: w.value_expr,
+            span: verter_span::Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+/// Discriminant for CSS variable DOM manipulation APIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CssVarManipulationKind {
+    /// `el.style.setProperty('--x', val)`
+    SetProperty,
+    /// `getComputedStyle(el).getPropertyValue('--x')`
+    GetPropertyValue,
+    /// `el.style.removeProperty('--x')`
+    RemoveProperty,
 }

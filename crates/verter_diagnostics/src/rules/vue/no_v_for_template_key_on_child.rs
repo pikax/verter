@@ -95,7 +95,6 @@ mod tests {
                     span: Span::new(0, 80),
                     tag_span_end: 40,
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 },
                 TemplateElement {
@@ -117,7 +116,6 @@ mod tests {
                     span: Span::new(41, 70),
                     tag_span_end: 62,
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 },
             ],
@@ -159,7 +157,6 @@ mod tests {
                 span: Span::new(5, 40),
                 tag_span_end: 30,
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -181,7 +178,6 @@ mod tests {
                 span: Span::new(41, 70),
                 tag_span_end: 46,
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

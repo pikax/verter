@@ -49,7 +49,7 @@ pub(crate) fn remove_inter_block_gaps(
 /// Used for scope IDs (`data-v-{hash}`) and component IDs. SHA-256 is chosen
 /// for compatibility with `@vue/compiler-sfc` which uses the same algorithm.
 /// See `verter_host::hash` module docs for the full hash algorithm rationale.
-pub(crate) fn get_hash(text: &str) -> String {
+pub fn get_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let result = hasher.finalize();
@@ -57,7 +57,7 @@ pub(crate) fn get_hash(text: &str) -> String {
 }
 
 /// Extract component name from a filename.
-pub(crate) fn extract_component_name(filename: &str) -> String {
+pub fn extract_component_name(filename: &str) -> String {
     let name = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
     let name = name.strip_suffix(".vue").unwrap_or(name);
     let name = name.strip_suffix(".ts").unwrap_or(name);

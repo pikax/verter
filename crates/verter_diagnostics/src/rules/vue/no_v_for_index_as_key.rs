@@ -85,7 +85,6 @@ mod tests {
                 span: Span::new(5, 35),
             }),
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }

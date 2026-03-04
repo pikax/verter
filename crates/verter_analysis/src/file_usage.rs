@@ -167,6 +167,9 @@ pub struct StyleUsageInfoOwned {
     pub id_names: Vec<String>,
     /// CSS custom property names (including `--` prefix)
     pub custom_property_names: Vec<String>,
+    /// CSS variable names referenced via `var()` in this style block
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub var_reference_names: Vec<String>,
     /// Whether this block uses `:deep()`
     pub has_deep: bool,
     /// Whether this block uses `:global()`
@@ -193,6 +196,12 @@ pub struct FileUsageInfoOwned {
     pub styles: Vec<StyleUsageInfoOwned>,
     /// Raw flags for quick queries (stored as u32 for serde compatibility)
     pub flags: u32,
+    /// CSS variable names set in template inline styles (from :style bindings)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub template_css_var_names: Vec<String>,
+    /// CSS variable names manipulated in script (from DOM style APIs)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub script_css_var_names: Vec<String>,
 }
 
 impl FileUsageInfoOwned {
@@ -248,6 +257,13 @@ impl FileUsageInfoOwned {
         self.styles
             .iter()
             .flat_map(|s| s.custom_property_names.iter().map(|n| n.as_str()))
+    }
+
+    /// Get all CSS variable reference names (via `var()`) across all style blocks
+    pub fn all_var_references(&self) -> impl Iterator<Item = &str> {
+        self.styles
+            .iter()
+            .flat_map(|s| s.var_reference_names.iter().map(|n| n.as_str()))
     }
 }
 

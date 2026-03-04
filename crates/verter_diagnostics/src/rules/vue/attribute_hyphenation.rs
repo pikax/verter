@@ -106,7 +106,6 @@ mod tests {
             span: Span::new(0, 50),
             tag_span_end: 45,
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -191,7 +190,6 @@ mod tests {
                 span: Span::new(0, 30),
                 tag_span_end: 25,
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

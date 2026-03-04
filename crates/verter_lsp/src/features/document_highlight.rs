@@ -396,7 +396,7 @@ mod tests {
             span: verter_span::Span::new(0, 0),
             tag_span_end: 0,
             content_end: 0,
-            text_children: Vec::new(),
+            ..Default::default()
         }
     }
 

@@ -435,7 +435,7 @@ fn test_css_nav_template_class_to_style() {
                 span: verter_span::Span::new(0, 0),
                 tag_span_end: 0,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -529,7 +529,7 @@ fn test_css_nav_multi_class_attr() {
                 span: verter_span::Span::new(0, 0),
                 tag_span_end: 0,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -622,7 +622,7 @@ fn test_css_nav_template_id_to_style() {
                 span: verter_span::Span::new(0, 0),
                 tag_span_end: 0,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -705,7 +705,7 @@ fn test_css_nav_dynamic_class_skipped() {
                 span: verter_span::Span::new(0, 0),
                 tag_span_end: 0,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -789,7 +789,7 @@ fn test_css_nav_style_to_template() {
                 span: verter_span::Span::new(0, 0),
                 tag_span_end: 0,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -1104,7 +1104,7 @@ fn test_dom_query_selector_navigates_to_element() {
                 span: verter_span::Span::new(btn_elem_start, btn_elem_end),
                 tag_span_end: btn_elem_end,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -1188,7 +1188,7 @@ fn test_dom_query_selector_no_match() {
                 span: verter_span::Span::new(0, 0),
                 tag_span_end: 0,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -1268,7 +1268,7 @@ fn test_dom_query_selector_falls_back_to_css() {
                 span: verter_span::Span::new(0, 0),
                 tag_span_end: 0,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -1460,7 +1460,7 @@ fn test_go_to_definition_event_handler_click() {
                 span: verter_span::Span::new(11, 60),
                 tag_span_end: 45,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             event_handlers: vec![verter_analysis::template::TemplateEventHandler {
                 event_name: "click".into(),
@@ -1560,7 +1560,7 @@ fn test_go_to_definition_inline_event_no_binding() {
                 span: verter_span::Span::new(11, 55),
                 tag_span_end: 40,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             event_handlers: vec![verter_analysis::template::TemplateEventHandler {
                 event_name: "click".into(),

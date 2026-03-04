@@ -11,7 +11,7 @@ All Rust span types are defined in `crates/verter_span/src/lib.rs`. Each type en
 
 | Type | Meaning | Serde? | Used Where |
 |------|---------|--------|------------|
-| `Span` | SFC-absolute byte offsets `[start, end)` | **Yes** (`spanStart`/`spanEnd`) | Analysis types, diagnostics, CSS analysis, CodeTransform, Raw* template data |
+| `Span` | SFC-absolute byte offsets `[start, end)` | **Yes** (`spanStart`/`spanEnd`) | Analysis types, diagnostics, CSS analysis, CodeTransform, Raw* template data, CSS variable spans |
 | `RelativeSpan` | Byte offsets relative to a base stored elsewhere | **No** | CSS scanner internals, OXC binding extraction (`Binding.span`) |
 | `PartialGeneratedSpan` | Unresolved position in generated output (TSX) | **No** | TSGO response parsing before PositionMapper resolution |
 | `GeneratedSpan` | Resolved mapping: generated position + SFC origin | **No** | TSGO diagnostics after resolution, codegen error mapping |
@@ -33,6 +33,21 @@ All Rust span types are defined in `crates/verter_span/src/lib.rs`. Each type en
 - `slice(&self, source: &str) -> &str` — on `Span`, `RelativeSpan`, `PartialGeneratedSpan`
 - `From<oxc_span::Span>` for both `Span` and `RelativeSpan`
 - **No `From` conversions between span types** — type safety enforced at compile time
+
+## CSS Variable Analysis Spans
+
+All CSS variable span fields use SFC-absolute `Span`:
+
+| Type | Field | Meaning |
+|------|-------|---------|
+| `AnalyzedCustomProperty` | `name_span` | Span of `--name` in declaration |
+| `AnalyzedCustomProperty` | `value_span` | Span of the value text after `:` |
+| `CssVarReference` | `span` | Span of entire `var(...)` expression |
+| `CssVarReference` | `name_span` | Span of variable name within `var()` |
+| `CssVarFallback` | `span` | Span of fallback text within `var()` |
+| `CssVarManipulation` | `span` | Span of DOM API call expression (e.g., `setProperty(...)`) |
+
+These spans are computed as `content_offset + local_offset` during CSS scanning, where `content_offset` is the SFC-absolute byte offset of the `<style>` block content start. For script-side `CssVarManipulation`, spans come from OXC and are adjusted by the script block's SFC offset.
 
 ## Position Encoding Layers
 

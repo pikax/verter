@@ -75,6 +75,10 @@ pub struct TemplateAnalysisSnapshot {
     /// Contains resolved types for template expressions, slot bindings, etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_enhancements: Option<TemplateTypeEnhancements>,
+
+    /// All CSS variable names set in template inline styles (static + dynamic, deduped).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub css_var_names: Vec<String>,
 }
 
 // =============================================================================
@@ -385,6 +389,10 @@ pub struct TemplateElement {
     /// Ordered text + interpolation children (excludes element/comment children).
     /// Used by code actions (extract bare text) and i18n rules.
     pub text_children: Vec<TemplateTextSegment>,
+    /// CSS variables set via `:style` binding (e.g., `{ '--color': val }`).
+    pub dynamic_style_vars: Vec<DynamicStyleVar>,
+    /// CSS variables set via static `style` attribute (e.g., `style="--color: red"`).
+    pub static_style_vars: Vec<StaticStyleVar>,
 }
 
 impl TemplateElement {
@@ -705,6 +713,260 @@ fn extract_string_literals_from_expr(expr: &str, base_offset: usize) -> Vec<Dyna
 
 // Old extract_object_class_keys, extract_key_from_pair, extract_array_class_keys
 // removed — all callers now use extract_dynamic_class_names_rich.
+
+// =============================================================================
+// CSS Variable Extraction from Template `:style` Bindings
+// =============================================================================
+
+/// A CSS variable set via a dynamic `:style` binding.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamicStyleVar {
+    /// CSS variable name (e.g. `"--color"`) or partial prefix for template literals.
+    pub name: String,
+    /// Byte offset within the expression where the variable name starts.
+    pub expr_offset: u32,
+    /// Value expression text (e.g. `"computedSize"`, `"val"`).
+    pub value_expr: String,
+    /// Whether this is a template literal key (partial/dynamic name).
+    pub is_dynamic_key: bool,
+    /// Whether this is inside a ternary or logical expression (conditional).
+    pub is_conditional: bool,
+}
+
+/// A CSS variable set via a static `style` attribute.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaticStyleVar {
+    /// CSS variable name (e.g. `"--color"`).
+    pub name: String,
+    /// Value text (e.g. `"red"`).
+    pub value: String,
+    /// Byte offset within the attribute value where the name starts.
+    pub name_offset: u32,
+}
+
+/// Extract CSS variable definitions from a dynamic `:style` expression.
+///
+/// Handles object syntax `{ '--color': val }` and extracts only keys starting with `--`.
+/// Also handles array syntax `[{ '--a': x }, { '--b': y }]`.
+pub fn extract_dynamic_style_vars(expr: &str) -> Vec<DynamicStyleVar> {
+    let trimmed = expr.trim();
+    if trimmed.starts_with('{') {
+        extract_style_vars_from_object(trimmed, 0)
+    } else if trimmed.starts_with('[') {
+        extract_style_vars_from_array(trimmed)
+    } else {
+        Vec::new()
+    }
+}
+
+fn extract_style_vars_from_object(expr: &str, _base_offset: usize) -> Vec<DynamicStyleVar> {
+    let inner = expr.trim();
+    let brace_start = inner.find('{').unwrap_or(0);
+    let inner_content = &inner[brace_start + 1..];
+    let inner_content = inner_content.strip_suffix('}').unwrap_or(inner_content);
+    let content_offset = brace_start + 1;
+
+    let mut results = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let bytes = inner_content.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b'\'' | b'"' | b'`' if depth == 0 => {
+                let quote = bytes[i];
+                i += 1;
+                while i < len && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b',' if depth == 0 => {
+                extract_style_var_from_pair(
+                    &inner_content[start..i],
+                    content_offset + start,
+                    &mut results,
+                );
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if start < len {
+        extract_style_var_from_pair(
+            &inner_content[start..],
+            content_offset + start,
+            &mut results,
+        );
+    }
+
+    results
+}
+
+fn extract_style_var_from_pair(pair: &str, offset: usize, out: &mut Vec<DynamicStyleVar>) {
+    let pair = pair.trim();
+    if pair.is_empty() {
+        return;
+    }
+
+    // Find the colon separator (key: value), accounting for nested colons
+    let bytes = pair.as_bytes();
+    let mut depth = 0i32;
+    let mut colon_pos = None;
+    let mut i = 0;
+    let len = bytes.len();
+    while i < len {
+        match bytes[i] {
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b'\'' | b'"' | b'`' if depth == 0 => {
+                let quote = bytes[i];
+                i += 1;
+                while i < len && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b':' if depth == 0 => {
+                colon_pos = Some(i);
+                break;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let Some(colon) = colon_pos else {
+        return;
+    };
+
+    let key_text = pair[..colon].trim();
+    let value_text = pair[colon + 1..].trim();
+
+    // Extract the key — must start with --
+    let (var_name, is_dynamic_key, key_offset) =
+        if key_text.starts_with('\'') || key_text.starts_with('"') {
+            // Quoted key
+            let inner = &key_text[1..key_text.len().saturating_sub(1)];
+            if inner.starts_with("--") {
+                (inner.to_string(), false, offset + 1)
+            } else {
+                return;
+            }
+        } else if key_text.starts_with('`') {
+            // Template literal key
+            let inner = &key_text[1..key_text.len().saturating_sub(1)];
+            if inner.starts_with("--") {
+                // Extract the static prefix before ${
+                let prefix = if let Some(dollar_pos) = inner.find("${") {
+                    &inner[..dollar_pos]
+                } else {
+                    inner
+                };
+                (prefix.to_string(), inner.contains("${"), offset + 1)
+            } else {
+                return;
+            }
+        } else {
+            // Unquoted identifier — not a CSS variable key (CSS vars start with --)
+            return;
+        };
+
+    out.push(DynamicStyleVar {
+        name: var_name,
+        expr_offset: key_offset as u32,
+        value_expr: value_text.to_string(),
+        is_dynamic_key,
+        is_conditional: false,
+    });
+}
+
+fn extract_style_vars_from_array(expr: &str) -> Vec<DynamicStyleVar> {
+    let inner = expr.trim();
+    let bracket_start = inner.find('[').unwrap_or(0);
+    let inner_content = &inner[bracket_start + 1..];
+    let inner_content = inner_content.strip_suffix(']').unwrap_or(inner_content);
+
+    let mut results = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let bytes = inner_content.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b'\'' | b'"' | b'`' if depth == 0 => {
+                let quote = bytes[i];
+                i += 1;
+                while i < len && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b',' if depth == 0 => {
+                let element = inner_content[start..i].trim();
+                if element.starts_with('{') {
+                    results.extend(extract_style_vars_from_object(element, 0));
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if start < len {
+        let element = inner_content[start..].trim();
+        if element.starts_with('{') {
+            results.extend(extract_style_vars_from_object(element, 0));
+        }
+    }
+
+    results
+}
+
+/// Extract CSS variable definitions from a static `style` attribute value.
+///
+/// Parses `"--color: red; --size: 10px; color: blue"` and extracts only `--*` declarations.
+pub fn extract_static_style_vars(style_value: &str) -> Vec<StaticStyleVar> {
+    let mut results = Vec::new();
+
+    for decl in style_value.split(';') {
+        let decl = decl.trim();
+        if !decl.starts_with("--") {
+            continue;
+        }
+        if let Some(colon_pos) = decl.find(':') {
+            let name = decl[..colon_pos].trim();
+            let value = decl[colon_pos + 1..].trim();
+            if name.starts_with("--") {
+                let name_offset = (name.as_ptr() as usize - style_value.as_ptr() as usize) as u32;
+                results.push(StaticStyleVar {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                    name_offset,
+                });
+            }
+        }
+    }
+
+    results
+}
 
 /// Element namespace.
 #[derive(
@@ -1459,6 +1721,12 @@ impl serde::Serialize for TemplateElement {
         if self.content_end != 0 {
             map.serialize_entry("contentEnd", &self.content_end)?;
         }
+        if !self.dynamic_style_vars.is_empty() {
+            map.serialize_entry("dynamicStyleVars", &self.dynamic_style_vars)?;
+        }
+        if !self.static_style_vars.is_empty() {
+            map.serialize_entry("staticStyleVars", &self.static_style_vars)?;
+        }
         // text_children omitted from serialization (Rust-only, not crossing FFI)
         map.end()
     }
@@ -1546,6 +1814,8 @@ impl<'de> serde::Deserialize<'de> for TemplateElement {
             tag_span_end: w.tag_span_end,
             content_end: w.content_end,
             text_children: Vec::new(), // Not deserialized — Rust-only
+            dynamic_style_vars: Vec::new(),
+            static_style_vars: Vec::new(),
         })
     }
 }
@@ -2024,6 +2294,8 @@ mod tests {
             tag_span_end: 50,
             content_end: 0,
             text_children: Vec::new(),
+            dynamic_style_vars: Vec::new(),
+            static_style_vars: Vec::new(),
         };
 
         let json = serde_json::to_string(&element).expect("serialize");
@@ -2313,5 +2585,81 @@ mod tests {
             "bar",
             "offset should point to 'bar' text"
         );
+    }
+
+    // ===== CSS Variable Extraction Tests =====
+
+    /// @ai-generated - extract_dynamic_style_vars parses object with CSS variable keys
+    #[test]
+    fn extract_dynamic_style_vars_object() {
+        let vars = extract_dynamic_style_vars("{ '--color': val, '--size': computedSize }");
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].name, "--color");
+        assert_eq!(vars[0].value_expr, "val");
+        assert!(!vars[0].is_dynamic_key);
+        assert_eq!(vars[1].name, "--size");
+        assert_eq!(vars[1].value_expr, "computedSize");
+    }
+
+    /// @ai-generated - extract_dynamic_style_vars ignores non-CSS-variable keys
+    #[test]
+    fn extract_dynamic_style_vars_filters_non_css_vars() {
+        let vars = extract_dynamic_style_vars("{ 'color': 'red', '--custom': val }");
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].name, "--custom");
+    }
+
+    /// @ai-generated - extract_dynamic_style_vars handles template literal keys
+    #[test]
+    fn extract_dynamic_style_vars_template_literal() {
+        let vars = extract_dynamic_style_vars("{ `--${prefix}--color`: val }");
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].name, "--");
+        assert!(vars[0].is_dynamic_key);
+    }
+
+    /// @ai-generated - extract_dynamic_style_vars handles array syntax
+    #[test]
+    fn extract_dynamic_style_vars_array() {
+        let vars = extract_dynamic_style_vars("[{ '--a': x }, { '--b': y }]");
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].name, "--a");
+        assert_eq!(vars[1].name, "--b");
+    }
+
+    /// @ai-generated - extract_dynamic_style_vars returns empty for non-object/array
+    #[test]
+    fn extract_dynamic_style_vars_non_object() {
+        let vars = extract_dynamic_style_vars("someVariable");
+        assert!(vars.is_empty());
+    }
+
+    /// @ai-generated - extract_static_style_vars parses CSS variable declarations
+    #[test]
+    fn extract_static_style_vars_basic() {
+        let vars = extract_static_style_vars("--color: red; --size: 10px; color: blue");
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].name, "--color");
+        assert_eq!(vars[0].value, "red");
+        assert_eq!(vars[1].name, "--size");
+        assert_eq!(vars[1].value, "10px");
+    }
+
+    /// @ai-generated - extract_static_style_vars returns empty for no CSS vars
+    #[test]
+    fn extract_static_style_vars_no_vars() {
+        let vars = extract_static_style_vars("color: red; font-size: 14px");
+        assert!(vars.is_empty());
+    }
+
+    /// @ai-generated - extract_static_style_vars handles only CSS vars
+    #[test]
+    fn extract_static_style_vars_only_vars() {
+        let vars = extract_static_style_vars("--x: 1; --y: 2");
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].name, "--x");
+        assert_eq!(vars[0].value, "1");
+        assert_eq!(vars[1].name, "--y");
+        assert_eq!(vars[1].value, "2");
     }
 }

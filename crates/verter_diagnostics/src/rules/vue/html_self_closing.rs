@@ -97,7 +97,7 @@ mod tests {
             span: Span::new(0, 10),
             tag_span_end: 10,
             content_end: 0,
-            text_children: Vec::new(),
+            ..Default::default()
         }
     }
 

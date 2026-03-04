@@ -161,6 +161,7 @@ fn build_script_snapshot(
         exported_functions: Vec::new(),
         vue_api_calls: analysis.vue_api_calls.clone(),
         dom_query_calls: analysis.dom_query_calls.clone(),
+        css_var_manipulations: analysis.css_var_manipulations.clone(),
         first_await_offset: None,
         type_enhancements: None,
     }

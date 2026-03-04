@@ -45,7 +45,7 @@ pub use file_usage::{
 pub use imports::extract_import_sources;
 pub use macros::collect_type_references;
 pub use project_index::{
-    ComponentEdge, ComponentUsageSummary, DynamicInjectEntry, FileInjectValidation,
+    ComponentEdge, ComponentUsageSummary, CssVarFlow, DynamicInjectEntry, FileInjectValidation,
     InjectValidation, InjectValidationEntry, ProjectIndex, ProjectStats, ProvideInjectSummary,
 };
 pub use scope::AnalysisScope;
@@ -70,8 +70,8 @@ pub use types::hash_16;
 pub use types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedExportedFunction, AnalyzedImport,
     AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, BindingInitializer, ComposableInfo,
-    ComposableReturn, ComposableReturnField, DomQueryCallSite, DomQueryKind, ExportSignature,
-    FunctionParam, Hash16, ImportSourceInfo, LiteralKind, MacroTypeDep, ReactivityKind,
-    ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot, ScriptTypeEnhancements,
-    VueApiClassification,
+    ComposableReturn, ComposableReturnField, CssVarManipulation, CssVarManipulationKind,
+    DomQueryCallSite, DomQueryKind, ExportSignature, FunctionParam, Hash16, ImportSourceInfo,
+    LiteralKind, MacroTypeDep, ReactivityKind, ResolvedTypeInfo, ReturnReactivity,
+    ScriptAnalysisSnapshot, ScriptTypeEnhancements, VueApiClassification,
 };

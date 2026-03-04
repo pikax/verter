@@ -97,7 +97,6 @@ mod tests {
             has_element_children: false,
             span: Span::new(0, 30),
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -108,7 +107,6 @@ mod tests {
             has_element_children: true,
             span: Span::new(0, 50),
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -126,7 +124,6 @@ mod tests {
                 value_span: None,
             }],
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }
@@ -154,7 +151,6 @@ mod tests {
                 has_element_children: false,
                 span: Span::new(0, 30),
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -182,7 +178,6 @@ mod tests {
                     tag: "source".to_string(),
                     parent_index: Some(0u32),
                     content_end: 0,
-                    text_children: Vec::new(),
                     ..Default::default()
                 },
             ],
@@ -201,7 +196,6 @@ mod tests {
             elements: vec![TemplateElement {
                 tag: "div".to_string(),
                 content_end: 0,
-                text_children: Vec::new(),
                 ..Default::default()
             }],
             ..Default::default()

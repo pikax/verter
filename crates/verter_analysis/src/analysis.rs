@@ -95,6 +95,7 @@ pub fn build_script_analysis_with_scope(
     let mut bindings = Vec::new();
     let mut vue_api_calls = Vec::new();
     let mut dom_query_calls = Vec::new();
+    let mut css_var_manipulations = Vec::new();
     let mut first_await_offset: Option<u32> = None;
     // Track local type → referenced type names (from extends and intersection)
     // e.g., `interface Local extends Base {}` → { "Local": ["Base"] }
@@ -115,6 +116,12 @@ pub fn build_script_analysis_with_scope(
                 try_extract_vue_api_call(&expr_stmt.expression, &import_map, &mut vue_api_calls);
                 // Detect DOM query calls (e.g., document.querySelector('.foo'))
                 try_extract_dom_query(&expr_stmt.expression, &mut dom_query_calls);
+                // Detect CSS variable manipulations (e.g., el.style.setProperty('--x', val))
+                try_extract_css_var_manipulation(
+                    &expr_stmt.expression,
+                    content,
+                    &mut css_var_manipulations,
+                );
                 if first_await_offset.is_none() {
                     if let Some(offset) = find_await_offset(&expr_stmt.expression) {
                         first_await_offset = Some(offset);
@@ -176,6 +183,7 @@ pub fn build_script_analysis_with_scope(
                     // Extract DOM query from initializer
                     if let Some(ref init) = decl.init {
                         try_extract_dom_query(init, &mut dom_query_calls);
+                        try_extract_css_var_manipulation(init, content, &mut css_var_manipulations);
                     }
 
                     if first_await_offset.is_none() {
@@ -298,6 +306,7 @@ pub fn build_script_analysis_with_scope(
         macro_type_deps,
         vue_api_calls,
         dom_query_calls,
+        css_var_manipulations,
         first_await_offset,
         flags,
         exported_functions,
@@ -649,7 +658,78 @@ fn try_extract_dom_query(expr: &Expression<'_>, dom_query_calls: &mut Vec<DomQue
     });
 }
 
-/// Find the byte offset of the first `await` expression in a top-level expression.
+/// Extract a CSS variable manipulation from an expression.
+/// Detects patterns like `el.style.setProperty('--x', val)`,
+/// `getComputedStyle(el).getPropertyValue('--x')`,
+/// `el.style.removeProperty('--x')`.
+fn try_extract_css_var_manipulation(
+    expr: &Expression<'_>,
+    source: &str,
+    css_var_manipulations: &mut Vec<CssVarManipulation>,
+) {
+    let call = match expr {
+        Expression::CallExpression(c) => c,
+        _ => return,
+    };
+
+    // Match member expressions: something.setProperty(...), something.getPropertyValue(...), something.removeProperty(...)
+    let method_name = match &call.callee {
+        Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+        Expression::ChainExpression(chain) => {
+            if let oxc_ast::ast::ChainElement::StaticMemberExpression(member) = &chain.expression {
+                member.property.name.as_str()
+            } else {
+                return;
+            }
+        }
+        _ => return,
+    };
+
+    let kind = match method_name {
+        "setProperty" => CssVarManipulationKind::SetProperty,
+        "getPropertyValue" => CssVarManipulationKind::GetPropertyValue,
+        "removeProperty" => CssVarManipulationKind::RemoveProperty,
+        _ => return,
+    };
+
+    // First argument must be a string literal starting with "--"
+    let arg = match call.arguments.first() {
+        Some(a) => a,
+        None => return,
+    };
+    let var_name = match arg.as_expression() {
+        Some(Expression::StringLiteral(s)) => {
+            let val = s.value.as_str();
+            if !val.starts_with("--") {
+                return;
+            }
+            val.to_string()
+        }
+        _ => return,
+    };
+
+    // For setProperty, extract the value expression source text
+    let value_expr = if kind == CssVarManipulationKind::SetProperty {
+        call.arguments.get(1).and_then(|a| {
+            let start = a.span().start as usize;
+            let end = a.span().end as usize;
+            if start < source.len() && end <= source.len() {
+                Some(source[start..end].to_string())
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+
+    css_var_manipulations.push(CssVarManipulation {
+        kind,
+        var_name,
+        value_expr,
+        span: call.span.into(),
+    });
+}
 /// Stops at function boundaries (arrow/function expressions don't make setup async).
 fn find_await_offset(expr: &Expression<'_>) -> Option<u32> {
     match expr {

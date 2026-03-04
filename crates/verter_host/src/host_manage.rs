@@ -44,9 +44,11 @@ impl VerterHost {
                 // Script analysis was already computed during upsert
                 stored_script
             };
-            let style_analyses = crate::parse::build_style_analyses_from_source(&source);
+            let style_analyses =
+                crate::parse::build_style_analyses_from_source(&source, &canonical);
             let vue_api_calls = script_analysis.vue_api_calls.clone();
             let dom_query_calls = script_analysis.dom_query_calls.clone();
+            let css_var_manipulations = script_analysis.css_var_manipulations.clone();
             return Some(FileAnalysisSnapshot {
                 imports: script_analysis.imports,
                 bindings: script_analysis.bindings,
@@ -57,6 +59,7 @@ impl VerterHost {
                 template,
                 vue_api_calls,
                 dom_query_calls,
+                css_var_manipulations,
             });
         }
 
@@ -70,6 +73,7 @@ impl VerterHost {
             template: entry.template_analysis.clone(),
             vue_api_calls: entry.script_analysis.vue_api_calls.clone(),
             dom_query_calls: entry.script_analysis.dom_query_calls.clone(),
+            css_var_manipulations: entry.script_analysis.css_var_manipulations.clone(),
         })
     }
 
@@ -179,5 +183,57 @@ impl VerterHost {
             .iter()
             .map(|(id, entry)| (id.clone(), entry.file_kind))
             .collect()
+    }
+
+    /// Returns cross-component CSS variable flow for a given variable name.
+    ///
+    /// Scans all files in the host to find where the variable is defined (in `<style>`),
+    /// referenced via `var()` (in `<style>`), set via `:style` bindings (in `<template>`),
+    /// and manipulated via DOM APIs (in `<script>`).
+    pub fn css_var_flow(&self, var_name: &str) -> verter_analysis::CssVarFlow {
+        let files = read_lock(&self.files);
+        let mut flow = verter_analysis::CssVarFlow {
+            name: var_name.to_string(),
+            ..Default::default()
+        };
+
+        for (canonical_id, entry) in files.iter() {
+            let path: std::sync::Arc<std::path::Path> =
+                std::sync::Arc::from(std::path::Path::new(canonical_id.as_str()));
+
+            // Check style blocks for definitions and var() references
+            for style in &entry.style_analyses {
+                if let Some(ref css) = style.css {
+                    let has_def = css.custom_properties.iter().any(|p| p.name == var_name);
+                    if has_def {
+                        flow.style_definitions.push(std::sync::Arc::clone(&path));
+                    }
+
+                    let has_ref = css.var_usages.iter().any(|u| u.reference.name == var_name);
+                    if has_ref {
+                        flow.style_var_usages.push(std::sync::Arc::clone(&path));
+                    }
+                }
+            }
+
+            // Check template for :style CSS variable bindings
+            if let Some(ref tmpl) = entry.template_analysis {
+                if tmpl.css_var_names.iter().any(|n| n == var_name) {
+                    flow.template_definitions.push(std::sync::Arc::clone(&path));
+                }
+            }
+
+            // Check script for DOM API CSS variable manipulations
+            if entry
+                .script_analysis
+                .css_var_manipulations
+                .iter()
+                .any(|m| m.var_name == var_name)
+            {
+                flow.script_manipulations.push(std::sync::Arc::clone(&path));
+            }
+        }
+
+        flow
     }
 }

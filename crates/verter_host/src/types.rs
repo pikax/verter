@@ -391,6 +391,10 @@ pub struct FileAnalysisSnapshot {
     /// DOM query call sites (querySelector, getElementById, etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dom_query_calls: Vec<verter_analysis::types::DomQueryCallSite>,
+
+    /// CSS variable manipulations via DOM style APIs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub css_var_manipulations: Vec<verter_analysis::types::CssVarManipulation>,
 }
 
 /// Result of [`VerterHost::resolve`](crate::VerterHost::resolve).

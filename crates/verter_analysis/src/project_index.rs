@@ -51,6 +51,15 @@ pub struct ProjectIndex {
 
     /// CSS custom property name → files that define it
     custom_property_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
+
+    /// CSS variable name → files that reference it via `var()`
+    var_reference_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
+
+    /// CSS variable name → files that set it in template `:style` bindings
+    template_css_var_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
+
+    /// CSS variable name → files that manipulate it via script DOM APIs
+    script_css_var_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
 }
 
 /// An edge in the component usage graph
@@ -64,6 +73,24 @@ pub struct ComponentEdge {
     pub start: u32,
     /// End offset in source
     pub end: u32,
+}
+
+/// Cross-component CSS variable flow information.
+///
+/// Tracks where a CSS variable is defined, referenced, and manipulated
+/// across all SFC blocks (style, template, script) in the project.
+#[derive(Debug, Clone, Default)]
+pub struct CssVarFlow {
+    /// The CSS variable name (e.g., "--theme-color").
+    pub name: String,
+    /// Files that define this variable in `<style>` blocks (`--name: value`).
+    pub style_definitions: Vec<Arc<Path>>,
+    /// Files that reference this variable via `var(--name)` in `<style>` blocks.
+    pub style_var_usages: Vec<Arc<Path>>,
+    /// Files that set this variable via `:style` bindings in `<template>`.
+    pub template_definitions: Vec<Arc<Path>>,
+    /// Files that manipulate this variable via DOM APIs in `<script>`.
+    pub script_manipulations: Vec<Arc<Path>>,
 }
 
 // =============================================================================
@@ -174,6 +201,12 @@ pub struct ProjectStats {
     pub unique_css_classes: usize,
     /// Total unique CSS custom properties
     pub unique_custom_properties: usize,
+    /// Total unique CSS variable references (via `var()`)
+    pub unique_var_references: usize,
+    /// Custom properties defined but never referenced via `var()`
+    pub unreferenced_custom_properties: usize,
+    /// `var()` references with no matching custom property definition
+    pub unresolved_var_references: usize,
 }
 
 // =============================================================================
@@ -198,6 +231,9 @@ impl ProjectIndex {
             id_index: FxHashMap::default(),
             v_bind_css_index: FxHashMap::default(),
             custom_property_index: FxHashMap::default(),
+            var_reference_index: FxHashMap::default(),
+            template_css_var_index: FxHashMap::default(),
+            script_css_var_index: FxHashMap::default(),
         }
     }
 
@@ -283,6 +319,28 @@ impl ProjectIndex {
                     .or_default()
                     .insert(Arc::clone(&path));
             }
+            for var_ref in &style.var_reference_names {
+                self.var_reference_index
+                    .entry(var_ref.clone())
+                    .or_default()
+                    .insert(Arc::clone(&path));
+            }
+        }
+
+        // Index template CSS variable names
+        for name in &info.template_css_var_names {
+            self.template_css_var_index
+                .entry(name.clone())
+                .or_default()
+                .insert(Arc::clone(&path));
+        }
+
+        // Index script CSS variable names
+        for name in &info.script_css_var_names {
+            self.script_css_var_index
+                .entry(name.clone())
+                .or_default()
+                .insert(Arc::clone(&path));
         }
 
         self.files.insert(path, info);
@@ -364,6 +422,34 @@ impl ProjectIndex {
                     if files.is_empty() {
                         self.custom_property_index.remove(prop);
                     }
+                }
+            }
+            for var_ref in &style.var_reference_names {
+                if let Some(files) = self.var_reference_index.get_mut(var_ref) {
+                    files.remove(&arc_path);
+                    if files.is_empty() {
+                        self.var_reference_index.remove(var_ref);
+                    }
+                }
+            }
+        }
+
+        // Remove from template CSS variable index
+        for name in &info.template_css_var_names {
+            if let Some(files) = self.template_css_var_index.get_mut(name) {
+                files.remove(&arc_path);
+                if files.is_empty() {
+                    self.template_css_var_index.remove(name);
+                }
+            }
+        }
+
+        // Remove from script CSS variable index
+        for name in &info.script_css_var_names {
+            if let Some(files) = self.script_css_var_index.get_mut(name) {
+                files.remove(&arc_path);
+                if files.is_empty() {
+                    self.script_css_var_index.remove(name);
                 }
             }
         }
@@ -498,6 +584,59 @@ impl ProjectIndex {
         self.custom_property_index.keys()
     }
 
+    /// Get files that reference a CSS variable via `var()` in style blocks
+    pub fn files_referencing_custom_property(
+        &self,
+        name: &str,
+    ) -> impl Iterator<Item = &Arc<Path>> {
+        self.var_reference_index
+            .get(name)
+            .into_iter()
+            .flat_map(|s| s.iter())
+    }
+
+    /// Get files that set a CSS variable in template `:style` bindings
+    pub fn files_setting_css_var_in_template(
+        &self,
+        name: &str,
+    ) -> impl Iterator<Item = &Arc<Path>> {
+        self.template_css_var_index
+            .get(name)
+            .into_iter()
+            .flat_map(|s| s.iter())
+    }
+
+    /// Get files that manipulate a CSS variable via script DOM APIs
+    pub fn files_manipulating_css_var_in_script(
+        &self,
+        name: &str,
+    ) -> impl Iterator<Item = &Arc<Path>> {
+        self.script_css_var_index
+            .get(name)
+            .into_iter()
+            .flat_map(|s| s.iter())
+    }
+
+    /// Get the cross-component flow for a CSS variable.
+    pub fn css_var_flow(&self, name: &str) -> CssVarFlow {
+        CssVarFlow {
+            name: name.to_string(),
+            style_definitions: self.files_defining_custom_property(name).cloned().collect(),
+            style_var_usages: self
+                .files_referencing_custom_property(name)
+                .cloned()
+                .collect(),
+            template_definitions: self
+                .files_setting_css_var_in_template(name)
+                .cloned()
+                .collect(),
+            script_manipulations: self
+                .files_manipulating_css_var_in_script(name)
+                .cloned()
+                .collect(),
+        }
+    }
+
     // ==================== Validation ====================
 
     /// Validate a single inject key for a file
@@ -611,6 +750,17 @@ impl ProjectIndex {
             unique_inject_keys: self.inject_index.len(),
             unique_css_classes: self.class_index.len(),
             unique_custom_properties: self.custom_property_index.len(),
+            unique_var_references: self.var_reference_index.len(),
+            unreferenced_custom_properties: self
+                .custom_property_index
+                .keys()
+                .filter(|name| !self.var_reference_index.contains_key(name.as_str()))
+                .count(),
+            unresolved_var_references: self
+                .var_reference_index
+                .keys()
+                .filter(|name| !self.custom_property_index.contains_key(name.as_str()))
+                .count(),
             ..Default::default()
         };
 

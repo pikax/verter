@@ -116,6 +116,7 @@ The style phase scans `<style>` blocks for `v-bind()` expressions (CSS values bo
 - **Scoped CSS** -- Inserts `[data-v-xxx]` attribute selectors for style isolation
 - **CSS Modules** -- Hashes class names for local scoping
 - **`v-bind()` in CSS** -- Extracts expressions for runtime CSS variable injection
+- **CSS Variable Analysis** -- Extracts custom property definitions (`--name: value`), `var()` references with fallbacks, and tracks `v-bind()` → generated variable name mappings for cross-component CSS variable flow analysis
 
 ### Phase 4: Script
 

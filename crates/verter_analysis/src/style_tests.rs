@@ -114,6 +114,7 @@ fn test_css_analysis_with_vue_input() {
             quoted: false,
             start: 10,
             end: 25,
+            generated_var_name: None,
         }],
         special_pseudos: vec![SpecialPseudoInput {
             kind: SpecialPseudoKind::Deep,
@@ -141,6 +142,7 @@ fn test_preprocessor_no_css_parsing() {
             quoted: false,
             start: 10,
             end: 25,
+            generated_var_name: None,
         }],
         special_pseudos: Vec::new(),
     };
@@ -167,6 +169,7 @@ fn test_flags_derived_correctly() {
             quoted: false,
             start: 0,
             end: 5,
+            generated_var_name: None,
         }],
         special_pseudos: vec![
             SpecialPseudoInput {
@@ -372,6 +375,7 @@ fn test_style_block_analysis_serializes_camel_case() {
             quoted: false,
             start: 10,
             end: 25,
+            generated_var_name: None,
         }],
         special_pseudos: vec![SpecialPseudoInput {
             kind: SpecialPseudoKind::Deep,
@@ -984,4 +988,236 @@ fn nested_selector_text_does_not_contain_declarations() {
             sel.text
         );
     }
+}
+
+// =============================================================================
+// CSS Variable Analysis Tests (Phase 1+2)
+// =============================================================================
+
+fn analyze_css_with_offset(css: &str, content_offset: u32) -> StyleBlockAnalysis {
+    build_css_style_analysis(
+        css,
+        VueStyleInput::default(),
+        false,
+        false,
+        None,
+        content_offset,
+    )
+}
+
+/// @ai-generated - Custom properties include name spans, values, and value spans
+#[test]
+fn test_custom_property_full_details() {
+    let css = ":root { --color: red; --spacing: 10px; }";
+    let analysis = analyze_css_with_offset(css, 100);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    assert_eq!(css_analysis.custom_properties.len(), 2);
+
+    let color_prop = &css_analysis.custom_properties[0];
+    assert_eq!(color_prop.name, "--color");
+    assert_eq!(color_prop.value, "red");
+    // name_span should be SFC-absolute (content_offset + position in css)
+    assert_eq!(
+        &css[color_prop.name_span.start as usize - 100..color_prop.name_span.end as usize - 100],
+        "--color"
+    );
+    assert_eq!(
+        &css[color_prop.value_span.start as usize - 100..color_prop.value_span.end as usize - 100],
+        "red"
+    );
+
+    let spacing_prop = &css_analysis.custom_properties[1];
+    assert_eq!(spacing_prop.name, "--spacing");
+    assert_eq!(spacing_prop.value, "10px");
+}
+
+/// @ai-generated - Custom properties have selector_index linking back to their rule
+#[test]
+fn test_custom_property_selector_index() {
+    let css = ".dark { --bg: black; } .light { --bg: white; }";
+    let analysis = analyze_css_with_offset(css, 0);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    assert_eq!(css_analysis.custom_properties.len(), 2);
+
+    let dark_prop = &css_analysis.custom_properties[0];
+    assert_eq!(dark_prop.name, "--bg");
+    assert_eq!(dark_prop.value, "black");
+    assert!(dark_prop.selector_index.is_some());
+    let dark_idx = dark_prop.selector_index.unwrap() as usize;
+    assert_eq!(css_analysis.selectors[dark_idx].text, ".dark");
+
+    let light_prop = &css_analysis.custom_properties[1];
+    assert_eq!(light_prop.name, "--bg");
+    assert_eq!(light_prop.value, "white");
+    assert!(light_prop.selector_index.is_some());
+    let light_idx = light_prop.selector_index.unwrap() as usize;
+    assert_eq!(css_analysis.selectors[light_idx].text, ".light");
+}
+
+/// @ai-generated - var() references within custom property values are extracted
+#[test]
+fn test_custom_property_with_var_references() {
+    let css = ":root { --accent: var(--primary-color); }";
+    let analysis = analyze_css_with_offset(css, 0);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    assert_eq!(css_analysis.custom_properties.len(), 1);
+    let prop = &css_analysis.custom_properties[0];
+    assert_eq!(prop.name, "--accent");
+    assert_eq!(prop.value, "var(--primary-color)");
+    assert_eq!(prop.var_references.len(), 1);
+
+    let var_ref = &prop.var_references[0];
+    assert_eq!(var_ref.name, "--primary-color");
+    assert!(var_ref.fallback.is_none());
+}
+
+/// @ai-generated - var() with fallback is parsed correctly
+#[test]
+fn test_var_reference_with_fallback() {
+    let css = ".box { color: var(--text, black); }";
+    let analysis = analyze_css_with_offset(css, 0);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    assert_eq!(css_analysis.var_usages.len(), 1);
+    let usage = &css_analysis.var_usages[0];
+    assert_eq!(usage.property_name, "color");
+    assert_eq!(usage.reference.name, "--text");
+    assert!(usage.reference.fallback.is_some());
+    let fallback = usage.reference.fallback.as_ref().unwrap();
+    assert_eq!(fallback.text, "black");
+    assert!(fallback.nested_var_references.is_empty());
+}
+
+/// @ai-generated - Nested var() in fallback is parsed
+#[test]
+fn test_nested_var_in_fallback() {
+    let css = ".box { color: var(--text, var(--fallback-text, blue)); }";
+    let analysis = analyze_css_with_offset(css, 0);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    assert_eq!(css_analysis.var_usages.len(), 1);
+    let usage = &css_analysis.var_usages[0];
+    assert_eq!(usage.reference.name, "--text");
+
+    let fallback = usage.reference.fallback.as_ref().unwrap();
+    assert_eq!(fallback.nested_var_references.len(), 1);
+    let nested = &fallback.nested_var_references[0];
+    assert_eq!(nested.name, "--fallback-text");
+    assert!(nested.fallback.is_some());
+    assert_eq!(nested.fallback.as_ref().unwrap().text, "blue");
+}
+
+/// @ai-generated - var_usages tracks non-custom-property declarations using var()
+#[test]
+fn test_var_usages_for_regular_properties() {
+    let css = ".btn { color: var(--primary); background: var(--bg, white); }";
+    let analysis = analyze_css_with_offset(css, 0);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    // No custom properties defined
+    assert!(css_analysis.custom_properties.is_empty());
+    // Two var() usages
+    assert_eq!(css_analysis.var_usages.len(), 2);
+
+    let color_usage = &css_analysis.var_usages[0];
+    assert_eq!(color_usage.property_name, "color");
+    assert_eq!(color_usage.reference.name, "--primary");
+
+    let bg_usage = &css_analysis.var_usages[1];
+    assert_eq!(bg_usage.property_name, "background");
+    assert_eq!(bg_usage.reference.name, "--bg");
+}
+
+/// @ai-generated - AnalyzedVBind carries generated_var_name
+#[test]
+fn test_v_bind_generated_var_name() {
+    let vue_input = VueStyleInput {
+        v_binds: vec![VBindInput {
+            expression: "color".to_string(),
+            quoted: false,
+            start: 10,
+            end: 25,
+            generated_var_name: Some("--a4f2eed6-color".to_string()),
+        }],
+        special_pseudos: vec![],
+    };
+    let analysis =
+        build_css_style_analysis(".btn { color: red; }", vue_input, true, false, None, 0);
+    assert_eq!(analysis.v_binds.len(), 1);
+    assert_eq!(analysis.v_binds[0].expression, "color");
+    assert_eq!(
+        analysis.v_binds[0].generated_var_name.as_deref(),
+        Some("--a4f2eed6-color")
+    );
+}
+
+/// @ai-generated - extract_var_references parses simple var()
+#[test]
+fn test_extract_var_references_simple() {
+    let refs = extract_var_references("var(--color)", 0, 0);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "--color");
+    assert!(refs[0].fallback.is_none());
+}
+
+/// @ai-generated - extract_var_references parses var() with fallback
+#[test]
+fn test_extract_var_references_with_fallback() {
+    let refs = extract_var_references("var(--color, red)", 0, 0);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "--color");
+    let fb = refs[0].fallback.as_ref().unwrap();
+    assert_eq!(fb.text, "red");
+}
+
+/// @ai-generated - extract_var_references handles multiple var() in one value
+#[test]
+fn test_extract_var_references_multiple() {
+    let refs = extract_var_references("var(--a) 10px var(--b)", 0, 0);
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs[0].name, "--a");
+    assert_eq!(refs[1].name, "--b");
+}
+
+/// @ai-generated - extract_var_references handles nested var() in fallback
+#[test]
+fn test_extract_var_references_nested() {
+    let refs = extract_var_references("var(--a, var(--b, blue))", 0, 0);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "--a");
+    let fb = refs[0].fallback.as_ref().unwrap();
+    assert_eq!(fb.nested_var_references.len(), 1);
+    assert_eq!(fb.nested_var_references[0].name, "--b");
+}
+
+/// @ai-generated - Custom property value with !important is trimmed correctly
+#[test]
+fn test_custom_property_value_important() {
+    let css = ":root { --color: red !important; }";
+    let analysis = analyze_css_with_offset(css, 0);
+    let css_analysis = analysis.css.as_ref().unwrap();
+    assert_eq!(css_analysis.custom_properties.len(), 1);
+    assert_eq!(css_analysis.custom_properties[0].value, "red !important");
+}
+
+/// @ai-generated - var() spans are SFC-absolute when content_offset is set
+#[test]
+fn test_var_reference_spans_are_sfc_absolute() {
+    let css = ".box { color: var(--c); }";
+    let content_offset = 200u32;
+    let analysis = analyze_css_with_offset(css, content_offset);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    assert_eq!(css_analysis.var_usages.len(), 1);
+    let var_ref = &css_analysis.var_usages[0].reference;
+    // The var(...) starts at position 14 in the CSS string
+    assert!(var_ref.span.start >= content_offset);
+    assert!(var_ref.span.end > var_ref.span.start);
+    // Verify the name_span points to --c
+    let name_start = (var_ref.name_span.start - content_offset) as usize;
+    let name_end = (var_ref.name_span.end - content_offset) as usize;
+    assert_eq!(&css[name_start..name_end], "--c");
 }

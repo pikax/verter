@@ -50,7 +50,7 @@ bitflags::bitflags! {
         /// Prop constness classification.
         const TPL_CONSTNESS     = 1 << 13;
 
-        // ── Style (bits 16–19) ──
+        // ── Style (bits 16–20) ──
 
         /// Full CSS analysis (selectors, classes, IDs).
         const STYLE_CSS         = 1 << 16;
@@ -60,6 +60,8 @@ bitflags::bitflags! {
         const STYLE_SCOPED      = 1 << 18;
         /// :deep/:global/:slotted.
         const STYLE_PSEUDOS     = 1 << 19;
+        /// CSS variable analysis (values, spans, var() references).
+        const STYLE_CSS_VARS    = 1 << 20;
 
         // ── Cross-file (bits 24–26) ──
 
@@ -127,7 +129,8 @@ impl AnalysisScope {
             | Self::TPL_BINDINGS.bits()
             | Self::TPL_SLOTS.bits()
             | Self::TPL_REFS.bits()
-            | Self::TPL_EVENTS.bits(),
+            | Self::TPL_EVENTS.bits()
+            | Self::STYLE_CSS_VARS.bits(),
     );
 
     /// Equivalent to the old `AnalysisLevel::Essential`.
@@ -192,6 +195,11 @@ impl AnalysisScope {
                 .union(Self::CROSS_PROVIDE)
                 .union(Self::CROSS_PROP_CONST),
         )
+    }
+
+    /// Returns `true` if CSS variable analysis (values, spans, var() references) should run.
+    pub fn needs_css_var_analysis(self) -> bool {
+        self.contains(Self::STYLE_CSS_VARS)
     }
 }
 
@@ -312,5 +320,24 @@ mod tests {
         let json = serde_json::to_string(&scope).unwrap();
         let deserialized: AnalysisScope = serde_json::from_str(&json).unwrap();
         assert_eq!(scope, deserialized);
+    }
+
+    /// @ai-generated - STYLE_CSS_VARS flag is in LSP and LINTER presets
+    #[test]
+    fn style_css_vars_flag_in_presets() {
+        // LSP has all flags
+        assert!(AnalysisScope::LSP.contains(AnalysisScope::STYLE_CSS_VARS));
+        assert!(AnalysisScope::LSP.needs_css_var_analysis());
+
+        // LINTER includes CSS var analysis
+        assert!(AnalysisScope::LINTER.contains(AnalysisScope::STYLE_CSS_VARS));
+        assert!(AnalysisScope::LINTER.needs_css_var_analysis());
+
+        // BUILD does NOT include CSS var analysis
+        assert!(!AnalysisScope::BUILD.contains(AnalysisScope::STYLE_CSS_VARS));
+        assert!(!AnalysisScope::BUILD.needs_css_var_analysis());
+
+        // ESSENTIAL does NOT include CSS var analysis
+        assert!(!AnalysisScope::ESSENTIAL.needs_css_var_analysis());
     }
 }

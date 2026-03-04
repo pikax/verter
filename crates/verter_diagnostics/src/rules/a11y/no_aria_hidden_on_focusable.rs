@@ -112,7 +112,6 @@ mod tests {
                 })
                 .collect(),
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }

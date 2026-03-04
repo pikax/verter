@@ -445,7 +445,6 @@ mod tests {
             attributes,
             parent_index: None,
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }

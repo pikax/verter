@@ -77,7 +77,6 @@ mod tests {
             is_component: true,
             directives: vec![dir],
             content_end: 0,
-            text_children: Vec::new(),
             ..Default::default()
         }
     }

@@ -429,7 +429,7 @@ fn test_hover_on_element_shows_css_rules() {
                 span: verter_span::Span::new(div_offset as u32, (div_offset + 20) as u32),
                 tag_span_end: (div_offset + 20) as u32,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -754,7 +754,7 @@ fn test_hover_on_div_class_attr_does_not_show_css() {
                 span: verter_span::Span::new(div_offset as u32, (div_offset + 30) as u32),
                 tag_span_end: (div_offset + 20) as u32,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -837,7 +837,7 @@ fn test_hover_on_ref_attr_does_not_show_import() {
                 span: verter_span::Span::new(0, 50),
                 tag_span_end: 30,
                 content_end: 0,
-                text_children: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         }),

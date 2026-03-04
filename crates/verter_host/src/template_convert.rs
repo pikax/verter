@@ -207,7 +207,7 @@ pub fn convert_raw_to_analysis(
 
     let mut v_if_v_for_conflicts = Vec::new();
 
-    let elements = raw
+    let elements: Vec<TemplateElement> = raw
         .elements
         .iter()
         .map(|e| {
@@ -285,6 +285,24 @@ pub fn convert_raw_to_analysis(
                 .flat_map(verter_analysis::extract_dynamic_class_names)
                 .collect();
 
+            // Extract CSS variables from :style bindings (e.g., { '--color': val })
+            let dynamic_style_vars: Vec<verter_analysis::template::DynamicStyleVar> = e
+                .attributes
+                .iter()
+                .filter(|a| a.is_dynamic && a.name == "style")
+                .filter_map(|a| a.value.as_deref())
+                .flat_map(verter_analysis::template::extract_dynamic_style_vars)
+                .collect();
+
+            // Extract CSS variables from static style attributes (e.g., style="--color: red")
+            let static_style_vars: Vec<verter_analysis::template::StaticStyleVar> = e
+                .attributes
+                .iter()
+                .filter(|a| !a.is_dynamic && a.name == "style")
+                .filter_map(|a| a.value.as_deref())
+                .flat_map(verter_analysis::template::extract_static_style_vars)
+                .collect();
+
             TemplateElement {
                 tag: e.tag.clone(),
                 is_component: e.is_component,
@@ -307,6 +325,8 @@ pub fn convert_raw_to_analysis(
                 parent_tag: e.parent_tag.clone(),
                 parent_index: e.parent_index,
                 dynamic_classes,
+                dynamic_style_vars,
+                static_style_vars,
                 span: e.span,
                 tag_span_end: e.tag_span_end,
                 content_end: e.content_end,
@@ -334,6 +354,22 @@ pub fn convert_raw_to_analysis(
         })
         .collect();
 
+    // Collect all CSS variable names from template inline styles (deduped)
+    let css_var_names: Vec<String> = {
+        let mut names: Vec<String> = elements
+            .iter()
+            .flat_map(|el| {
+                el.dynamic_style_vars
+                    .iter()
+                    .map(|v| v.name.clone())
+                    .chain(el.static_style_vars.iter().map(|v| v.name.clone()))
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    };
+
     TemplateAnalysisSnapshot {
         components,
         binding_occurrences,
@@ -346,6 +382,7 @@ pub fn convert_raw_to_analysis(
         max_nesting_depth: raw.max_nesting_depth,
         v_if_v_for_conflicts,
         comment_directives,
+        css_var_names,
         // prop/emit definitions and type_enhancements come from script analysis.
         ..Default::default()
     }
