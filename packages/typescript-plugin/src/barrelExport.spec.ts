@@ -27,6 +27,20 @@ declare module "vue" {
 }
 `;
 
+// ── Minimal lib.d.ts stub ───────────────────────────────────────────────────
+// Essential utility types needed by the generated declarations (Omit, Pick, etc.)
+
+const LIB_STUB = `
+type Exclude<T, U> = T extends U ? never : T;
+type Extract<T, U> = T extends U ? T : never;
+type Pick<T, K extends keyof T> = { [P in K]: T[P] };
+type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;
+type Record<K extends keyof any, T> = { [P in K]: T };
+type Partial<T> = { [P in keyof T]?: T[P] };
+type Required<T> = { [P in keyof T]-?: T[P] };
+type Readonly<T> = { readonly [P in keyof T]: T[P] };
+`;
+
 // ── Virtual TS program factory ──────────────────────────────────────────────
 
 function resolveRelative(from: string, moduleName: string): string {
@@ -75,9 +89,9 @@ function createVirtualProgram(
     if (content !== undefined) {
       return ts.createSourceFile(fileName, content, languageVersion, true);
     }
-    // Return empty default lib to avoid errors
+    // Return minimal lib with essential utility types
     if (fileName.includes("lib.") && fileName.endsWith(".d.ts")) {
-      return ts.createSourceFile(fileName, "", languageVersion, true);
+      return ts.createSourceFile(fileName, LIB_STUB, languageVersion, true);
     }
     return undefined;
   };
@@ -214,13 +228,15 @@ function getVariableType(
 
 function makeComponentDecl(name: string, propsFields: string, emitOverloads?: string): string {
   const emit = emitOverloads ?? "(event: string, ...args: unknown[]) => void";
+  const omitKeys = '"$props" | "$emit" | "$slots" | "$data" | "$attrs" | "$refs"';
   return `
 import { defineComponent } from "vue"
+type __OmitNew<T> = { [K in keyof T]: T[K] }
 
 const __comp = defineComponent({})
 
-declare const ${name}: typeof __comp & import("vue").ComponentPublicInstance<{}, {}, {}, {}, {}, {}, {}, {}> & {
-  new(): {
+declare const ${name}: __OmitNew<typeof __comp> & {
+  new(): Omit<import("vue").ComponentPublicInstance<{}, {}, {}, {}, {}, {}, {}, {}>, ${omitKeys}> & {
     $props: { ${propsFields} },
     $emit: ${emit},
     $data: {},
@@ -235,6 +251,18 @@ export default ${name}
 // ── Mock logger for parseFile() ─────────────────────────────────────────────
 
 const mockLogger = { info: () => {}, msg: () => {} } as any;
+
+// ── Native binary availability check ────────────────────────────────────────
+// parseFile() requires the native NAPI binary. If unavailable, skip tests
+// that depend on real generated output.
+
+let hasNativeBinary = false;
+try {
+  const probe = parseFile("/probe.vue", "<template><div /></template>", mockLogger);
+  hasNativeBinary = probe !== FALLBACK_STUB;
+} catch {
+  hasNativeBinary = false;
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Tests
@@ -251,9 +279,8 @@ describe("barrel export type preservation", () => {
         "/src/MyComp.vue.d.ts": decl,
         "/src/consumer.ts": `
           import MyComp from './MyComp.vue'
-          type CompInstance = InstanceType<typeof MyComp>
-          type Props = CompInstance['$props']
-          const props: Props = null!
+          const inst = new MyComp()
+          const props = inst.$props
         `,
       });
 
@@ -282,9 +309,8 @@ describe("barrel export type preservation", () => {
         "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
         "/src/consumer.ts": `
           import { Overlay } from './index'
-          type CompInstance = InstanceType<typeof Overlay>
-          type Props = CompInstance['$props']
-          const props: Props = null!
+          const inst = new Overlay()
+          const props = inst.$props
         `,
       });
 
@@ -314,9 +340,8 @@ describe("barrel export type preservation", () => {
         "/src/index.ts": `export { default as Dialog } from './Dialog.vue'`,
         "/src/consumer.ts": `
           import { Dialog } from './index'
-          type CompInstance = InstanceType<typeof Dialog>
-          type Emit = CompInstance['$emit']
-          const emit: Emit = null!
+          const inst = new Dialog()
+          const emit = inst.$emit
         `,
       });
 
@@ -345,9 +370,8 @@ describe("barrel export type preservation", () => {
         "/src/components/index.ts": `export * from './Button'`,
         "/src/consumer.ts": `
           import { Button } from './components'
-          type CompInstance = InstanceType<typeof Button>
-          type Props = CompInstance['$props']
-          const props: Props = null!
+          const inst = new Button()
+          const props = inst.$props
         `,
       });
 
@@ -400,6 +424,8 @@ defineProps<{
       expect(generatedDecl).toContain("$props");
       expect(generatedDecl).toContain("zIndex");
       expect(generatedDecl).toContain("lockScroll");
+      // Positive: uses __OmitNew for barrel safety
+      expect(generatedDecl).toContain("__OmitNew");
       // Negative: not the fallback stub
       expect(generatedDecl).not.toBe(FALLBACK_STUB);
       expect(generatedDecl).not.toContain("as any");
@@ -411,9 +437,8 @@ defineProps<{
         "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
         "/src/consumer.ts": `
           import { Overlay } from './index'
-          type CompInstance = InstanceType<typeof Overlay>
-          type Props = CompInstance['$props']
-          const props: Props = null!
+          const inst = new Overlay()
+          const props = inst.$props
         `,
       });
 
@@ -439,9 +464,8 @@ defineProps<{
         "/src/components/index.ts": `export * from './Overlay'`,
         "/src/consumer.ts": `
           import { Overlay } from './components'
-          type CompInstance = InstanceType<typeof Overlay>
-          type Props = CompInstance['$props']
-          const props: Props = null!
+          const inst = new Overlay()
+          const props = inst.$props
         `,
       });
 
@@ -481,6 +505,125 @@ defineProps<{
       // The type should NOT contain any prop names (they're lost)
       expect(compType).not.toContain("zIndex");
       expect(compType).not.toContain("lockScroll");
+    });
+  });
+
+  // ── __OmitNew strips construct signature for barrel safety ────────────────
+  //
+  // Root cause: `typeof __comp` carries DefineComponent's `new()` returning
+  // `{ $props: {} }`. Through barrel re-exports, TypeScript picks this empty
+  // $props over our explicit typed one.
+  //
+  // Fix: `__OmitNew<typeof __comp>` (mapped type) strips the construct sig,
+  // leaving only static members. Then a single `new()` with the correct types
+  // is the only construct signature, so barrels can't pick the wrong one.
+
+  describe("__OmitNew barrel fix: construct sig stripping", () => {
+    // Demonstrates the BUG: raw typeof __comp with conflicting new()
+    // loses $props through barrel re-export.
+    it("BUG: raw typeof emptyComp & { new(): { $props: T } } loses $props through barrel", () => {
+      const decl = `
+interface EmptyInstance { $props: {}; $emit: (event: string) => void; }
+declare const __comp: { new(): EmptyInstance };
+declare const Overlay: typeof __comp & {
+  new(): {
+    $props: { zIndex?: number; show?: boolean; lockScroll?: boolean },
+    $emit: (event: string) => void,
+    $data: {}, $attrs: {}, $refs: {},
+  }
+}
+export default Overlay
+`;
+      const { checker, getSourceFile } = createVirtualProgram({
+        "/src/Overlay.vue.d.ts": decl,
+        "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
+        "/src/consumer.ts": `
+          import { Overlay } from './index'
+          const inst = new Overlay()
+          const props = inst.$props
+        `,
+      });
+
+      const sf = getSourceFile("/src/consumer.ts");
+      expect(sf).toBeDefined();
+      const propsType = getVariableType(checker, sf!, "props");
+      // This SHOULD have typed props, but the bug causes empty $props
+      expect(propsType).toBe("{}");
+    });
+
+    // The FIX: __OmitNew strips construct sig, so only our typed new() exists.
+    it("FIX: __OmitNew<typeof __comp> & { new(): { $props: T } } preserves $props through barrel", () => {
+      const decl = `
+type __OmitNew<T> = { [K in keyof T]: T[K] }
+interface EmptyInstance { $props: {}; $emit: (event: string) => void; }
+declare const __comp: { new(): EmptyInstance };
+declare const Overlay: __OmitNew<typeof __comp> & {
+  new(): {
+    $props: { zIndex?: number; show?: boolean; lockScroll?: boolean },
+    $emit: (event: string) => void,
+    $data: {}, $attrs: {}, $refs: {},
+  }
+}
+export default Overlay
+`;
+      const { checker, getSourceFile } = createVirtualProgram({
+        "/src/Overlay.vue.d.ts": decl,
+        "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
+        "/src/consumer.ts": `
+          import { Overlay } from './index'
+          const inst = new Overlay()
+          const props = inst.$props
+        `,
+      });
+
+      const sf = getSourceFile("/src/consumer.ts");
+      expect(sf).toBeDefined();
+      const propsType = getVariableType(checker, sf!, "props");
+      expect(propsType).toBeDefined();
+      // Positive: props preserved through barrel
+      expect(propsType).toContain("zIndex");
+      expect(propsType).toContain("show");
+      expect(propsType).toContain("lockScroll");
+      // Negative: not degraded
+      expect(propsType).not.toBe("{}");
+      expect(propsType).not.toBe("any");
+    });
+
+    // The FIX with parseFile() output (requires native binary).
+    it.skipIf(!hasNativeBinary)("FIX: real parseFile() output with __OmitNew preserves $props through barrel", () => {
+      const sfc = `
+<script setup lang="ts">
+defineProps<{
+  zIndex?: number
+  show?: boolean
+  lockScroll?: boolean
+}>()
+</script>
+<template><div /></template>
+`;
+      const generated = parseFile("/src/Overlay.vue", sfc, mockLogger);
+      // The generated output should now use __OmitNew
+      expect(generated).toContain("__OmitNew");
+      expect(generated).not.toContain(": typeof __comp &");
+
+      const { checker, getSourceFile } = createVirtualProgram({
+        "/src/Overlay.vue.d.ts": generated,
+        "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
+        "/src/consumer.ts": `
+          import { Overlay } from './index'
+          const inst = new Overlay()
+          const props = inst.$props
+        `,
+      });
+
+      const sf = getSourceFile("/src/consumer.ts");
+      expect(sf).toBeDefined();
+      const propsType = getVariableType(checker, sf!, "props");
+      expect(propsType).toBeDefined();
+      expect(propsType).toContain("zIndex");
+      expect(propsType).toContain("show");
+      expect(propsType).toContain("lockScroll");
+      expect(propsType).not.toBe("{}");
     });
   });
 

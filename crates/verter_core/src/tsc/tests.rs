@@ -1085,10 +1085,12 @@ defineProps<{ title: string }>()
 </script><template/>"#,
     );
 
-    // No $slots when defineSlots not used
+    // No $slots: field inside the instance when defineSlots not used.
+    // Note: "$slots" appears in the Omit<CPI, ...> exclusion list, but
+    // the actual `$slots:` assignment must NOT appear in the instance body.
     assert!(
-        !r.contains("$slots"),
-        "should not emit $slots without defineSlots: got {}",
+        !r.contains("$slots:"),
+        "should not emit $slots: field without defineSlots: got {}",
         r
     );
 }
@@ -1184,9 +1186,9 @@ defineProps<{ title: string }>()
 </script><template/>"#,
     );
 
-    // Without generic, should have plain new()
+    // Without generic, should have plain new() (followed by Omit<CPI, ...>)
     assert!(
-        r.contains("new(): {"),
+        r.contains("new(): Omit<"),
         "should have plain new() without generic: got {}",
         r
     );
@@ -1328,6 +1330,94 @@ const attrs = useAttrs()
     assert!(
         r.contains("$attrs: {},"),
         "useAttrs() without type param should produce empty $attrs, got:\n{}",
+        r
+    );
+}
+
+// ── Barrel export type preservation: __OmitNew + Omit<CPI> ──────────────────
+//
+// Barrel re-exports (`export { default as X } from './X.vue'`) degrade
+// `typeof __comp`'s construct signature, picking `DefineComponent<{}>`'s
+// empty `$props` over our explicit typed one. The fix:
+// 1. `__OmitNew<typeof __comp>` strips the construct sig via mapped type
+// 2. A single `new()` returns `Omit<CPI, ...> & { $props: T, $emit: E, ... }`
+//    so barrel re-exports have exactly one construct signature.
+
+#[test]
+fn tsc_codegen_uses_omit_new_for_barrel_safety() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineProps<{
+  zIndex?: number
+  duration?: number | string
+  show?: boolean
+  lockScroll?: boolean
+}>()
+</script><template><div /></template>"#,
+    );
+
+    eprintln!("\n=== barrel type fix output ===\n{}\n", r);
+
+    // Positive: __OmitNew utility type is emitted
+    assert!(
+        r.contains("type __OmitNew<T> = { [K in keyof T]: T[K] }"),
+        "__OmitNew utility type should be present: got:\n{}",
+        r
+    );
+    // Positive: declare uses __OmitNew<typeof __comp>, not raw typeof __comp
+    assert!(
+        r.contains("__OmitNew<typeof __comp>"),
+        "should use __OmitNew<typeof __comp>: got:\n{}",
+        r
+    );
+    // Negative: raw `typeof __comp &` intersection must NOT appear
+    assert!(
+        !r.contains(": typeof __comp &"),
+        "should NOT use raw typeof __comp in intersection: got:\n{}",
+        r
+    );
+    // Positive: CPI is inside new() with Omit wrapping
+    assert!(
+        r.contains("new(): Omit<import(\"vue\").ComponentPublicInstance<"),
+        "CPI should be inside new() with Omit<>: got:\n{}",
+        r
+    );
+    // Positive: Omit excludes instance members we provide explicitly
+    assert!(
+        r.contains("\"$props\" | \"$emit\" | \"$slots\" | \"$data\" | \"$attrs\" | \"$refs\">"),
+        "Omit should exclude $props/$emit/$slots/$data/$attrs/$refs: got:\n{}",
+        r
+    );
+    // Positive: explicit $props still has typed fields
+    assert!(
+        r.contains("zIndex?: number"),
+        "$props should have typed zIndex: got:\n{}",
+        r
+    );
+    assert!(
+        r.contains("show?: boolean"),
+        "$props should have typed show: got:\n{}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_generic_uses_omit_new() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" generic="T">
+defineProps<{ items: T[] }>()
+</script><template/>"#,
+    );
+
+    // Positive: generic on new() with CPI inside
+    assert!(
+        r.contains("new<T>(): Omit<import(\"vue\").ComponentPublicInstance<"),
+        "generic new() should have CPI with Omit: got:\n{}",
+        r
+    );
+    assert!(
+        r.contains("__OmitNew<typeof __comp>"),
+        "should use __OmitNew: got:\n{}",
         r
     );
 }

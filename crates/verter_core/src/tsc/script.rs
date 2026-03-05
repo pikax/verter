@@ -666,6 +666,15 @@ fn generate_code(
     // ── Import ────────────────────────────────────────────────────────
     out.push_str("import { defineComponent } from \"vue\"\n");
 
+    // ── Utility type: strip construct signature from typeof __comp ────
+    // `typeof __comp` carries DefineComponent's `new()` which returns
+    // `ComponentPublicInstance<{}>` (empty props). When barrel-re-exported
+    // (`export { default as X } from './X.vue'`), TypeScript picks this
+    // empty `new()` over our explicit typed one. Stripping construct sigs
+    // via a mapped type leaves only the static members (props, emits options)
+    // so there is exactly one `new()` — ours — with the correct $props.
+    out.push_str("type __OmitNew<T> = { [K in keyof T]: T[K] }\n");
+
     // ── Type import statements ────────────────────────────────────────
     for stmt in &state.type_import_stmts {
         out.push_str(stmt);
@@ -718,18 +727,30 @@ fn generate_code(
     out.push_str("})\n\n");
 
     // ── declare const ComponentName ───────────────────────────────────
+    // Uses `__OmitNew<typeof __comp>` to strip the construct signature from
+    // DefineComponent, then provides a single `new()` that returns the
+    // intersection of ComponentPublicInstance and the typed instance shape.
+    // This ensures barrel re-exports preserve the correct $props/$emit types.
     let emits_type = build_emits_type(&state.emits_ts, &state.models);
     let props_type = build_props_type(&state.props_ts, &state.models);
 
     out.push_str(&format!(
-        "declare const {name}: typeof __comp & import(\"vue\").ComponentPublicInstance<{{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {emits}> & {{\n",
+        "declare const {name}: __OmitNew<typeof __comp> & {{\n",
         name = component_name,
-        emits = emits_type,
     ));
     let emit_fn_type = build_emit_fn_type(&state.emits_ts, &state.models);
+    // Omit instance members we provide explicitly, so CPI defaults don't conflict.
+    const CPI_OMIT: &str =
+        "\"$props\" | \"$emit\" | \"$slots\" | \"$data\" | \"$attrs\" | \"$refs\"";
     match generic_params {
-        Some(gp) => out.push_str(&format!("  new<{gp}>(): {{\n")),
-        None => out.push_str("  new(): {\n"),
+        Some(gp) => out.push_str(&format!(
+            "  new<{gp}>(): Omit<import(\"vue\").ComponentPublicInstance<{{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {emits}>, {CPI_OMIT}> & {{\n",
+            emits = emits_type,
+        )),
+        None => out.push_str(&format!(
+            "  new(): Omit<import(\"vue\").ComponentPublicInstance<{{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {emits}>, {CPI_OMIT}> & {{\n",
+            emits = emits_type,
+        )),
     }
     out.push_str(&format!("    $props: {},\n", props_type));
     out.push_str(&format!("    $emit: {},\n", emit_fn_type));
