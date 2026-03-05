@@ -21,7 +21,7 @@ defineProps<Props>()
     );
     assert!(r.contains("defineComponent("), "defineComponent present");
     assert!(!r.contains("props: {"), "no runtime props for type-only");
-    assert!(r.contains("$props: Props"), "type name in new()");
+    assert!(r.contains("$props: import(\"vue\").PublicProps & Props"), "type name in new()");
     assert!(r.contains("ComponentPublicInstance"), "CPI declaration");
     assert!(
         !r.contains("import('./types').Props"),
@@ -358,7 +358,7 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
         r.contains("import type { Props } from './types'"),
         "import type statement present"
     );
-    assert!(r.contains("$props: Props"), "type name in $props");
+    assert!(r.contains("$props: import(\"vue\").PublicProps & Props"), "type name in $props");
     assert!(!r.contains("withDefaults"), "macro removed");
 }
 
@@ -663,7 +663,7 @@ const stopObservation = ref(false)
         r.contains("import type { WatermarkProps } from './watermark'"),
         "imported type as import statement"
     );
-    assert!(r.contains("$props: WatermarkProps"), "type name in $props");
+    assert!(r.contains("$props: import(\"vue\").PublicProps & WatermarkProps"), "type name in $props");
     assert!(!r.contains("const style"), "no script body");
     assert!(!r.contains("const fontGap"), "no computed");
     assert!(!r.contains("import { computed"), "no value imports");
@@ -855,7 +855,7 @@ defineProps<Props>()
     );
     // Positive: $props should reference the type name directly
     assert!(
-        r.contains("$props: Props"),
+        r.contains("$props: import(\"vue\").PublicProps & Props"),
         "should use type name directly in $props: got {}",
         r
     );
@@ -883,7 +883,7 @@ defineProps<MyProps>()
         r
     );
     assert!(
-        r.contains("$props: MyProps"),
+        r.contains("$props: import(\"vue\").PublicProps & MyProps"),
         "should reference type name directly: got {}",
         r
     );
@@ -912,7 +912,7 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
     );
     // $props should reference the type name
     assert!(
-        r.contains("$props: Props"),
+        r.contains("$props: import(\"vue\").PublicProps & Props"),
         "should reference type name in $props: got {}",
         r
     );
@@ -1386,6 +1386,12 @@ defineProps<{
     assert!(
         r.contains("\"$props\" | \"$emit\" | \"$slots\" | \"$data\" | \"$attrs\" | \"$refs\">"),
         "Omit should exclude $props/$emit/$slots/$data/$attrs/$refs: got:\n{}",
+        r
+    );
+    // Positive: $props includes PublicProps for class/style/key
+    assert!(
+        r.contains("$props: import(\"vue\").PublicProps &"),
+        "$props should include PublicProps intersection: got:\n{}",
         r
     );
     // Positive: explicit $props still has typed fields

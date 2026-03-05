@@ -124,27 +124,35 @@ pub fn macro_code_actions(
                 .defined_slots
                 .iter()
                 .any(|s| offset >= s.span.start && offset <= s.span.end);
-            let on_define_slots = analysis
-                .macros
-                .iter()
-                .any(|m| m.kind == AnalyzedMacroKind::DefineSlots && offset >= m.span.start && offset <= m.span.end);
+            let on_define_slots = analysis.macros.iter().any(|m| {
+                m.kind == AnalyzedMacroKind::DefineSlots
+                    && offset >= m.span.start
+                    && offset <= m.span.end
+            });
             let on_emit_usage = template
                 .emit_definitions
                 .iter()
                 .filter(|e| !e.is_declared)
                 .any(|e| offset >= e.span.start && offset <= e.span.end);
-            let on_define_emits = analysis
-                .macros
-                .iter()
-                .any(|m| m.kind == AnalyzedMacroKind::DefineEmits && offset >= m.span.start && offset <= m.span.end);
-            (on_slot_element || on_define_slots, on_emit_usage || on_define_emits)
+            let on_define_emits = analysis.macros.iter().any(|m| {
+                m.kind == AnalyzedMacroKind::DefineEmits
+                    && offset >= m.span.start
+                    && offset <= m.span.end
+            });
+            (
+                on_slot_element || on_define_slots,
+                on_emit_usage || on_define_emits,
+            )
         }
     };
 
     let mut actions = Vec::new();
 
     // B1: Generate defineSlots (no existing defineSlots, template has <slot> tags)
-    if show_slot_actions && !flags.contains(AnalysisFlags::HAS_DEFINE_SLOTS) && !template.defined_slots.is_empty() {
+    if show_slot_actions
+        && !flags.contains(AnalysisFlags::HAS_DEFINE_SLOTS)
+        && !template.defined_slots.is_empty()
+    {
         if let Some(action) = generate_define_slots_action(
             source,
             analysis,

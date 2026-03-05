@@ -1030,7 +1030,13 @@ fn cursor_on_slot_element_shows_slot_actions() {
 
     // Cursor inside the <slot> element → should show slot actions
     let cursor_in_slot = Some(slot_start + 2); // inside "<sl|ot"
-    let actions = macro_code_actions(source, Some(&analysis), &blocks, &line_index, cursor_in_slot);
+    let actions = macro_code_actions(
+        source,
+        Some(&analysis),
+        &blocks,
+        &line_index,
+        cursor_in_slot,
+    );
     assert!(
         !actions.is_empty(),
         "cursor inside <slot> should show slot actions"
@@ -1096,7 +1102,13 @@ fn cursor_on_define_slots_macro_shows_augmentation_actions() {
 
     // Cursor on defineSlots macro → should show B3 actions
     let cursor_on_macro = Some(macro_start + 5);
-    let actions = macro_code_actions(source, Some(&analysis), &blocks, &line_index, cursor_on_macro);
+    let actions = macro_code_actions(
+        source,
+        Some(&analysis),
+        &blocks,
+        &line_index,
+        cursor_on_macro,
+    );
     let has_add_footer = actions.iter().any(|a| match a {
         CodeActionOrCommand::CodeAction(ca) => ca.title.contains("footer"),
         _ => false,

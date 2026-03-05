@@ -752,7 +752,11 @@ fn generate_code(
             emits = emits_type,
         )),
     }
-    out.push_str(&format!("    $props: {},\n", props_type));
+    // PublicProps (AllowedComponentProps & VNodeProps & …) first, so class/style/key are available.
+    out.push_str(&format!(
+        "    $props: import(\"vue\").PublicProps & {},\n",
+        props_type
+    ));
     out.push_str(&format!("    $emit: {},\n", emit_fn_type));
     if let Some(ref slots) = state.slots_ts {
         out.push_str(&format!("    $slots: {},\n", slots));
