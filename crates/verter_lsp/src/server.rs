@@ -831,6 +831,100 @@ impl VerterLanguageServer {
 
     /// Get external IDE context for a `.vue.tsx` path (used by merge functions for
     /// cross-file position mapping, e.g., CTRL+CLICK on component navigates to target file).
+    /// Resolve a component prop attribute to the child component's defineProps field.
+    ///
+    /// When the cursor is on `foo` in `<MyComp foo="literal">`, this finds:
+    /// 1. Which component the prop belongs to (via template analysis)
+    /// 2. The child component's analysis (via documents registry)
+    /// 3. The matching prop field in the child's defineProps macro
+    /// 4. Returns a cross-file definition pointing to the prop's span
+    fn resolve_component_prop_definition(
+        &self,
+        uri: &Uri,
+        position: &Position,
+    ) -> Option<GotoDefinitionResponse> {
+        let doc = self.documents.get(uri)?;
+        let analysis = self.documents.get_analysis(uri)?;
+        let template = analysis.template.as_ref()?;
+        let offset = doc.line_index.position_to_offset(position)?;
+
+        // Find which component prop the cursor is on
+        for comp in &template.components {
+            for prop in &comp.props {
+                if offset >= prop.span.start && offset < prop.span.end {
+                    // Cursor is inside this prop's span — resolve to child component
+                    let import_source = comp.import_source.as_ref()?;
+
+                    // Resolve import source to canonical ID
+                    let canonical_id = uri_to_canonical_id(uri);
+                    let child_canonical_id = {
+                        let registry_guard = self.project_registry.read();
+                        registry_guard
+                            .as_ref()
+                            .and_then(|reg| reg.resolve_alias(&canonical_id, import_source))
+                    }
+                    .or_else(|| {
+                        if import_source.starts_with('.') {
+                            let resolved =
+                                verter_host::resolve_external(&canonical_id, import_source);
+                            if std::path::Path::new(&resolved).exists() {
+                                Some(resolved)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })?;
+
+                    // Get child component's analysis directly from host (works for
+                    // background-compiled files, not just open documents)
+                    let child_analysis = self.documents.host().get_analysis(&child_canonical_id)?;
+                    let child_source = self.documents.host().get_source(&child_canonical_id)?;
+                    let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
+
+                    // Build the child file URI
+                    let child_uri = crate::features::definition::resolved_import_definition(
+                        &child_canonical_id,
+                    )
+                    .and_then(|resp| match resp {
+                        GotoDefinitionResponse::Scalar(loc) => Some(loc.uri),
+                        _ => None,
+                    })?;
+
+                    // Find matching prop field in child's defineProps
+                    for mac in &child_analysis.macros {
+                        if let Some(pf) = mac.prop_fields.iter().find(|pf| pf.name == prop.name) {
+                            if pf.span.start > 0 || pf.span.end > 0 {
+                                let start_pos = child_line_index
+                                    .offset_to_position(pf.span.start)
+                                    .unwrap_or_default();
+                                let end_pos = child_line_index
+                                    .offset_to_position(pf.span.end)
+                                    .unwrap_or_default();
+                                return Some(GotoDefinitionResponse::Scalar(Location {
+                                    uri: child_uri,
+                                    range: Range {
+                                        start: start_pos,
+                                        end: end_pos,
+                                    },
+                                }));
+                            }
+                        }
+                    }
+
+                    // Prop not found in child defineProps — fall back to navigating to child file
+                    return Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: child_uri,
+                        range: Range::default(),
+                    }));
+                }
+            }
+        }
+
+        None
+    }
+
     fn external_ide_context(&self, ide_path: &str) -> Option<merge::ExternalIdeContext> {
         let (_tsx_path, tsx_content, mapper) = self.ide_context_by_path(ide_path)?;
         let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
@@ -3253,14 +3347,50 @@ impl LanguageServer for VerterLanguageServer {
             let blocks = scan_sfc_blocks(&doc.source);
             let canonical_id = uri_to_canonical_id(uri);
             let registry_guard = self.project_registry.read();
-            let resolve_path = registry_guard.as_ref().map(|reg| {
+            let resolve_path = {
                 let canonical_id = canonical_id.clone();
-                move |specifier: &str| reg.resolve_alias(&canonical_id, specifier)
-            });
+                let registry = registry_guard.as_ref();
+                move |specifier: &str| -> Option<String> {
+                    // First try tsconfig/vite path aliases
+                    if let Some(reg) = registry {
+                        if let Some(resolved) = reg.resolve_alias(&canonical_id, specifier) {
+                            return Some(resolved);
+                        }
+                    }
+                    // Then try relative import resolution
+                    if specifier.starts_with('.') {
+                        let resolved = verter_host::resolve_external(&canonical_id, specifier);
+                        // Try the resolved path as-is, then with common extensions
+                        let candidates = if std::path::Path::new(&resolved).extension().is_some() {
+                            vec![resolved.clone()]
+                        } else {
+                            vec![
+                                format!("{resolved}.ts"),
+                                format!("{resolved}.tsx"),
+                                format!("{resolved}.js"),
+                                format!("{resolved}.vue"),
+                                format!("{resolved}/index.ts"),
+                                format!("{resolved}/index.js"),
+                                format!("{resolved}/index.vue"),
+                            ]
+                        };
+                        for candidate in candidates {
+                            if std::path::Path::new(&candidate).exists() {
+                                return Some(candidate);
+                            }
+                        }
+                        // For .vue imports with extension, return even if file doesn't
+                        // exist (the host may have it compiled)
+                        if resolved.ends_with(".vue") {
+                            return Some(resolved);
+                        }
+                    }
+                    None
+                }
+            };
             #[allow(clippy::type_complexity)]
-            let resolve_fn: Option<&dyn Fn(&str) -> Option<String>> = resolve_path
-                .as_ref()
-                .map(|f| f as &dyn Fn(&str) -> Option<String>);
+            let resolve_fn: Option<&dyn Fn(&str) -> Option<String>> =
+                Some(&resolve_path as &dyn Fn(&str) -> Option<String>);
             let mut def = definition_at_position(
                 position,
                 &doc.source,
@@ -3288,6 +3418,14 @@ impl LanguageServer for VerterLanguageServer {
             if loc.uri.as_str() != uri.as_str() {
                 tracing::debug!("definition: verter resolved cross-file, skipping type provider");
                 return Ok(verter_result);
+            }
+        }
+
+        // Native cross-file prop navigation: cursor on a component prop attribute
+        // → navigate to the matching prop field in the child's defineProps.
+        if verter_result.is_none() {
+            if let Some(prop_def) = self.resolve_component_prop_definition(uri, position) {
+                return Ok(Some(prop_def));
             }
         }
 
@@ -3320,6 +3458,7 @@ impl LanguageServer for VerterLanguageServer {
                                 &ctx.mapper,
                                 &ctx.vue_line_index,
                                 Some(&|ide_path: &str| self.external_ide_context(ide_path)),
+                                uri,
                             ));
                         }
                         Err(e) => {

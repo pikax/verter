@@ -469,12 +469,18 @@ pub fn merge_definitions(
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
+    document_uri: &Uri,
 ) -> Option<GotoDefinitionResponse> {
     // If verter provides a definition, prefer it when:
     // - TSGO returned nothing, or
     // - verter resolved cross-file (TSGO often returns *.vue shim declarations)
+    //
+    // Compare against the actual document URI — the sentinel has already been
+    // replaced by the server handler before this function is called.
     if let Some(ref vd) = verter_def {
-        let is_cross_file = matches!(vd, GotoDefinitionResponse::Scalar(loc) if loc.uri.as_str() != crate::features::definition::SAME_FILE_URI);
+        let is_cross_file = matches!(vd, GotoDefinitionResponse::Scalar(loc)
+            if loc.uri != *document_uri
+            && loc.uri.as_str() != crate::features::definition::SAME_FILE_URI);
         if type_defs.is_empty() || is_cross_file {
             return verter_def;
         }
@@ -1394,6 +1400,10 @@ mod tests {
 
     // ── Definition merge tests ─────────────────────────────────────
 
+    fn test_doc_uri() -> Uri {
+        "file:///test.vue".parse().unwrap()
+    }
+
     /// @ai-generated — Verter definition is preferred when no type definitions
     #[test]
     fn merge_definitions_verter_only() {
@@ -1403,7 +1413,15 @@ mod tests {
             range: Range::default(),
         }));
 
-        let result = merge_definitions(verter, vec![], &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            verter,
+            vec![],
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         assert!(result.is_some());
     }
 
@@ -1417,7 +1435,15 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_definitions(None, types, &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            None,
+            types,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         assert!(result.is_some());
     }
 
@@ -1425,7 +1451,15 @@ mod tests {
     #[test]
     fn merge_definitions_neither() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_definitions(None, vec![], &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            None,
+            vec![],
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         assert!(result.is_none());
     }
 
@@ -1725,7 +1759,15 @@ mod tests {
             end: 9,
         }];
 
-        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            None,
+            type_defs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         assert!(result.is_some(), "Expected definition response");
 
         match result.unwrap() {
@@ -1773,7 +1815,15 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            None,
+            type_defs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         assert!(result.is_some());
     }
 
@@ -1806,7 +1856,15 @@ mod tests {
             end: 120,
         }];
 
-        let result = merge_definitions(verter_def, type_defs, &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            verter_def,
+            type_defs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         assert!(result.is_some(), "should return TSGO's external definition");
 
         match result.unwrap() {
@@ -1847,7 +1905,15 @@ mod tests {
             },
         }));
 
-        let result = merge_definitions(verter_def, vec![], &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            verter_def,
+            vec![],
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         assert!(result.is_some());
         match result.unwrap() {
             GotoDefinitionResponse::Scalar(loc) => {
@@ -1913,7 +1979,15 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            None,
+            type_defs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         assert!(result.is_some());
         match result.unwrap() {
             GotoDefinitionResponse::Scalar(loc) => {
@@ -2333,8 +2407,15 @@ mod tests {
         }];
 
         // Without resolver: current file's mapper can't resolve target's TSX offsets → default range
-        let result_no_resolver =
-            merge_definitions(None, type_defs.clone(), &tsx_li, &_mapper, &vue_li, None);
+        let result_no_resolver = merge_definitions(
+            None,
+            type_defs.clone(),
+            &tsx_li,
+            &_mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         assert!(result_no_resolver.is_some());
         match result_no_resolver.unwrap() {
             GotoDefinitionResponse::Scalar(loc) => {
@@ -2360,8 +2441,15 @@ mod tests {
             }
         };
 
-        let result_with_resolver =
-            merge_definitions(None, type_defs, &tsx_li, &_mapper, &vue_li, Some(&resolver));
+        let result_with_resolver = merge_definitions(
+            None,
+            type_defs,
+            &tsx_li,
+            &_mapper,
+            &vue_li,
+            Some(&resolver),
+            &test_doc_uri(),
+        );
         assert!(result_with_resolver.is_some());
         match result_with_resolver.unwrap() {
             GotoDefinitionResponse::Scalar(loc) => {
@@ -2406,7 +2494,15 @@ mod tests {
             },
         ];
 
-        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            None,
+            type_defs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         match result {
             Some(GotoDefinitionResponse::Scalar(_)) => {
                 // Deduplicated to a single location — correct
@@ -2445,7 +2541,15 @@ mod tests {
             },
         ];
 
-        let result = merge_definitions(None, type_defs, &tsx_li, &mapper, &vue_li, None);
+        let result = merge_definitions(
+            None,
+            type_defs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
         match result {
             Some(GotoDefinitionResponse::Scalar(loc)) => {
                 // Should keep only the .d.mts definition

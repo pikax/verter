@@ -152,7 +152,7 @@ pub(crate) fn parse_raw_id(raw: &str) -> Option<ParsedRawId> {
     })
 }
 
-pub(crate) fn resolve_external(owner: &str, specifier: &str) -> String {
+pub fn resolve_external(owner: &str, specifier: &str) -> String {
     if specifier.starts_with('/') {
         return canonicalize_id(specifier).into_owned();
     }

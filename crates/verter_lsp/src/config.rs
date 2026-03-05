@@ -469,7 +469,7 @@ fn is_solution_style_tsconfig(tsconfig_path: &Path) -> bool {
     };
     json.get("references")
         .and_then(|v| v.as_array())
-        .map_or(false, |refs| !refs.is_empty())
+        .is_some_and(|refs| !refs.is_empty())
 }
 
 /// Read immediate subdirectories, skipping hidden dirs and node_modules.
@@ -480,7 +480,7 @@ fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
     entries
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.file_type().map_or(false, |ft| ft.is_dir()) && {
+            e.file_type().is_ok_and(|ft| ft.is_dir()) && {
                 let name = e.file_name();
                 let name = name.to_string_lossy();
                 !name.starts_with('.') && name != "node_modules" && name != "dist"
