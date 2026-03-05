@@ -1,6 +1,7 @@
 {
   "extends": "./tsconfig.json",
   "include": ["./e2e"],
+  "exclude": ["./e2e/fixtures"],
   "compilerOptions": {
     "outDir": "./out-test",
     "rootDir": ".",

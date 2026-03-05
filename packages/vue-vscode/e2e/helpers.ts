@@ -114,6 +114,8 @@ export function getCompVuePath(): string | undefined {
       return "src/components/MyComp.vue";
     case "composite-paths":
       return "src/components/HelloWorld.vue";
+    case "barrel-exports":
+      return "src/components/Overlay.vue";
     case "monorepo":
       return "packages/shared/src/SharedComp.vue";
     case "no-config":

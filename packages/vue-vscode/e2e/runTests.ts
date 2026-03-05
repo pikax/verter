@@ -26,6 +26,8 @@ const FIXTURES = [
   "no-config@tsgo",
   "single-file@tsserver",
   "single-file@tsgo",
+  "barrel-exports@tsserver",
+  "barrel-exports@tsgo",
 ];
 
 /**
