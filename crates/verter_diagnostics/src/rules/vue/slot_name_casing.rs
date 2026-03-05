@@ -95,6 +95,8 @@ mod tests {
             name: name.to_string(),
             has_bindings: false,
             binding_names: vec![],
+            binding_expressions: vec![],
+            binding_value_spans: vec![],
             span: Span::new(10, 30),
         }
     }

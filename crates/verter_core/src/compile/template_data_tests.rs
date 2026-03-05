@@ -157,6 +157,39 @@ fn slot_definition_named() {
     assert_eq!(data.slot_definitions[0].name, "header");
 }
 
+#[test]
+fn slot_definition_binding_expressions() {
+    let data = extract(r#"<template><slot :item="row" :count="total" /></template>"#);
+    assert_eq!(data.slot_definitions.len(), 1);
+    let slot = &data.slot_definitions[0];
+    assert!(slot.has_bindings);
+    assert_eq!(slot.binding_names, vec!["item", "count"]);
+    assert_eq!(slot.binding_expressions, vec!["row", "total"]);
+    assert_eq!(slot.binding_value_spans.len(), 2);
+    // Verify spans point to the correct source text
+    let src = r#"<template><slot :item="row" :count="total" /></template>"#;
+    let s0 = &slot.binding_value_spans[0];
+    assert_eq!(&src[s0.start as usize..s0.end as usize], "row");
+    let s1 = &slot.binding_value_spans[1];
+    assert_eq!(&src[s1.start as usize..s1.end as usize], "total");
+}
+
+#[test]
+fn slot_definition_shorthand_binding() {
+    // :item shorthand (no value) means expression = "item"
+    let data = extract(r#"<template><slot :item /></template>"#);
+    assert_eq!(data.slot_definitions.len(), 1);
+    let slot = &data.slot_definitions[0];
+    assert!(slot.has_bindings);
+    assert_eq!(slot.binding_names, vec!["item"]);
+    assert_eq!(slot.binding_expressions, vec!["item"]);
+    assert_eq!(slot.binding_value_spans.len(), 1);
+    // Shorthand span should point to the arg name
+    let src = r#"<template><slot :item /></template>"#;
+    let s0 = &slot.binding_value_spans[0];
+    assert_eq!(&src[s0.start as usize..s0.end as usize], "item");
+}
+
 // ── Event handlers ──
 
 #[test]

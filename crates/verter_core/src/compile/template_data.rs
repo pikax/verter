@@ -162,6 +162,12 @@ pub struct RawSlotDef {
     pub has_bindings: bool,
     /// Prop names from `:prop` bindings on the `<slot>` element.
     pub binding_names: Vec<String>,
+    /// Expression text for each binding (parallel to `binding_names`).
+    /// E.g. for `:item="row"`, the expression is `"row"`.
+    /// For shorthand `:item`, the expression equals the arg name `"item"`.
+    pub binding_expressions: Vec<String>,
+    /// SFC-absolute spans of each binding's value expression (parallel to `binding_names`).
+    pub binding_value_spans: Vec<Span>,
     pub span: Span,
 }
 
@@ -1041,6 +1047,8 @@ fn extract_slot_def(
     let mut name = "default".to_string();
     let mut has_bindings = false;
     let mut binding_names = Vec::new();
+    let mut binding_expressions = Vec::new();
+    let mut binding_value_spans = Vec::new();
 
     for prop in &el.props {
         if prop.is_directive {
@@ -1054,6 +1062,16 @@ fn extract_slot_def(
                 if let Some(arg_name) = arg {
                     has_bindings = true;
                     binding_names.push(arg_name.to_string());
+                    // Capture expression text and span
+                    if let Some((vs, ve)) = prop.value_start.zip(prop.value_end) {
+                        binding_expressions.push(source[vs as usize..ve as usize].to_string());
+                        binding_value_spans.push(Span::new(vs, ve));
+                    } else {
+                        // Shorthand: :item → expression is the arg name itself
+                        let (as_, ae) = (prop.arg_start.unwrap(), prop.arg_end.unwrap());
+                        binding_expressions.push(arg_name.to_string());
+                        binding_value_spans.push(Span::new(as_, ae));
+                    }
                 }
             }
         } else {
@@ -1070,6 +1088,8 @@ fn extract_slot_def(
         name,
         has_bindings,
         binding_names,
+        binding_expressions,
+        binding_value_spans,
         span: Span::new(span_start, span_end),
     });
 }

@@ -3829,11 +3829,13 @@ impl LanguageServer for VerterLanguageServer {
             }
 
             // Macro code actions (defineSlots, defineEmits generation/augmentation)
+            let cursor_offset = doc.line_index.position_to_offset(&range.start);
             let mut macro_actions = crate::features::macro_actions::macro_code_actions(
                 &doc.source,
                 analysis.as_ref(),
                 &blocks,
                 &doc.line_index,
+                cursor_offset,
             );
             fix_placeholder_uris(&mut macro_actions, uri);
             all_actions.extend(macro_actions);

@@ -140,6 +140,8 @@ pub fn convert_raw_to_analysis(
             name: s.name.clone(),
             has_bindings: s.has_bindings,
             binding_names: s.binding_names.clone(),
+            binding_expressions: s.binding_expressions.clone(),
+            binding_value_spans: s.binding_value_spans.clone(),
             span: s.span,
         })
         .collect();

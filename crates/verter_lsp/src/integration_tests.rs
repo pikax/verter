@@ -4092,3 +4092,103 @@ const msg = "world"
         "did_change task must have completed"
     );
 }
+
+// ─── Code action (defineSlots) E2E tests ─────────────────────────────
+
+#[test]
+fn code_action_generate_define_slots_with_type_resolution() {
+    let source = r#"<script setup lang="ts">
+const pageTitle: string = 'Hello'
+</script>
+
+<template>
+  <slot :title="pageTitle" />
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let analysis = registry.get_analysis(&uri);
+    let blocks = scan_sfc_blocks(&doc.source);
+
+    let actions = crate::features::macro_actions::macro_code_actions(
+        &doc.source,
+        analysis.as_ref(),
+        &blocks,
+        &doc.line_index,
+        None,
+    );
+
+    // Should have B1: generate defineSlots
+    let gen_action = actions.iter().find(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title == "Generate defineSlots from template",
+        _ => false,
+    });
+    assert!(
+        gen_action.is_some(),
+        "should offer defineSlots generation, actions: {:?}",
+        actions
+            .iter()
+            .map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => ca.title.clone(),
+                _ => "command".into(),
+            })
+            .collect::<Vec<_>>()
+    );
+
+    if let Some(CodeActionOrCommand::CodeAction(ca)) = gen_action {
+        let edit = ca.edit.as_ref().unwrap();
+        if let Some(DocumentChanges::Edits(edits)) = &edit.document_changes {
+            let text = &edits[0].edits[0];
+            if let OneOf::Left(te) = text {
+                assert!(
+                    te.new_text.contains("defineSlots"),
+                    "should contain defineSlots"
+                );
+                assert!(
+                    te.new_text.contains("title: string"),
+                    "should resolve pageTitle type to string, got: {}",
+                    te.new_text
+                );
+                // Negative: should NOT have title: unknown
+                assert!(
+                    !te.new_text.contains("title: unknown"),
+                    "should not fall back to unknown when type is available"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn code_action_no_slots_no_action() {
+    let source = r#"<script setup lang="ts">
+const x = 1
+</script>
+
+<template>
+  <div>Hello</div>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let analysis = registry.get_analysis(&uri);
+    let blocks = scan_sfc_blocks(&doc.source);
+
+    let actions = crate::features::macro_actions::macro_code_actions(
+        &doc.source,
+        analysis.as_ref(),
+        &blocks,
+        &doc.line_index,
+        None,
+    );
+
+    // No slots → no macro code actions for slots
+    let has_slots_action = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.contains("defineSlots"),
+        _ => false,
+    });
+    assert!(
+        !has_slots_action,
+        "should not offer defineSlots action without slot elements"
+    );
+}

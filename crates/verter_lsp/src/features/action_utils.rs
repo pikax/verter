@@ -193,6 +193,247 @@ pub fn make_insert_action(
 /// Must be replaced with the actual document URI via [`fix_placeholder_uris`].
 pub const SAME_FILE_URI: &str = "file:///placeholder";
 
+/// A slot definition parsed from a `defineSlots<{ ... }>()` type literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedSlotDef {
+    pub name: String,
+    pub prop_names: Vec<String>,
+}
+
+/// Extract slot names and their prop names from a `defineSlots<{ ... }>()` type literal.
+///
+/// Returns each slot with its declared prop names. For example:
+/// ```text
+/// defineSlots<{
+///     header(props: { title: string, count: number }): any
+///     default(props: {}): any
+/// }>()
+/// ```
+/// Returns `[("header", ["title", "count"]), ("default", [])]`.
+pub fn extract_slots_with_props_from_type_literal(macro_text: &str) -> Vec<ParsedSlotDef> {
+    let mut results = Vec::new();
+
+    // Find the type parameter body between `<{` and `}>`
+    let body = match macro_text.find("<{") {
+        Some(start) => {
+            let end = macro_text.rfind("}>").unwrap_or(macro_text.len());
+            &macro_text[start + 2..end]
+        }
+        None => return results,
+    };
+
+    // Split into slot member lines by finding each `name(props:` pattern
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip whitespace
+        while i < bytes.len()
+            && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r')
+        {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+
+        let slot_name;
+        if bytes[i] == b'\'' || bytes[i] == b'"' {
+            // Quoted name
+            let quote = bytes[i];
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                break;
+            }
+            slot_name = body[start..i].to_string();
+            i += 1;
+        } else if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] == b'$' {
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+            {
+                i += 1;
+            }
+            slot_name = body[start..i].to_string();
+        } else {
+            i += 1;
+            continue;
+        }
+
+        // Skip whitespace
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+
+        // Must be followed by `(`
+        if i >= bytes.len() || bytes[i] != b'(' {
+            continue;
+        }
+        i += 1; // skip `(`
+
+        // Now find the props inside `props: { ... }`
+        // First find `{` after `props:`
+        let mut prop_names = Vec::new();
+        let mut depth = 1; // we're inside the outer `(`
+        while i < bytes.len() && depth > 0 {
+            if bytes[i] == b'{' {
+                i += 1;
+                // Now extract prop names from inside the braces
+                let mut brace_depth = 1;
+                while i < bytes.len() && brace_depth > 0 {
+                    // Skip whitespace
+                    while i < bytes.len()
+                        && (bytes[i] == b' '
+                            || bytes[i] == b'\t'
+                            || bytes[i] == b'\n'
+                            || bytes[i] == b'\r')
+                    {
+                        i += 1;
+                    }
+                    if i >= bytes.len() || brace_depth == 0 {
+                        break;
+                    }
+
+                    if bytes[i] == b'}' {
+                        brace_depth -= 1;
+                        i += 1;
+                        continue;
+                    }
+                    if bytes[i] == b'{' {
+                        brace_depth += 1;
+                        i += 1;
+                        continue;
+                    }
+
+                    // Try to read an identifier followed by `:`
+                    if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] == b'$' {
+                        let start = i;
+                        while i < bytes.len()
+                            && (bytes[i].is_ascii_alphanumeric()
+                                || bytes[i] == b'_'
+                                || bytes[i] == b'$')
+                        {
+                            i += 1;
+                        }
+                        let ident = &body[start..i];
+                        // Skip whitespace
+                        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                            i += 1;
+                        }
+                        // If followed by `:`, this is a prop name
+                        if i < bytes.len() && bytes[i] == b':' && brace_depth == 1 {
+                            prop_names.push(ident.to_string());
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                // After props brace, skip to end of the slot member
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i] == b'(' {
+                        depth += 1;
+                    } else if bytes[i] == b')' {
+                        depth -= 1;
+                    }
+                    i += 1;
+                }
+                break;
+            }
+            if bytes[i] == b'(' {
+                depth += 1;
+            } else if bytes[i] == b')' {
+                depth -= 1;
+            }
+            i += 1;
+        }
+
+        results.push(ParsedSlotDef {
+            name: slot_name,
+            prop_names,
+        });
+    }
+
+    results
+}
+
+/// Extract slot names from a `defineSlots<{ ... }>()` type literal.
+///
+/// Scans the type parameter body for identifiers or quoted names before `(`.
+/// E.g. from `defineSlots<{ header(props: {}): any\n 'nav-bar'(props: {}): any }>()`,
+/// extracts `["header", "nav-bar"]`.
+pub fn extract_slot_names_from_type_literal(macro_text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+
+    // Find the type parameter body between `<{` and `}>`
+    let body = match macro_text.find("<{") {
+        Some(start) => {
+            let end = macro_text.rfind("}>").unwrap_or(macro_text.len());
+            &macro_text[start + 2..end]
+        }
+        None => return names,
+    };
+
+    // Scan for slot names: identifier or 'quoted-name' followed by `(`
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip whitespace
+        while i < bytes.len()
+            && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r')
+        {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+
+        if bytes[i] == b'\'' || bytes[i] == b'"' {
+            // Quoted name: 'nav-bar' or "nav-bar"
+            let quote = bytes[i];
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            if i < bytes.len() {
+                let name = &body[start..i];
+                i += 1; // skip closing quote
+                        // Skip whitespace before (
+                while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b'(' {
+                    names.push(name.to_string());
+                }
+            }
+        } else if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] == b'$' {
+            // Unquoted identifier
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+            {
+                i += 1;
+            }
+            let name = &body[start..i];
+            // Skip whitespace before (
+            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'(' {
+                names.push(name.to_string());
+            }
+        } else {
+            // Skip any other character (e.g., inside props: { ... }: any)
+            i += 1;
+        }
+    }
+
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +720,69 @@ mod tests {
                 assert_ne!(edits[0].text_document.uri.as_str(), SAME_FILE_URI);
             }
         }
+    }
+
+    // ── extract_slot_names_from_type_literal ───────────────────────────
+
+    #[test]
+    fn extract_slot_names_basic() {
+        let names =
+            extract_slot_names_from_type_literal("defineSlots<{ header(props: {}): any }>()");
+        assert_eq!(names, vec!["header"]);
+    }
+
+    #[test]
+    fn extract_slot_names_quoted() {
+        let names =
+            extract_slot_names_from_type_literal("defineSlots<{ 'nav-bar'(props: {}): any }>()");
+        assert_eq!(names, vec!["nav-bar"]);
+    }
+
+    #[test]
+    fn extract_slot_names_multiple() {
+        let names = extract_slot_names_from_type_literal(
+            "defineSlots<{\n    header(props: {}): any\n    default(props: {}): any\n    'nav-bar'(props: { item: string }): any\n}>()",
+        );
+        assert_eq!(names, vec!["header", "default", "nav-bar"]);
+        // Negative: should not include prop names like "item" or type names
+        assert!(!names.contains(&"item".to_string()));
+        assert!(!names.contains(&"string".to_string()));
+        assert!(!names.contains(&"props".to_string()));
+    }
+
+    #[test]
+    fn extract_slot_names_empty_type() {
+        let names = extract_slot_names_from_type_literal("defineSlots<{}>()");
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn extract_slot_names_no_type_parameter() {
+        let names = extract_slot_names_from_type_literal("defineSlots()");
+        assert!(names.is_empty());
+    }
+
+    // ── extract_slots_with_props_from_type_literal ─────────────────────
+
+    #[test]
+    fn extract_slots_with_props_basic() {
+        let slots = extract_slots_with_props_from_type_literal(
+            "defineSlots<{\n    header(props: { title: string, count: number }): any\n    default(props: {}): any\n}>()",
+        );
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].name, "header");
+        assert_eq!(slots[0].prop_names, vec!["title", "count"]);
+        assert_eq!(slots[1].name, "default");
+        assert!(slots[1].prop_names.is_empty());
+    }
+
+    #[test]
+    fn extract_slots_with_props_quoted_name() {
+        let slots = extract_slots_with_props_from_type_literal(
+            "defineSlots<{ 'nav-bar'(props: { item: Item }): any }>()",
+        );
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].name, "nav-bar");
+        assert_eq!(slots[0].prop_names, vec!["item"]);
     }
 }

@@ -210,6 +210,11 @@ pub struct DefinedSlot {
     pub has_bindings: bool,
     /// Prop names from `:prop` bindings on the `<slot>` element.
     pub binding_names: Vec<String>,
+    /// Expression text for each binding (parallel to `binding_names`).
+    /// E.g. for `:item="row"`, the expression is `"row"`.
+    pub binding_expressions: Vec<String>,
+    /// SFC-absolute spans of each binding's value expression (parallel to `binding_names`).
+    pub binding_value_spans: Vec<Span>,
     /// Byte span in SFC source.
     pub span: Span,
 }
@@ -1413,6 +1418,10 @@ impl serde::Serialize for DefinedSlot {
         if !self.binding_names.is_empty() {
             map.serialize_entry("bindingNames", &self.binding_names)?;
         }
+        if !self.binding_expressions.is_empty() {
+            map.serialize_entry("bindingExpressions", &self.binding_expressions)?;
+        }
+        // binding_value_spans are SFC-absolute and not serialized (internal use only)
         map.serialize_entry("spanStart", &self.span.start)?;
         map.serialize_entry("spanEnd", &self.span.end)?;
         map.end()
@@ -1430,6 +1439,8 @@ impl<'de> serde::Deserialize<'de> for DefinedSlot {
             #[serde(default)]
             binding_names: Vec<String>,
             #[serde(default)]
+            binding_expressions: Vec<String>,
+            #[serde(default)]
             span_start: u32,
             #[serde(default)]
             span_end: u32,
@@ -1439,6 +1450,8 @@ impl<'de> serde::Deserialize<'de> for DefinedSlot {
             name: w.name,
             has_bindings: w.has_bindings,
             binding_names: w.binding_names,
+            binding_expressions: w.binding_expressions,
+            binding_value_spans: vec![],
             span: Span::new(w.span_start, w.span_end),
         })
     }
@@ -2212,6 +2225,8 @@ mod tests {
                 name: "header".to_string(),
                 has_bindings: true,
                 binding_names: vec![],
+                binding_expressions: vec![],
+                binding_value_spans: vec![],
                 span: Span::new(0, 0),
             }],
             template_refs: vec![TemplateRef {
