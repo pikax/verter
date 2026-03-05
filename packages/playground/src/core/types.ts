@@ -156,6 +156,8 @@ export interface AnalysisBinding {
   reactivityKind?: string;
   typeAnnotation?: string | null;
   initializer: AnalysisBindingInitializer | null;
+  spanStart: number;
+  spanEnd: number;
 }
 
 export type AnalysisBindingInitializer =

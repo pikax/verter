@@ -111,6 +111,7 @@ mod tests {
                 arg_value: None,
 
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             first_await_offset: None,
             ..Default::default()
@@ -127,6 +128,7 @@ mod tests {
                 arg_value: None,
 
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             first_await_offset: Some(50),
             flags: AnalysisFlags::ASYNC_SETUP,
@@ -144,6 +146,7 @@ mod tests {
                 arg_value: None,
 
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             first_await_offset: Some(50),
             flags: AnalysisFlags::ASYNC_SETUP,
@@ -165,6 +168,7 @@ mod tests {
                 arg_value: None,
 
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             first_await_offset: Some(50),
             flags: AnalysisFlags::ASYNC_SETUP,
@@ -184,6 +188,7 @@ mod tests {
                 arg_value: None,
 
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             first_await_offset: Some(50),
             flags: AnalysisFlags::ASYNC_SETUP,
@@ -203,6 +208,7 @@ mod tests {
                 arg_value: None,
 
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             first_await_offset: Some(50),
             flags: AnalysisFlags::ASYNC_SETUP,
@@ -222,6 +228,7 @@ mod tests {
                     arg_value: None,
 
                     is_async_callback: false,
+                    callback_params: vec![],
                 },
                 VueApiCallSite {
                     api: VueApiClassification::OnUnmounted,
@@ -229,6 +236,7 @@ mod tests {
                     arg_value: None,
 
                     is_async_callback: false,
+                    callback_params: vec![],
                 },
                 VueApiCallSite {
                     api: VueApiClassification::WatchEffect,
@@ -236,6 +244,7 @@ mod tests {
                     arg_value: None,
 
                     is_async_callback: false,
+                    callback_params: vec![],
                 },
             ],
             first_await_offset: Some(50),

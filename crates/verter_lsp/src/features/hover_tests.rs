@@ -164,6 +164,7 @@ fn test_hover_on_vue_api_call_site() {
             ),
             arg_value: None,
             is_async_callback: false,
+            callback_params: vec![],
         }],
         ..Default::default()
     };

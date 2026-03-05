@@ -5,7 +5,7 @@ use oxc_span::{GetSpan, SourceType};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::classify::{is_lifecycle_api, is_reactivity_api, is_watcher_api};
+use crate::classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};
 use crate::exports::extract_export_signatures_from_program;
 use crate::imports::analyze_import_declaration;
 
@@ -428,7 +428,17 @@ fn classify_initializer(
                 let callee_import_source = import_map
                     .source(imports, callee_name)
                     .map(|s| s.to_string());
-                let vue_api = import_map.vue_api(callee_name);
+                let vue_api = import_map.vue_api(callee_name).or_else(|| {
+                    // Compiler macros (defineModel, defineProps, etc.) are not imported
+                    // but still have a Vue API classification. Fall back to name-based
+                    // classification for unimported callees.
+                    let api = classify_vue_api(callee_name);
+                    if api != VueApiClassification::Other {
+                        Some(api)
+                    } else {
+                        None
+                    }
+                });
                 let is_reactive = vue_api.map(is_reactivity_api).unwrap_or(false);
                 let reactivity_kind = classify_reactivity_kind(vue_api, callee_name);
 
@@ -513,6 +523,11 @@ fn classify_reactivity_kind(
         Some(VueApiClassification::Reactive | VueApiClassification::ShallowReactive) => {
             ReactivityKind::Reactive
         }
+        Some(VueApiClassification::ToRefs) => ReactivityKind::Ref,
+        Some(VueApiClassification::Readonly | VueApiClassification::ShallowReadonly) => {
+            ReactivityKind::Reactive
+        }
+        Some(VueApiClassification::DefineModel) => ReactivityKind::Ref,
         _ => {
             // Composable convention: useXxx() → MaybeRef
             if callee_name.starts_with("use")
@@ -556,15 +571,78 @@ fn try_extract_vue_api_call(
                     None
                 };
                 let is_async_callback = first_arg_is_async(call);
+                let callback_params = extract_callback_params(call, api);
                 vue_api_calls.push(VueApiCallSite {
                     api,
                     span: call.span.into(),
                     arg_value,
                     is_async_callback,
+                    callback_params,
                 });
             }
         }
     }
+}
+
+/// Extract callback parameter names and spans from a Vue API call.
+///
+/// For watchers: `watch(source, (val, old) => ...)` → extracts `val`, `old` from 2nd arg
+/// For lifecycle/watchEffect: `onMounted(() => ...)` → extracts from 1st arg (if any params)
+fn extract_callback_params(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    api: VueApiClassification,
+) -> Vec<VueApiCallbackParam> {
+    use crate::types::VueApiCallbackParam;
+
+    // Determine which argument index has the callback
+    let cb_index = match api {
+        VueApiClassification::Watch | VueApiClassification::WatchSyncEffect => 1,
+        _ if api.is_lifecycle()
+            || api == VueApiClassification::WatchEffect
+            || api == VueApiClassification::WatchPostEffect =>
+        {
+            0
+        }
+        _ => return vec![],
+    };
+
+    let arg = match call.arguments.get(cb_index) {
+        Some(a) => a,
+        None => return vec![],
+    };
+
+    let expr = match arg.as_expression() {
+        Some(e) => e,
+        None => return vec![],
+    };
+
+    // Extract params from arrow or function expression
+    let params = match expr {
+        Expression::ArrowFunctionExpression(arrow) => &arrow.params,
+        Expression::FunctionExpression(func) => &func.params,
+        _ => return vec![],
+    };
+
+    params
+        .items
+        .iter()
+        .filter_map(|param| {
+            // Only extract simple identifier params (not destructured)
+            if let BindingPattern::BindingIdentifier(id) = &param.pattern {
+                // Skip if already has a type annotation
+                if param.type_annotation.is_some() {
+                    return None;
+                }
+                Some(VueApiCallbackParam {
+                    name: id.name.to_string(),
+                    span: id.span.into(),
+                    inferred_type: None, // Will be populated later
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Extract the first string literal argument from a call expression.
@@ -990,7 +1068,7 @@ fn analyze_arrow_function(
     } else if arrow.expression {
         // Arrow with expression body: `() => ref(0)` — single expression statement
         if let Some(Statement::ExpressionStatement(expr_stmt)) = body.statements.first() {
-            classify_single_return_expr(&expr_stmt.expression, import_map)
+            classify_single_return_expr(&expr_stmt.expression, import_map, &[])
         } else {
             ReturnReactivity::Unknown
         }
@@ -1062,11 +1140,16 @@ fn extract_function_params(content: &str, params: &FormalParameters<'_>) -> Vec<
         let is_optional = param.optional;
         let has_default = param.initializer.is_some();
 
+        let span = match &param.pattern {
+            BindingPattern::BindingIdentifier(id) => id.span.into(),
+            _ => verter_span::Span::new(param.span.start, param.span.end),
+        };
         out.push(FunctionParam {
             name,
             type_annotation,
             is_optional,
             has_default,
+            span,
         });
     }
     out
@@ -1102,7 +1185,7 @@ fn classify_return_reactivity_from_body(
     import_map: &ImportBindingMap,
 ) -> ReturnReactivity {
     let mut return_kinds = Vec::new();
-    collect_return_expressions(body, import_map, &mut return_kinds);
+    collect_return_expressions(body, import_map, &[], &mut return_kinds);
 
     if return_kinds.is_empty() {
         return ReturnReactivity::Plain;
@@ -1125,10 +1208,11 @@ fn classify_return_reactivity_from_body(
 fn collect_return_expressions(
     body: &FunctionBody<'_>,
     import_map: &ImportBindingMap,
+    local_bindings: &[(String, ReactivityKind)],
     out: &mut Vec<ReturnReactivity>,
 ) {
     for stmt in &body.statements {
-        collect_returns_from_stmt(stmt, import_map, out);
+        collect_returns_from_stmt(stmt, import_map, local_bindings, out);
     }
 }
 
@@ -1136,12 +1220,13 @@ fn collect_return_expressions(
 fn collect_returns_from_stmt(
     stmt: &Statement<'_>,
     import_map: &ImportBindingMap,
+    local_bindings: &[(String, ReactivityKind)],
     out: &mut Vec<ReturnReactivity>,
 ) {
     match stmt {
         Statement::ReturnStatement(ret) => {
             if let Some(arg) = &ret.argument {
-                out.push(classify_single_return_expr(arg, import_map));
+                out.push(classify_single_return_expr(arg, import_map, local_bindings));
             } else {
                 out.push(ReturnReactivity::Plain);
             }
@@ -1149,34 +1234,34 @@ fn collect_returns_from_stmt(
         // Recurse into blocks
         Statement::BlockStatement(block) => {
             for s in &block.body {
-                collect_returns_from_stmt(s, import_map, out);
+                collect_returns_from_stmt(s, import_map, local_bindings, out);
             }
         }
         Statement::IfStatement(if_stmt) => {
-            collect_returns_from_stmt(&if_stmt.consequent, import_map, out);
+            collect_returns_from_stmt(&if_stmt.consequent, import_map, local_bindings, out);
             if let Some(alt) = &if_stmt.alternate {
-                collect_returns_from_stmt(alt, import_map, out);
+                collect_returns_from_stmt(alt, import_map, local_bindings, out);
             }
         }
         Statement::TryStatement(try_stmt) => {
             for s in &try_stmt.block.body {
-                collect_returns_from_stmt(s, import_map, out);
+                collect_returns_from_stmt(s, import_map, local_bindings, out);
             }
             if let Some(catch) = &try_stmt.handler {
                 for s in &catch.body.body {
-                    collect_returns_from_stmt(s, import_map, out);
+                    collect_returns_from_stmt(s, import_map, local_bindings, out);
                 }
             }
             if let Some(fin) = &try_stmt.finalizer {
                 for s in &fin.body {
-                    collect_returns_from_stmt(s, import_map, out);
+                    collect_returns_from_stmt(s, import_map, local_bindings, out);
                 }
             }
         }
         Statement::SwitchStatement(switch) => {
             for case in &switch.cases {
                 for s in &case.consequent {
-                    collect_returns_from_stmt(s, import_map, out);
+                    collect_returns_from_stmt(s, import_map, local_bindings, out);
                 }
             }
         }
@@ -1190,6 +1275,7 @@ fn collect_returns_from_stmt(
 fn classify_single_return_expr(
     expr: &Expression<'_>,
     import_map: &ImportBindingMap,
+    local_bindings: &[(String, ReactivityKind)],
 ) -> ReturnReactivity {
     match expr {
         Expression::CallExpression(call) => {
@@ -1218,7 +1304,7 @@ fn classify_single_return_expr(
             for prop in &obj.properties {
                 if let ObjectPropertyKind::ObjectProperty(p) = prop {
                     if let Some(name) = property_key_name(&p.key) {
-                        let kind = classify_value_reactivity(&p.value, import_map);
+                        let kind = classify_value_reactivity(&p.value, import_map, local_bindings);
                         if kind != ReactivityKind::None {
                             has_any_reactive = true;
                         }
@@ -1239,21 +1325,25 @@ fn classify_single_return_expr(
         | Expression::NullLiteral(_) => ReturnReactivity::Plain,
         // Parenthesized → unwrap
         Expression::ParenthesizedExpression(p) => {
-            classify_single_return_expr(&p.expression, import_map)
+            classify_single_return_expr(&p.expression, import_map, local_bindings)
         }
         // TS assertions → unwrap
-        Expression::TSAsExpression(e) => classify_single_return_expr(&e.expression, import_map),
+        Expression::TSAsExpression(e) => {
+            classify_single_return_expr(&e.expression, import_map, local_bindings)
+        }
         Expression::TSSatisfiesExpression(e) => {
-            classify_single_return_expr(&e.expression, import_map)
+            classify_single_return_expr(&e.expression, import_map, local_bindings)
         }
         _ => ReturnReactivity::Unknown,
     }
 }
 
 /// Classify the reactivity of a value expression (for object return fields).
+/// Resolves identifier references to local bindings when possible.
 fn classify_value_reactivity(
     expr: &Expression<'_>,
     import_map: &ImportBindingMap,
+    local_bindings: &[(String, ReactivityKind)],
 ) -> ReactivityKind {
     match expr {
         Expression::CallExpression(call) => {
@@ -1263,8 +1353,16 @@ fn classify_value_reactivity(
             }
             ReactivityKind::None
         }
+        Expression::Identifier(id) => {
+            // Resolve identifier to a local binding's reactivity
+            local_bindings
+                .iter()
+                .find(|(name, _)| name == id.name.as_str())
+                .map(|(_, kind)| *kind)
+                .unwrap_or(ReactivityKind::None)
+        }
         Expression::ParenthesizedExpression(p) => {
-            classify_value_reactivity(&p.expression, import_map)
+            classify_value_reactivity(&p.expression, import_map, local_bindings)
         }
         _ => ReactivityKind::None,
     }
@@ -1304,7 +1402,7 @@ fn build_composable_info(
     }
 
     let return_shape = if let Some(body) = body {
-        detect_composable_return_shape(body, import_map)
+        detect_composable_return_shape(body, import_map, &internal_reactive_state)
     } else {
         ComposableReturn::Unknown
     };
@@ -1447,10 +1545,11 @@ fn scan_expr_for_vue_call(
 fn detect_composable_return_shape(
     body: &FunctionBody<'_>,
     import_map: &ImportBindingMap,
+    local_bindings: &[(String, ReactivityKind)],
 ) -> ComposableReturn {
     // Find the last return statement's expression
     let mut returns = Vec::new();
-    collect_return_expressions(body, import_map, &mut returns);
+    collect_return_expressions(body, import_map, local_bindings, &mut returns);
 
     if returns.is_empty() {
         return ComposableReturn::Unknown;

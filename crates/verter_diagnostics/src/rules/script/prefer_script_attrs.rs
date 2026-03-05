@@ -121,6 +121,7 @@ const attrs = useAttrs<{ class?: string }>()
                 span: Span::new(call_start, call_end),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };
@@ -159,6 +160,7 @@ const attrs = useAttrs()
                 span: Span::new(call_start, call_end),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };
@@ -194,6 +196,7 @@ const slots = useSlots<{ default: () => void }>()
                 span: Span::new(call_start, call_end),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };

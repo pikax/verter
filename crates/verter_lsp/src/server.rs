@@ -4278,18 +4278,46 @@ impl LanguageServer for VerterLanguageServer {
                         &ctx.tsx_line_index,
                     );
                     if let (Some(so), Some(eo)) = (start_offset, end_offset) {
-                        if let Ok(type_hints) = tp.get_inlay_hints(&ctx.tsx_path, so, eo).await {
-                            let mut tsgo_hints = merge::merge_inlay_hints(
-                                type_hints,
-                                &ctx.tsx_line_index,
-                                &ctx.mapper,
-                                &ctx.vue_line_index,
-                            );
-                            hints.append(&mut tsgo_hints);
+                        match tp.get_inlay_hints(&ctx.tsx_path, so, eo).await {
+                            Ok(type_hints) => {
+                                tracing::debug!(
+                                    "inlay_hint: type provider returned {} hints for {}",
+                                    type_hints.len(),
+                                    uri.as_str()
+                                );
+                                let mut tsgo_hints = merge::merge_inlay_hints(
+                                    type_hints,
+                                    &ctx.tsx_line_index,
+                                    &ctx.mapper,
+                                    &ctx.vue_line_index,
+                                );
+                                tracing::debug!(
+                                    "inlay_hint: {} hints after merge mapping",
+                                    tsgo_hints.len()
+                                );
+                                hints.append(&mut tsgo_hints);
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    "inlay_hint: type provider error for {}: {}",
+                                    uri.as_str(),
+                                    e
+                                );
+                            }
                         }
+                    } else {
+                        tracing::debug!(
+                            "inlay_hint: position mapping failed — start={:?}, end={:?}",
+                            start_offset,
+                            end_offset
+                        );
                     }
+                } else {
+                    tracing::debug!("inlay_hint: no type_provider_context for {}", uri.as_str());
                 }
             }
+        } else {
+            tracing::debug!("inlay_hint: skipped type provider (typing cooldown)");
         }
 
         Ok(if hints.is_empty() { None } else { Some(hints) })

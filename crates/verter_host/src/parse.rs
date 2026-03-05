@@ -788,6 +788,19 @@ pub(crate) fn parse_non_sfc_snapshot(_canonical_id: &str, source: &str) -> Parse
         None => DiagnosticsSnapshot::default(),
     };
 
+    // Run script analysis for non-SFC files to populate exported_functions
+    // (composable return shape data used by cross-file binding enrichment).
+    let alloc2 = Allocator::new();
+    let script_analysis = verter_analysis::build_script_analysis_with_scope(
+        source,
+        SourceType::ts(),
+        &alloc2,
+        verter_analysis::AnalysisScope::IMPORTS
+            | verter_analysis::AnalysisScope::BINDINGS
+            | verter_analysis::AnalysisScope::FUNC_RETURNS
+            | verter_analysis::AnalysisScope::REACTIVITY,
+    );
+
     ParseSnapshot {
         whole_hash,
         semantic_hash,
@@ -797,7 +810,7 @@ pub(crate) fn parse_non_sfc_snapshot(_canonical_id: &str, source: &str) -> Parse
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics,
-        script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
+        script_analysis,
         export_signatures,
         style_analyses: Vec::new(),
         preprocessor_requests: Vec::new(),

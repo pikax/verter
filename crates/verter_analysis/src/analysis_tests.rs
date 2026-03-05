@@ -830,14 +830,44 @@ export function useCounter() {
     let result = analyze_with_scope(code, AnalysisScope::all());
     assert_eq!(result.exported_functions.len(), 1);
     let f = &result.exported_functions[0];
-    // The return has identifier refs, not direct calls, so it won't detect
-    // individual field reactivity from identifiers alone (only from call exprs).
-    // This is expected: the heuristic classifies `{ count, doubled }` as Plain
-    // when the values are identifiers (not call expressions).
-    assert!(matches!(
+    // The top-level `return_reactivity` doesn't resolve local identifiers
+    // (it uses a general heuristic without function-local binding context).
+    // The composable `return_shape` DOES resolve identifiers via `internal_reactive_state`.
+    assert!(
+        matches!(
+            f.return_reactivity,
+            ReturnReactivity::Plain | ReturnReactivity::ObjectWithReactiveFields(_)
+        ),
+        "return_reactivity: {:?}",
         f.return_reactivity,
-        ReturnReactivity::Plain | ReturnReactivity::ObjectWithReactiveFields(_)
-    ));
+    );
+    // Verify composable return shape has per-field reactivity
+    let composable = f.composable.as_ref().expect("should be a composable");
+    if let ComposableReturn::Object(fields) = &composable.return_shape {
+        let count_field = fields
+            .iter()
+            .find(|f| f.name == "count")
+            .expect("count field");
+        assert_eq!(
+            count_field.reactivity,
+            ReactivityKind::Ref,
+            "count should be Ref"
+        );
+        let doubled_field = fields
+            .iter()
+            .find(|f| f.name == "doubled")
+            .expect("doubled field");
+        assert_eq!(
+            doubled_field.reactivity,
+            ReactivityKind::Computed,
+            "doubled should be Computed"
+        );
+    } else {
+        panic!(
+            "expected Object return shape, got: {:?}",
+            composable.return_shape
+        );
+    }
 }
 
 #[test]
@@ -1038,4 +1068,122 @@ fn css_var_set_property_value_expr_is_source_text() {
         result.css_var_manipulations[0].value_expr.as_deref(),
         Some("computedColor.value")
     );
+}
+
+// ── ReactivityKind classification tests ──
+
+#[test]
+fn torefs_gets_ref_reactivity_kind() {
+    let result = analyze("import { toRefs } from 'vue';\nconst { x, y } = toRefs(props);");
+    let x_binding = result.bindings.iter().find(|b| b.name == "x").unwrap();
+    assert_eq!(
+        x_binding.reactivity_kind,
+        ReactivityKind::Ref,
+        "toRefs() destructured fields should be Ref"
+    );
+    assert!(x_binding.is_reactive, "toRefs() binding should be reactive");
+}
+
+#[test]
+fn readonly_gets_reactive_kind() {
+    let result = analyze("import { readonly, reactive } from 'vue';\nconst state = readonly(reactive({ count: 0 }));");
+    let binding = result.bindings.iter().find(|b| b.name == "state").unwrap();
+    assert_eq!(
+        binding.reactivity_kind,
+        ReactivityKind::Reactive,
+        "readonly() should classify as Reactive"
+    );
+    assert!(binding.is_reactive, "readonly() binding should be reactive");
+}
+
+#[test]
+fn shallow_readonly_gets_reactive_kind() {
+    let result = analyze(
+        "import { shallowReadonly } from 'vue';\nconst state = shallowReadonly({ count: 0 });",
+    );
+    let binding = result.bindings.iter().find(|b| b.name == "state").unwrap();
+    assert_eq!(
+        binding.reactivity_kind,
+        ReactivityKind::Reactive,
+        "shallowReadonly() should classify as Reactive"
+    );
+}
+
+#[test]
+fn define_model_gets_ref_kind() {
+    let result = analyze("const modelValue = defineModel();");
+    let binding = result
+        .bindings
+        .iter()
+        .find(|b| b.name == "modelValue")
+        .unwrap();
+    assert_eq!(
+        binding.reactivity_kind,
+        ReactivityKind::Ref,
+        "defineModel() returns a Ref-like ModelRef, should classify as Ref"
+    );
+}
+
+#[test]
+fn watch_callback_params_extracted() {
+    let result = analyze("import { ref, watch } from 'vue';\nconst x = ref(0);\nwatch(x, (val, old) => { console.log(val, old) });");
+    let watch_call = result
+        .vue_api_calls
+        .iter()
+        .find(|c| c.api == VueApiClassification::Watch)
+        .expect("should have a watch call");
+    assert_eq!(
+        watch_call.callback_params.len(),
+        2,
+        "watch callback should have 2 params"
+    );
+    assert_eq!(watch_call.callback_params[0].name, "val");
+    assert_eq!(watch_call.callback_params[1].name, "old");
+    // Spans should be valid (non-zero)
+    assert!(
+        watch_call.callback_params[0].span.start > 0,
+        "val span should have valid start"
+    );
+}
+
+#[test]
+fn watch_callback_typed_params_skipped() {
+    let result = analyze(
+        "import { ref, watch } from 'vue';\nconst x = ref(0);\nwatch(x, (val: number) => { });",
+    );
+    let watch_call = result
+        .vue_api_calls
+        .iter()
+        .find(|c| c.api == VueApiClassification::Watch)
+        .expect("should have a watch call");
+    assert!(
+        watch_call.callback_params.is_empty(),
+        "typed params should NOT be extracted for inlay hints"
+    );
+}
+
+#[test]
+fn lifecycle_callback_no_params() {
+    let result = analyze("import { onMounted } from 'vue';\nonMounted(() => { });");
+    let hook = result
+        .vue_api_calls
+        .iter()
+        .find(|c| c.api == VueApiClassification::OnMounted)
+        .expect("should have onMounted call");
+    assert!(
+        hook.callback_params.is_empty(),
+        "onMounted with no-param arrow should have empty callback_params"
+    );
+}
+
+#[test]
+fn plain_const_stays_none() {
+    let result = analyze("const x = 42;");
+    let binding = result.bindings.iter().find(|b| b.name == "x").unwrap();
+    assert_eq!(
+        binding.reactivity_kind,
+        ReactivityKind::None,
+        "plain const literal should stay None"
+    );
+    assert!(!binding.is_reactive, "plain const should not be reactive");
 }

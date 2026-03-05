@@ -65,6 +65,7 @@ impl VerterHost {
                 css_var_manipulations,
             };
             self.resolve_snapshot_imports(&canonical, &mut snapshot);
+            self.enrich_destructured_bindings(&mut snapshot);
             return Some(snapshot);
         }
 
@@ -83,6 +84,7 @@ impl VerterHost {
         // Drop the files lock before resolving (resolve_snapshot_imports acquires its own)
         drop(files);
         self.resolve_snapshot_imports(&canonical, &mut snapshot);
+        self.enrich_destructured_bindings(&mut snapshot);
         Some(snapshot)
     }
 
@@ -106,6 +108,86 @@ impl VerterHost {
                     entry,
                     &import.source,
                 );
+            }
+        }
+    }
+
+    /// Enrich destructured composable bindings with per-field reactivity info.
+    ///
+    /// When a binding has `reactivity_kind: MaybeRef` and its initializer is a
+    /// `FunctionCall` to a composable, look up the composable's `return_shape`
+    /// from the resolved file's `exported_functions`. If it's `Object(fields)`,
+    /// match binding names to field names and replace `MaybeRef` with the
+    /// field's actual `ReactivityKind`.
+    fn enrich_destructured_bindings(&self, snapshot: &mut FileAnalysisSnapshot) {
+        use verter_analysis::types::{BindingInitializer, ComposableReturn, ReactivityKind};
+
+        // Build a map of import source → resolved canonical ID from the snapshot
+        let import_resolved: rustc_hash::FxHashMap<&str, &str> = snapshot
+            .imports
+            .iter()
+            .filter_map(|imp| {
+                imp.resolved_canonical_id
+                    .as_deref()
+                    .map(|resolved| (imp.source.as_str(), resolved))
+            })
+            .collect();
+
+        let files = read_lock(&self.files);
+
+        for binding in &mut snapshot.bindings {
+            if binding.reactivity_kind != ReactivityKind::MaybeRef {
+                continue;
+            }
+
+            let Some(BindingInitializer::FunctionCall {
+                callee,
+                callee_import_source,
+                ..
+            }) = &binding.initializer
+            else {
+                continue;
+            };
+
+            // Resolve the composable's source file
+            let import_source = match callee_import_source {
+                Some(src) => src.as_str(),
+                None => continue, // Local function, can't do cross-file
+            };
+
+            let canonical_id = match import_resolved.get(import_source) {
+                Some(id) => *id,
+                None => continue,
+            };
+
+            let Some(entry) = files.get(canonical_id) else {
+                continue;
+            };
+
+            // Find the exported function matching the callee name
+            let composable_info = entry
+                .script_analysis
+                .exported_functions
+                .iter()
+                .find(|f| f.name == *callee)
+                .and_then(|f| f.composable.as_ref());
+
+            let Some(info) = composable_info else {
+                continue;
+            };
+
+            match &info.return_shape {
+                ComposableReturn::Object(fields) => {
+                    if let Some(field) = fields.iter().find(|f| f.name == binding.name) {
+                        binding.reactivity_kind = field.reactivity;
+                        binding.is_reactive = !matches!(field.reactivity, ReactivityKind::None);
+                    }
+                }
+                ComposableReturn::Single(kind) => {
+                    binding.reactivity_kind = *kind;
+                    binding.is_reactive = !matches!(kind, ReactivityKind::None);
+                }
+                _ => {}
             }
         }
     }
@@ -593,5 +675,83 @@ mod tests {
         );
         // Bare specifiers that aren't in the file map resolve to None
         assert!(host.resolve_import("Parent.vue", "lodash").is_none());
+    }
+
+    fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn enriches_destructured_composable_bindings() {
+        let host = make_host();
+
+        // Composable that returns { x: ref, y: ref, reset: function }
+        upsert_ts(
+            &host,
+            "useMouse.ts",
+            r#"
+import { ref } from 'vue'
+export function useMouse() {
+    const x = ref(0)
+    const y = ref(0)
+    function reset() { x.value = 0; y.value = 0 }
+    return { x, y, reset }
+}
+"#,
+        );
+
+        // SFC that destructures the composable return
+        upsert_vue(
+            &host,
+            "App.vue",
+            r#"<script setup>
+import { useMouse } from './useMouse.ts'
+const { x, y, reset } = useMouse()
+</script>
+<template><div>{{ x }} {{ y }}</div></template>"#,
+        );
+
+        let analysis = host.get_analysis("App.vue").unwrap();
+
+        // x and y should be enriched to Ref (from composable return shape)
+        let x_binding = analysis.bindings.iter().find(|b| b.name == "x").unwrap();
+        assert_eq!(
+            x_binding.reactivity_kind,
+            verter_analysis::ReactivityKind::Ref,
+            "x should be enriched from MaybeRef to Ref via composable return shape"
+        );
+
+        let y_binding = analysis.bindings.iter().find(|b| b.name == "y").unwrap();
+        assert_eq!(
+            y_binding.reactivity_kind,
+            verter_analysis::ReactivityKind::Ref,
+            "y should be enriched from MaybeRef to Ref via composable return shape"
+        );
+
+        // reset should stay as a function (ReactivityKind::None since it's not reactive)
+        let reset_binding = analysis
+            .bindings
+            .iter()
+            .find(|b| b.name == "reset")
+            .unwrap();
+        assert_eq!(
+            reset_binding.reactivity_kind,
+            verter_analysis::ReactivityKind::None,
+            "reset (a function) should be None, not reactive"
+        );
+
+        // Negative: non-enriched bindings should not be affected
+        assert!(
+            !x_binding.is_reactive
+                || x_binding.reactivity_kind != verter_analysis::ReactivityKind::MaybeRef,
+            "x should NOT remain MaybeRef after enrichment"
+        );
     }
 }

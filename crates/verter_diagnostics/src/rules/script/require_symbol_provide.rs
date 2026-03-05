@@ -70,6 +70,7 @@ mod tests {
             span: Span::new(0, 30),
             arg_value: arg_value.map(|s| s.to_string()),
             is_async_callback: false,
+            callback_params: vec![],
         }
     }
 
@@ -111,6 +112,7 @@ mod tests {
                 span: Span::new(0, 20),
                 arg_value: Some("myKey".to_string()),
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };

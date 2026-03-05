@@ -12,7 +12,7 @@ import {
   type TemplateCompletion,
 } from "./templateIde";
 import { getCodeActions, getDocumentSymbols, type HostDocumentSymbol } from "../core/compiler";
-import { computeCodeLenses } from "./decorations";
+import { computeCodeLenses, computeBindingInlayHints } from "./decorations";
 
 // ── TypeScript service integration interface ──
 
@@ -496,6 +496,28 @@ export function registerLspProviders(
         }));
 
         return { lenses: monacoLenses, dispose() {} };
+      },
+    }),
+  );
+
+  // Inlay hints provider (per-binding type hints)
+  disposables.push(
+    monaco.languages.registerInlayHintsProvider("vue", {
+      provideInlayHints(model) {
+        const file = store.activeFile;
+        const analysis = file?.compiled.analysis;
+        if (!file || !analysis) return { hints: [], dispose() {} };
+
+        const hints = computeBindingInlayHints(analysis);
+        const monacoHints: monaco.languages.InlayHint[] = hints.map((hint) => ({
+          position: model.getPositionAt(hint.position),
+          label: hint.label,
+          kind: hint.kind === "type"
+            ? monaco.languages.InlayHintKind.Type
+            : monaco.languages.InlayHintKind.Parameter,
+        }));
+
+        return { hints: monacoHints, dispose() {} };
       },
     }),
   );

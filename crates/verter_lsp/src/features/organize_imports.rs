@@ -293,6 +293,7 @@ mod tests {
                 span: verter_span::Span::new(48, 54),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
         );
 
@@ -340,6 +341,7 @@ mod tests {
                 span: verter_span::Span::new(58, 64),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
         );
 
@@ -439,6 +441,7 @@ mod tests {
                 span: verter_span::Span::new(58, 64),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
         );
 

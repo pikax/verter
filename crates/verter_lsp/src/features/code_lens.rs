@@ -210,6 +210,7 @@ mod tests {
                 span: verter_span::Span::new(0, 5),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };

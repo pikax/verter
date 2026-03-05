@@ -87,6 +87,7 @@ mod tests {
                 arg_value: None,
 
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };
@@ -102,6 +103,7 @@ mod tests {
                 arg_value: None,
 
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };
@@ -122,6 +124,7 @@ mod tests {
                 arg_value: None,
 
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };
@@ -139,6 +142,7 @@ mod tests {
                     arg_value: None,
 
                     is_async_callback: false,
+                    callback_params: vec![],
                 },
                 VueApiCallSite {
                     api: VueApiClassification::OnUnmounted,
@@ -146,6 +150,7 @@ mod tests {
                     arg_value: None,
 
                     is_async_callback: false,
+                    callback_params: vec![],
                 },
             ],
             ..Default::default()

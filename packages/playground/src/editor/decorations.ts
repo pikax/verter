@@ -64,47 +64,51 @@ function getBindingStyle(binding: AnalysisBinding): { className: string; label: 
 
 /**
  * Compute binding reactivity decorations from analysis data.
- * Returns decorations for each binding declaration that has a known reactivity kind.
+ * Returns decorations for each binding declaration AND template binding occurrences.
  *
- * Note: These decorations use binding name spans from the analysis. Since the analysis
- * currently doesn't include declaration spans, we search for the binding name in the
- * script block as an approximation.
+ * Uses SFC-absolute spans from the analysis for precise positioning.
  */
 export function computeBindingDecorations(
-  source: string,
+  _source: string,
   analysis: FileAnalysis,
 ): BindingDecoration[] {
   const decorations: BindingDecoration[] = [];
 
-  // Find script setup block boundaries
-  const scriptMatch = /<script[^>]*\bsetup\b[^>]*>/i.exec(source);
-  if (!scriptMatch) return decorations;
-  const scriptStart = scriptMatch.index + scriptMatch[0].length;
-  const scriptEnd = source.indexOf("</script>", scriptStart);
-  if (scriptEnd === -1) return decorations;
+  // Build a lookup map of binding name → style
+  const bindingStyles = new Map<string, { className: string; label: string }>();
 
-  const scriptContent = source.slice(scriptStart, scriptEnd);
-
+  // Script binding declarations (using span data)
   for (const binding of analysis.bindings) {
     if (binding.name.startsWith("___VERTER___")) continue;
     const style = getBindingStyle(binding);
     if (!style) continue;
 
-    // Find the binding name in the script block
-    // Use word boundary matching to avoid partial matches
-    const nameRegex = new RegExp(`\\b${escapeRegExp(binding.name)}\\b`);
-    const match = nameRegex.exec(scriptContent);
-    if (!match) continue;
+    bindingStyles.set(binding.name, style);
 
-    const start = scriptStart + match.index;
-    const end = start + binding.name.length;
+    // Use SFC-absolute span from analysis
+    if (binding.spanStart > 0 || binding.spanEnd > 0) {
+      decorations.push({
+        start: binding.spanStart,
+        end: binding.spanEnd,
+        className: style.className,
+        hoverMessage: `**${style.label}** binding`,
+      });
+    }
+  }
 
-    decorations.push({
-      start,
-      end,
-      className: style.className,
-      hoverMessage: `**${style.label}** binding`,
-    });
+  // Template binding occurrences (all usages in the template)
+  if (analysis.template?.bindingOccurrences) {
+    for (const occ of analysis.template.bindingOccurrences) {
+      const style = bindingStyles.get(occ.name);
+      if (!style) continue;
+
+      decorations.push({
+        start: occ.spanStart,
+        end: occ.spanEnd,
+        className: style.className,
+        hoverMessage: `**${style.label}** binding (${occ.usageKind})`,
+      });
+    }
   }
 
   return decorations;
@@ -220,6 +224,70 @@ export function computeCodeLenses(
   return lenses;
 }
 
+// ── Inlay hints ──
+
+/** Inlay hint descriptor for Monaco. */
+export interface BindingInlayHint {
+  /** SFC-absolute byte offset where the hint should appear. */
+  position: number;
+  /** Display text for the hint. */
+  label: string;
+  /** Hint kind: "type" or "parameter". */
+  kind: "type" | "parameter";
+}
+
+/**
+ * Compute per-binding type inlay hints from analysis data.
+ * Returns hints for reactive bindings without explicit type annotations.
+ */
+export function computeBindingInlayHints(
+  analysis: FileAnalysis,
+): BindingInlayHint[] {
+  const hints: BindingInlayHint[] = [];
+
+  for (const binding of analysis.bindings) {
+    if (binding.name.startsWith("___VERTER___")) continue;
+    if (binding.typeAnnotation) continue;
+    if (!binding.reactivityKind || binding.reactivityKind === "None") continue;
+
+    const typeText = inferTypeText(binding);
+    if (!typeText) continue;
+
+    hints.push({
+      position: binding.spanEnd,
+      label: `: ${typeText}`,
+      kind: "type",
+    });
+  }
+
+  return hints;
+}
+
+function inferTypeText(binding: AnalysisBinding): string | null {
+  const kind = binding.reactivityKind;
+  if (!kind) return null;
+
+  if (kind === "Ref") {
+    if (
+      binding.initializer &&
+      "FunctionCall" in binding.initializer &&
+      binding.initializer.FunctionCall.vueApi === "Computed"
+    ) {
+      return "ComputedRef<...>";
+    }
+    return "Ref<...>";
+  }
+  if (kind === "Computed") return "ComputedRef<...>";
+  if (kind === "Reactive") return "reactive object";
+  if (kind === "MaybeRef") {
+    if (binding.initializer && "FunctionCall" in binding.initializer) {
+      return `ReturnType<typeof ${binding.initializer.FunctionCall.callee}>`;
+    }
+    return "MaybeRef<...>";
+  }
+  return null;
+}
+
 // ── CSS for Monaco decorations ──
 
 /** Returns CSS rules to inject into the page for binding decorations. */
@@ -237,10 +305,6 @@ export function getDecorationStyles(): string {
 }
 
 // ── Helpers ──
-
-function escapeRegExp(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 /** Count lines (1-based) up to a byte offset. */
 function countLines(source: string, offset: number): number {

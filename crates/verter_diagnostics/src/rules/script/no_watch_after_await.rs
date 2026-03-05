@@ -84,6 +84,7 @@ mod tests {
                 span: Span::new(80, 100),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };
@@ -105,6 +106,7 @@ mod tests {
                 span: Span::new(20, 50),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };
@@ -121,6 +123,7 @@ mod tests {
                 span: Span::new(20, 50),
                 arg_value: None,
                 is_async_callback: false,
+                callback_params: vec![],
             }],
             ..Default::default()
         };

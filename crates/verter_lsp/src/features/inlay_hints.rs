@@ -8,10 +8,11 @@
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
-use tower_lsp_server::ls_types::{InlayHint, InlayHintLabel};
+use tower_lsp_server::ls_types::{InlayHint, InlayHintKind, InlayHintLabel};
 use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 use verter_analysis::types::{
-    DomQueryCallSite, DomQueryKind, VueApiCallSite, VueApiClassification,
+    AnalyzedBinding, BindingInitializer, DomQueryCallSite, DomQueryKind, ReactivityKind,
+    VueApiCallSite, VueApiClassification,
 };
 use verter_analysis::{match_selector, MatchResult};
 use verter_host::FileAnalysisSnapshot;
@@ -42,6 +43,13 @@ pub fn verter_inlay_hints(
     // DOM query inlay hints
     for call in &analysis.dom_query_calls {
         if let Some(hint) = dom_query_hint(call, script_offset, template, line_index) {
+            hints.push(hint);
+        }
+    }
+
+    // Binding type hints (reactive bindings without explicit type annotations)
+    for binding in &analysis.bindings {
+        if let Some(hint) = binding_type_hint(binding, script_offset, line_index) {
             hints.push(hint);
         }
     }
@@ -177,6 +185,76 @@ fn template_ref_hint(
         padding_right: None,
         data: None,
     })
+}
+
+/// Generate an inlay hint for a reactive binding without an explicit type annotation.
+///
+/// Shows the inferred type after the binding name:
+/// - `const count = ref(0)` → `count: Ref<number>`
+/// - `const doubled = computed(...)` → `doubled: ComputedRef<...>`
+/// - `const state = reactive({})` → `state: reactive object`
+///
+/// Skips bindings that:
+/// - Have an explicit TypeScript type annotation
+/// - Are not reactive (plain `const x = 42`)
+/// - Have `ReactivityKind::None`
+fn binding_type_hint(
+    binding: &AnalyzedBinding,
+    _script_offset: u32,
+    line_index: &LineIndex,
+) -> Option<InlayHint> {
+    // Skip if already has a type annotation
+    if binding.type_annotation.is_some() {
+        return None;
+    }
+
+    // Skip non-reactive bindings (plain const, let, etc.)
+    if binding.reactivity_kind == ReactivityKind::None {
+        return None;
+    }
+
+    let type_text = infer_type_text(binding)?;
+
+    // Position at the end of the binding name span
+    let position = line_index.offset_to_position(binding.span.end)?;
+
+    Some(InlayHint {
+        position,
+        label: InlayHintLabel::String(format!(": {type_text}")),
+        kind: Some(InlayHintKind::TYPE),
+        text_edits: None,
+        tooltip: None,
+        padding_left: None,
+        padding_right: Some(true),
+        data: None,
+    })
+}
+
+/// Infer a display type string from a binding's reactivity kind and initializer.
+fn infer_type_text(binding: &AnalyzedBinding) -> Option<String> {
+    match binding.reactivity_kind {
+        ReactivityKind::Ref => {
+            if let Some(BindingInitializer::FunctionCall { vue_api, .. }) = &binding.initializer {
+                match vue_api {
+                    Some(VueApiClassification::Computed) => Some("ComputedRef<...>".to_string()),
+                    _ => Some("Ref<...>".to_string()),
+                }
+            } else {
+                Some("Ref<...>".to_string())
+            }
+        }
+        ReactivityKind::Computed => Some("ComputedRef<...>".to_string()),
+        ReactivityKind::Reactive => Some("reactive object".to_string()),
+        ReactivityKind::MaybeRef => {
+            if let Some(BindingInitializer::FunctionCall { callee, .. }) = &binding.initializer {
+                Some(format!("ReturnType<typeof {callee}>"))
+            } else {
+                Some("MaybeRef<...>".to_string())
+            }
+        }
+        ReactivityKind::Mutable => None, // `let` bindings — no type hint
+        ReactivityKind::None => None,
+    }
 }
 
 /// Format a single matched element for an inlay hint.
@@ -452,6 +530,7 @@ mod tests {
                 span: verter_span::Span::new(14, 51),
                 arg_value: Some("myForm".to_string()),
                 is_async_callback: false,
+                callback_params: vec![],
             }],
         );
 
@@ -481,6 +560,7 @@ mod tests {
                 span: verter_span::Span::new(11, 50),
                 arg_value: Some("missing".to_string()),
                 is_async_callback: false,
+                callback_params: vec![],
             }],
         );
 
@@ -550,5 +630,255 @@ mod tests {
         let hints = verter_inlay_hints(source, &blocks, &analysis, &li);
 
         assert!(hints.is_empty());
+    }
+
+    // ── Binding type hint tests ──
+
+    fn make_binding(
+        name: &str,
+        reactivity: ReactivityKind,
+        initializer: Option<BindingInitializer>,
+        type_annotation: Option<&str>,
+        span_start: u32,
+        span_end: u32,
+    ) -> AnalyzedBinding {
+        AnalyzedBinding {
+            name: name.to_string(),
+            kind: verter_analysis::types::AnalyzedBindingKind::Const,
+            is_reactive: reactivity != ReactivityKind::None,
+            reactivity_kind: reactivity,
+            type_annotation: type_annotation.map(|s| s.to_string()),
+            initializer,
+            span: verter_span::Span::new(span_start, span_end),
+        }
+    }
+
+    #[test]
+    fn ref_binding_gets_type_hint() {
+        let source = "<script setup>\nconst count = ref(0)\n</script>\n<template><div/></template>";
+        let li = make_line_index(source);
+
+        let analysis = FileAnalysisSnapshot {
+            bindings: vec![make_binding(
+                "count",
+                ReactivityKind::Ref,
+                Some(BindingInitializer::FunctionCall {
+                    callee: "ref".to_string(),
+                    callee_import_source: Some("vue".to_string()),
+                    vue_api: Some(VueApiClassification::Ref),
+                }),
+                None,
+                21, // position of "count" in SFC
+                26,
+            )],
+            ..Default::default()
+        };
+
+        let blocks = vec![script_block(15)];
+        let hints = verter_inlay_hints(source, &blocks, &analysis, &li);
+
+        let type_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::TYPE))
+            .collect();
+        assert_eq!(
+            type_hints.len(),
+            1,
+            "should have one type hint for ref binding"
+        );
+        let label = match &type_hints[0].label {
+            InlayHintLabel::String(s) => s.clone(),
+            _ => panic!("expected string label"),
+        };
+        assert!(
+            label.contains("Ref"),
+            "label should contain 'Ref', got: {label}"
+        );
+        assert!(!label.contains("Computed"), "should not be ComputedRef");
+    }
+
+    #[test]
+    fn computed_binding_gets_type_hint() {
+        let source = "<script setup>\nconst doubled = computed(() => 0)\n</script>\n<template><div/></template>";
+        let li = make_line_index(source);
+
+        let analysis = FileAnalysisSnapshot {
+            bindings: vec![make_binding(
+                "doubled",
+                ReactivityKind::Computed,
+                Some(BindingInitializer::FunctionCall {
+                    callee: "computed".to_string(),
+                    callee_import_source: Some("vue".to_string()),
+                    vue_api: Some(VueApiClassification::Computed),
+                }),
+                None,
+                21,
+                28,
+            )],
+            ..Default::default()
+        };
+
+        let blocks = vec![script_block(15)];
+        let hints = verter_inlay_hints(source, &blocks, &analysis, &li);
+
+        let type_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::TYPE))
+            .collect();
+        assert_eq!(type_hints.len(), 1);
+        let label = match &type_hints[0].label {
+            InlayHintLabel::String(s) => s.clone(),
+            _ => panic!("expected string label"),
+        };
+        assert!(
+            label.contains("ComputedRef"),
+            "label should contain 'ComputedRef', got: {label}"
+        );
+    }
+
+    #[test]
+    fn no_hint_for_typed_binding() {
+        let source = "<script setup>\nconst count: Ref<number> = ref(0)\n</script>\n<template><div/></template>";
+        let li = make_line_index(source);
+
+        let analysis = FileAnalysisSnapshot {
+            bindings: vec![make_binding(
+                "count",
+                ReactivityKind::Ref,
+                Some(BindingInitializer::FunctionCall {
+                    callee: "ref".to_string(),
+                    callee_import_source: Some("vue".to_string()),
+                    vue_api: Some(VueApiClassification::Ref),
+                }),
+                Some("Ref<number>"), // Has explicit type
+                21,
+                26,
+            )],
+            ..Default::default()
+        };
+
+        let blocks = vec![script_block(15)];
+        let hints = verter_inlay_hints(source, &blocks, &analysis, &li);
+
+        let type_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::TYPE))
+            .collect();
+        assert!(
+            type_hints.is_empty(),
+            "should NOT show hint for explicitly typed binding"
+        );
+    }
+
+    #[test]
+    fn no_hint_for_plain_const() {
+        let source = "<script setup>\nconst x = 42\n</script>\n<template><div/></template>";
+        let li = make_line_index(source);
+
+        let analysis = FileAnalysisSnapshot {
+            bindings: vec![make_binding(
+                "x",
+                ReactivityKind::None,
+                Some(BindingInitializer::Literal {
+                    kind: verter_analysis::types::LiteralKind::Number,
+                }),
+                None,
+                21,
+                22,
+            )],
+            ..Default::default()
+        };
+
+        let blocks = vec![script_block(15)];
+        let hints = verter_inlay_hints(source, &blocks, &analysis, &li);
+
+        let type_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::TYPE))
+            .collect();
+        assert!(
+            type_hints.is_empty(),
+            "plain const should NOT get a type hint"
+        );
+    }
+
+    #[test]
+    fn composable_binding_gets_return_type_hint() {
+        let source =
+            "<script setup>\nconst mouse = useMouse()\n</script>\n<template><div/></template>";
+        let li = make_line_index(source);
+
+        let analysis = FileAnalysisSnapshot {
+            bindings: vec![make_binding(
+                "mouse",
+                ReactivityKind::MaybeRef,
+                Some(BindingInitializer::FunctionCall {
+                    callee: "useMouse".to_string(),
+                    callee_import_source: Some("./useMouse".to_string()),
+                    vue_api: None,
+                }),
+                None,
+                21,
+                26,
+            )],
+            ..Default::default()
+        };
+
+        let blocks = vec![script_block(15)];
+        let hints = verter_inlay_hints(source, &blocks, &analysis, &li);
+
+        let type_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::TYPE))
+            .collect();
+        assert_eq!(type_hints.len(), 1);
+        let label = match &type_hints[0].label {
+            InlayHintLabel::String(s) => s.clone(),
+            _ => panic!("expected string label"),
+        };
+        assert!(
+            label.contains("useMouse"),
+            "label should reference composable name, got: {label}"
+        );
+    }
+
+    #[test]
+    fn reactive_binding_gets_type_hint() {
+        let source =
+            "<script setup>\nconst state = reactive({})\n</script>\n<template><div/></template>";
+        let li = make_line_index(source);
+
+        let analysis = FileAnalysisSnapshot {
+            bindings: vec![make_binding(
+                "state",
+                ReactivityKind::Reactive,
+                Some(BindingInitializer::FunctionCall {
+                    callee: "reactive".to_string(),
+                    callee_import_source: Some("vue".to_string()),
+                    vue_api: Some(VueApiClassification::Reactive),
+                }),
+                None,
+                21,
+                26,
+            )],
+            ..Default::default()
+        };
+
+        let blocks = vec![script_block(15)];
+        let hints = verter_inlay_hints(source, &blocks, &analysis, &li);
+
+        let type_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::TYPE))
+            .collect();
+        assert_eq!(type_hints.len(), 1);
+        let label = match &type_hints[0].label {
+            InlayHintLabel::String(s) => s.clone(),
+            _ => panic!("expected string label"),
+        };
+        assert!(
+            label.contains("reactive"),
+            "label should contain 'reactive', got: {label}"
+        );
     }
 }

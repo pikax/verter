@@ -282,12 +282,34 @@ pub struct VueApiCallSite {
     /// Whether the first function argument is an async function/arrow.
     /// Used by `no-async-in-computed` rule.
     pub is_async_callback: bool,
+    /// Callback parameters with inferred types (e.g., `watch(x, (val) => ...)` → `val: number`).
+    pub callback_params: Vec<VueApiCallbackParam>,
+}
+
+/// A parameter from a Vue API callback function, with an optionally inferred type.
+///
+/// Examples:
+/// - `watch(countRef, (val, old) => ...)` → `val: number`, `old: number`
+/// - `onMounted(() => ...)` → no params
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VueApiCallbackParam {
+    /// Parameter name.
+    pub name: String,
+    /// Script-relative byte span of the parameter name.
+    pub span: Span,
+    /// Inferred type string (e.g., "number" from unwrapping `Ref<number>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_type: Option<String>,
 }
 
 impl serde::Serialize for VueApiCallSite {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let count = 3 + usize::from(self.arg_value.is_some()) + usize::from(self.is_async_callback);
+        let count = 3
+            + usize::from(self.arg_value.is_some())
+            + usize::from(self.is_async_callback)
+            + usize::from(!self.callback_params.is_empty());
         let mut s = serializer.serialize_struct("VueApiCallSite", count)?;
         s.serialize_field("api", &self.api)?;
         s.serialize_field("spanStart", &self.span.start)?;
@@ -297,6 +319,9 @@ impl serde::Serialize for VueApiCallSite {
         }
         if self.is_async_callback {
             s.serialize_field("isAsyncCallback", &self.is_async_callback)?;
+        }
+        if !self.callback_params.is_empty() {
+            s.serialize_field("callbackParams", &self.callback_params)?;
         }
         s.end()
     }
@@ -314,6 +339,8 @@ impl<'de> serde::Deserialize<'de> for VueApiCallSite {
             arg_value: Option<String>,
             #[serde(default)]
             is_async_callback: bool,
+            #[serde(default)]
+            callback_params: Vec<VueApiCallbackParam>,
         }
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
@@ -321,6 +348,7 @@ impl<'de> serde::Deserialize<'de> for VueApiCallSite {
             span: Span::new(w.span_start, w.span_end),
             arg_value: w.arg_value,
             is_async_callback: w.is_async_callback,
+            callback_params: w.callback_params,
         })
     }
 }
@@ -857,6 +885,9 @@ pub struct FunctionParam {
     pub is_optional: bool,
     /// Whether this parameter has a default value.
     pub has_default: bool,
+    /// Script-relative byte span of the parameter name identifier.
+    #[serde(default)]
+    pub span: Span,
 }
 
 /// What a function returns in terms of reactivity.

@@ -69,6 +69,7 @@ mod tests {
             span: Span::new(10, 50),
             arg_value: None,
             is_async_callback: is_async,
+            callback_params: vec![],
         }
     }
 

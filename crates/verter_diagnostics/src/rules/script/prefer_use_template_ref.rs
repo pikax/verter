@@ -113,6 +113,7 @@ mod tests {
             span: Span::new(0, 30),
             arg_value: Some(ref_name.to_string()),
             is_async_callback: false,
+            callback_params: vec![],
         }
     }
 
