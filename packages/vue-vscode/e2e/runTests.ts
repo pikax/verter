@@ -10,6 +10,7 @@ const FIXTURES = [
   "tsconfig-extends",
   "tsconfig-references",
   "path-aliases",
+  "composite-paths",
   "no-config",
   "single-file",
 ];

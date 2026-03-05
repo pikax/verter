@@ -26,8 +26,14 @@ const msg = "hello";
 `;
     const result = parseFile("/test/Simple.vue", sfc, mockLogger);
 
+    // getPublicApi() generates a type declaration for the component's public API
     expect(result).not.toBe("export default {} as any");
-    expect(result).toContain("msg");
+    // Component name derived from filename
+    expect(result).toContain("Simple");
+    // Uses defineComponent from vue
+    expect(result).toContain('defineComponent');
+    // Local bindings like `msg` are NOT included — only macros (defineProps, defineEmits, etc.)
+    expect(result).not.toContain("msg");
   });
 
   it("compiles defineProps with types", () => {
@@ -98,8 +104,8 @@ const emit = defineEmits<{ change: [value: string] }>();
     expect(result).toContain("emit");
   });
 
-  // @ai-generated - Verifies generated TSX imports @verter/types (the module we need to resolve)
-  it("generated TSX contains @verter/types import", () => {
+  // @ai-generated - Verifies generated TSX uses Vue's ComponentPublicInstance for the type declaration
+  it("generated TSX uses ComponentPublicInstance from vue", () => {
     const sfc = `
 <script setup lang="ts">
 const props = defineProps<{ title: string }>();
@@ -111,7 +117,10 @@ const props = defineProps<{ title: string }>();
 `;
     const result = parseFile("/test/VerterTypes.vue", sfc, mockLogger);
 
-    expect(result).toContain('@verter/types');
-    expect(result).not.toContain('$verter/types$');
+    // getPublicApi() generates a type declaration using Vue's ComponentPublicInstance
+    expect(result).toContain('ComponentPublicInstance');
+    expect(result).toContain('import("vue")');
+    // Props should be present in the $props type
+    expect(result).toContain('title');
   });
 });

@@ -1,7 +1,7 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
 import path from "node:path";
 import fs from "node:fs";
-import { isRelativeVue, isVue } from "./helpers/utils";
+import { isRelativeVue, isVue, isRelativeVueTs } from "./helpers/utils";
 import { parseFile, FALLBACK_STUB } from "./helpers/getDtsSnapshot";
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
 
@@ -74,6 +74,23 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           };
         }
 
+        // Handle .vue.ts imports (IDE codegen rewrites .vue → .vue.ts so the
+        // type provider resolves to the public API output, not the IDE .vue.tsx)
+        if (isRelativeVueTs(moduleName)) {
+          const vuePath = moduleName.slice(0, -3); // strip '.ts' → './Foo.vue'
+          logger.info(
+            "[Verter] createModuleResolver relative vue.ts - " +
+              moduleName +
+              " -- " +
+              path.resolve(path.dirname(containingFile), vuePath),
+          );
+          return {
+            extension: ts.Extension.Dts,
+            isExternalLibraryImport: false,
+            resolvedFileName: path.resolve(path.dirname(containingFile), vuePath) + ".d.ts",
+          };
+        }
+
         if (isRelativeVue(moduleName)) {
           logger.info(
             "[Verter] createModuleResolver relative vue - " +
@@ -138,6 +155,13 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         if (file) return parseFile(vuePath, file, logger);
         return FALLBACK_STUB;
       }
+      // .vue.ts virtual file → same as .vue.d.ts (IDE codegen uses .vue.ts suffix)
+      if (fileName.endsWith(".vue.ts")) {
+        const vuePath = fileName.slice(0, -3); // strip ".ts"
+        const file = _readFile(vuePath);
+        if (file) return parseFile(vuePath, file, logger);
+        return FALLBACK_STUB;
+      }
       // Direct .vue reads (for other TS operations)
       const file = _readFile(fileName);
       if (isVue(fileName) && file) {
@@ -154,6 +178,9 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       }
       if (fileName.endsWith(".vue.d.ts")) {
         return _fileExists(fileName.slice(0, -5)); // check if .vue exists
+      }
+      if (fileName.endsWith(".vue.ts")) {
+        return _fileExists(fileName.slice(0, -3)); // check if .vue exists
       }
       return _fileExists(fileName);
     };

@@ -2257,6 +2257,40 @@ impl LanguageServer for VerterLanguageServer {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
             + 1;
 
+        // C2. Early path configuration — discover tsconfig paths and configure
+        // the type provider BEFORE any did_open() can fire. This is fast (reads
+        // JSON files only, no Node.js eval). Vite aliases are merged later in
+        // background_init. Without this, there's a race: did_open() syncs files
+        // to tsserver before configure_paths() runs, creating inferred projects
+        // without path aliases (causing "Cannot find module '@/...'" errors).
+        if let Some(tp) = &self.type_provider {
+            let roots_for_paths = roots.clone();
+            for root_uri in &roots_for_paths {
+                let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
+                let root_path = std::path::PathBuf::from(&canonical);
+                let mut discovery = crate::config::TsConfigDiscovery::new();
+                discovery.discover(&root_path);
+
+                let candidates = [
+                    discovery.find_config_for(&root_path.join("src/dummy.ts")),
+                    discovery.configs().first(),
+                ];
+                for candidate in candidates.into_iter().flatten() {
+                    if let Some((base_url, paths)) =
+                        crate::config::TsConfigPathResolver::raw_paths_json(&candidate.config_path)
+                    {
+                        tracing::info!(
+                            "early path config: baseUrl={} from {}",
+                            base_url,
+                            candidate.config_path.display(),
+                        );
+                        let _ = tp.configure_paths(&base_url, paths).await;
+                        break;
+                    }
+                }
+            }
+        }
+
         // D. Clone Arcs for background task
         let args = BackgroundInitArgs {
             roots,

@@ -1,0 +1,7 @@
+{
+  "name": "e2e-composite-paths",
+  "private": true,
+  "dependencies": {
+    "vue": "^3.5.0"
+  }
+}

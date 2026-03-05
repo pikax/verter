@@ -111,6 +111,8 @@ export function getCompVuePath(): string | undefined {
       return "src/MyComp.vue";
     case "path-aliases":
       return "src/components/MyComp.vue";
+    case "composite-paths":
+      return "src/components/HelloWorld.vue";
     case "monorepo":
       return "packages/shared/src/SharedComp.vue";
     case "no-config":
