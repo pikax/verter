@@ -27,6 +27,8 @@
     "watch": "node esbuild.mjs --watch",
     "vscode:prepublish": "node esbuild.mjs --production",
     "test": "echo \"Error: no test specified\" && exit 1",
+    "pretest:e2e": "tsc -p tsconfig.test.json",
+    "test:e2e": "vscode-test",
     "package": "node package.mjs",
     "package:win32-x64": "node package.mjs --target win32-x64",
     "package:linux-x64": "node package.mjs --target linux-x64",
@@ -54,7 +56,14 @@
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver-protocol": "^3.17.5",
     "vscode-languageserver-textdocument": "^1.0.12",
-    "vscode-languageserver-types": "^3.17.5"
+    "vscode-languageserver-types": "^3.17.5",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.5.2",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.0.0",
+    "@types/chai": "^4.3.19",
+    "chai": "^4.5.0",
+    "mocha": "^11.5.0"
   },
   "configurationDefaults": {
     "emmet.includeLanguages": {

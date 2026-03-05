@@ -52,6 +52,8 @@ docs/.vitepress/cache
 
 # VS Code extension build artifacts
 packages/vue-vscode/bin/
+packages/vue-vscode/out-test/
+packages/vue-vscode/.vscode-test/
 *.vsix
 
 # Scratch files

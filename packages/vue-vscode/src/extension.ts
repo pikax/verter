@@ -25,7 +25,7 @@ import {
 } from "vscode-languageclient/node";
 
 import { join, normalize } from "path";
-import { existsSync } from "fs";
+import { existsSync, appendFileSync, writeFileSync } from "fs";
 
 import type { PatchClient } from "@verter/language-shared";
 import { patchClient, NotificationType, RequestType } from "@verter/language-shared";
@@ -58,6 +58,28 @@ export async function activate(context: ExtensionContext) {
 
   const log = window.createOutputChannel("Verter", { log: true });
   context.subscriptions.push(log);
+
+  // ── E2E test mode: dual-write logs to file + timing markers ──
+  const testLogFile = process.env.VERTER_E2E_LOG_FILE;
+  if (process.env.VERTER_E2E_TEST && testLogFile) {
+    try { writeFileSync(testLogFile, ""); } catch {}
+    const writeLog = (level: string, msg: string, ...args: unknown[]) => {
+      const line = `[${level}] ${msg}${args.length ? " " + args.map(String).join(" ") : ""}\n`;
+      try { appendFileSync(testLogFile, line); } catch {}
+    };
+    const origInfo = log.info.bind(log);
+    const origWarn = log.warn.bind(log);
+    const origError = log.error.bind(log);
+    const origDebug = log.debug.bind(log);
+    const origTrace = log.trace.bind(log);
+    log.info = ((msg: string, ...args: unknown[]) => { writeLog("INFO", msg, ...args); origInfo(msg, ...args); }) as typeof log.info;
+    log.warn = ((msg: string, ...args: unknown[]) => { writeLog("WARN", msg, ...args); origWarn(msg, ...args); }) as typeof log.warn;
+    log.error = ((msg: string, ...args: unknown[]) => { writeLog("ERROR", msg, ...args); origError(msg, ...args); }) as typeof log.error;
+    log.debug = ((msg: string, ...args: unknown[]) => { writeLog("DEBUG", msg, ...args); origDebug(msg, ...args); }) as typeof log.debug;
+    log.trace = ((msg: string, ...args: unknown[]) => { writeLog("TRACE", msg, ...args); origTrace(msg, ...args); }) as typeof log.trace;
+    writeLog("TIMING", `activation_start ${Date.now()}`);
+  }
+
   log.info("Verter extension activating");
 
   const server = activateVueLanguageServer(context, log);
@@ -88,6 +110,7 @@ export function deactivate(): Thenable<void> | undefined {
  * Find the verter-lsp binary.
  *
  * Search order:
+ * 0. `VERTER_E2E_LSP_PATH` env var (E2E test mode — isolated copy)
  * 1. `verter.lspBinaryPath` setting (user-configured)
  * 2. `<monorepoRoot>/target/{debug,release}/verter-lsp[.exe]` (dev mode — newest wins)
  * 3. `<extensionPath>/bin/verter-lsp[.exe]` (bundled in VSIX)
@@ -98,6 +121,13 @@ export function deactivate(): Thenable<void> | undefined {
  */
 function findLspBinary(extensionPath: string, log: LogOutputChannel): string {
   const ext = process.platform === "win32" ? ".exe" : "";
+
+  // 0. E2E test mode — use isolated binary copy to prevent file locking
+  const e2eLspPath = process.env.VERTER_E2E_LSP_PATH;
+  if (e2eLspPath && existsSync(e2eLspPath)) {
+    log.info(`LSP binary: ${e2eLspPath} (E2E test copy)`);
+    return e2eLspPath;
+  }
 
   // 1. User-configured path
   const configuredPath = workspace.getConfiguration("verter").get<string>("lspBinaryPath");
@@ -397,9 +427,18 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
     }, HEARTBEAT_INITIAL_TIMEOUT_MS);
     lc.onNotification(NotificationType.Heartbeat, () => {
       resetHeartbeatTimer();
+      // Log heartbeat in E2E test mode so tests can verify heartbeat receipt
+      if (process.env.VERTER_E2E_TEST) {
+        log.trace("$/verter/heartbeat received");
+      }
     });
     lc.onNotification(NotificationType.Ready, (params: { gen: number }) => {
       log.info(`Verter ready (init generation ${params.gen})`);
+      // E2E timing marker
+      const testLogFile = process.env.VERTER_E2E_LOG_FILE;
+      if (process.env.VERTER_E2E_TEST && testLogFile) {
+        try { appendFileSync(testLogFile, `[TIMING] ready ${Date.now()}\n`); } catch {}
+      }
     });
   }
 
@@ -842,6 +881,17 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
   const bindingColorProvider = new BindingColorDecorationProvider(getClient);
   const propConstnessProvider = new PropConstnessDecorationProvider(getClient);
   const sourceMapPanel = new SourceMapWebviewPanel();
+
+  // ── E2E test mode: expose decoration state command ──────────
+  if (process.env.VERTER_E2E_TEST) {
+    context.subscriptions.push(
+      commands.registerCommand("verter._getDecorationState", () => ({
+        bindingColors: bindingColorProvider.getState(),
+        vueApiCalls: decorationProvider.getState(),
+        propConstness: propConstnessProvider.getState(),
+      })),
+    );
+  }
 
   // Register tree views
   context.subscriptions.push(

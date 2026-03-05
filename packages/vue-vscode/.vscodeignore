@@ -14,6 +14,10 @@ dist/**
 # Tests
 **/*.spec.*
 **/*.test.*
+e2e/**
+out-test/**
+.vscode-test.mjs
+tsconfig.test.json
 
 # Config files
 .gitignore

@@ -20,6 +20,7 @@ jobs:
       js: ${{ steps.filter.outputs.js }}
       wasm: ${{ steps.filter.outputs.wasm }}
       playground: ${{ steps.filter.outputs.playground }}
+      vscode: ${{ steps.filter.outputs.vscode }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -67,6 +68,19 @@ jobs:
               - 'crates/verter_lsp/**'
               - 'packages/wasm/**'
               - 'packages/playground/**'
+              - '.github/workflows/ci.yml'
+            vscode:
+              - 'crates/verter_core/**'
+              - 'crates/verter_analysis/**'
+              - 'crates/verter_host/**'
+              - 'crates/verter_ffi/**'
+              - 'crates/verter_diagnostics/**'
+              - 'crates/verter_actions/**'
+              - 'crates/verter_lsp/**'
+              - 'crates/verter_span/**'
+              - 'packages/vue-vscode/**'
+              - 'packages/language-shared/**'
+              - 'packages/typescript-plugin/**'
               - '.github/workflows/ci.yml'
 
   rust-fmt:
@@ -214,3 +228,44 @@ jobs:
         run: pnpm run build:wasm
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
+
+  vscode-e2e:
+    name: VS Code E2E Tests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.vscode == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build LSP binary
+        run: cargo build -p verter_lsp
+      - name: Build extension
+        run: pnpm --filter verter-vscode build:dev
+      - name: Compile E2E tests
+        run: pnpm --filter verter-vscode pretest:e2e
+      - name: Run E2E tests (single-project)
+        run: xvfb-run -a pnpm --filter verter-vscode test:e2e
+        env:
+          E2E_FIXTURE: single-project
+      - name: Upload timing report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-timing-report
+          path: /tmp/verter-e2e-timing-*.json
+          if-no-files-found: ignore

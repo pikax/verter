@@ -40,6 +40,7 @@ export class PropConstnessDecorationProvider implements Disposable {
     new Map();
   private subscriptions: Disposable[] = [];
   private enabled = false;
+  private _lastState: Map<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> = new Map();
 
   constructor(private getClient: () => PatchClient<LanguageClient>) {
     this.readConfig();
@@ -161,10 +162,29 @@ export class PropConstnessDecorationProvider implements Disposable {
       }
     }
 
+    this._lastState.clear();
     for (const [category, dt] of this.decorationTypes) {
       const ranges = grouped.get(category) ?? [];
       editor.setDecorations(dt, ranges);
+      this._lastState.set(
+        category,
+        ranges.map((r) => ({
+          startLine: r.start.line,
+          startChar: r.start.character,
+          endLine: r.end.line,
+          endChar: r.end.character,
+        })),
+      );
     }
+  }
+
+  /** Returns the last-applied decoration ranges by category (for E2E testing). */
+  getState(): Record<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> {
+    const result: Record<string, Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>> = {};
+    for (const [category, ranges] of this._lastState) {
+      result[category] = ranges;
+    }
+    return result;
   }
 
   dispose(): void {

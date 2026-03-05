@@ -1,0 +1,7 @@
+{
+  "name": "e2e-single-project",
+  "private": true,
+  "dependencies": {
+    "vue": "^3.5.0"
+  }
+}
