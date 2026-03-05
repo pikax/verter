@@ -19,6 +19,7 @@ function makeAnalysis(overrides: Partial<FileAnalysis> = {}): FileAnalysis {
     macroTypeDeps: [],
     scriptFlags: 0,
     styles: [],
+    template: null,
     ...overrides,
   };
 }

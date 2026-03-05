@@ -83,6 +83,9 @@ export interface Store extends StoreState {
   toggleEditableOutput(): void;
   updateTsxOverride(code: string): void;
   clearTsxOverride(): void;
+  // Click-to-highlight from output panels
+  revealSpan: { start: number; end: number } | null;
+  requestRevealSpan(start: number, end: number): void;
 }
 
 export function useStore(): Store {
@@ -472,6 +475,12 @@ export function useStore(): Store {
     tsxUserEdited.value = false;
   }
 
+  // Click-to-highlight from output panels
+  const revealSpan: Ref<{ start: number; end: number } | null> = ref(null);
+  function requestRevealSpan(start: number, end: number) {
+    revealSpan.value = { start, end };
+  }
+
   async function switchVersion(entry: VersionEntry) {
     versionLoading.value = true;
     try {
@@ -535,5 +544,7 @@ export function useStore(): Store {
     toggleEditableOutput,
     updateTsxOverride,
     clearTsxOverride,
+    revealSpan,
+    requestRevealSpan,
   }) as Store;
 }

@@ -531,6 +531,26 @@ onMounted(() => {
     },
   );
 
+  // Watch revealSpan requests from output panels (click-to-highlight)
+  watch(
+    () => props.store.revealSpan,
+    (span) => {
+      if (!span || !editor.value) return;
+      const model = editor.value.getModel();
+      if (!model) return;
+      const startPos = model.getPositionAt(span.start);
+      const endPos = model.getPositionAt(span.end);
+      const range = new monaco.Range(
+        startPos.lineNumber,
+        startPos.column,
+        endPos.lineNumber,
+        endPos.column,
+      );
+      editor.value.setSelection(range);
+      editor.value.revealRangeInCenter(range);
+    },
+  );
+
   // Initial markers
   updateMarkers();
 });

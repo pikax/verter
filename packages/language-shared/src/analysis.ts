@@ -87,6 +87,12 @@ export interface TemplatePropUsage {
   spanEnd: number;
 }
 
+export interface TemplateComponentVModel {
+  bindingName: string;
+  spanStart: number;
+  spanEnd: number;
+}
+
 export interface TemplateComponentUsage {
   name: string;
   /** Skipped from JSON when None (`skip_serializing_if = "Option::is_none"`). */
@@ -96,20 +102,41 @@ export interface TemplateComponentUsage {
   hasSpread: boolean;
   /** Skipped from JSON when empty (`skip_serializing_if = "Vec::is_empty"`). */
   slotsUsed?: string[];
+  /** Skipped from JSON when empty. */
+  staticClasses?: string[];
+  hasDynamicClass: boolean;
+  /** Skipped from JSON when empty. */
+  dynamicClasses?: string[];
+  /** Skipped from JSON when empty. */
+  vModels?: TemplateComponentVModel[];
   spanStart: number;
   spanEnd: number;
 }
+
+export type BindingUsageKind =
+  | "Interpolation"
+  | "DirectiveValue"
+  | "EventHandler"
+  | "ComponentTag"
+  | "TemplateRef"
+  | "IteratorSource";
 
 export interface TemplateBindingOccurrence {
   name: string;
   spanStart: number;
   spanEnd: number;
-  usageKind: string;
+  usageKind: BindingUsageKind;
 }
 
 export interface DefinedSlot {
   name: string;
   hasBindings: boolean;
+  /** Skipped from JSON when empty. */
+  bindingNames?: string[];
+  /** Skipped from JSON when empty. */
+  bindingExpressions?: string[];
+  spanStart: number;
+  spanEnd: number;
 }
 
 export interface TemplateRef {
@@ -120,8 +147,157 @@ export interface TemplateRef {
 
 export interface TemplateEventHandler {
   eventName: string;
-  handlerBinding: string | null;
+  handlerBinding?: string | null;
   isInline: boolean;
+  targetTag: string;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface TemplateDirective {
+  name: string;
+  rawName: string;
+  argument?: string | null;
+  /** Skipped from JSON when empty. */
+  modifiers?: string[];
+  expression?: string | null;
+  spanStart: number;
+  spanEnd: number;
+  nameEnd?: number;
+  argSpanStart?: number;
+  argSpanEnd?: number;
+  expressionSpanStart?: number;
+  expressionSpanEnd?: number;
+  /** Skipped from JSON when empty. */
+  modifierSpans?: Array<{ start: number; end: number }>;
+}
+
+export interface VForDirective {
+  variable: string;
+  index?: string | null;
+  iterable: string;
+  hasKey: boolean;
+  keyExpression?: string | null;
+  keyUsesIndex: boolean;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface VModelDirective {
+  bindingName: string;
+  /** Skipped from JSON when empty. */
+  modifiers?: string[];
+  targetIsComponent: boolean;
+  targetTag: string;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export type ElementNamespace = "html" | "svg" | "mathML";
+
+export interface TemplateAttribute {
+  name: string;
+  value?: string | null;
+  isDynamic: boolean;
+  spanStart: number;
+  spanEnd: number;
+  nameEnd?: number;
+  valueSpanStart?: number;
+  valueSpanEnd?: number;
+}
+
+export interface DynamicStyleVar {
+  name: string;
+  exprOffset: number;
+  valueExpr: string;
+  isDynamicKey: boolean;
+  isConditional: boolean;
+}
+
+export interface StaticStyleVar {
+  name: string;
+  value: string;
+  nameOffset: number;
+}
+
+export interface TemplateElement {
+  tag: string;
+  isComponent: boolean;
+  isSelfClosing: boolean;
+  namespace: ElementNamespace;
+  /** Skipped from JSON when empty. */
+  attributes?: TemplateAttribute[];
+  /** Skipped from JSON when empty. */
+  directives?: TemplateDirective[];
+  vFor?: VForDirective | null;
+  vModel?: VModelDirective | null;
+  hasVIf: boolean;
+  hasVElse: boolean;
+  hasVElseIf: boolean;
+  hasVShow: boolean;
+  hasVHtml: boolean;
+  hasVText: boolean;
+  hasTextContent: boolean;
+  hasBareText?: boolean;
+  hasElementChildren?: boolean;
+  nestingDepth: number;
+  parentTag?: string | null;
+  parentIndex?: number | null;
+  /** Skipped from JSON when empty. */
+  dynamicClasses?: string[];
+  spanStart: number;
+  spanEnd: number;
+  tagSpanEnd?: number;
+  contentEnd?: number;
+  /** Skipped from JSON when empty. */
+  dynamicStyleVars?: DynamicStyleVar[];
+  /** Skipped from JSON when empty. */
+  staticStyleVars?: StaticStyleVar[];
+}
+
+export interface IfChain {
+  /** Condition expressions with their spans: [expression, spanStart, spanEnd]. */
+  conditions: [string, number, number][];
+}
+
+export interface AnalyzedPropDefinition {
+  name: string;
+  typeAnnotation?: string | null;
+  hasDefault: boolean;
+  isRequired: boolean;
+  isBoolean: boolean;
+  usedInTemplate: boolean;
+  usedInScript: boolean;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalyzedEmitDefinition {
+  eventName: string;
+  hasValidator: boolean;
+  isDeclared: boolean;
+  /** Skipped from JSON when empty. */
+  emitLocations?: [number, number][];
+  spanStart: number;
+  spanEnd: number;
+}
+
+export type CommentDirectiveKind =
+  | "Disable"
+  | "DisableNextLine"
+  | "Enable"
+  | "Todo"
+  | "Fixme"
+  | "Deprecated"
+  | "IgnoreStart"
+  | "IgnoreEnd";
+
+export interface CommentDirective {
+  kind: CommentDirectiveKind;
+  message?: string | null;
+  spanStart: number;
+  spanEnd: number;
+  affectsNextLine: boolean;
 }
 
 export interface TemplateAnalysisSnapshot {
@@ -135,9 +311,21 @@ export interface TemplateAnalysisSnapshot {
   templateRefs?: TemplateRef[];
   /** Skipped from JSON when empty. */
   eventHandlers?: TemplateEventHandler[];
+  /** Skipped from JSON when empty. */
+  elements?: TemplateElement[];
+  /** Skipped from JSON when empty. */
+  ifChains?: IfChain[];
   maxNestingDepth: number;
   /** Skipped from JSON when empty. */
   vIfVForConflicts?: [number, number][];
+  /** Skipped from JSON when empty. */
+  propDefinitions?: AnalyzedPropDefinition[];
+  /** Skipped from JSON when empty. */
+  emitDefinitions?: AnalyzedEmitDefinition[];
+  /** Skipped from JSON when empty. */
+  commentDirectives?: CommentDirective[];
+  /** Skipped from JSON when empty. */
+  cssVarNames?: string[];
 }
 
 // ── Style Analysis Types ───────────────────────────────────────
@@ -149,12 +337,33 @@ export interface AnalyzedVBind {
   end: number;
 }
 
+export interface CssVarFallback {
+  text: string;
+  span: { start: number; end: number };
+  nestedVarReferences?: CssVarReference[];
+}
+
+export interface CssVarReference {
+  name: string;
+  span: { start: number; end: number };
+  nameSpan: { start: number; end: number };
+  fallback?: CssVarFallback | null;
+}
+
+export interface CssVarUsage {
+  propertyName: string;
+  reference: CssVarReference;
+  selectorIndex?: number | null;
+}
+
 export interface CssAnalysis {
   selectors: Array<{ text: string; specificity: [number, number, number] }>;
   classes: Array<{ name: string }>;
   ids: Array<{ name: string }>;
   customProperties: Array<{ name: string }>;
   atRules: Array<{ kind: string; name: string }>;
+  /** var() usages in non-custom-property declarations. */
+  varUsages?: CssVarUsage[];
   ruleCount: number;
 }
 
@@ -175,6 +384,43 @@ export interface VueApiCallSite {
   api: string;
   spanStart: number;
   spanEnd: number;
+  /** First string argument value (e.g., provide key, useTemplateRef name). */
+  argValue?: string | null;
+  /** Whether the first function argument is async. */
+  isAsyncCallback?: boolean;
+}
+
+// ── DOM Query Call Sites ──────────────────────────────────────
+
+export type DomQueryKind =
+  | "QuerySelector"
+  | "QuerySelectorAll"
+  | "GetElementById"
+  | "GetElementsByClassName";
+
+export interface DomQueryCallSite {
+  kind: DomQueryKind;
+  selectorText: string;
+  parsed?: unknown | null;
+  spanStart: number;
+  spanEnd: number;
+  argSpanStart: number;
+  argSpanEnd: number;
+}
+
+// ── CSS Variable Manipulations ────────────────────────────────
+
+export type CssVarManipulationKind =
+  | "SetProperty"
+  | "GetPropertyValue"
+  | "RemoveProperty";
+
+export interface CssVarManipulation {
+  kind: CssVarManipulationKind;
+  varName: string;
+  valueExpr?: string | null;
+  spanStart: number;
+  spanEnd: number;
 }
 
 // ── File Analysis Snapshot (top-level response) ─────────────────
@@ -189,6 +435,10 @@ export interface FileAnalysisSnapshot {
   template: TemplateAnalysisSnapshot | null;
   /** Vue API call sites (lifecycle hooks, watchers, provide/inject, etc.). */
   vueApiCalls?: VueApiCallSite[];
+  /** DOM query call sites (querySelector, getElementById, etc.). */
+  domQueryCalls?: DomQueryCallSite[];
+  /** CSS variable manipulations via DOM style APIs. */
+  cssVarManipulations?: CssVarManipulation[];
 }
 
 // ── Project Overview ────────────────────────────────────────────

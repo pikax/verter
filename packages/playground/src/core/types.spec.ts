@@ -24,6 +24,7 @@ describe("File", () => {
         css: "",
         types: "",
         typesSourceMap: "",
+        destructuredBlock: null,
         templateCode: "",
         verterSourceMap: "",
         tscCode: "",

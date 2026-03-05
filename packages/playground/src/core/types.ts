@@ -74,7 +74,7 @@ export class File {
   }
 }
 
-export type OutputMode = "preview" | "js" | "ssr" | "css" | "types" | "tsc" | "analysis" | "lint" | "outline" | "files" | "cssMatch" | "map" | "diagnostics";
+export type OutputMode = "preview" | "js" | "ssr" | "css" | "types" | "tsc" | "analysis" | "lint" | "outline" | "files" | "cssMatch" | "map" | "diagnostics" | "templateAst" | "cssVarFlow" | "depGraph";
 
 export interface TsDiagnosticEntry {
   message: string;
@@ -131,6 +131,10 @@ export interface FileAnalysis {
   macroTypeDeps: AnalysisMacroTypeDep[];
   scriptFlags: number;
   styles: AnalysisStyleBlock[];
+  template: AnalysisTemplate | null;
+  vueApiCalls?: AnalysisVueApiCallSite[];
+  domQueryCalls?: AnalysisDomQueryCallSite[];
+  cssVarManipulations?: AnalysisCssVarManipulation[];
 }
 
 export interface AnalysisImport {
@@ -282,6 +286,247 @@ export const AnalysisFlagLabels: Record<number, string> = {
   [AnalysisFlags.HAS_INJECT]: "Inject",
   [AnalysisFlags.HAS_EXTERNAL_TYPE_DEPS]: "External Type Deps",
 };
+
+// ── Template Analysis Types ──
+
+export interface AnalysisTemplate {
+  components: AnalysisTemplateComponentUsage[];
+  bindingOccurrences: AnalysisTemplateBindingOccurrence[];
+  unresolvedBindings?: Array<{ name: string; spanStart: number; spanEnd: number }>;
+  definedSlots?: AnalysisDefinedSlot[];
+  templateRefs?: AnalysisTemplateRef[];
+  eventHandlers?: AnalysisTemplateEventHandler[];
+  elements?: AnalysisTemplateElement[];
+  ifChains?: AnalysisIfChain[];
+  maxNestingDepth: number;
+  vIfVForConflicts?: [number, number][];
+  propDefinitions?: AnalysisPropDefinition[];
+  emitDefinitions?: AnalysisEmitDefinition[];
+  commentDirectives?: AnalysisCommentDirective[];
+  cssVarNames?: string[];
+}
+
+export interface AnalysisTemplateComponentUsage {
+  name: string;
+  importSource?: string | null;
+  isDynamic: boolean;
+  props: AnalysisTemplatePropUsage[];
+  hasSpread: boolean;
+  slotsUsed?: string[];
+  staticClasses?: string[];
+  hasDynamicClass: boolean;
+  dynamicClasses?: string[];
+  vModels?: Array<{ bindingName: string; spanStart: number; spanEnd: number }>;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export type AnalysisPropValueConstness = "Const" | "Dynamic" | "Unknown";
+
+export interface AnalysisTemplatePropUsage {
+  name: string;
+  isBound: boolean;
+  constness: AnalysisPropValueConstness;
+  referencedBindings?: string[];
+  fromSpread: boolean;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export type AnalysisBindingUsageKind =
+  | "Interpolation"
+  | "DirectiveValue"
+  | "EventHandler"
+  | "ComponentTag"
+  | "TemplateRef"
+  | "IteratorSource";
+
+export interface AnalysisTemplateBindingOccurrence {
+  name: string;
+  spanStart: number;
+  spanEnd: number;
+  usageKind: AnalysisBindingUsageKind;
+}
+
+export interface AnalysisDefinedSlot {
+  name: string;
+  hasBindings: boolean;
+  bindingNames?: string[];
+  bindingExpressions?: string[];
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalysisTemplateRef {
+  name: string;
+  isDynamic: boolean;
+  targetTag: string;
+}
+
+export interface AnalysisTemplateEventHandler {
+  eventName: string;
+  handlerBinding?: string | null;
+  isInline: boolean;
+  targetTag: string;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalysisTemplateDirective {
+  name: string;
+  rawName: string;
+  argument?: string | null;
+  modifiers?: string[];
+  expression?: string | null;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalysisVForDirective {
+  variable: string;
+  index?: string | null;
+  iterable: string;
+  hasKey: boolean;
+  keyExpression?: string | null;
+  keyUsesIndex: boolean;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalysisVModelDirective {
+  bindingName: string;
+  modifiers?: string[];
+  targetIsComponent: boolean;
+  targetTag: string;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalysisTemplateAttribute {
+  name: string;
+  value?: string | null;
+  isDynamic: boolean;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalysisDynamicStyleVar {
+  name: string;
+  exprOffset: number;
+  valueExpr: string;
+  isDynamicKey: boolean;
+  isConditional: boolean;
+}
+
+export interface AnalysisStaticStyleVar {
+  name: string;
+  value: string;
+  nameOffset: number;
+}
+
+export interface AnalysisTemplateElement {
+  tag: string;
+  isComponent: boolean;
+  isSelfClosing: boolean;
+  namespace: string;
+  attributes?: AnalysisTemplateAttribute[];
+  directives?: AnalysisTemplateDirective[];
+  vFor?: AnalysisVForDirective | null;
+  vModel?: AnalysisVModelDirective | null;
+  hasVIf: boolean;
+  hasVElse: boolean;
+  hasVElseIf: boolean;
+  hasVShow: boolean;
+  hasVHtml: boolean;
+  hasVText: boolean;
+  hasTextContent: boolean;
+  hasBareText?: boolean;
+  hasElementChildren?: boolean;
+  nestingDepth: number;
+  parentTag?: string | null;
+  parentIndex?: number | null;
+  dynamicClasses?: string[];
+  spanStart: number;
+  spanEnd: number;
+  tagSpanEnd?: number;
+  contentEnd?: number;
+  dynamicStyleVars?: AnalysisDynamicStyleVar[];
+  staticStyleVars?: AnalysisStaticStyleVar[];
+}
+
+export interface AnalysisIfChain {
+  conditions: [string, number, number][];
+}
+
+export interface AnalysisPropDefinition {
+  name: string;
+  typeAnnotation?: string | null;
+  hasDefault: boolean;
+  isRequired: boolean;
+  isBoolean: boolean;
+  usedInTemplate: boolean;
+  usedInScript: boolean;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalysisEmitDefinition {
+  eventName: string;
+  hasValidator: boolean;
+  isDeclared: boolean;
+  emitLocations?: [number, number][];
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalysisCommentDirective {
+  kind: string;
+  message?: string | null;
+  spanStart: number;
+  spanEnd: number;
+  affectsNextLine: boolean;
+}
+
+// ── Vue API / DOM Query / CSS Var Manipulation Types ──
+
+export interface AnalysisVueApiCallSite {
+  api: string;
+  spanStart: number;
+  spanEnd: number;
+  argValue?: string | null;
+  isAsyncCallback?: boolean;
+}
+
+export interface AnalysisDomQueryCallSite {
+  kind: string;
+  selectorText: string;
+  spanStart: number;
+  spanEnd: number;
+  argSpanStart: number;
+  argSpanEnd: number;
+}
+
+export interface AnalysisCssVarManipulation {
+  kind: string;
+  varName: string;
+  valueExpr?: string | null;
+  spanStart: number;
+  spanEnd: number;
+}
+
+// ── CSS Analysis Extensions ──
+
+export interface AnalysisCssVarReference {
+  name: string;
+  span: { start: number; end: number };
+  nameSpan: { start: number; end: number };
+}
+
+export interface AnalysisCssVarUsage {
+  propertyName: string;
+  reference: AnalysisCssVarReference;
+  selectorIndex?: number | null;
+}
 
 // ── Lint diagnostic types (mirror Rust verter_linter) ──
 

@@ -4,6 +4,7 @@ import type { Store } from "../core/store";
 import {
   type FileAnalysis,
   type AnalysisBinding,
+  type AnalysisTemplateBindingOccurrence,
   AnalysisFlagLabels,
 } from "../core/types";
 
@@ -25,6 +26,26 @@ const activeFlags = computed<string[]>(() => {
     }
   }
   return labels;
+});
+
+const bindingUsageGroups = computed<Map<string, { kind: string; count: number }[]>>(() => {
+  const tpl = analysis.value?.template;
+  if (!tpl?.bindingOccurrences?.length) return new Map();
+  const map = new Map<string, Map<string, number>>();
+  for (const occ of tpl.bindingOccurrences) {
+    let kindMap = map.get(occ.name);
+    if (!kindMap) { kindMap = new Map(); map.set(occ.name, kindMap); }
+    kindMap.set(occ.usageKind, (kindMap.get(occ.usageKind) ?? 0) + 1);
+  }
+  const result = new Map<string, { kind: string; count: number }[]>();
+  for (const [name, kindMap] of map) {
+    result.set(name, [...kindMap.entries()].map(([kind, count]) => ({ kind, count })));
+  }
+  return result;
+});
+
+const totalBindingOccurrences = computed(() => {
+  return analysis.value?.template?.bindingOccurrences?.length ?? 0;
 });
 
 function formatInitializer(init: AnalysisBinding["initializer"]): string {
@@ -199,6 +220,189 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
             <span v-for="(sp, j) in style.specialPseudos" :key="j" class="badge badge-kind">
               :{{ sp.kind.toLowerCase() }}
             </span>
+          </div>
+        </div>
+      </details>
+
+      <!-- Template Components -->
+      <details v-if="analysis.template?.components?.length" class="analysis-section">
+        <summary class="section-title">Components ({{ analysis.template.components.length }})</summary>
+        <div class="import-list">
+          <div v-for="(comp, i) in analysis.template.components" :key="i" class="import-item">
+            <code class="binding-name">{{ comp.name }}</code>
+            <span v-if="comp.isDynamic" class="badge badge-reactive">dynamic</span>
+            <span v-if="comp.importSource" class="import-source">
+              from <code>{{ comp.importSource }}</code>
+            </span>
+            <div v-if="comp.props?.length" class="import-bindings">
+              <span v-for="(p, j) in comp.props" :key="j" class="binding-tag">
+                <code>{{ p.isBound ? ':' : '' }}{{ p.name }}</code>
+                <span :class="['badge', p.constness === 'Const' ? 'badge-vue' : p.constness === 'Dynamic' ? 'badge-reactive' : 'badge-kind']">
+                  {{ p.constness.toLowerCase() }}
+                </span>
+              </span>
+            </div>
+            <div v-if="comp.slotsUsed?.length" class="import-bindings">
+              <span class="sub-label">slots:</span>
+              <code v-for="(s, j) in comp.slotsUsed" :key="j" class="style-tag">{{ s }}</code>
+            </div>
+            <div v-if="comp.vModels?.length" class="import-bindings">
+              <span class="sub-label">v-model:</span>
+              <code v-for="(m, j) in comp.vModels" :key="j" class="style-tag">{{ m.bindingName }}</code>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <!-- Binding Usage Map -->
+      <details v-if="totalBindingOccurrences > 0" class="analysis-section">
+        <summary class="section-title">Binding Usage ({{ totalBindingOccurrences }})</summary>
+        <div class="import-list">
+          <div v-for="[name, kinds] in bindingUsageGroups" :key="name" class="binding-item">
+            <code class="binding-name">{{ name }}</code>
+            <span class="badge badge-kind">{{ kinds.reduce((s, k) => s + k.count, 0) }}x</span>
+            <span v-for="k in kinds" :key="k.kind" class="badge badge-type" style="font-size: 9px;">
+              {{ k.kind }}: {{ k.count }}
+            </span>
+          </div>
+          <div v-if="analysis.template?.unresolvedBindings?.length" class="unresolved-section">
+            <span class="sub-label warning-label">Unresolved:</span>
+            <span v-for="(u, i) in analysis.template.unresolvedBindings" :key="i" class="badge badge-warning">
+              {{ u.name }}
+            </span>
+          </div>
+        </div>
+      </details>
+
+      <!-- Event Handlers -->
+      <details v-if="analysis.template?.eventHandlers?.length" class="analysis-section">
+        <summary class="section-title">Events ({{ analysis.template.eventHandlers.length }})</summary>
+        <div class="import-list">
+          <div v-for="(ev, i) in analysis.template.eventHandlers" :key="i" class="binding-item">
+            <code class="binding-name">@{{ ev.eventName }}</code>
+            <span class="macro-binding">&rarr;</span>
+            <code v-if="ev.handlerBinding">{{ ev.handlerBinding }}</code>
+            <code v-else class="binding-init">(inline)</code>
+            <span class="badge badge-kind">{{ ev.targetTag }}</span>
+            <span v-if="ev.isInline" class="badge badge-type">inline</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- Slots & Refs -->
+      <details v-if="(analysis.template?.definedSlots?.length ?? 0) + (analysis.template?.templateRefs?.length ?? 0) > 0" class="analysis-section">
+        <summary class="section-title">Slots & Refs</summary>
+        <div class="import-list">
+          <div v-if="analysis.template?.definedSlots?.length">
+            <div class="sub-label" style="padding: 4px 0;">Defined Slots</div>
+            <div v-for="(slot, i) in analysis.template.definedSlots" :key="'s' + i" class="binding-item">
+              <code class="binding-name">#{{ slot.name }}</code>
+              <span v-if="slot.hasBindings && slot.bindingNames?.length" class="import-bindings">
+                <span class="sub-label">scoped:</span>
+                <code v-for="(bn, j) in slot.bindingNames" :key="j" class="style-tag">{{ bn }}</code>
+              </span>
+              <span v-else-if="!slot.hasBindings" class="badge badge-kind">no bindings</span>
+            </div>
+          </div>
+          <div v-if="analysis.template?.templateRefs?.length">
+            <div class="sub-label" style="padding: 4px 0;">Template Refs</div>
+            <div v-for="(ref, i) in analysis.template.templateRefs" :key="'r' + i" class="binding-item">
+              <code class="binding-name">{{ ref.name }}</code>
+              <span class="badge badge-kind">{{ ref.targetTag }}</span>
+              <span v-if="ref.isDynamic" class="badge badge-reactive">dynamic</span>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <!-- Directives Summary -->
+      <details v-if="analysis.template && analysis.template.maxNestingDepth > 0" class="analysis-section">
+        <summary class="section-title">Template Summary</summary>
+        <div class="import-list">
+          <div class="binding-item">
+            <span class="sub-label">Max nesting depth:</span>
+            <span class="badge badge-kind">{{ analysis.template.maxNestingDepth }}</span>
+          </div>
+          <div v-if="analysis.template.elements?.length" class="binding-item">
+            <span class="sub-label">Elements:</span>
+            <span class="badge badge-kind">{{ analysis.template.elements.length }}</span>
+            <span class="sub-label" style="margin-left: 8px;">Components:</span>
+            <span class="badge badge-vue">{{ analysis.template.elements.filter(e => e.isComponent).length }}</span>
+          </div>
+          <div v-if="analysis.template.vIfVForConflicts?.length" class="binding-item">
+            <span class="badge badge-warning">v-if + v-for conflicts: {{ analysis.template.vIfVForConflicts.length }}</span>
+          </div>
+          <div v-if="analysis.template.ifChains?.length" class="binding-item">
+            <span class="sub-label">If chains:</span>
+            <span class="badge badge-kind">{{ analysis.template.ifChains.length }}</span>
+            <span class="sub-label" style="margin-left: 8px;">Longest:</span>
+            <span class="badge badge-kind">{{ Math.max(...analysis.template.ifChains.map(c => c.conditions.length)) }} branches</span>
+          </div>
+          <div v-if="analysis.template.cssVarNames?.length" class="binding-item">
+            <span class="sub-label">CSS vars (template):</span>
+            <code v-for="(v, i) in analysis.template.cssVarNames" :key="i" class="style-tag">{{ v }}</code>
+          </div>
+        </div>
+      </details>
+
+      <!-- Prop & Emit Definitions -->
+      <details v-if="(analysis.template?.propDefinitions?.length ?? 0) + (analysis.template?.emitDefinitions?.length ?? 0) > 0" class="analysis-section">
+        <summary class="section-title">Props & Emits</summary>
+        <div class="import-list">
+          <div v-if="analysis.template?.propDefinitions?.length">
+            <div class="sub-label" style="padding: 4px 0;">Props</div>
+            <div v-for="(p, i) in analysis.template.propDefinitions" :key="'p' + i" class="binding-item">
+              <code class="binding-name">{{ p.name }}</code>
+              <span v-if="p.typeAnnotation" class="badge badge-type">{{ p.typeAnnotation }}</span>
+              <span v-if="p.isRequired" class="badge badge-reactive">required</span>
+              <span v-if="p.hasDefault" class="badge badge-vue">default</span>
+              <span v-if="p.isBoolean" class="badge badge-kind">boolean</span>
+              <span v-if="!p.usedInTemplate && !p.usedInScript" class="badge badge-warning">unused</span>
+            </div>
+          </div>
+          <div v-if="analysis.template?.emitDefinitions?.length">
+            <div class="sub-label" style="padding: 4px 0;">Emits</div>
+            <div v-for="(e, i) in analysis.template.emitDefinitions" :key="'e' + i" class="binding-item">
+              <code class="binding-name">{{ e.eventName }}</code>
+              <span v-if="e.isDeclared" class="badge badge-vue">declared</span>
+              <span v-if="e.hasValidator" class="badge badge-reactive">validator</span>
+              <span v-if="e.emitLocations?.length" class="badge badge-kind">{{ e.emitLocations.length }} emit sites</span>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <!-- Vue API Calls -->
+      <details v-if="analysis.vueApiCalls?.length" class="analysis-section">
+        <summary class="section-title">Vue API Calls ({{ analysis.vueApiCalls.length }})</summary>
+        <div class="import-list">
+          <div v-for="(call, i) in analysis.vueApiCalls" :key="i" class="binding-item">
+            <code class="binding-name">{{ call.api }}</code>
+            <span v-if="call.argValue" class="badge badge-kind">"{{ call.argValue }}"</span>
+            <span v-if="call.isAsyncCallback" class="badge badge-warning">async</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- DOM Queries -->
+      <details v-if="analysis.domQueryCalls?.length" class="analysis-section">
+        <summary class="section-title">DOM Queries ({{ analysis.domQueryCalls.length }})</summary>
+        <div class="import-list">
+          <div v-for="(q, i) in analysis.domQueryCalls" :key="i" class="binding-item">
+            <code class="binding-name">{{ q.kind }}</code>
+            <code class="style-tag">"{{ q.selectorText }}"</code>
+          </div>
+        </div>
+      </details>
+
+      <!-- CSS Variable Manipulations -->
+      <details v-if="analysis.cssVarManipulations?.length" class="analysis-section">
+        <summary class="section-title">CSS Var Manipulations ({{ analysis.cssVarManipulations.length }})</summary>
+        <div class="import-list">
+          <div v-for="(m, i) in analysis.cssVarManipulations" :key="i" class="binding-item">
+            <code class="binding-name">{{ m.kind }}</code>
+            <code class="style-tag">{{ m.varName }}</code>
+            <span v-if="m.valueExpr" class="binding-init">= {{ m.valueExpr }}</span>
           </div>
         </div>
       </details>
@@ -432,6 +636,29 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
   padding: 1px 4px;
   background: var(--bg-tertiary);
   border-radius: 2px;
+}
+
+.unresolved-section {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 0;
+  margin-top: 4px;
+  border-top: 1px solid var(--border-color);
+}
+
+.warning-label {
+  color: #e5a100;
+}
+
+.badge-warning {
+  background: rgba(229, 161, 0, 0.15);
+  color: #e5a100;
+  padding: 1px 5px;
+  font-size: 10px;
+  border-radius: 3px;
+  font-weight: 500;
 }
 
 code {

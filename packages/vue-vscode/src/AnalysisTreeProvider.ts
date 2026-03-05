@@ -594,6 +594,237 @@ export class AnalysisTreeProvider
       });
     }
 
+    // Binding Usage Map — group binding occurrences by name
+    const bindingOccs = analysis.template?.bindingOccurrences ?? [];
+    if (bindingOccs.length > 0) {
+      const grouped = new Map<string, Map<string, number>>();
+      for (const occ of bindingOccs) {
+        let kindMap = grouped.get(occ.name);
+        if (!kindMap) { kindMap = new Map(); grouped.set(occ.name, kindMap); }
+        kindMap.set(occ.usageKind, (kindMap.get(occ.usageKind) ?? 0) + 1);
+      }
+      categories.push({
+        type: "category",
+        label: "Binding Usage Map",
+        children: [...grouped.entries()].map(([name, kindMap]) => {
+          const total = [...kindMap.values()].reduce((a, b) => a + b, 0);
+          const desc = [...kindMap.entries()].map(([k, c]) => `${k}: ${c}`).join(", ");
+          return {
+            type: "leaf" as const,
+            label: `${name} (${total}x)`,
+            description: desc,
+            tooltip: `Binding "${name}" used ${total} times in template\n${desc}`,
+            icon: new ThemeIcon("symbol-reference"),
+            sourceUri,
+          };
+        }),
+      });
+    }
+
+    // Event Handlers
+    const handlers = analysis.template?.eventHandlers ?? [];
+    if (handlers.length > 0) {
+      categories.push({
+        type: "category",
+        label: "Event Handlers",
+        children: handlers.map((ev) => ({
+          type: "leaf" as const,
+          label: `@${ev.eventName}`,
+          description: ev.handlerBinding
+            ? `→ ${ev.handlerBinding} on <${ev.targetTag}>`
+            : `(inline) on <${ev.targetTag}>`,
+          tooltip: [
+            `Event: ${ev.eventName}`,
+            ev.handlerBinding ? `Handler: ${ev.handlerBinding}` : "Inline expression",
+            `Target: <${ev.targetTag}>`,
+          ].join("\n"),
+          icon: new ThemeIcon("zap"),
+          startPosition: this.toPosition(sourceText, ev.spanStart),
+          endPosition: this.toPosition(sourceText, ev.spanEnd),
+          sourceUri,
+        })),
+      });
+    }
+
+    // Template Refs
+    const refs = analysis.template?.templateRefs ?? [];
+    if (refs.length > 0) {
+      categories.push({
+        type: "category",
+        label: "Template Refs",
+        children: refs.map((r) => ({
+          type: "leaf" as const,
+          label: r.name,
+          description: `on <${r.targetTag}>${r.isDynamic ? " (dynamic)" : ""}`,
+          tooltip: `Template ref "${r.name}" on <${r.targetTag}>${r.isDynamic ? " (dynamic)" : ""}`,
+          icon: new ThemeIcon("symbol-reference"),
+          sourceUri,
+        })),
+      });
+    }
+
+    // Slot Definitions
+    const slots = analysis.template?.definedSlots ?? [];
+    if (slots.length > 0) {
+      categories.push({
+        type: "category",
+        label: "Defined Slots",
+        children: slots.map((s) => ({
+          type: "leaf" as const,
+          label: `#${s.name}`,
+          description: s.hasBindings && s.bindingNames?.length
+            ? `scoped: ${s.bindingNames.join(", ")}`
+            : "no bindings",
+          tooltip: [
+            `Slot: ${s.name}`,
+            s.hasBindings ? `Bindings: ${(s.bindingNames ?? []).join(", ")}` : "No bindings",
+          ].join("\n"),
+          icon: new ThemeIcon("symbol-interface"),
+          startPosition: this.toPosition(sourceText, s.spanStart),
+          endPosition: this.toPosition(sourceText, s.spanEnd),
+          sourceUri,
+        })),
+      });
+    }
+
+    // Unresolved Bindings
+    const unresolved = analysis.template?.unresolvedBindings ?? [];
+    if (unresolved.length > 0) {
+      categories.push({
+        type: "category",
+        label: "Unresolved Bindings",
+        children: unresolved.map((u) => ({
+          type: "leaf" as const,
+          label: u.name,
+          description: "not defined in script",
+          tooltip: `"${u.name}" is used in template but not defined in <script setup>`,
+          icon: new ThemeIcon("warning"),
+          startPosition: this.toPosition(sourceText, u.spanStart),
+          endPosition: this.toPosition(sourceText, u.spanEnd),
+          sourceUri,
+        })),
+      });
+    }
+
+    // Prop Definitions
+    const propDefs = analysis.template?.propDefinitions ?? [];
+    if (propDefs.length > 0) {
+      categories.push({
+        type: "category",
+        label: "Prop Definitions",
+        children: propDefs.map((p) => ({
+          type: "leaf" as const,
+          label: p.name,
+          description: [
+            p.typeAnnotation ?? "",
+            p.isRequired ? "required" : "optional",
+            p.hasDefault ? "has default" : "",
+          ].filter(Boolean).join(" · "),
+          tooltip: [
+            `Prop: ${p.name}`,
+            p.typeAnnotation ? `Type: ${p.typeAnnotation}` : "",
+            `Required: ${p.isRequired}`,
+            `Has default: ${p.hasDefault}`,
+            `Used in template: ${p.usedInTemplate}`,
+            `Used in script: ${p.usedInScript}`,
+          ].filter(Boolean).join("\n"),
+          icon: new ThemeIcon("symbol-property"),
+          startPosition: this.toPosition(sourceText, p.spanStart),
+          endPosition: this.toPosition(sourceText, p.spanEnd),
+          sourceUri,
+        })),
+      });
+    }
+
+    // Emit Definitions
+    const emitDefs = analysis.template?.emitDefinitions ?? [];
+    if (emitDefs.length > 0) {
+      categories.push({
+        type: "category",
+        label: "Emit Definitions",
+        children: emitDefs.map((e) => ({
+          type: "leaf" as const,
+          label: e.eventName,
+          description: [
+            e.isDeclared ? "declared" : "",
+            e.hasValidator ? "has validator" : "",
+            e.emitLocations?.length ? `${e.emitLocations.length} emit sites` : "",
+          ].filter(Boolean).join(" · "),
+          tooltip: [
+            `Event: ${e.eventName}`,
+            `Declared: ${e.isDeclared}`,
+            `Has validator: ${e.hasValidator}`,
+            e.emitLocations?.length ? `Emit locations: ${e.emitLocations.length}` : "",
+          ].filter(Boolean).join("\n"),
+          icon: new ThemeIcon("symbol-event"),
+          startPosition: this.toPosition(sourceText, e.spanStart),
+          endPosition: this.toPosition(sourceText, e.spanEnd),
+          sourceUri,
+        })),
+      });
+    }
+
+    // DOM Query Call Sites
+    const domQueries = analysis.domQueryCalls ?? [];
+    if (domQueries.length > 0) {
+      categories.push({
+        type: "category",
+        label: "DOM Queries",
+        children: domQueries.map((q) => ({
+          type: "leaf" as const,
+          label: q.kind,
+          description: `"${q.selectorText}"`,
+          tooltip: `${q.kind}("${q.selectorText}")`,
+          icon: new ThemeIcon("search"),
+          startPosition: this.toPosition(sourceText, q.spanStart),
+          endPosition: this.toPosition(sourceText, q.spanEnd),
+          sourceUri,
+        })),
+      });
+    }
+
+    // CSS Variable Manipulations
+    const cssManips = analysis.cssVarManipulations ?? [];
+    if (cssManips.length > 0) {
+      categories.push({
+        type: "category",
+        label: "CSS Variable Manipulations",
+        children: cssManips.map((m) => ({
+          type: "leaf" as const,
+          label: m.kind,
+          description: m.valueExpr ? `${m.varName} = ${m.valueExpr}` : m.varName,
+          tooltip: `${m.kind}("${m.varName}"${m.valueExpr ? `, ${m.valueExpr}` : ""})`,
+          icon: new ThemeIcon("symbol-color"),
+          startPosition: this.toPosition(sourceText, m.spanStart),
+          endPosition: this.toPosition(sourceText, m.spanEnd),
+          sourceUri,
+        })),
+      });
+    }
+
+    // Vue API Calls (grouped by category)
+    const apiCalls = analysis.vueApiCalls ?? [];
+    if (apiCalls.length > 0) {
+      categories.push({
+        type: "category",
+        label: "Vue API Calls",
+        children: apiCalls.map((c) => ({
+          type: "leaf" as const,
+          label: c.api,
+          description: c.argValue ? `"${c.argValue}"` : "",
+          tooltip: [
+            `API: ${c.api}`,
+            c.argValue ? `Argument: "${c.argValue}"` : "",
+            c.isAsyncCallback ? "Async callback" : "",
+          ].filter(Boolean).join("\n"),
+          icon: new ThemeIcon("symbol-method"),
+          startPosition: this.toPosition(sourceText, c.spanStart),
+          endPosition: this.toPosition(sourceText, c.spanEnd),
+          sourceUri,
+        })),
+      });
+    }
+
     return categories;
   }
 

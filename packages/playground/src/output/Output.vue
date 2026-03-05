@@ -11,6 +11,9 @@ import VirtualFilesPanel from "./VirtualFilesPanel.vue";
 import CssMatchPanel from "./CssMatchPanel.vue";
 import SourceMapPanel from "./SourceMapPanel.vue";
 import DiagnosticsPanel from "./DiagnosticsPanel.vue";
+import TemplateAstPanel from "./TemplateAstPanel.vue";
+import CssVarFlowPanel from "./CssVarFlowPanel.vue";
+import DependencyGraphPanel from "./DependencyGraphPanel.vue";
 
 const props = defineProps<{
   store: Store;
@@ -25,6 +28,9 @@ const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "cssMatch", label: "CSS Match" },
   { mode: "map", label: "Map" },
   { mode: "diagnostics", label: "Diagnostics" },
+  { mode: "templateAst", label: "Template AST" },
+  { mode: "cssVarFlow", label: "CSS Vars" },
+  { mode: "depGraph", label: "Dep Graph" },
 ];
 
 const tabs = computed(() => {
@@ -152,6 +158,9 @@ function isEditedMode(_mode: OutputMode): boolean {
       <CssMatchPanel v-else-if="store.outputMode === 'cssMatch'" :store="store" />
       <SourceMapPanel v-else-if="store.outputMode === 'map'" :store="store" />
       <DiagnosticsPanel v-else-if="store.outputMode === 'diagnostics'" :store="store" />
+      <TemplateAstPanel v-else-if="store.outputMode === 'templateAst'" :store="store" />
+      <CssVarFlowPanel v-else-if="store.outputMode === 'cssVarFlow'" :store="store" />
+      <DependencyGraphPanel v-else-if="store.outputMode === 'depGraph'" :store="store" />
       <CodeOutput v-else :store="store" :mode="store.outputMode" :editable="isEditableMode(store.outputMode)" />
     </div>
   </div>
