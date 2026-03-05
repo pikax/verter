@@ -1,7 +1,9 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::{ParseOptions, Parser};
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
+
+use verter_span::Span;
 
 use crate::types::{hash_16, ExportSignature};
 
@@ -54,6 +56,7 @@ pub(crate) fn extract_export_signatures_from_program(
                             name,
                             declaration_hash: hash_16(hash_input.as_bytes()),
                             is_type: decl.export_kind.is_type(),
+                            span: spec.exported.span().into(),
                         });
                     }
                     continue;
@@ -74,6 +77,7 @@ pub(crate) fn extract_export_signatures_from_program(
                             name,
                             declaration_hash: hash,
                             is_type: decl.export_kind.is_type(),
+                            span: spec.exported.span().into(),
                         });
                     }
                     continue;
@@ -84,12 +88,28 @@ pub(crate) fn extract_export_signatures_from_program(
                 }
             }
             Statement::ExportDefaultDeclaration(decl) => {
-                let span = decl.span;
-                let text = safe_slice(content, span.start, span.end);
+                let full_span = decl.span;
+                let text = safe_slice(content, full_span.start, full_span.end);
+                // For named default exports, point to the declaration's identifier.
+                // For anonymous ones, point to the 'default' keyword.
+                let id_span = match &decl.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                        f.id.as_ref().map(|id| id.span)
+                    }
+                    ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                        c.id.as_ref().map(|id| id.span)
+                    }
+                    _ => None,
+                };
+                // 'default' keyword starts at "export ".len() = 7 bytes after export start
+                let default_kw_span =
+                    oxc_span::Span::new(full_span.start + 7, full_span.start + 14);
+                let target_span = id_span.unwrap_or(default_kw_span);
                 out.push(ExportSignature {
                     name: "default".to_string(),
                     declaration_hash: hash_16(text.as_bytes()),
                     is_type: false,
+                    span: target_span.into(),
                 });
             }
             Statement::ExportAllDeclaration(decl) => {
@@ -98,6 +118,7 @@ pub(crate) fn extract_export_signatures_from_program(
                     name: "*".to_string(),
                     declaration_hash: hash_16(hash_input.as_bytes()),
                     is_type: decl.export_kind.is_type(),
+                    span: decl.span.into(),
                 });
             }
             _ => {}
@@ -116,63 +137,70 @@ fn extract_declaration_signatures(
         Declaration::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
                 if let Some(name) = binding_name(&decl.id) {
-                    let span = decl.span;
-                    let text = safe_slice(content, span.start, span.end);
+                    let hash_span = decl.span;
+                    let text = safe_slice(content, hash_span.start, hash_span.end);
+                    let id_span = binding_id_span(&decl.id);
                     out.push(ExportSignature {
                         name,
                         declaration_hash: hash_16(text.as_bytes()),
                         is_type: false,
+                        span: id_span,
                     });
                 }
             }
         }
         Declaration::FunctionDeclaration(func) => {
             if let Some(ref id) = func.id {
-                let span = func.span;
-                let text = safe_slice(content, span.start, span.end);
+                let hash_span = func.span;
+                let text = safe_slice(content, hash_span.start, hash_span.end);
                 out.push(ExportSignature {
                     name: id.name.to_string(),
                     declaration_hash: hash_16(text.as_bytes()),
                     is_type: false,
+                    span: id.span.into(),
                 });
             }
         }
         Declaration::ClassDeclaration(cls) => {
             if let Some(ref id) = cls.id {
-                let span = cls.span;
-                let text = safe_slice(content, span.start, span.end);
+                let hash_span = cls.span;
+                let text = safe_slice(content, hash_span.start, hash_span.end);
                 out.push(ExportSignature {
                     name: id.name.to_string(),
                     declaration_hash: hash_16(text.as_bytes()),
                     is_type: false,
+                    span: id.span.into(),
                 });
             }
         }
         Declaration::TSInterfaceDeclaration(iface) => {
-            let span = iface.span;
-            let text = safe_slice(content, span.start, span.end);
+            let hash_span = iface.span;
+            let text = safe_slice(content, hash_span.start, hash_span.end);
             out.push(ExportSignature {
                 name: iface.id.name.to_string(),
                 declaration_hash: hash_16(text.as_bytes()),
                 is_type: true,
+                span: iface.id.span.into(),
             });
         }
         Declaration::TSTypeAliasDeclaration(alias) => {
-            let span = alias.span;
-            let text = safe_slice(content, span.start, span.end);
+            let hash_span = alias.span;
+            let text = safe_slice(content, hash_span.start, hash_span.end);
             out.push(ExportSignature {
                 name: alias.id.name.to_string(),
                 declaration_hash: hash_16(text.as_bytes()),
                 is_type: true,
+                span: alias.id.span.into(),
             });
         }
         Declaration::TSEnumDeclaration(en) => {
-            let span = en.span;
-            let text = safe_slice(content, span.start, span.end);
+            let hash_span = en.span;
+            let text = safe_slice(content, hash_span.start, hash_span.end);
             out.push(ExportSignature {
                 name: en.id.name.to_string(),
                 declaration_hash: hash_16(text.as_bytes()),
                 is_type: false,
+                span: en.id.span.into(),
             });
         }
         _ => {}
@@ -183,6 +211,14 @@ fn binding_name(pattern: &BindingPattern<'_>) -> Option<String> {
     match pattern {
         BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
         _ => None,
+    }
+}
+
+/// Extract the identifier span from a binding pattern.
+fn binding_id_span(pattern: &BindingPattern<'_>) -> Span {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => id.span.into(),
+        _ => Span::default(),
     }
 }
 
@@ -470,5 +506,148 @@ export function helper() {}
         let sigs = parse_exports("export * from './other';");
         assert_eq!(sigs.len(), 1);
         assert_eq!(sigs[0].name, "*");
+    }
+
+    // ── Export span tests ────────────────────────────────────────────
+
+    /// @ai-generated - Export function span covers identifier
+    #[test]
+    fn export_function_span_covers_identifier() {
+        let code = "export function foo() { return 1; }";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        assert!(span.start > 0 || span.end > 0, "span should be non-zero");
+        let spanned = &code[span.start as usize..span.end as usize];
+        assert_eq!(spanned, "foo", "span should cover the function identifier");
+    }
+
+    /// @ai-generated - Export const span covers identifier
+    #[test]
+    fn export_const_span_covers_identifier() {
+        let code = "export const bar = 42;";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        let spanned = &code[span.start as usize..span.end as usize];
+        assert_eq!(spanned, "bar", "span should cover the const identifier");
+    }
+
+    /// @ai-generated - Export class span covers identifier
+    #[test]
+    fn export_class_span_covers_identifier() {
+        let code = "export class MyClass {}";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        let spanned = &code[span.start as usize..span.end as usize];
+        assert_eq!(spanned, "MyClass", "span should cover the class identifier");
+    }
+
+    /// @ai-generated - Export interface span covers identifier
+    #[test]
+    fn export_interface_span_covers_identifier() {
+        let code = "export interface IFoo { x: number }";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        let spanned = &code[span.start as usize..span.end as usize];
+        assert_eq!(
+            spanned, "IFoo",
+            "span should cover the interface identifier"
+        );
+    }
+
+    /// @ai-generated - Export type alias span covers identifier
+    #[test]
+    fn export_type_alias_span_covers_identifier() {
+        let code = "export type Foo = string | number;";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        let spanned = &code[span.start as usize..span.end as usize];
+        assert_eq!(
+            spanned, "Foo",
+            "span should cover the type alias identifier"
+        );
+    }
+
+    /// @ai-generated - Export enum span covers identifier
+    #[test]
+    fn export_enum_span_covers_identifier() {
+        let code = "export enum Color { Red, Green }";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        let spanned = &code[span.start as usize..span.end as usize];
+        assert_eq!(spanned, "Color", "span should cover the enum identifier");
+    }
+
+    /// @ai-generated - Re-export span covers exported specifier
+    #[test]
+    fn reexport_span_covers_specifier() {
+        let code = "export { Foo } from './other';";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        let spanned = &code[span.start as usize..span.end as usize];
+        assert_eq!(spanned, "Foo", "span should cover the re-export specifier");
+    }
+
+    /// @ai-generated - Default export span covers the declaration identifier or keyword
+    #[test]
+    fn default_export_span() {
+        let code = "export default class MyClass {}";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        let spanned = &code[span.start as usize..span.end as usize];
+        // For default exports with a named declaration, span covers the name
+        assert_eq!(
+            spanned, "MyClass",
+            "span should cover the default export class name"
+        );
+    }
+
+    /// @ai-generated - Default export anonymous function → span covers 'default' keyword
+    #[test]
+    fn default_export_anonymous_span() {
+        let code = "export default function() {}";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        let spanned = &code[span.start as usize..span.end as usize];
+        assert_eq!(
+            spanned, "default",
+            "anonymous default export span should cover 'default' keyword"
+        );
+    }
+
+    /// @ai-generated - Local re-export span covers specifier
+    #[test]
+    fn local_reexport_span_covers_specifier() {
+        let code = "const foo = 1;\nexport { foo };";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        let spanned = &code[span.start as usize..span.end as usize];
+        assert_eq!(
+            spanned, "foo",
+            "local re-export span should cover the specifier"
+        );
+    }
+
+    /// @ai-generated - Export all span covers the star token
+    #[test]
+    fn export_all_span() {
+        let code = "export * from './other';";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        let span = sigs[0].span;
+        // Star exports don't have a meaningful identifier; span can cover the full statement or '*'
+        assert!(
+            span.end > span.start,
+            "export all should have a non-empty span"
+        );
     }
 }

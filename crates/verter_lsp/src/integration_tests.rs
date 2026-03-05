@@ -241,6 +241,7 @@ const msg = 'hello'
         analysis.as_ref(),
         &doc.line_index,
         None,
+        None,
     );
 
     assert!(def.is_some(), "Should find definition for 'msg'");
@@ -269,6 +270,7 @@ const msg = 'hello'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        None,
         None,
     );
 
@@ -323,6 +325,7 @@ const title = 'hello'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        None,
         None,
     );
 

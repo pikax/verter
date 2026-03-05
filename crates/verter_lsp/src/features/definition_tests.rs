@@ -53,6 +53,7 @@ fn test_go_to_definition_from_template_to_script_via_span() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
     assert!(result.is_some());
 
@@ -66,7 +67,9 @@ fn test_go_to_definition_from_template_to_script_via_span() {
 }
 
 #[test]
-fn test_go_to_import_with_resolved_canonical_id() {
+fn test_go_to_import_with_resolved_canonical_id_no_export_resolver_returns_none() {
+    // When resolved_canonical_id is set but no resolve_export_location callback,
+    // returns None to let the type provider handle it (can't resolve to exact location)
     let source = "<script setup>\nimport { ref } from 'vue'\n</script>\n";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
@@ -98,12 +101,80 @@ fn test_go_to_import_with_resolved_canonical_id() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
-    assert!(result.is_some());
+    // No resolve_export_location → returns None, type provider takes over
+    assert!(
+        result.is_none(),
+        "should return None without export resolver"
+    );
+}
+
+#[test]
+fn test_go_to_import_with_resolved_canonical_id_and_export_resolver() {
+    // When resolved_canonical_id is set AND resolve_export_location returns a location,
+    // returns the precise cross-file location
+    let source = "<script setup>\nimport { ref } from 'vue'\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis(
+        vec![],
+        vec![AnalyzedImport {
+            source: "vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "ref".to_string(),
+                is_type_only: false,
+                vue_api: Some(VueApiClassification::Ref),
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(15, 40),
+            resolved_canonical_id: Some("/usr/lib/node_modules/vue/dist/vue.d.ts".to_string()),
+        }],
+        vec![],
+    );
+
+    let ref_offset = source.find("ref").unwrap();
+    let position = line_index.offset_to_position(ref_offset as u32).unwrap();
+
+    let export_resolver = |canonical_id: &str, binding_name: &str| -> Option<Location> {
+        if canonical_id.contains("vue.d.ts") && binding_name == "ref" {
+            Some(Location {
+                uri: "file:///usr/lib/node_modules/vue/dist/vue.d.ts"
+                    .parse()
+                    .unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 100,
+                        character: 16,
+                    },
+                    end: Position {
+                        line: 100,
+                        character: 19,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        Some(&export_resolver),
+    );
+    assert!(result.is_some(), "should navigate with export resolver");
 
     if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
-        // Should navigate to the resolved file
         assert!(loc.uri.as_str().contains("vue.d.ts"));
+        assert_eq!(loc.range.start.line, 100);
+        assert_eq!(loc.range.start.character, 16);
     } else {
         panic!("expected scalar location");
     }
@@ -144,6 +215,7 @@ fn test_go_to_import_without_resolution_falls_back_to_import_span() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
     );
     assert!(result.is_some());
@@ -192,6 +264,7 @@ fn test_go_to_macro_binding_from_template() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
     assert!(result.is_some());
 
@@ -233,6 +306,7 @@ fn test_no_definition_for_unknown_binding() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
     );
     assert!(result.is_none());
@@ -283,6 +357,7 @@ fn test_no_definition_inside_html_comment() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
     );
     assert!(
@@ -350,7 +425,7 @@ fn test_go_to_component_definition_from_template() {
         ..Default::default()
     };
 
-    // Click on "ChildComp" in template
+    // Click on "ChildComp" in template — without export resolver, returns None
     let offset = source.find("ChildComp").unwrap();
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
@@ -361,8 +436,43 @@ fn test_go_to_component_definition_from_template() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
-    assert!(result.is_some(), "should navigate to component file");
+    assert!(
+        result.is_none(),
+        "should return None without export resolver"
+    );
+
+    // With export resolver, navigates to precise location
+    let export_resolver = |canonical_id: &str, _binding_name: &str| -> Option<Location> {
+        if canonical_id.contains("ChildComp.vue") {
+            Some(Location {
+                uri: "file:///project/ChildComp.vue".parse().unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 9,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        Some(&export_resolver),
+    );
+    assert!(result.is_some(), "should navigate with export resolver");
 
     if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
         assert!(loc.uri.as_str().contains("ChildComp.vue"));
@@ -462,6 +572,7 @@ fn test_css_nav_template_class_to_style() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -558,6 +669,7 @@ fn test_css_nav_multi_class_attr() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
     assert!(result.is_some(), "should navigate to .primary in style");
 
@@ -649,6 +761,7 @@ fn test_css_nav_template_id_to_style() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -731,6 +844,7 @@ fn test_css_nav_dynamic_class_skipped() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
     );
     // Should NOT navigate — it's a dynamic class binding
@@ -818,6 +932,7 @@ fn test_css_nav_style_to_template() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -862,10 +977,10 @@ fn test_import_source_string_navigation() {
         vec![],
     );
 
-    // Click on "Foo.vue" inside the import string
-    let foo_vue_offset = source.find("Foo.vue").unwrap();
+    // Click on "./" inside the import source string (not on the binding name)
+    let dot_slash_offset = source.find("./Foo.vue").unwrap();
     let position = line_index
-        .offset_to_position(foo_vue_offset as u32)
+        .offset_to_position(dot_slash_offset as u32)
         .unwrap();
 
     let result = definition_at_position(
@@ -874,6 +989,7 @@ fn test_import_source_string_navigation() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
     );
     assert!(
@@ -926,7 +1042,7 @@ fn test_path_alias_resolution_on_binding() {
     let foo_offset = source.find("Foo").unwrap();
     let position = line_index.offset_to_position(foo_offset as u32).unwrap();
 
-    // With resolver: should navigate to resolved file
+    // With path resolver but no export resolver: returns None (type provider handles)
     let resolver = |specifier: &str| -> Option<String> {
         if specifier == "@/components/Foo.vue" {
             Some("/project/src/components/Foo.vue".to_string())
@@ -941,8 +1057,43 @@ fn test_path_alias_resolution_on_binding() {
         Some(&analysis),
         &line_index,
         Some(&resolver),
+        None,
     );
-    assert!(result.is_some(), "should navigate via path resolver");
+    assert!(
+        result.is_none(),
+        "should return None without export resolver"
+    );
+
+    // With both resolvers: navigates to precise location
+    let export_resolver = |canonical_id: &str, binding_name: &str| -> Option<Location> {
+        if canonical_id.contains("Foo.vue") && binding_name == "Foo" {
+            Some(Location {
+                uri: "file:///project/src/components/Foo.vue".parse().unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 5,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 5,
+                        character: 3,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        Some(&resolver),
+        Some(&export_resolver),
+    );
+    assert!(result.is_some(), "should navigate with export resolver");
 
     if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
         assert!(
@@ -950,17 +1101,19 @@ fn test_path_alias_resolution_on_binding() {
             "should resolve to Foo.vue, got: {}",
             loc.uri.as_str()
         );
+        assert_eq!(loc.range.start.line, 5);
     } else {
         panic!("expected scalar location");
     }
 
-    // Without resolver: should fall back to import span
+    // Without any resolver: should fall back to import span
     let result_no_resolver = definition_at_position(
         &position,
         source,
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
     );
     assert!(
@@ -1022,6 +1175,7 @@ fn test_path_alias_resolution_on_import_string() {
         Some(&analysis),
         &line_index,
         Some(&resolver),
+        None,
     );
     assert!(
         result.is_some(),
@@ -1130,6 +1284,7 @@ fn test_dom_query_selector_navigates_to_element() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -1212,6 +1367,7 @@ fn test_dom_query_selector_no_match() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
     );
     assert!(
@@ -1301,6 +1457,7 @@ fn test_dom_query_selector_falls_back_to_css() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -1373,6 +1530,7 @@ fn test_path_alias_resolution_on_component_tag() {
             None
         }
     };
+    // Without export resolver: returns None (type provider handles)
     let result = definition_at_position(
         &position,
         source,
@@ -1380,10 +1538,47 @@ fn test_path_alias_resolution_on_component_tag() {
         Some(&analysis),
         &line_index,
         Some(&resolver),
+        None,
+    );
+    assert!(
+        result.is_none(),
+        "should return None without export resolver"
+    );
+
+    // With export resolver: navigates to precise location
+    let export_resolver = |canonical_id: &str, _binding_name: &str| -> Option<Location> {
+        if canonical_id.contains("FooComp.vue") {
+            Some(Location {
+                uri: "file:///project/src/components/FooComp.vue"
+                    .parse()
+                    .unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 7,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        Some(&resolver),
+        Some(&export_resolver),
     );
     assert!(
         result.is_some(),
-        "should navigate to component via path resolver"
+        "should navigate to component via path + export resolver"
     );
 
     if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
@@ -1479,7 +1674,15 @@ fn test_go_to_definition_event_handler_click() {
     let pos = line_index
         .offset_to_position((click_offset + 1) as u32)
         .unwrap();
-    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+    let result = definition_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
 
     assert!(
         result.is_some(),
@@ -1579,7 +1782,15 @@ fn test_go_to_definition_inline_event_no_binding() {
     let pos = line_index
         .offset_to_position((click_offset + 1) as u32)
         .unwrap();
-    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+    let result = definition_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
 
     assert!(
         result.is_none(),
@@ -1620,7 +1831,15 @@ fn test_go_to_definition_dollar_props() {
     };
 
     let pos = line_index.offset_to_position(props_offset as u32).unwrap();
-    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+    let result = definition_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
 
     assert!(
         result.is_some(),
@@ -1666,7 +1885,15 @@ fn test_go_to_definition_dollar_emit() {
     };
 
     let pos = line_index.offset_to_position(emit_offset as u32).unwrap();
-    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+    let result = definition_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
 
     assert!(
         result.is_some(),
@@ -1702,7 +1929,15 @@ fn test_go_to_definition_dollar_props_without_macro() {
     };
 
     let pos = line_index.offset_to_position(props_offset as u32).unwrap();
-    let result = definition_at_position(&pos, source, &blocks, Some(&analysis), &line_index, None);
+    let result = definition_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
 
     assert!(
         result.is_none(),
@@ -1761,6 +1996,7 @@ fn definition_prop_field_type_based() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
     );
 
@@ -1830,6 +2066,7 @@ fn definition_prop_field_runtime() {
         Some(&analysis),
         &line_index,
         None,
+        None,
     );
 
     assert!(
@@ -1898,6 +2135,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
     );
 

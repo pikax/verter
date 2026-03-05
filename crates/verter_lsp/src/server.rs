@@ -3391,6 +3391,37 @@ impl LanguageServer for VerterLanguageServer {
             #[allow(clippy::type_complexity)]
             let resolve_fn: Option<&dyn Fn(&str) -> Option<String>> =
                 Some(&resolve_path as &dyn Fn(&str) -> Option<String>);
+
+            let encoding = self.position_encoding.read().clone();
+            let host = &self.documents.host;
+            let resolve_export =
+                |target_canonical_id: &str, binding_name: &str| -> Option<Location> {
+                    let (start, end) = host.get_export_span(target_canonical_id, binding_name)?;
+                    let target_source = host.get_source(target_canonical_id)?;
+                    let target_li = LineIndex::new(&target_source, encoding.clone());
+                    let start_pos = target_li.offset_to_position(start)?;
+                    let end_pos = target_li.offset_to_position(end)?;
+                    let normalized = target_canonical_id.replace('\\', "/");
+                    let uri_str = if normalized.starts_with('/') {
+                        format!("file://{normalized}")
+                    } else if normalized.chars().nth(1) == Some(':') {
+                        format!("file:///{normalized}")
+                    } else {
+                        return None;
+                    };
+                    let target_uri: Uri = uri_str.parse().ok()?;
+                    Some(Location {
+                        uri: target_uri,
+                        range: Range {
+                            start: start_pos,
+                            end: end_pos,
+                        },
+                    })
+                };
+            #[allow(clippy::type_complexity)]
+            let resolve_export_fn =
+                Some(&resolve_export as &dyn Fn(&str, &str) -> Option<Location>);
+
             let mut def = definition_at_position(
                 position,
                 &doc.source,
@@ -3398,6 +3429,7 @@ impl LanguageServer for VerterLanguageServer {
                 analysis.as_ref(),
                 &doc.line_index,
                 resolve_fn,
+                resolve_export_fn,
             )?;
 
             // Fix up sentinel URIs: if the definition is in the same file, use the document URI

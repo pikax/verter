@@ -240,7 +240,7 @@ impl VerterHost {
 ///    parent's dependency set already contains `/project/src/components/Child.vue`)
 /// 5. Basename match (test helper — files registered by basename only)
 /// 6. Extension guessing (`.vue`, `/index.vue`)
-fn resolve_import_to_canonical(
+pub(crate) fn resolve_import_to_canonical(
     files: &std::collections::HashMap<String, crate::types::FileEntry>,
     alias_map: &std::collections::HashMap<String, String>,
     parent_entry: &crate::types::FileEntry,

@@ -739,6 +739,11 @@ pub struct ExportSignature {
     pub declaration_hash: Hash16,
     /// Whether this is a type-only export (`export type` or `export interface`).
     pub is_type: bool,
+    /// Byte span of the export's identifier within the script content.
+    /// Points to the identifier name (e.g., `foo` in `export function foo()`),
+    /// or `default` keyword for anonymous default exports.
+    /// Script-content-relative; add script content offset for SFC-absolute.
+    pub span: Span,
 }
 
 fn serialize_analysis_flags<S: serde::Serializer>(

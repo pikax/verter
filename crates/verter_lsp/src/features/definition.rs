@@ -32,6 +32,12 @@ pub const SAME_FILE_URI: &str = "verter-internal:same-file";
 ///
 /// The optional `resolve_path` callback resolves import specifiers (e.g., `@/Foo.vue`)
 /// to absolute canonical file paths using tsconfig.json `compilerOptions.paths`.
+///
+/// The optional `resolve_export_location` callback resolves a cross-file import to
+/// the exact location of the exported symbol in the target file.
+/// Takes `(canonical_id, binding_name)` and returns a `Location` with precise range.
+/// When this returns `None`, the function also returns `None` for cross-file imports,
+/// letting the type provider handle it (it can navigate to the exact symbol).
 #[allow(clippy::type_complexity)]
 pub fn definition_at_position(
     position: &Position,
@@ -40,6 +46,7 @@ pub fn definition_at_position(
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
     resolve_path: Option<&dyn Fn(&str) -> Option<String>>,
+    resolve_export_location: Option<&dyn Fn(&str, &str) -> Option<Location>>,
 ) -> Option<GotoDefinitionResponse> {
     let analysis = analysis?;
     let offset = line_index.position_to_offset(position)? as usize;
@@ -63,14 +70,29 @@ pub fn definition_at_position(
         for import in &analysis.imports {
             for binding in &import.bindings {
                 if binding.name == *word {
-                    // If we have a resolved canonical ID, navigate to the source file
+                    // Try to resolve cross-file with precise export location
                     if let Some(ref canonical_id) = import.resolved_canonical_id {
-                        return resolved_import_definition(canonical_id);
+                        if let Some(result) = try_precise_cross_file(
+                            canonical_id,
+                            &binding.name,
+                            resolve_export_location,
+                        ) {
+                            return Some(result);
+                        }
+                        // Can't resolve to exact location → let type provider handle it
+                        return None;
                     }
                     // Try path alias resolution (tsconfig paths)
                     if let Some(resolved) = resolve_path.as_ref().and_then(|rp| rp(&import.source))
                     {
-                        return resolved_import_definition(&resolved);
+                        if let Some(result) = try_precise_cross_file(
+                            &resolved,
+                            &binding.name,
+                            resolve_export_location,
+                        ) {
+                            return Some(result);
+                        }
+                        return None;
                     }
                     // Otherwise, navigate to the import statement itself using span data
                     if import.span.start > 0 || import.span.end > 0 {
@@ -137,15 +159,31 @@ pub fn definition_at_position(
                                                         if let Some(ref cid) =
                                                             import.resolved_canonical_id
                                                         {
-                                                            return resolved_import_definition(cid);
+                                                            if let Some(result) =
+                                                                try_precise_cross_file(
+                                                                    cid,
+                                                                    binding_name,
+                                                                    resolve_export_location,
+                                                                )
+                                                            {
+                                                                return Some(result);
+                                                            }
+                                                            return None;
                                                         }
                                                         if let Some(resolved) = resolve_path
                                                             .as_ref()
                                                             .and_then(|rp| rp(&import.source))
                                                         {
-                                                            return resolved_import_definition(
-                                                                &resolved,
-                                                            );
+                                                            if let Some(result) =
+                                                                try_precise_cross_file(
+                                                                    &resolved,
+                                                                    binding_name,
+                                                                    resolve_export_location,
+                                                                )
+                                                            {
+                                                                return Some(result);
+                                                            }
+                                                            return None;
                                                         }
                                                     }
                                                 }
@@ -174,14 +212,33 @@ pub fn definition_at_position(
                         if let Some(ref src) = comp.import_source {
                             for import in &analysis.imports {
                                 if import.source == *src {
+                                    // Find the local binding name for this component import
+                                    let comp_binding = import
+                                        .bindings
+                                        .first()
+                                        .map(|b| b.name.as_str())
+                                        .unwrap_or("default");
                                     if let Some(ref cid) = import.resolved_canonical_id {
-                                        return resolved_import_definition(cid);
+                                        if let Some(result) = try_precise_cross_file(
+                                            cid,
+                                            comp_binding,
+                                            resolve_export_location,
+                                        ) {
+                                            return Some(result);
+                                        }
+                                        return None;
                                     }
-                                    // Try path alias resolution
                                     if let Some(resolved) =
                                         resolve_path.as_ref().and_then(|rp| rp(&import.source))
                                     {
-                                        return resolved_import_definition(&resolved);
+                                        if let Some(result) = try_precise_cross_file(
+                                            &resolved,
+                                            comp_binding,
+                                            resolve_export_location,
+                                        ) {
+                                            return Some(result);
+                                        }
+                                        return None;
                                     }
                                 }
                             }
@@ -232,13 +289,26 @@ pub fn definition_at_position(
                 for binding in &import.bindings {
                     if binding.name == *word {
                         if let Some(ref canonical_id) = import.resolved_canonical_id {
-                            return resolved_import_definition(canonical_id);
+                            if let Some(result) = try_precise_cross_file(
+                                canonical_id,
+                                &binding.name,
+                                resolve_export_location,
+                            ) {
+                                return Some(result);
+                            }
+                            return None;
                         }
-                        // Try path alias resolution
                         if let Some(resolved) =
                             resolve_path.as_ref().and_then(|rp| rp(&import.source))
                         {
-                            return resolved_import_definition(&resolved);
+                            if let Some(result) = try_precise_cross_file(
+                                &resolved,
+                                &binding.name,
+                                resolve_export_location,
+                            ) {
+                                return Some(result);
+                            }
+                            return None;
                         }
                     }
                 }
@@ -278,24 +348,41 @@ pub fn definition_at_position(
 /// Create a definition response from a resolved canonical ID (cross-file navigation).
 ///
 /// Normalizes Windows backslashes to forward slashes before constructing the file URI.
+/// Returns `Range::default()` (file top) — used only as a fallback when no precise
+/// export location is available.
 pub(crate) fn resolved_import_definition(canonical_id: &str) -> Option<GotoDefinitionResponse> {
-    // Normalize backslashes for Windows paths
-    let normalized = canonical_id.replace('\\', "/");
-    // Convert canonical ID back to a file:// URI
-    let uri_str = if normalized.starts_with('/') {
-        format!("file://{normalized}")
-    } else if normalized.chars().nth(1) == Some(':') {
-        // Windows drive letter (e.g., "D:/projects/...")
-        format!("file:///{normalized}")
-    } else {
-        return None;
-    };
-
-    let uri: Uri = uri_str.parse().ok()?;
+    let uri = canonical_id_to_uri(canonical_id)?;
     Some(GotoDefinitionResponse::Scalar(Location {
         uri,
         range: Range::default(),
     }))
+}
+
+/// Convert a canonical ID to a file:// URI.
+fn canonical_id_to_uri(canonical_id: &str) -> Option<Uri> {
+    let normalized = canonical_id.replace('\\', "/");
+    let uri_str = if normalized.starts_with('/') {
+        format!("file://{normalized}")
+    } else if normalized.chars().nth(1) == Some(':') {
+        format!("file:///{normalized}")
+    } else {
+        return None;
+    };
+    uri_str.parse().ok()
+}
+
+/// Try to resolve a cross-file import to a precise export location.
+/// If `resolve_export_location` returns a Location, wrap it. Otherwise return `None`
+/// to let the type provider handle it.
+#[allow(clippy::type_complexity)]
+fn try_precise_cross_file(
+    canonical_id: &str,
+    binding_name: &str,
+    resolve_export_location: Option<&dyn Fn(&str, &str) -> Option<Location>>,
+) -> Option<GotoDefinitionResponse> {
+    let resolve = resolve_export_location?;
+    let loc = resolve(canonical_id, binding_name)?;
+    Some(GotoDefinitionResponse::Scalar(loc))
 }
 
 /// Create a same-file definition response from analysis span data.
