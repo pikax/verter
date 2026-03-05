@@ -1531,6 +1531,72 @@ fn slot_outlet_with_fallback() {
     );
 }
 
+#[test]
+fn slot_outlet_hyphenated_name() {
+    let result = gen_tsx_template(r#"<template><slot name="overlay-content" /></template>"#);
+    assert!(
+        result.contains("$slots['overlay-content']"),
+        "Hyphenated slot name must use bracket notation. Got: {}",
+        result
+    );
+    assert!(
+        !result.contains("$slots.overlay-content"),
+        "Must NOT use dot notation for hyphenated names (parses as subtraction). Got: {}",
+        result
+    );
+    assert!(
+        !result.contains("<slot"),
+        "<slot> tag must be replaced. Got: {}",
+        result
+    );
+}
+
+#[test]
+fn slot_outlet_hyphenated_name_with_props() {
+    let result = gen_tsx_template(r#"<template><slot name="item-data" :value="x" /></template>"#);
+    assert!(
+        result.contains("$slots['item-data']"),
+        "Hyphenated slot name with props must use bracket notation. Got: {}",
+        result
+    );
+    assert!(
+        result.contains("value:") || result.contains("value :"),
+        "Slot props should be present. Got: {}",
+        result
+    );
+}
+
+#[test]
+fn slot_outlet_dotted_name() {
+    let result = gen_tsx_template(r#"<template><slot name="foo.bar" /></template>"#);
+    assert!(
+        result.contains("$slots['foo.bar']"),
+        "Dotted slot name must use bracket notation. Got: {}",
+        result
+    );
+    assert!(
+        !result.contains("$slots.foo.bar"),
+        "Must NOT use dot notation for dotted names. Got: {}",
+        result
+    );
+}
+
+#[test]
+fn slot_outlet_hyphenated_name_with_fallback() {
+    let result =
+        gen_tsx_template(r#"<template><slot name="overlay-content">fallback</slot></template>"#);
+    assert!(
+        result.contains("$slots['overlay-content']"),
+        "Hyphenated slot name with fallback must use bracket notation. Got: {}",
+        result
+    );
+    assert!(
+        result.contains("??"),
+        "Slot with fallback should use ?? operator. Got: {}",
+        result
+    );
+}
+
 // ── Instance property resolution in TSX ─────────────────────────
 
 #[test]

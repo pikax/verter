@@ -290,39 +290,88 @@ fn walk_element<'a, 'alloc>(
         }
         TagType::SlotOutlet => {
             // <slot name="x" :prop="val">fallback</slot>
-            // → {$slots.x?.({ prop: val }) ?? <>fallback</>}
+            // → {___VERTER___instance.$slots.x?.({ prop: val }) ?? <>fallback</>}
             //
             // For TSX type checking, emit the slot call so TypeScript can
             // verify slot props and return types.
+            //
+            // Uses fine-grained mapped emissions so that:
+            // - Hovering `<slot` in source → resolves to `$slots` type
+            // - Hovering `name="header"` → resolves to the slot property type
             let has_children = el.content.as_ref().is_some_and(|c| !c.children.is_empty());
 
-            // Extract slot name from props (static `name` or `:name`)
-            let slot_name = extract_slot_name(el, ctx.source).unwrap_or("default");
+            // Extract slot name + source position from props (static `name` or `:name`)
+            let slot_info = extract_slot_name(el, ctx.source);
+            let (slot_name, slot_name_pos) = match &slot_info {
+                Some((name, pos)) => (*name, Some(*pos)),
+                None => ("default", None),
+            };
 
             // Collect slot props (non-name, non-structural attributes)
             let slot_props = collect_slot_props(el, oxc_el, ctx.source, ctx.resolver);
 
-            // Build the call expression
-            let call = if slot_props.is_empty() {
-                format!("___VERTER___instance.$slots.{}?.()", slot_name)
-            } else {
-                format!(
-                    "___VERTER___instance.$slots.{}?.({{ {} }})",
-                    slot_name, slot_props
-                )
-            };
+            // Remove the entire open tag — we'll replace it with mapped prepends
+            ctx.out.overwrite(el.tag_open.start, el.tag_open.end, "");
 
-            // Overwrite open tag with slot call prefix
-            if has_children {
-                ctx.out.overwrite(
-                    el.tag_open.start,
-                    el.tag_open.end,
-                    &format!("{{{} ?? <>", call),
-                );
+            let insert_pos = el.tag_open.start;
+
+            // 1. Emit `{___VERTER___instance.$slots` mapped so `$slots` → `<slot` position
+            let prefix = "{___VERTER___instance.";
+            let slots_content = format!("{}$slots", prefix);
+            ctx.out.prepend_alloc_mapped_with_offset(
+                insert_pos,
+                el.tag_open.start + 1, // source position of `s` in `<slot`
+                prefix.len() as u32,   // content_offset: past prefix, at `$slots`
+                &slots_content,
+            );
+
+            // 2. Emit slot name access
+            if let Some(name_pos) = slot_name_pos {
+                if is_valid_js_ident(slot_name) {
+                    // Dot notation: `.header` with token at `header`
+                    let name_content = format!(".{}", slot_name);
+                    ctx.out.prepend_alloc_mapped_with_offset(
+                        insert_pos,
+                        name_pos,
+                        1, // content_offset: past `.`, at slot name
+                        &name_content,
+                    );
+                } else {
+                    // Bracket notation: `['overlay-content']` with token at name
+                    let name_content = format!("['{}']", slot_name);
+                    ctx.out.prepend_alloc_mapped_with_offset(
+                        insert_pos,
+                        name_pos,
+                        2, // content_offset: past `['`, at slot name
+                        &name_content,
+                    );
+                }
             } else {
-                ctx.out
-                    .overwrite(el.tag_open.start, el.tag_open.end, &format!("{{{}}}", call));
+                // Default slot or dynamic — unmapped
+                let name_content = ".default";
+                ctx.out.prepend_alloc_mapped_with_offset(
+                    insert_pos,
+                    0,
+                    name_content.len() as u32,
+                    name_content,
+                );
             }
+
+            // 3. Emit call suffix
+            let suffix = if slot_props.is_empty() {
+                if has_children {
+                    "?.() ?? <>".to_string()
+                } else {
+                    "?.()}".to_string()
+                }
+            } else if has_children {
+                format!("?.({{ {} }}) ?? <>", slot_props)
+            } else {
+                format!("?.({{ {} }})}}", slot_props)
+            };
+            let suffix_len = suffix.len() as u32;
+            ctx.out
+                .prepend_alloc_mapped_with_offset(insert_pos, 0, suffix_len, &suffix);
 
             // Close tag
             if let Some(tag_close) = &el.tag_close {
@@ -911,12 +960,23 @@ fn directive_name<'a>(prop: &crate::types::NodeProp, source: &'a str) -> &'a str
     name.strip_prefix("v-").unwrap_or(name)
 }
 
+/// Check if a string is a valid JS identifier (can be used as a bare property name).
+fn is_valid_js_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
 /// Extract the slot name from a `<slot>` element's attributes.
+/// Returns the name string and its source position (value_start) for sourcemap mapping.
 ///
 /// - `<slot>` → `None` (will use "default")
-/// - `<slot name="header">` → `Some("header")`
+/// - `<slot name="header">` → `Some(("header", value_start_pos))`
 /// - `<slot :name="dynamicName">` → `None` (dynamic, falls back to "default")
-fn extract_slot_name<'a>(el: &ElementNode, source: &'a str) -> Option<&'a str> {
+fn extract_slot_name<'a>(el: &ElementNode, source: &'a str) -> Option<(&'a str, u32)> {
     for prop in &el.props {
         if !prop.is_directive {
             let attr_name = &source[prop.start as usize..prop.name_end as usize];
@@ -924,7 +984,7 @@ fn extract_slot_name<'a>(el: &ElementNode, source: &'a str) -> Option<&'a str> {
                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                     let name = source[vs as usize..ve as usize].trim();
                     if !name.is_empty() {
-                        return Some(name);
+                        return Some((name, vs));
                     }
                 }
             }
