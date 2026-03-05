@@ -1,4 +1,7 @@
 {
   "name": "e2e-monorepo",
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
 }

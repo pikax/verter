@@ -7,6 +7,7 @@ import * as assert from "assert";
 // ── Environment ────────────────────────────────────────────────
 
 export const FIXTURE_NAME = process.env.VERTER_E2E_FIXTURE || "single-project";
+export const TYPE_PROVIDER = process.env.VERTER_E2E_TYPE_PROVIDER;
 export const LOG_FILE = process.env.VERTER_E2E_LOG_FILE || path.join(os.tmpdir(), "verter-e2e.log");
 export const TIMING_FILE = process.env.VERTER_E2E_TIMING_FILE || path.join(os.tmpdir(), "verter-e2e-timing.json");
 

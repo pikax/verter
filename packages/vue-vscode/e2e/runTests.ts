@@ -4,16 +4,43 @@ import { execSync } from "child_process";
 import { runTests, downloadAndUnzipVSCode } from "@vscode/test-electron";
 import * as os from "os";
 
+/**
+ * Fixture entries: plain name uses auto type provider,
+ * "name@provider" forces a specific type provider (tsserver or tsgo).
+ * Every fixture runs with both providers to ensure full coverage.
+ */
 const FIXTURES = [
-  "single-project",
-  "monorepo",
-  "tsconfig-extends",
-  "tsconfig-references",
-  "path-aliases",
-  "composite-paths",
-  "no-config",
-  "single-file",
+  "single-project@tsserver",
+  "single-project@tsgo",
+  "monorepo@tsserver",
+  "monorepo@tsgo",
+  "tsconfig-extends@tsserver",
+  "tsconfig-extends@tsgo",
+  "tsconfig-references@tsserver",
+  "tsconfig-references@tsgo",
+  "path-aliases@tsserver",
+  "path-aliases@tsgo",
+  "composite-paths@tsserver",
+  "composite-paths@tsgo",
+  "no-config@tsserver",
+  "no-config@tsgo",
+  "single-file@tsserver",
+  "single-file@tsgo",
 ];
+
+/**
+ * Parse a fixture entry into fixture name and optional type provider override.
+ * "composite-paths" → { fixture: "composite-paths", typeProvider: undefined }
+ * "composite-paths@tsgo" → { fixture: "composite-paths", typeProvider: "tsgo" }
+ */
+function parseFixtureEntry(entry: string): { fixture: string; typeProvider?: string } {
+  const atIndex = entry.indexOf("@");
+  if (atIndex === -1) return { fixture: entry };
+  return {
+    fixture: entry.slice(0, atIndex),
+    typeProvider: entry.slice(atIndex + 1),
+  };
+}
 
 /**
  * Find the verter-lsp binary in the monorepo.
@@ -120,7 +147,9 @@ async function main() {
 
   let totalFailures = 0;
 
-  for (const fixture of fixturesToRun) {
+  for (const entry of fixturesToRun) {
+    const { fixture, typeProvider } = parseFixtureEntry(entry);
+    const label = typeProvider ? `${fixture}@${typeProvider}` : fixture;
     const fixtureDir = path.resolve(
       __dirname,
       "../fixtures",
@@ -128,8 +157,9 @@ async function main() {
     );
 
     console.log(`\n${"=".repeat(60)}`);
-    console.log(`Running E2E tests for fixture: ${fixture}`);
+    console.log(`Running E2E tests for fixture: ${label}`);
     console.log(`Workspace: ${fixtureDir}`);
+    if (typeProvider) console.log(`Type provider override: ${typeProvider}`);
     console.log("=".repeat(60));
 
     // Install fixture dependencies if needed (for Vue type resolution)
@@ -154,20 +184,21 @@ async function main() {
           VERTER_E2E_TEST: "1",
           VERTER_E2E_LOG_FILE: path.join(
             os.tmpdir(),
-            `verter-e2e-${fixture}.log`,
+            `verter-e2e-${label}.log`,
           ),
           VERTER_E2E_FIXTURE: fixture,
           VERTER_E2E_TIMING_FILE: path.join(
             os.tmpdir(),
-            `verter-e2e-timing-${fixture}.json`,
+            `verter-e2e-timing-${label}.json`,
           ),
           VERTER_LOG: "debug",
           ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
+          ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
         },
       });
-      console.log(`  PASSED: ${fixture}`);
+      console.log(`  PASSED: ${label}`);
     } catch (err) {
-      console.error(`  FAILED: ${fixture}`, err);
+      console.error(`  FAILED: ${label}`, err);
       totalFailures++;
     }
   }

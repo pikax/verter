@@ -429,6 +429,25 @@ fn resolve_tsconfig_reference(tsconfig_dir: &Path, ref_path: &str) -> Option<Pat
     None
 }
 
+/// Check if a workspace root has a solution-style `tsconfig.json` (non-empty `references` array).
+/// TSGO cannot resolve path aliases from referenced tsconfig files, so this is used by
+/// auto-mode provider selection to prefer tsserver when composite tsconfigs are detected.
+pub fn has_solution_style_tsconfig(workspace_root: &Path) -> bool {
+    let tsconfig = workspace_root.join("tsconfig.json");
+    let content = match std::fs::read_to_string(&tsconfig) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let cleaned = strip_json_comments(&content);
+    let json: serde_json::Value = match serde_json::from_str(&cleaned) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    json.get("references")
+        .and_then(|v| v.as_array())
+        .map_or(false, |refs| !refs.is_empty())
+}
+
 /// Strip single-line (`//`) and multi-line (`/* */`) comments from JSON text.
 /// tsconfig.json supports JSONC (JSON with Comments).
 ///
@@ -2464,6 +2483,75 @@ export default {{
         assert!(
             result.is_none(),
             "noisy output without sentinels should return None (fallback parse fails)"
+        );
+    }
+
+    // =====================================================================
+    // has_solution_style_tsconfig tests
+    // =====================================================================
+
+    #[test]
+    fn has_solution_style_tsconfig_detects_references() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{ "files": [], "references": [{ "path": "./tsconfig.app.json" }] }"#,
+        )
+        .unwrap();
+        assert!(
+            has_solution_style_tsconfig(dir.path()),
+            "should detect solution-style tsconfig with references"
+        );
+    }
+
+    #[test]
+    fn has_solution_style_tsconfig_false_for_flat_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{ "compilerOptions": { "strict": true }, "include": ["src"] }"#,
+        )
+        .unwrap();
+        assert!(
+            !has_solution_style_tsconfig(dir.path()),
+            "flat tsconfig without references should return false"
+        );
+    }
+
+    #[test]
+    fn has_solution_style_tsconfig_false_for_empty_references() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{ "references": [] }"#,
+        )
+        .unwrap();
+        assert!(
+            !has_solution_style_tsconfig(dir.path()),
+            "empty references array should return false"
+        );
+    }
+
+    #[test]
+    fn has_solution_style_tsconfig_false_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            !has_solution_style_tsconfig(dir.path()),
+            "missing tsconfig.json should return false"
+        );
+    }
+
+    #[test]
+    fn has_solution_style_tsconfig_handles_jsonc() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            "{\n  // Solution-style config\n  \"files\": [],\n  \"references\": [{ \"path\": \"./tsconfig.app.json\" }],\n}",
+        )
+        .unwrap();
+        assert!(
+            has_solution_style_tsconfig(dir.path()),
+            "should handle JSONC with comments and trailing commas"
         );
     }
 }

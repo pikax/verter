@@ -107,7 +107,7 @@ pub trait TypeProvider: Send + Sync {
     ///
     /// Called after workspace initialization when tsconfig paths are discovered.
     /// For tsserver, sends updated `compilerOptionsForInferredProjects`.
-    /// For TSGO, this is a no-op (TSGO reads tsconfig directly via rootUri).
+    /// For TSGO, sends `workspace/didChangeConfiguration` (may be ignored by TSGO).
     fn configure_paths(
         &self,
         _base_url: &str,

@@ -1,5 +1,5 @@
 {
-  "name": "e2e-tsconfig-extends",
+  "name": "e2e-no-config",
   "private": true,
   "dependencies": {
     "vue": "^3.5.0"

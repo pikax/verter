@@ -605,7 +605,8 @@ function buildServerOptions(
 ): ServerOptions {
   const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
   const verterConfig = workspace.getConfiguration("verter");
-  const typeProvider = verterConfig.get<string>("typeProvider", "auto");
+  // E2E tests can override the type provider via environment variable
+  const typeProvider = process.env.VERTER_E2E_TYPE_PROVIDER || verterConfig.get<string>("typeProvider", "auto");
   const tsdk = verterConfig.get<string>("typescript.tsdk", "");
 
   const mcpEnabled = verterConfig.get<boolean>("mcp.enabled", true);

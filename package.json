@@ -68,5 +68,11 @@
       "esbuild",
       "keytar"
     ]
-  }
+  },
+  "workspaces": [
+    "packages/*",
+    "packages/native/npm/*",
+    "packages/verter-tsc/npm/*",
+    "docs"
+  ]
 }

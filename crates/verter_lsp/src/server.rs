@@ -2234,14 +2234,16 @@ impl LanguageServer for VerterLanguageServer {
                 .await;
         }
 
-        // Warn about TSGO limitation: re-exported .vue components lose typing
+        // Warn about TSGO limitations
         if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
             self.client
                 .show_message(
                     MessageType::WARNING,
-                    "Verter: TSGO has a known limitation — re-exported .vue components \
-                     (e.g. barrel files) may lose their typing. If you experience missing \
-                     types, switch to tsserver: set verter.typeProvider to \"tsserver\".",
+                    "Verter: TSGO has known limitations — (1) re-exported .vue components \
+                     (e.g. barrel files) may lose their typing; (2) path aliases from \
+                     composite/referenced tsconfig files (e.g. tsconfig.app.json) are not \
+                     resolved. If you experience issues, switch to tsserver: set \
+                     verter.typeProvider to \"tsserver\".",
                 )
                 .await;
         }

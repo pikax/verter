@@ -1675,6 +1675,36 @@ impl TypeProvider for TsgoTypeProvider {
         })
     }
 
+    fn configure_paths(
+        &self,
+        base_url: &str,
+        paths: serde_json::Value,
+    ) -> ProviderFuture<'_, ()> {
+        let transport = Arc::clone(&self.transport);
+        let base_url = base_url.to_string();
+        Box::pin(async move {
+            // Try workspace/didChangeConfiguration — TSGO may honor compiler options
+            // sent this way even though it's not guaranteed by the LSP spec.
+            transport
+                .notify(
+                    "workspace/didChangeConfiguration",
+                    serde_json::json!({
+                        "settings": {
+                            "typescript": {
+                                "tsserver": {
+                                    "compilerOptions": {
+                                        "baseUrl": base_url,
+                                        "paths": paths,
+                                    }
+                                }
+                            }
+                        }
+                    }),
+                )
+                .await
+        })
+    }
+
     fn update_workspace_folders(
         &self,
         added: Vec<serde_json::Value>,

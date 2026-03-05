@@ -110,7 +110,11 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 - `tsserver`: tsserver only
 - `off`: no type provider (verter-only mode)
 
-**TSGO known limitation**: Re-exported `.vue` components (e.g. barrel files like `export { default as MyComp } from './MyComp.vue'`) lose their typing when imported in another SFC. This is why `auto` mode defaults to tsserver. A warning is shown when TSGO is active. Remove the warning once this is resolved.
+**TSGO known limitations**:
+1. Re-exported `.vue` components (e.g. barrel files like `export { default as MyComp } from './MyComp.vue'`) lose their typing when imported in another SFC.
+2. Path aliases from composite/referenced tsconfig files (e.g., `paths` in `tsconfig.app.json` referenced by root `tsconfig.json`) are not resolved. This is a TSGO upstream limitation — TSGO does not follow `references` in solution-style tsconfig setups. Users with composite tsconfigs should use tsserver instead.
+
+This is why `auto` mode defaults to tsserver. A warning is shown when TSGO is active. Remove the warning once these are resolved.
 
 Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/traits.rs`) with 14+ methods (hover, completions, diagnostics, definition, references, rename, etc.). Both are wrapped in a `ResilientTypeProvider` that detects crashes, auto-restarts (max 3 with exponential backoff), and replays the file cache.
 

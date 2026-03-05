@@ -7,6 +7,7 @@ import { execSync } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixture = process.env.E2E_FIXTURE || "single-project";
+const typeProvider = process.env.E2E_TYPE_PROVIDER || "";
 
 /**
  * Find and copy the LSP binary to a temp directory to prevent file locking.
@@ -104,14 +105,15 @@ export default defineConfig({
   launchArgs: ["--disable-extensions"],
   env: {
     VERTER_E2E_TEST: "1",
-    VERTER_E2E_LOG_FILE: path.join(os.tmpdir(), `verter-e2e-${fixture}.log`),
+    VERTER_E2E_LOG_FILE: path.join(os.tmpdir(), `verter-e2e-${fixture}${typeProvider ? `-${typeProvider}` : ""}.log`),
     VERTER_E2E_FIXTURE: fixture,
     VERTER_E2E_TIMING_FILE: path.join(
       os.tmpdir(),
-      `verter-e2e-timing-${fixture}.json`,
+      `verter-e2e-timing-${fixture}${typeProvider ? `-${typeProvider}` : ""}.json`,
     ),
     VERTER_LOG: "debug",
     ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
+    ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
   },
   mocha: {
     ui: "tdd",

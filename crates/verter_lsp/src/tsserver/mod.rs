@@ -37,7 +37,7 @@ pub fn detect_ts_major_version(tsserver_path: &Path) -> Option<u32> {
 ///
 /// Search order:
 /// 1. `<tsdk>/tsserver.js` (from VS Code setting)
-/// 2. `<workspace>/node_modules/typescript/lib/tsserver.js`
+/// 2. `<workspace>/node_modules/typescript/lib/tsserver.js` (+ parent directories)
 /// 3. Global TypeScript via `npm root -g`
 pub fn find_tsserver(tsdk: Option<&str>, workspace_root: Option<&str>) -> Option<PathBuf> {
     // 1. From tsdk setting
@@ -50,11 +50,19 @@ pub fn find_tsserver(tsdk: Option<&str>, workspace_root: Option<&str>) -> Option
         }
     }
 
-    // 2. Workspace node_modules
+    // 2. Workspace node_modules — walk up parent directories
+    // (handles monorepos, pnpm workspaces where TS is hoisted to a parent)
     if let Some(root) = workspace_root {
-        let path = Path::new(root).join("node_modules/typescript/lib/tsserver.js");
-        if path.exists() {
-            return Some(path);
+        let mut dir = Path::new(root);
+        for _ in 0..10 {
+            let path = dir.join("node_modules/typescript/lib/tsserver.js");
+            if path.exists() {
+                return Some(path);
+            }
+            match dir.parent() {
+                Some(parent) if parent != dir => dir = parent,
+                _ => break,
+            }
         }
     }
 

@@ -225,9 +225,22 @@ async fn create_type_provider(
             }
         }
         _ => {
-            // "auto" (default): if TS 5.x/6.x installed, use tsserver; else try TSGO
+            // "auto" (default): if TS 5.x/6.x installed, use tsserver; else try TSGO.
+            // Also prefer tsserver when composite tsconfigs are detected (TSGO upstream
+            // limitation: cannot resolve path aliases from referenced configs).
             let tsserver_path =
                 verter_lsp::tsserver::find_tsserver(args.tsdk.as_deref(), Some(&ws_canonical));
+
+            let has_composite = verter_lsp::config::has_solution_style_tsconfig(
+                std::path::Path::new(&ws_canonical),
+            );
+            if has_composite {
+                tracing::info!(
+                    "auto mode: solution-style tsconfig detected at {} \
+                     (TSGO cannot resolve path aliases from referenced configs)",
+                    ws_canonical
+                );
+            }
 
             if let Some(ref ts_path) = tsserver_path {
                 let ts_major = verter_lsp::tsserver::detect_ts_major_version(ts_path);
@@ -237,15 +250,28 @@ async fn create_type_provider(
                     ts_path.display()
                 );
 
-                if ts_major == Some(5) || ts_major == Some(6) {
-                    // TS 5.x/6.x installed — default to tsserver
+                let prefer_tsserver =
+                    ts_major == Some(5) || ts_major == Some(6) || has_composite;
+
+                if prefer_tsserver {
                     if let Some(tp) = try_spawn_tsserver(args, &ws_canonical, client_cell).await {
                         return (Some(tp), TypeProviderKind::Tsserver, false);
                     }
                 }
+            } else if has_composite {
+                // No local TypeScript found, but composite tsconfigs detected.
+                // Try spawning tsserver anyway — find_node + global TS might work,
+                // and tsserver handles composite configs better than TSGO.
+                tracing::info!(
+                    "auto mode: no local TypeScript found, but composite tsconfig detected — \
+                     attempting tsserver anyway"
+                );
+                if let Some(tp) = try_spawn_tsserver(args, &ws_canonical, client_cell).await {
+                    return (Some(tp), TypeProviderKind::Tsserver, false);
+                }
             }
 
-            // No TS 5/6 found or tsserver failed — try TSGO
+            // No tsserver available or not preferred — try TSGO
             if let Some(tp) = try_spawn_tsgo(&ws_canonical, client_cell).await {
                 return (Some(tp), TypeProviderKind::Tsgo, false);
             }
