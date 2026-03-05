@@ -2575,3 +2575,151 @@ fn prop_in_template_literal_source_map_accuracy() {
         );
     }
 }
+
+// ── v-bind shorthand `:` off-by-one source map tests ────────────
+
+/// v-bind shorthand `:prop="expr"` — the source map token for the prop name
+/// must point to the prop name itself (e.g., `class`), NOT to the `:` prefix.
+///
+/// Previously, `out.overwrite(prop.start, ...)` used `prop.start` which includes
+/// the `:`, making all diagnostics off by 1 column.
+#[test]
+fn v_bind_shorthand_prop_name_source_map_accuracy() {
+    let source = r#"<template><div :class="foo"/></template>"#;
+
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("foo", BindingType::SetupConst)]);
+
+    // Positive: should emit class={foo}
+    assert!(
+        output.contains("class={foo}"),
+        "should convert :class to class={{foo}}: {output}"
+    );
+    // Negative: no raw :class in output
+    assert!(
+        !output.contains(":class"),
+        ":class must be removed from JSX output: {output}"
+    );
+
+    // Source map: the `class` prop name token should map to `class` in source,
+    // not to the `:` that precedes it.
+    let colon_src_col = source.find(":class").unwrap() as u32;
+    let class_src_col = colon_src_col + 1; // `class` starts after `:`
+
+    // Find the generated position of `class` in the output
+    let class_gen_col = output.find("class={").unwrap() as u32;
+
+    // There must be a token mapping generated `class` back to source `class` (not `:`)
+    let has_correct_token = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == class_gen_col && sc == class_src_col);
+    let has_wrong_token = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == class_gen_col && sc == colon_src_col);
+    assert!(
+        has_correct_token,
+        "source map token for `class` should point to source col {} (the `c` in `class`), \
+         not col {} (the `:`). Tokens: {:?}",
+        class_src_col,
+        colon_src_col,
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+    assert!(
+        !has_wrong_token,
+        "source map must NOT map generated `class` to the `:` position (col {}). \
+         Tokens: {:?}",
+        colon_src_col,
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+}
+
+/// Same as above but for a longer prop name to confirm it's not just `class`.
+/// `:title="msg"` — token for `title` should map to `t` not `:`.
+#[test]
+fn v_bind_shorthand_title_source_map_accuracy() {
+    let source = r#"<template><Comp :title="msg"/></template>"#;
+
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("msg", BindingType::SetupConst)]);
+
+    // Positive: should emit title={msg}
+    assert!(
+        output.contains("title={msg}"),
+        "should convert :title to title={{msg}}: {output}"
+    );
+
+    let colon_src_col = source.find(":title").unwrap() as u32;
+    let title_src_col = colon_src_col + 1;
+    let title_gen_col = output.find("title={").unwrap() as u32;
+
+    let has_correct_token = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == title_gen_col && sc == title_src_col);
+    assert!(
+        has_correct_token,
+        "source map token for `title` should point to source col {} (the `t` in `title`), \
+         not col {} (the `:`). Tokens: {:?}",
+        title_src_col,
+        colon_src_col,
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+}
+
+/// v-bind shorthand without value: `:foo` → `foo={foo}`.
+/// The prop name token should map to `foo`, not the `:`.
+#[test]
+fn v_bind_shorthand_no_value_source_map_accuracy() {
+    let source = r#"<template><Comp :foo/></template>"#;
+
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("foo", BindingType::SetupConst)]);
+
+    // Positive: should emit foo={foo}
+    assert!(
+        output.contains("foo={foo}"),
+        "should convert :foo to foo={{foo}}: {output}"
+    );
+
+    let colon_src_col = source.find(":foo").unwrap() as u32;
+    let foo_src_col = colon_src_col + 1;
+    let foo_gen_col = output.find("foo={").unwrap() as u32;
+
+    let has_correct_token = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == foo_gen_col && sc == foo_src_col);
+    assert!(
+        has_correct_token,
+        "source map token for `foo` should point to source col {} (the `f` in `foo`), \
+         not col {} (the `:`). Tokens: {:?}",
+        foo_src_col,
+        colon_src_col,
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+}
+
+/// Long-form `v-bind:prop="expr"` — the prop name token should map to `prop`, not `v`.
+#[test]
+fn v_bind_longform_prop_name_source_map_accuracy() {
+    let source = r#"<template><div v-bind:class="foo"/></template>"#;
+
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("foo", BindingType::SetupConst)]);
+
+    // Positive: should emit class={foo}
+    assert!(
+        output.contains("class={foo}"),
+        "should convert v-bind:class to class={{foo}}: {output}"
+    );
+
+    let vbind_src_col = source.find("v-bind:class").unwrap() as u32;
+    let class_src_col = source.find(":class").unwrap() as u32 + 1; // after `:` in `v-bind:class`
+    let class_gen_col = output.find("class={").unwrap() as u32;
+
+    let has_correct_token = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == class_gen_col && sc == class_src_col);
+    assert!(
+        has_correct_token,
+        "source map token for `class` should point to source col {} (the `c` in `class`), \
+         not col {} (the `v` in `v-bind`). Tokens: {:?}",
+        class_src_col,
+        vbind_src_col,
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+}

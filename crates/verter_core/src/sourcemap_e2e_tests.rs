@@ -520,6 +520,12 @@ fn assert_all_mapped_tokens_match(
             continue;
         }
 
+        // Skip v-bind delimiter transformation: `="` in source → `={` in generated.
+        // This is a legitimate overwrite from split prop name handling.
+        if gen_text.starts_with("={") && vue_text.starts_with("=\"") {
+            continue;
+        }
+
         // Handle .value suffix transformation: TSX adds `.value` to ref bindings
         // e.g., `count.value` in TSX maps to `count` in the SFC
         if gen_text.contains(".value") && !vue_text.contains(".value") {

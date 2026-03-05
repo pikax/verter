@@ -333,7 +333,8 @@ fn process_v_bind<'alloc>(
             let trailing_ws = value_expr.len() - value_expr.trim_end().len();
             let tvs = vs + leading_ws as u32;
             let tve = ve - trailing_ws as u32;
-            out.overwrite(prop.start, tvs, &format!("{}={{", arg_name));
+            out.overwrite(prop.start, arg_start, "");
+            out.overwrite(arg_end, tvs, "={");
             out.overwrite(tve, prop_end, "}");
         } else if let Some(prefix) = final_expr.strip_suffix(trimmed_expr) {
             // Prefix-only change (e.g., "___VERTER___instance." + "$attrs").
@@ -342,15 +343,13 @@ fn process_v_bind<'alloc>(
             let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
             let tvs = vs + leading_ws;
             let tve = ve - trailing_ws;
-            out.overwrite(prop.start, tvs, &format!("{}={{{}", arg_name, prefix));
+            out.overwrite(prop.start, arg_start, "");
+            out.overwrite(arg_end, tvs, &format!("={{{}", prefix));
             out.overwrite(tve, prop_end, "}");
         } else if guarded.is_some() {
             // Guard was injected — the expression was rewritten, can't patch individually
-            out.overwrite(
-                prop.start,
-                prop_end,
-                &format!("{}={{{}}}", arg_name, final_expr),
-            );
+            out.overwrite(prop.start, arg_start, "");
+            out.overwrite(arg_end, prop_end, &format!("={{{}}}", final_expr));
         } else {
             // Patch-based: overwrite only boundaries, apply binding patches individually.
             // This preserves source map tokens for each identifier in the expression,
@@ -359,7 +358,8 @@ fn process_v_bind<'alloc>(
             let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
             let tvs = vs + leading_ws;
             let tve = ve - trailing_ws;
-            out.overwrite(prop.start, tvs, &format!("{}={{", arg_name));
+            out.overwrite(prop.start, arg_start, "");
+            out.overwrite(arg_end, tvs, "={");
             out.overwrite(tve, prop_end, "}");
             if let Some(oxc_p) = oxc_prop {
                 if let Some(ref exp) = oxc_p.exp {
@@ -372,11 +372,8 @@ fn process_v_bind<'alloc>(
     } else {
         // `:foo` shorthand → `foo={ctx.foo}`; `:foo-bar` uses camelCase lookup.
         let resolved = resolver.resolve_simple_expr(&kebab_to_camel_case(arg_name.trim()));
-        out.overwrite(
-            prop.start,
-            prop_end,
-            &format!("{}={{{}}}", arg_name, resolved),
-        );
+        out.overwrite(prop.start, arg_start, "");
+        out.overwrite(arg_end, prop_end, &format!("={{{}}}", resolved));
     }
 }
 

@@ -75,6 +75,61 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on title: ${latencyMs}ms, ${hovers.length} result(s)`);
   });
 
+  test("hover on v-bind shorthand prop name", async function () {
+    // Regression test: v-bind shorthand `:bar="count"` had off-by-1 source map
+    // mapping (prop name mapped to `:` instead of `b` in `bar`).
+    // Verify hover at the prop name returns meaningful type info.
+    const text = doc.getText();
+    const match = text.indexOf(':bar="count"');
+    if (match === -1) {
+      console.log('    :bar="count" not in fixture — pass (N/A)');
+      return;
+    }
+
+    // Hover on "bar" (1 char after ":" to land on the prop name)
+    const pos = doc.positionAt(match + 1);
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+
+    getTimer().recordHover("bar (v-bind prop)", latencyMs);
+    console.log(`    Hover on :bar prop name: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    if (hovers.length > 0) {
+      const content = hovers[0].contents
+        .map((c) => (typeof c === "string" ? c : c.value))
+        .join("\n");
+      console.log(`    Hover content: ${content.slice(0, 120)}`);
+      // With correct source map, hover at "bar" should show prop type info,
+      // not be empty or show info for the ":" character.
+      expect(hovers[0].contents.length, "Hover on v-bind prop name should have content").to.be.greaterThan(0);
+    }
+  });
+
+  test("hover on v-bind shorthand value expression", async function () {
+    // Verify hover at the value expression of a v-bind shorthand works.
+    // `:bar="count"` — hover on "count" should show its type (Ref<number>).
+    const text = doc.getText();
+    const match = text.indexOf(':bar="count"');
+    if (match === -1) {
+      console.log('    :bar="count" not in fixture — pass (N/A)');
+      return;
+    }
+
+    // Hover on "count" (6 chars after `:bar="` which is 6 from match)
+    const pos = doc.positionAt(match + 6);
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+
+    getTimer().recordHover("count (v-bind value)", latencyMs);
+    console.log(`    Hover on :bar value "count": ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    if (hovers.length > 0) {
+      const content = hovers[0].contents
+        .map((c) => (typeof c === "string" ? c : c.value))
+        .join("\n");
+      console.log(`    Hover content: ${content.slice(0, 120)}`);
+      expect(hovers[0].contents.length, "Hover on v-bind value should have content").to.be.greaterThan(0);
+    }
+  });
+
   test("hover on function in template", async function () {
     const text = doc.getText();
     const match = text.indexOf('"increment"');
