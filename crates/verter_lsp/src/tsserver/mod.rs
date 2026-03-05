@@ -35,22 +35,12 @@ pub fn detect_ts_major_version(tsserver_path: &Path) -> Option<u32> {
 
 /// Find the tsserver.js binary path.
 ///
-/// Search order:
-/// 1. `<tsdk>/tsserver.js` (from VS Code setting)
-/// 2. `<workspace>/node_modules/typescript/lib/tsserver.js` (+ parent directories)
+/// Search order (project TypeScript preferred over bundled/global):
+/// 1. `<workspace>/node_modules/typescript/lib/tsserver.js` (+ parent directories)
+/// 2. `<tsdk>/tsserver.js` (from VS Code setting or extension's bundled TypeScript)
 /// 3. Global TypeScript via `npm root -g`
 pub fn find_tsserver(tsdk: Option<&str>, workspace_root: Option<&str>) -> Option<PathBuf> {
-    // 1. From tsdk setting
-    if let Some(tsdk) = tsdk {
-        if !tsdk.is_empty() {
-            let path = Path::new(tsdk).join("tsserver.js");
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    // 2. Workspace node_modules — walk up parent directories
+    // 1. Workspace node_modules — walk up parent directories
     // (handles monorepos, pnpm workspaces where TS is hoisted to a parent)
     if let Some(root) = workspace_root {
         let mut dir = Path::new(root);
@@ -62,6 +52,16 @@ pub fn find_tsserver(tsdk: Option<&str>, workspace_root: Option<&str>) -> Option
             match dir.parent() {
                 Some(parent) if parent != dir => dir = parent,
                 _ => break,
+            }
+        }
+    }
+
+    // 2. From tsdk setting (user-configured or extension's bundled TypeScript)
+    if let Some(tsdk) = tsdk {
+        if !tsdk.is_empty() {
+            let path = Path::new(tsdk).join("tsserver.js");
+            if path.exists() {
+                return Some(path);
             }
         }
     }

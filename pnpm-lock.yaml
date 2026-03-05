@@ -500,6 +500,9 @@ importers:
       '@verter/typescript-plugin':
         specifier: workspace:^
         version: link:../typescript-plugin
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
     devDependencies:
       '@types/chai':
         specifier: ^4.3.19
@@ -549,9 +552,6 @@ importers:
       source-map:
         specifier: ^0.7.6
         version: 0.7.6
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
       vite:
         specifier: ^7.3.1
         version: 7.3.1(@types/node@22.19.13)(jiti@2.6.1)(less@4.5.1)(sass@1.97.3)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)

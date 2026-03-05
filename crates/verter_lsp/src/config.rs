@@ -429,12 +429,36 @@ fn resolve_tsconfig_reference(tsconfig_dir: &Path, ref_path: &str) -> Option<Pat
     None
 }
 
-/// Check if a workspace root has a solution-style `tsconfig.json` (non-empty `references` array).
+/// Check if a workspace has any solution-style `tsconfig.json` (non-empty `references` array).
 /// TSGO cannot resolve path aliases from referenced tsconfig files, so this is used by
 /// auto-mode provider selection to prefer tsserver when composite tsconfigs are detected.
+///
+/// Checks the workspace root first, then scans up to 2 levels of subdirectories
+/// (handles monorepos where tsconfig.json lives in `packages/foo/tsconfig.json`).
 pub fn has_solution_style_tsconfig(workspace_root: &Path) -> bool {
-    let tsconfig = workspace_root.join("tsconfig.json");
-    let content = match std::fs::read_to_string(&tsconfig) {
+    // Check root tsconfig.json
+    if is_solution_style_tsconfig(&workspace_root.join("tsconfig.json")) {
+        return true;
+    }
+
+    // Check subdirectories up to 2 levels deep (monorepo packages)
+    for depth1 in read_subdirs(workspace_root) {
+        if is_solution_style_tsconfig(&depth1.join("tsconfig.json")) {
+            return true;
+        }
+        for depth2 in read_subdirs(&depth1) {
+            if is_solution_style_tsconfig(&depth2.join("tsconfig.json")) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if a single tsconfig.json file is solution-style (has non-empty `references`).
+fn is_solution_style_tsconfig(tsconfig_path: &Path) -> bool {
+    let content = match std::fs::read_to_string(tsconfig_path) {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -446,6 +470,24 @@ pub fn has_solution_style_tsconfig(workspace_root: &Path) -> bool {
     json.get("references")
         .and_then(|v| v.as_array())
         .map_or(false, |refs| !refs.is_empty())
+}
+
+/// Read immediate subdirectories, skipping hidden dirs and node_modules.
+fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().map_or(false, |ft| ft.is_dir()) && {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with('.') && name != "node_modules" && name != "dist"
+            }
+        })
+        .map(|e| e.path())
+        .collect()
 }
 
 /// Strip single-line (`//`) and multi-line (`/* */`) comments from JSON text.
@@ -1707,6 +1749,140 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
+    /// Resolver follows `references` in solution-style tsconfigs to find paths.
+    /// Mirrors nexus-ui monorepo structure: packages/ui/tsconfig.json has references
+    /// to tsconfig.app.json which defines `@/*` path aliases.
+    #[test]
+    fn test_path_resolver_references_solution_style() {
+        let tmp_dir = std::env::temp_dir().join("verter_test_references");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let src_dir = tmp_dir.join("src");
+        let components_dir = src_dir.join("components").join("Overlay");
+        std::fs::create_dir_all(&components_dir).unwrap();
+
+        // Create target files
+        std::fs::write(
+            components_dir.join("index.ts"),
+            "export const Overlay = {}",
+        )
+        .unwrap();
+
+        // tsconfig.app.json — has the actual paths
+        std::fs::write(
+            tmp_dir.join("tsconfig.app.json"),
+            r#"{
+  "compilerOptions": {
+    "composite": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
+}"#,
+        )
+        .unwrap();
+
+        // Root tsconfig.json — solution-style with references only
+        std::fs::write(
+            tmp_dir.join("tsconfig.json"),
+            r#"{
+  "compilerOptions": { "composite": true },
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        // from_tsconfig on the root should follow references and find @/* paths
+        let resolver = TsConfigPathResolver::from_tsconfig(&tmp_dir.join("tsconfig.json"));
+        assert!(
+            !resolver.is_empty(),
+            "resolver should have aliases from referenced tsconfig.app.json"
+        );
+
+        // @/components/Overlay → src/components/Overlay (index.ts)
+        let result = resolver.resolve("@/components/Overlay");
+        assert!(
+            result.is_some(),
+            "should resolve @/components/Overlay through references; aliases: {:?}",
+            resolver.aliases
+        );
+
+        // Negative: non-existent path should not resolve
+        let result2 = resolver.resolve("@/nonexistent/Module");
+        assert!(
+            result2.is_none(),
+            "non-existent module should not resolve"
+        );
+
+        // Negative: bare specifier should not match
+        let result3 = resolver.resolve("motion");
+        assert!(result3.is_none(), "bare specifier should not resolve");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Resolver follows `references` in a monorepo sub-package.
+    /// The workspace root's ProjectRegistry calls from_tsconfig on packages/ui/tsconfig.json
+    /// which has references to tsconfig.app.json.
+    #[test]
+    fn test_path_resolver_monorepo_nested_references() {
+        let tmp_dir = std::env::temp_dir().join("verter_test_mono_refs");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let pkg_ui = tmp_dir.join("packages").join("ui");
+        let src_dir = pkg_ui.join("src").join("components").join("Popup");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        // Create target component
+        std::fs::write(src_dir.join("Popup.vue"), "<template><div/></template>").unwrap();
+
+        // packages/ui/tsconfig.app.json — has @/* paths
+        std::fs::write(
+            pkg_ui.join("tsconfig.app.json"),
+            r#"{
+  "compilerOptions": {
+    "composite": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["src"]
+}"#,
+        )
+        .unwrap();
+
+        // packages/ui/tsconfig.json — solution-style
+        std::fs::write(
+            pkg_ui.join("tsconfig.json"),
+            r#"{
+  "compilerOptions": { "composite": true },
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.vitest.json" }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        // Resolve from the sub-package tsconfig.json
+        let resolver = TsConfigPathResolver::from_tsconfig(&pkg_ui.join("tsconfig.json"));
+        assert!(
+            !resolver.is_empty(),
+            "should find @/* aliases from packages/ui/tsconfig.app.json"
+        );
+
+        let result = resolver.resolve("@/components/Popup/Popup.vue");
+        assert!(
+            result.is_some(),
+            "should resolve @/components/Popup/Popup.vue"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
     /// @ai-generated - Extension guessing resolves .ts files
     #[test]
     fn test_try_resolve_file_extension_guessing() {
@@ -2552,6 +2728,46 @@ export default {{
         assert!(
             has_solution_style_tsconfig(dir.path()),
             "should handle JSONC with comments and trailing commas"
+        );
+    }
+
+    #[test]
+    fn has_solution_style_tsconfig_detects_monorepo_subdirectory() {
+        // Monorepo: root has no tsconfig, but packages/ui/tsconfig.json has references
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        let ui = packages.join("ui");
+        std::fs::create_dir_all(&ui).unwrap();
+        std::fs::write(
+            ui.join("tsconfig.json"),
+            r#"{ "composite": true, "files": [], "references": [{ "path": "./tsconfig.app.json" }] }"#,
+        )
+        .unwrap();
+        assert!(
+            has_solution_style_tsconfig(dir.path()),
+            "should detect solution-style tsconfig in monorepo subdirectory (packages/ui/)"
+        );
+        // Negative: root itself has no tsconfig
+        assert!(
+            !is_solution_style_tsconfig(&dir.path().join("tsconfig.json")),
+            "root tsconfig.json should not exist"
+        );
+    }
+
+    #[test]
+    fn has_solution_style_tsconfig_skips_node_modules() {
+        // node_modules should be skipped even if it contains a solution-style tsconfig
+        let dir = tempfile::tempdir().unwrap();
+        let nm = dir.path().join("node_modules").join("some-pkg");
+        std::fs::create_dir_all(&nm).unwrap();
+        std::fs::write(
+            nm.join("tsconfig.json"),
+            r#"{ "files": [], "references": [{ "path": "./tsconfig.app.json" }] }"#,
+        )
+        .unwrap();
+        assert!(
+            !has_solution_style_tsconfig(dir.path()),
+            "should not scan node_modules"
         );
     }
 }

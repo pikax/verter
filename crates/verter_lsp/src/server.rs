@@ -2040,6 +2040,13 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
         return Ok(());
     }
+
+    // 7a. Request diagnostic refresh — clears stale diagnostics from a previous
+    // session (e.g., TSGO errors that persist after switching to tsserver).
+    if let Err(e) = client.workspace_diagnostic_refresh().await {
+        tracing::debug!("workspace/diagnostic/refresh failed (client may not support it): {e}");
+    }
+
     client
         .send_notification::<VerterReady>(VerterReadyParams { gen: my_gen })
         .await;

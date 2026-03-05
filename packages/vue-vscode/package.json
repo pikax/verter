@@ -37,7 +37,8 @@
     "package:darwin-arm64": "node package.mjs --target darwin-arm64"
   },
   "dependencies": {
-    "@verter/typescript-plugin": "workspace:^"
+    "@verter/typescript-plugin": "workspace:^",
+    "typescript": "^5.9.3"
   },
   "devDependencies": {
     "@types/lodash": "^4.17.24",

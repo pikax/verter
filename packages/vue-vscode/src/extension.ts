@@ -607,7 +607,10 @@ function buildServerOptions(
   const verterConfig = workspace.getConfiguration("verter");
   // E2E tests can override the type provider via environment variable
   const typeProvider = process.env.VERTER_E2E_TYPE_PROVIDER || verterConfig.get<string>("typeProvider", "auto");
-  const tsdk = verterConfig.get<string>("typescript.tsdk", "");
+  const userTsdk = verterConfig.get<string>("typescript.tsdk", "");
+  // Always pass --tsdk: user setting → bundled TypeScript (fallback for pnpm strict mode etc.)
+  const bundledTsdk = join(extensionPath, "node_modules", "typescript", "lib");
+  const tsdk = userTsdk || bundledTsdk;
 
   const mcpEnabled = verterConfig.get<boolean>("mcp.enabled", true);
   const mcpPort = verterConfig.get<number>("mcp.port", 6772);
@@ -615,7 +618,7 @@ function buildServerOptions(
 
   const args: string[] = [];
   args.push(`--type-provider=${typeProvider}`);
-  if (tsdk) args.push(`--tsdk=${tsdk}`);
+  args.push(`--tsdk=${tsdk}`);
   args.push(`--plugin-path=${join(extensionPath, "node_modules")}`);
   if (mcpEnabled) {
     args.push(`--mcp-port=${mcpPort}`);
@@ -623,7 +626,7 @@ function buildServerOptions(
   }
   if (rootPath) args.push(rootPath);
 
-  log?.info(`[buildServerOptions] typeProvider=${typeProvider}, tsdk=${tsdk}, args=${JSON.stringify(args)}`);
+  log?.info(`[buildServerOptions] typeProvider=${typeProvider}, tsdk=${tsdk}${userTsdk ? "" : " (bundled)"}, args=${JSON.stringify(args)}`);
 
   return {
     run: {
