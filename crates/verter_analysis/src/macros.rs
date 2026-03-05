@@ -1,6 +1,7 @@
 use oxc_ast::ast::*;
+use oxc_span::GetSpan;
 
-use crate::types::{AnalyzedMacro, AnalyzedMacroKind};
+use crate::types::{AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField};
 
 /// Classify a callee name as a Vue compiler macro.
 fn classify_macro(name: &str) -> Option<AnalyzedMacroKind> {
@@ -289,6 +290,12 @@ fn try_extract_macro(expr: &Expression<'_>, binding_name: Option<String>) -> Opt
             let has_inherit_attrs_false =
                 kind == AnalyzedMacroKind::DefineOptions && has_inherit_attrs_false_in_args(call);
 
+            let prop_fields = if kind == AnalyzedMacroKind::DefineProps {
+                extract_prop_fields(call)
+            } else {
+                Vec::new()
+            };
+
             Some(AnalyzedMacro {
                 kind,
                 is_type_based,
@@ -296,10 +303,113 @@ fn try_extract_macro(expr: &Expression<'_>, binding_name: Option<String>) -> Opt
                 binding_name,
                 model_name,
                 has_inherit_attrs_false,
+                prop_fields,
                 span: call.span.into(),
             })
         }
         _ => None,
+    }
+}
+
+/// Extract individual prop field names and spans from a `defineProps` call.
+///
+/// Handles:
+/// - Type-based: `defineProps<{ count: number, name: string }>()`
+/// - Runtime object: `defineProps({ count: { type: Number }, name: String })`
+/// - Runtime array: `defineProps(['count', 'name'])`
+fn extract_prop_fields(call: &CallExpression<'_>) -> Vec<AnalyzedPropField> {
+    // Type-based: extract from type parameters
+    if let Some(ref type_args) = call.type_arguments {
+        if let Some(first) = type_args.params.first() {
+            return extract_prop_fields_from_type(first);
+        }
+    }
+
+    // Runtime: extract from first argument
+    if let Some(first_arg) = call.arguments.first() {
+        if let Some(expr) = first_arg.as_expression() {
+            return extract_prop_fields_from_runtime(expr);
+        }
+    }
+
+    Vec::new()
+}
+
+/// Extract prop fields from a TypeScript type parameter (e.g., `{ count: number }`).
+fn extract_prop_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedPropField> {
+    match ts_type {
+        TSType::TSTypeLiteral(literal) => literal
+            .members
+            .iter()
+            .filter_map(|member| {
+                if let TSSignature::TSPropertySignature(prop) = member {
+                    let key_name = match &prop.key {
+                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                        _ => None,
+                    };
+                    key_name.map(|name| AnalyzedPropField {
+                        name,
+                        span: prop.key.span().into(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        TSType::TSTypeReference(_) => {
+            // Interface reference — can't resolve inline, leave empty
+            Vec::new()
+        }
+        TSType::TSIntersectionType(intersection) => {
+            // Merge fields from all branches
+            intersection
+                .types
+                .iter()
+                .flat_map(|t| extract_prop_fields_from_type(t))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Extract prop fields from a runtime argument (object or array).
+fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropField> {
+    match expr {
+        Expression::ObjectExpression(obj) => obj
+            .properties
+            .iter()
+            .filter_map(|prop| {
+                if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                    let key_name = match &p.key {
+                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                        _ => None,
+                    };
+                    key_name.map(|name| AnalyzedPropField {
+                        name,
+                        span: p.key.span().into(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Expression::ArrayExpression(arr) => arr
+            .elements
+            .iter()
+            .filter_map(|elem| {
+                if let ArrayExpressionElement::StringLiteral(lit) = elem {
+                    Some(AnalyzedPropField {
+                        name: lit.value.to_string(),
+                        span: lit.span.into(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -567,5 +677,147 @@ defineExpose({ props })
         // TSTypeQuery (typeof) should collect the referenced identifier
         let refs = parse_type_refs("typeof X");
         assert_eq!(refs, vec!["X".to_string()]);
+    }
+
+    // =========================================================================
+    // Prop field extraction tests
+    // =========================================================================
+
+    #[test]
+    fn prop_fields_type_based_literal() {
+        let code = "defineProps<{ count: number, name: string }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "should extract 2 prop fields: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "count");
+        assert_eq!(fields[1].name, "name");
+        // Verify spans point to prop keys
+        assert_eq!(
+            &code[fields[0].span.start as usize..fields[0].span.end as usize],
+            "count"
+        );
+        assert_eq!(
+            &code[fields[1].span.start as usize..fields[1].span.end as usize],
+            "name"
+        );
+    }
+
+    #[test]
+    fn prop_fields_type_based_with_assignment() {
+        let code = "const props = defineProps<{ msg: string }>()";
+        let macros = parse_macros(code);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        assert_eq!(dp.prop_fields.len(), 1);
+        assert_eq!(dp.prop_fields[0].name, "msg");
+        assert_eq!(
+            &code[dp.prop_fields[0].span.start as usize..dp.prop_fields[0].span.end as usize],
+            "msg"
+        );
+    }
+
+    #[test]
+    fn prop_fields_runtime_object() {
+        let code = "defineProps({ count: { type: Number }, name: String })";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "should extract 2 runtime prop fields: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "count");
+        assert_eq!(fields[1].name, "name");
+        assert_eq!(
+            &code[fields[0].span.start as usize..fields[0].span.end as usize],
+            "count"
+        );
+        assert_eq!(
+            &code[fields[1].span.start as usize..fields[1].span.end as usize],
+            "name"
+        );
+    }
+
+    #[test]
+    fn prop_fields_runtime_array() {
+        let code = "defineProps(['count', 'name'])";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "should extract 2 array prop fields: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "count");
+        assert_eq!(fields[1].name, "name");
+    }
+
+    #[test]
+    fn prop_fields_with_defaults() {
+        let code = "withDefaults(defineProps<{ msg: string, count: number }>(), { msg: 'hi' })";
+        let macros = parse_macros(code);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        assert_eq!(
+            dp.prop_fields.len(),
+            2,
+            "withDefaults inner defineProps should have prop fields: {:?}",
+            dp.prop_fields
+        );
+        assert_eq!(dp.prop_fields[0].name, "msg");
+        assert_eq!(dp.prop_fields[1].name, "count");
+    }
+
+    #[test]
+    fn prop_fields_non_define_props_empty() {
+        let code = "defineEmits<{(e: 'click'): void}>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        assert!(
+            macros[0].prop_fields.is_empty(),
+            "defineEmits should have no prop fields"
+        );
+    }
+
+    #[test]
+    fn prop_fields_type_reference_empty() {
+        // Interface reference — can't resolve inline, prop_fields is empty
+        let code = "defineProps<MyProps>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        assert!(
+            macros[0].prop_fields.is_empty(),
+            "type reference should yield empty prop fields"
+        );
+    }
+
+    #[test]
+    fn prop_fields_intersection_type() {
+        let code = "defineProps<{ a: string } & { b: number }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "intersection should merge fields: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "a");
+        assert_eq!(fields[1].name, "b");
     }
 }

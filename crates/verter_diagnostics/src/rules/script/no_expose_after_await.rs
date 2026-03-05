@@ -69,6 +69,7 @@ mod tests {
             binding_name: None,
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: Span::new(start, end),
         }
     }

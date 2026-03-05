@@ -250,8 +250,7 @@ async fn create_type_provider(
                     ts_path.display()
                 );
 
-                let prefer_tsserver =
-                    ts_major == Some(5) || ts_major == Some(6) || has_composite;
+                let prefer_tsserver = ts_major == Some(5) || ts_major == Some(6) || has_composite;
 
                 if prefer_tsserver {
                     if let Some(tp) = try_spawn_tsserver(args, &ws_canonical, client_cell).await {

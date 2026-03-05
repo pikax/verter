@@ -1761,11 +1761,7 @@ mod tests {
         std::fs::create_dir_all(&components_dir).unwrap();
 
         // Create target files
-        std::fs::write(
-            components_dir.join("index.ts"),
-            "export const Overlay = {}",
-        )
-        .unwrap();
+        std::fs::write(components_dir.join("index.ts"), "export const Overlay = {}").unwrap();
 
         // tsconfig.app.json — has the actual paths
         std::fs::write(
@@ -1813,10 +1809,7 @@ mod tests {
 
         // Negative: non-existent path should not resolve
         let result2 = resolver.resolve("@/nonexistent/Module");
-        assert!(
-            result2.is_none(),
-            "non-existent module should not resolve"
-        );
+        assert!(result2.is_none(), "non-existent module should not resolve");
 
         // Negative: bare specifier should not match
         let result3 = resolver.resolve("motion");
@@ -2697,11 +2690,7 @@ export default {{
     #[test]
     fn has_solution_style_tsconfig_false_for_empty_references() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("tsconfig.json"),
-            r#"{ "references": [] }"#,
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), r#"{ "references": [] }"#).unwrap();
         assert!(
             !has_solution_style_tsconfig(dir.path()),
             "empty references array should return false"

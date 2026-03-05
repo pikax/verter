@@ -702,6 +702,10 @@ fn adjust_analysis_spans(
     for mac in &mut analysis.macros {
         mac.span.start = map(mac.span.start);
         mac.span.end = map(mac.span.end);
+        for pf in &mut mac.prop_fields {
+            pf.span.start = map(pf.span.start);
+            pf.span.end = map(pf.span.end);
+        }
     }
     for call in &mut analysis.vue_api_calls {
         call.span.start = map(call.span.start);

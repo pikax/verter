@@ -196,6 +196,14 @@ pub fn definition_at_position(
                     return span_definition(binding.span.start, binding.span.end, line_index);
                 }
             }
+            // Check individual prop fields from defineProps
+            for mac in &analysis.macros {
+                if let Some(pf) = mac.prop_fields.iter().find(|pf| pf.name == *word) {
+                    if pf.span.start > 0 || pf.span.end > 0 {
+                        return span_definition(pf.span.start, pf.span.end, line_index);
+                    }
+                }
+            }
             // Check macro binding names
             for mac in &analysis.macros {
                 if mac.binding_name.as_ref().is_some_and(|n| n == word)

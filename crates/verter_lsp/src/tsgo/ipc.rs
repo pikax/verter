@@ -1675,11 +1675,7 @@ impl TypeProvider for TsgoTypeProvider {
         })
     }
 
-    fn configure_paths(
-        &self,
-        base_url: &str,
-        paths: serde_json::Value,
-    ) -> ProviderFuture<'_, ()> {
+    fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
         let transport = Arc::clone(&self.transport);
         let base_url = base_url.to_string();
         Box::pin(async move {

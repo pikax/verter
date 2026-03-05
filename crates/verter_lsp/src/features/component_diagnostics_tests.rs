@@ -476,6 +476,7 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
                 binding_name: None,
                 model_name: name.map(|s| s.to_string()),
                 has_inherit_attrs_false: false,
+                prop_fields: vec![],
                 span: verter_span::Span::new(0, 30),
             })
             .collect(),

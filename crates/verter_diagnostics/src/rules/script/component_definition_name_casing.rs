@@ -94,6 +94,7 @@ mod tests {
             binding_name: binding_name.map(|s| s.to_string()),
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: Span::new(10, 50),
         }
     }
@@ -152,6 +153,7 @@ mod tests {
                 binding_name: Some("my-props".to_string()),
                 model_name: None,
                 has_inherit_attrs_false: false,
+                prop_fields: vec![],
                 span: Span::new(10, 50),
             }],
             ..Default::default()

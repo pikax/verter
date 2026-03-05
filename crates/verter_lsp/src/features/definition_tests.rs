@@ -176,6 +176,7 @@ fn test_go_to_macro_binding_from_template() {
             binding_name: Some("props".to_string()),
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );
@@ -1608,6 +1609,7 @@ fn test_go_to_definition_dollar_props() {
             binding_name: Some("props".into()),
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: verter_span::Span::new(define_offset as u32, (define_offset + 30) as u32),
         }],
         template: Some(TemplateAnalysisSnapshot {
@@ -1653,6 +1655,7 @@ fn test_go_to_definition_dollar_emit() {
             binding_name: Some("emit".into()),
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: verter_span::Span::new(define_offset as u32, (define_offset + 22) as u32),
         }],
         template: Some(TemplateAnalysisSnapshot {
@@ -1705,4 +1708,208 @@ fn test_go_to_definition_dollar_props_without_macro() {
         result.is_none(),
         "should return None when no defineProps exists"
     );
+}
+
+// =========================================================================
+// Prop field go-to-definition
+// =========================================================================
+
+/// Ctrl+Click on a prop binding in template navigates to the prop declaration.
+#[test]
+fn definition_prop_field_type_based() {
+    let source = "<template>\n  {{ count }}\n</template>\n\n<script setup lang=\"ts\">\nconst props = defineProps<{ count: number }>()\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Find the span of "count" in the defineProps type parameter
+    // "defineProps<{ count: number }>" — find "count" after the opening brace
+    let define_props_offset = source.find("defineProps").unwrap();
+    let type_count_offset =
+        source[define_props_offset..].find("count").unwrap() + define_props_offset;
+    let type_count_end = type_count_offset + 5;
+
+    let analysis = make_analysis(
+        vec![], // No regular bindings — count is a prop, not a top-level binding
+        vec![],
+        vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: true,
+            type_references: vec![],
+            binding_name: Some("props".to_string()),
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: vec![AnalyzedPropField {
+                name: "count".to_string(),
+                span: verter_span::Span::new(type_count_offset as u32, type_count_end as u32),
+            }],
+            span: verter_span::Span::new(
+                define_props_offset as u32,
+                (define_props_offset + 45) as u32,
+            ),
+        }],
+    );
+
+    // Click on "count" in template
+    let template_count_offset = source.find("count").unwrap();
+    let position = line_index
+        .offset_to_position(template_count_offset as u32)
+        .unwrap();
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+    );
+
+    assert!(result.is_some(), "should navigate to prop declaration");
+
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
+        let expected_start = line_index
+            .offset_to_position(type_count_offset as u32)
+            .unwrap();
+        let expected_end = line_index
+            .offset_to_position(type_count_end as u32)
+            .unwrap();
+        assert_eq!(
+            loc.range.start, expected_start,
+            "should point to count in defineProps type param"
+        );
+        assert_eq!(loc.range.end, expected_end);
+    } else {
+        panic!("expected scalar location");
+    }
+}
+
+/// Ctrl+Click on a prop in template navigates to the runtime prop declaration.
+#[test]
+fn definition_prop_field_runtime() {
+    let source = "<template>\n  {{ name }}\n</template>\n\n<script setup>\ndefineProps({ name: String })\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Find the span of "name" in the defineProps runtime argument
+    let define_props_offset = source.find("defineProps").unwrap();
+    let runtime_name_offset =
+        source[define_props_offset..].find("name").unwrap() + define_props_offset;
+    let runtime_name_end = runtime_name_offset + 4;
+
+    let analysis = make_analysis(
+        vec![],
+        vec![],
+        vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: false,
+            type_references: vec![],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: vec![AnalyzedPropField {
+                name: "name".to_string(),
+                span: verter_span::Span::new(runtime_name_offset as u32, runtime_name_end as u32),
+            }],
+            span: verter_span::Span::new(
+                define_props_offset as u32,
+                (define_props_offset + 28) as u32,
+            ),
+        }],
+    );
+
+    // Click on "name" in template
+    let template_name_offset = source.find("name").unwrap();
+    let position = line_index
+        .offset_to_position(template_name_offset as u32)
+        .unwrap();
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+    );
+
+    assert!(
+        result.is_some(),
+        "should navigate to runtime prop declaration"
+    );
+
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
+        let expected_start = line_index
+            .offset_to_position(runtime_name_offset as u32)
+            .unwrap();
+        assert_eq!(
+            loc.range.start, expected_start,
+            "should point to name in defineProps object"
+        );
+    } else {
+        panic!("expected scalar location");
+    }
+}
+
+/// When both a regular binding and a prop field share a name, the binding wins.
+#[test]
+fn definition_binding_takes_precedence_over_prop_field() {
+    let source = "<template>\n  {{ count }}\n</template>\n\n<script setup lang=\"ts\">\nconst count = ref(0)\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let script_count_offset = source.rfind("count").unwrap() as u32;
+    let script_count_end = script_count_offset + 5;
+
+    let analysis = make_analysis(
+        vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(script_count_offset, script_count_end),
+        }],
+        vec![],
+        vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: true,
+            type_references: vec![],
+            binding_name: Some("props".to_string()),
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: vec![AnalyzedPropField {
+                name: "count".to_string(),
+                span: verter_span::Span::new(100, 105),
+            }],
+            span: verter_span::Span::new(90, 140),
+        }],
+    );
+
+    // Click on "count" in template
+    let template_count_offset = source.find("count").unwrap();
+    let position = line_index
+        .offset_to_position(template_count_offset as u32)
+        .unwrap();
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+    );
+
+    assert!(result.is_some(), "should find definition");
+
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
+        let binding_start = line_index.offset_to_position(script_count_offset).unwrap();
+        assert_eq!(
+            loc.range.start, binding_start,
+            "binding should take precedence over prop field"
+        );
+    } else {
+        panic!("expected scalar location");
+    }
 }

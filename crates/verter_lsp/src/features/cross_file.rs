@@ -222,6 +222,7 @@ mod tests {
                 binding_name: None,
                 model_name: None,
                 has_inherit_attrs_false: false,
+                prop_fields: vec![],
                 span: verter_span::Span::new(24, 60),
             }],
             ..Default::default()
@@ -386,6 +387,7 @@ mod tests {
                 binding_name: None,
                 model_name: None,
                 has_inherit_attrs_false: false,
+                prop_fields: vec![],
                 span: verter_span::Span::new(24, 57), // past the closing `)`
             }],
             ..Default::default()
@@ -415,6 +417,7 @@ mod tests {
                 binding_name: None,
                 model_name: None,
                 has_inherit_attrs_false: false,
+                prop_fields: vec![],
                 span: verter_span::Span::new(15, 35),
             }],
             ..Default::default()

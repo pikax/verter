@@ -616,6 +616,16 @@ pub enum AnalyzedBindingKind {
     Class,
 }
 
+/// An individual prop field from `defineProps`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedPropField {
+    /// Prop name as declared (e.g., `"count"` from `defineProps<{ count: number }>()`).
+    pub name: String,
+    /// SFC-absolute byte span of the prop name in the declaration.
+    pub span: Span,
+}
+
 /// A Vue compiler macro call found in `<script setup>` (e.g., `defineProps`, `defineEmits`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedMacro {
@@ -631,6 +641,9 @@ pub struct AnalyzedMacro {
     pub model_name: Option<String>,
     /// For `defineOptions({ inheritAttrs: false })`: whether `inheritAttrs` is set to `false`.
     pub has_inherit_attrs_false: bool,
+    /// Individual prop fields from `defineProps` (type-based and runtime).
+    /// Each field has the prop name and the SFC-absolute span of the property key.
+    pub prop_fields: Vec<AnalyzedPropField>,
     /// SFC-absolute byte span of the macro call.
     pub span: Span,
 }
@@ -638,7 +651,8 @@ pub struct AnalyzedMacro {
 impl serde::Serialize for AnalyzedMacro {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let count = 7 + usize::from(self.model_name.is_some());
+        let count =
+            7 + usize::from(self.model_name.is_some()) + usize::from(!self.prop_fields.is_empty());
         let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("isTypeBased", &self.is_type_based)?;
@@ -648,6 +662,9 @@ impl serde::Serialize for AnalyzedMacro {
             s.serialize_field("modelName", &self.model_name)?;
         }
         s.serialize_field("hasInheritAttrsFalse", &self.has_inherit_attrs_false)?;
+        if !self.prop_fields.is_empty() {
+            s.serialize_field("propFields", &self.prop_fields)?;
+        }
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
         s.end()
@@ -668,6 +685,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             #[serde(default)]
             has_inherit_attrs_false: bool,
             #[serde(default)]
+            prop_fields: Vec<AnalyzedPropField>,
+            #[serde(default)]
             span_start: u32,
             #[serde(default)]
             span_end: u32,
@@ -680,6 +699,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             binding_name: w.binding_name,
             model_name: w.model_name,
             has_inherit_attrs_false: w.has_inherit_attrs_false,
+            prop_fields: w.prop_fields,
             span: Span::new(w.span_start, w.span_end),
         })
     }

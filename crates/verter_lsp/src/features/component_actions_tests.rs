@@ -92,6 +92,7 @@ fn add_prop_to_type_based_define_props() {
             binding_name: None,
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: verter_span::Span::new(24, 56),
         }],
         ..Default::default()
@@ -222,6 +223,7 @@ fn no_action_for_runtime_based_define_props() {
             binding_name: None,
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: verter_span::Span::new(15, 35),
         }],
         ..Default::default()

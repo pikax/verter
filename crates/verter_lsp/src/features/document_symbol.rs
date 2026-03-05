@@ -540,6 +540,7 @@ mod tests {
                 binding_name: Some("props".to_string()),
                 model_name: None,
                 has_inherit_attrs_false: false,
+                prop_fields: vec![],
                 span: verter_span::Span::new(0, 0),
             }],
         );

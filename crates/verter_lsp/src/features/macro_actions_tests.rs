@@ -128,6 +128,7 @@ fn b1_no_action_when_define_slots_exists() {
             binding_name: None,
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: verter_span::Span::new(24, 42),
         }],
     );
@@ -246,6 +247,7 @@ fn b2_no_action_when_all_emits_declared() {
             binding_name: Some("emit".into()),
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -296,6 +298,7 @@ fn b4_add_missing_emit_to_existing_type_based() {
             binding_name: Some("emit".into()),
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -362,6 +365,7 @@ fn b4_add_missing_emit_to_runtime_array() {
             binding_name: Some("emit".into()),
             model_name: None,
             has_inherit_attrs_false: false,
+            prop_fields: vec![],
             span: verter_span::Span::new(24, 57),
         }],
     );
