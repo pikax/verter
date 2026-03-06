@@ -344,10 +344,21 @@ fn make_element_for_completion(
     // Find the element's span in source for accurate positioning
     let tag_pattern = format!("<{}", tag);
     let span_start = source.find(&tag_pattern).unwrap_or(0) as u32;
-    let span_end = source[span_start as usize..]
+    // Find the end of the opening tag (the '>')
+    let open_tag_end = source[span_start as usize..]
         .find('>')
         .map(|i| span_start + i as u32 + 1)
         .unwrap_or(span_start + 10);
+    // Find the closing tag
+    let close_pattern = format!("</{}>", tag);
+    let close_start = source
+        .find(&close_pattern)
+        .map(|i| i as u32)
+        .unwrap_or(open_tag_end);
+    let span_end = source
+        .find(&close_pattern)
+        .map(|i| i as u32 + close_pattern.len() as u32)
+        .unwrap_or(open_tag_end);
 
     let mut attrs = Vec::new();
     if !classes.is_empty() {
@@ -355,26 +366,31 @@ fn make_element_for_completion(
         let class_pattern = format!("class=\"{}\"", class_val);
         let attr_start = source.find(&class_pattern).unwrap_or(0) as u32;
         let attr_end = attr_start + class_pattern.len() as u32;
+        // value_span is the content inside the quotes
+        let val_start = attr_start + "class=\"".len() as u32;
+        let val_end = val_start + class_val.len() as u32;
         attrs.push(verter_analysis::TemplateAttribute {
             name: "class".into(),
             value: Some(class_val),
             is_dynamic: false,
             span: verter_span::Span::new(attr_start, attr_end),
-            name_end: 0,
-            value_span: None,
+            name_end: attr_start + "class".len() as u32,
+            value_span: Some(verter_span::Span::new(val_start, val_end)),
         });
     }
     if let Some(id_val) = id {
         let id_pattern = format!("id=\"{}\"", id_val);
         let attr_start = source.find(&id_pattern).unwrap_or(0) as u32;
         let attr_end = attr_start + id_pattern.len() as u32;
+        let val_start = attr_start + "id=\"".len() as u32;
+        let val_end = val_start + id_val.len() as u32;
         attrs.push(verter_analysis::TemplateAttribute {
             name: "id".into(),
             value: Some(id_val.into()),
             is_dynamic: false,
             span: verter_span::Span::new(attr_start, attr_end),
-            name_end: 0,
-            value_span: None,
+            name_end: attr_start + "id".len() as u32,
+            value_span: Some(verter_span::Span::new(val_start, val_end)),
         });
     }
     verter_analysis::TemplateElement {
@@ -400,8 +416,8 @@ fn make_element_for_completion(
         parent_index: None,
         dynamic_classes: vec![],
         span: verter_span::Span::new(span_start, span_end),
-        tag_span_end: span_end,
-        content_end: 0,
+        tag_span_end: open_tag_end,
+        content_end: close_start,
         ..Default::default()
     }
 }
@@ -423,8 +439,11 @@ fn test_class_completions_in_dynamic_class() {
         value: Some("{ 'btn': active }".into()),
         is_dynamic: true,
         span: verter_span::Span::new(attr_start, attr_end),
-        name_end: 0,
-        value_span: None,
+        name_end: attr_start + ":class".len() as u32,
+        value_span: Some(verter_span::Span::new(
+            attr_start + ":class=\"".len() as u32,
+            attr_end - 1, // exclude closing quote
+        )),
     });
 
     let analysis = FileAnalysisSnapshot {
@@ -532,7 +551,7 @@ fn test_event_modifier_completions_click() {
     let source = "<template><div @click.></div></template>\n<script setup>\n</script>";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
-    let analysis = make_analysis(vec![], vec![], vec![]);
+    let analysis = make_event_directive_analysis("div", "click", "@click.", &[], source);
 
     // Position after the dot in @click.
     let dot_pos = source.find("@click.").unwrap() + 7;
@@ -578,7 +597,7 @@ fn test_event_modifier_completions_keyup() {
     let source = "<template><input @keyup.></template>\n<script setup>\n</script>";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
-    let analysis = make_analysis(vec![], vec![], vec![]);
+    let analysis = make_event_directive_analysis("input", "keyup", "@keyup.", &[], source);
 
     let dot_pos = source.find("@keyup.").unwrap() + 7;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
@@ -618,7 +637,7 @@ fn test_event_modifier_completions_mouse() {
     let source = "<template><div @mousedown.></div></template>\n<script setup>\n</script>";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
-    let analysis = make_analysis(vec![], vec![], vec![]);
+    let analysis = make_event_directive_analysis("div", "mousedown", "@mousedown.", &[], source);
 
     let dot_pos = source.find("@mousedown.").unwrap() + 11;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
@@ -683,7 +702,8 @@ fn test_event_modifier_completions_chained() {
     let source = "<template><div @click.stop.></div></template>\n<script setup>\n</script>";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
-    let analysis = make_analysis(vec![], vec![], vec![]);
+    let analysis =
+        make_event_directive_analysis("div", "click", "@click.stop.", &["stop"], source);
 
     // Position after the second dot in @click.stop.
     let second_dot = source.find(".stop.").unwrap() + 6;
@@ -708,6 +728,167 @@ fn test_event_modifier_completions_chained() {
         items.iter().any(|i| i.label == "prevent"),
         "should offer 'prevent' as chained modifier"
     );
+}
+
+/// Build an analysis snapshot with a single element that has an event directive.
+/// Used for event modifier completion tests.
+fn make_event_directive_analysis(
+    tag: &str,
+    event_name: &str,
+    raw_name: &str,
+    modifiers: &[&str],
+    source: &str,
+) -> FileAnalysisSnapshot {
+    let tag_pattern = format!("<{}", tag);
+    let span_start = source.find(&tag_pattern).unwrap_or(0) as u32;
+    let open_tag_end = source[span_start as usize..]
+        .find('>')
+        .map(|i| span_start + i as u32 + 1)
+        .unwrap_or(span_start + 10);
+    let close_pattern = format!("</{}>", tag);
+    let close_start = source
+        .find(&close_pattern)
+        .map(|i| i as u32)
+        .unwrap_or(open_tag_end);
+    let span_end = source
+        .find(&close_pattern)
+        .map(|i| i as u32 + close_pattern.len() as u32)
+        .unwrap_or(open_tag_end);
+
+    // Find the directive in source
+    let dir_start = source.find(raw_name).unwrap_or(0) as u32;
+    // Find the end — either next whitespace, >, or end of raw_name text
+    let dir_end_in_src = source[dir_start as usize..]
+        .find(|c: char| c == '>' || c == ' ' || c == '\t' || c == '\n')
+        .map(|i| dir_start + i as u32)
+        .unwrap_or(dir_start + raw_name.len() as u32);
+
+    // Build modifier spans
+    let mut modifier_spans = Vec::new();
+    let mut search_from = dir_start as usize + 1; // skip past '@'
+    // Skip past event name
+    if let Some(dot_pos) = source[search_from..].find('.') {
+        search_from += dot_pos; // at first dot
+    }
+    for m in modifiers {
+        if let Some(pos) = source[search_from..].find(m) {
+            let abs_pos = (search_from + pos) as u32;
+            modifier_spans.push(verter_span::Span::new(abs_pos, abs_pos + m.len() as u32));
+            search_from = search_from + pos + m.len();
+        }
+    }
+
+    let name_end = dir_start + raw_name.split('.').next().unwrap_or(raw_name).len() as u32;
+
+    let dir = verter_analysis::template::TemplateDirective {
+        name: "on".to_string(),
+        raw_name: raw_name.to_string(),
+        argument: Some(event_name.to_string()),
+        modifiers: modifiers.iter().map(|s| s.to_string()).collect(),
+        expression: None,
+        span: verter_span::Span::new(dir_start, dir_end_in_src),
+        name_end,
+        arg_span: None,
+        expression_span: None,
+        modifier_spans,
+    };
+
+    let el = verter_analysis::TemplateElement {
+        tag: tag.to_string(),
+        is_component: false,
+        is_self_closing: false,
+        namespace: verter_analysis::ElementNamespace::Html,
+        attributes: vec![],
+        directives: vec![dir],
+        span: verter_span::Span::new(span_start, span_end),
+        tag_span_end: open_tag_end,
+        content_end: close_start,
+        ..Default::default()
+    };
+
+    FileAnalysisSnapshot {
+        template: Some(verter_analysis::TemplateAnalysisSnapshot {
+            elements: vec![el],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Build an analysis snapshot for v-model modifier tests.
+fn make_vmodel_directive_analysis(
+    tag: &str,
+    modifiers: &[&str],
+    source: &str,
+) -> FileAnalysisSnapshot {
+    let tag_pattern = format!("<{}", tag);
+    let span_start = source.find(&tag_pattern).unwrap_or(0) as u32;
+    let open_tag_end = source[span_start as usize..]
+        .find('>')
+        .map(|i| span_start + i as u32 + 1)
+        .unwrap_or(span_start + 10);
+    let close_pattern = format!("</{}>", tag);
+    let close_start = source
+        .find(&close_pattern)
+        .map(|i| i as u32)
+        .unwrap_or(open_tag_end);
+    let span_end = source
+        .find(&close_pattern)
+        .map(|i| i as u32 + close_pattern.len() as u32)
+        .unwrap_or(open_tag_end);
+
+    let raw_name = "v-model";
+    let dir_start = source.find(raw_name).unwrap_or(0) as u32;
+    let dir_end_in_src = source[dir_start as usize..]
+        .find(|c: char| c == '>' || c == ' ' || c == '\t' || c == '\n' || c == '=')
+        .map(|i| dir_start + i as u32)
+        .unwrap_or(dir_start + raw_name.len() as u32);
+
+    let name_end = dir_start + "v-model".len() as u32;
+
+    let mut modifier_spans = Vec::new();
+    let mut search_from = name_end as usize;
+    for m in modifiers {
+        if let Some(pos) = source[search_from..].find(m) {
+            let abs_pos = (search_from + pos) as u32;
+            modifier_spans.push(verter_span::Span::new(abs_pos, abs_pos + m.len() as u32));
+            search_from = search_from + pos + m.len();
+        }
+    }
+
+    let dir = verter_analysis::template::TemplateDirective {
+        name: "model".to_string(),
+        raw_name: raw_name.to_string(),
+        argument: None,
+        modifiers: modifiers.iter().map(|s| s.to_string()).collect(),
+        expression: None,
+        span: verter_span::Span::new(dir_start, dir_end_in_src),
+        name_end,
+        arg_span: None,
+        expression_span: None,
+        modifier_spans,
+    };
+
+    let el = verter_analysis::TemplateElement {
+        tag: tag.to_string(),
+        is_component: false,
+        is_self_closing: false,
+        namespace: verter_analysis::ElementNamespace::Html,
+        attributes: vec![],
+        directives: vec![dir],
+        span: verter_span::Span::new(span_start, span_end),
+        tag_span_end: open_tag_end,
+        content_end: close_start,
+        ..Default::default()
+    };
+
+    FileAnalysisSnapshot {
+        template: Some(verter_analysis::TemplateAnalysisSnapshot {
+            elements: vec![el],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_analysis::StyleBlockAnalysis {
@@ -1283,8 +1464,19 @@ fn test_attr_value_shows_bindings() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    let analysis = make_analysis_with_template(
-        vec![AnalyzedBinding {
+    // Build proper element with directive data
+    let dir_start = source.find(":foo").unwrap() as u32;
+    let dir_end = source.find(":foo=\"\"").unwrap() as u32 + ":foo=\"\"".len() as u32;
+    let expr_start = dir_start + ":foo=\"".len() as u32; // empty expression between quotes
+    let expr_end = expr_start; // empty
+
+    let el_start = source.find("<div").unwrap() as u32;
+    let el_open_end = source[el_start as usize..].find('>').map(|i| el_start + i as u32 + 1).unwrap();
+    let close_start = source.find("</div>").unwrap() as u32;
+    let el_end = close_start + "</div>".len() as u32;
+
+    let analysis = FileAnalysisSnapshot {
+        bindings: vec![AnalyzedBinding {
             name: "count".to_string(),
             kind: AnalyzedBindingKind::Const,
             is_reactive: true,
@@ -1293,8 +1485,34 @@ fn test_attr_value_shows_bindings() {
             initializer: None,
             span: verter_span::Span::new(0, 0),
         }],
-        vec![],
-    );
+        template: Some(verter_analysis::TemplateAnalysisSnapshot {
+            elements: vec![verter_analysis::TemplateElement {
+                tag: "div".to_string(),
+                is_component: false,
+                is_self_closing: false,
+                namespace: verter_analysis::ElementNamespace::Html,
+                attributes: vec![],
+                directives: vec![verter_analysis::template::TemplateDirective {
+                    name: "bind".to_string(),
+                    raw_name: ":foo".to_string(),
+                    argument: Some("foo".to_string()),
+                    modifiers: vec![],
+                    expression: Some(String::new()),
+                    span: verter_span::Span::new(dir_start, dir_end),
+                    name_end: dir_start + ":foo".len() as u32,
+                    arg_span: None,
+                    expression_span: Some(verter_span::Span::new(expr_start, expr_end)),
+                    modifier_spans: vec![],
+                }],
+                span: verter_span::Span::new(el_start, el_end),
+                tag_span_end: el_open_end,
+                content_end: close_start,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
 
     let cursor = source.find(":foo=\"\"").unwrap() + 6; // between the quotes
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
@@ -1326,7 +1544,7 @@ fn test_vmodel_modifier_completions() {
     let source = "<template><input v-model.></template>\n<script setup>\n</script>";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
-    let analysis = make_analysis(vec![], vec![], vec![]);
+    let analysis = make_vmodel_directive_analysis("input", &[], source);
 
     let dot_pos = source.find("v-model.").unwrap() + 8;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
@@ -1554,4 +1772,209 @@ fn test_script_completions_have_sort_text() {
             item.label
         );
     }
+}
+
+// ── is_member_access_in_tsx tests ──────────────────────────────────────
+
+#[test]
+fn test_member_access_regular_dot() {
+    // `action.` — cursor right after the dot
+    let tsx = "action.";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access after 'action.'"
+    );
+}
+
+#[test]
+fn test_member_access_optional_chaining() {
+    // `action?.` — optional chaining
+    let tsx = "action?.";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect optional chaining after 'action?.'"
+    );
+}
+
+#[test]
+fn test_member_access_after_paren() {
+    // `foo().` — member access after call expression
+    let tsx = "foo().";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access after 'foo().'"
+    );
+}
+
+#[test]
+fn test_member_access_after_bracket() {
+    // `arr[0].` — member access after index
+    let tsx = "arr[0].";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access after 'arr[0].'"
+    );
+}
+
+#[test]
+fn test_member_access_with_trailing_whitespace() {
+    // `foo.  ` — cursor after whitespace following dot
+    let tsx = "foo.  ";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access even with trailing whitespace after dot"
+    );
+}
+
+#[test]
+fn test_member_access_in_mustache_context() {
+    // Simulates TSX output like `{action.}` in template
+    let tsx = "const __r = <div>{action.}</div>";
+    let dot_pos = tsx.find("action.").unwrap() + "action.".len();
+    assert!(
+        is_member_access_in_tsx(tsx, dot_pos as u32),
+        "should detect member access inside JSX expression"
+    );
+}
+
+#[test]
+fn test_member_access_dollar_prefix() {
+    // `$route.` — dollar-prefixed identifier
+    let tsx = "$route.";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access after '$route.'"
+    );
+}
+
+#[test]
+fn test_no_member_access_empty_mustache() {
+    // `{{ }}` — no dot, no member access
+    let tsx = "const __r = <div>{}</div>";
+    let cursor = tsx.find("{}").unwrap() + 1; // inside braces
+    assert!(
+        !is_member_access_in_tsx(tsx, cursor as u32),
+        "should NOT detect member access in empty expression"
+    );
+}
+
+#[test]
+fn test_no_member_access_identifier_only() {
+    // `count` — just a bare identifier
+    let tsx = "count";
+    assert!(
+        !is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should NOT detect member access for bare identifier"
+    );
+}
+
+#[test]
+fn test_no_member_access_at_start() {
+    // offset 0
+    let tsx = ".foo";
+    assert!(
+        !is_member_access_in_tsx(tsx, 0),
+        "should NOT detect member access at offset 0"
+    );
+}
+
+#[test]
+fn test_no_member_access_spread() {
+    // `...foo` — spread operator, not member access
+    // cursor at position 3 (right after `..`) — spread, not member access
+    let tsx = "{..}";
+    assert!(
+        !is_member_access_in_tsx(tsx, 3),
+        "should NOT detect member access for spread-like '..'"
+    );
+}
+
+#[test]
+fn test_no_member_access_leading_dot() {
+    // `.5` — numeric literal starting with dot
+    let tsx = " .5";
+    assert!(
+        !is_member_access_in_tsx(tsx, 2),
+        "should NOT detect member access for leading dot (space before dot)"
+    );
+}
+
+#[test]
+fn test_member_access_underscore_identifier() {
+    let tsx = "_private.";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access after '_private.'"
+    );
+}
+
+#[test]
+fn test_member_access_chained() {
+    // `a.b.` — chained member access, cursor at end
+    let tsx = "a.b.";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access in chained 'a.b.'"
+    );
+}
+
+#[test]
+fn test_member_access_partial_identifier_after_dot() {
+    // `foo.te` — cursor at end, user typed partial member name
+    let tsx = "foo.te";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access in 'foo.te' (partial identifier after dot)"
+    );
+}
+
+#[test]
+fn test_member_access_cursor_mid_identifier() {
+    // `foo.teff` — cursor at position 6 (after 'te', before 'ff')
+    let tsx = "foo.teff";
+    assert!(
+        is_member_access_in_tsx(tsx, 6),
+        "should detect member access at cursor mid-identifier 'foo.te|ff'"
+    );
+}
+
+#[test]
+fn test_member_access_partial_after_optional_chain() {
+    // `foo?.va` — cursor at end
+    let tsx = "foo?.va";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access in 'foo?.va' (partial after optional chain)"
+    );
+}
+
+#[test]
+fn test_member_access_single_char_after_dot() {
+    // `obj.t` — just one char typed after dot
+    let tsx = "obj.t";
+    assert!(
+        is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should detect member access in 'obj.t' (single char after dot)"
+    );
+}
+
+#[test]
+fn test_member_access_in_jsx_partial() {
+    // Simulates `{action.tex}` in JSX with cursor after 'tex'
+    let tsx = "const __r = <div>{action.tex}</div>";
+    let cursor = tsx.find("action.tex").unwrap() + "action.tex".len();
+    assert!(
+        is_member_access_in_tsx(tsx, cursor as u32),
+        "should detect member access inside JSX expression with partial identifier"
+    );
+}
+
+#[test]
+fn test_no_member_access_standalone_identifier_not_dot() {
+    // `foobar` — no dot at all, just identifier chars
+    let tsx = "foobar";
+    assert!(
+        !is_member_access_in_tsx(tsx, tsx.len() as u32),
+        "should NOT detect member access for standalone identifier 'foobar'"
+    );
 }

@@ -1,12 +1,15 @@
 // Phase 2: Completion — template bindings, component names, props from verter_host analysis.
 // Phase 3: Enhanced with typed member access, generic inference from TypeProvider.
+// Phase 4: AST-based cursor context detection via cursor_context module.
 
 use tower_lsp_server::ls_types::*;
 use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::{
-    classify_cursor, parse_opening_tag, SfcBlock, SfcCursorContext,
+use crate::documents::sfc_scanner::{parse_opening_tag, SfcBlock};
+use crate::features::cursor_context::{
+    classify_cursor_context, CursorContext, ExpressionKind, StyleCursorContext,
+    TemplateCursorContext,
 };
 
 /// Result from completion, including an `is_incomplete` flag for re-query behavior.
@@ -15,18 +18,6 @@ pub struct CompletionResult {
     pub is_incomplete: bool,
 }
 
-/// Provide completions at a given position.
-///
-/// Strategy:
-/// 1. Find which SFC block the position is in
-/// 2. For script blocks: offer bindings, imports, Vue APIs
-/// 3. For template blocks:
-///    a. If cursor is inside a class attribute → offer CSS class completions
-///    b. If cursor is inside a component's opening tag → offer component props/events
-///    c. Otherwise → offer all available bindings from script setup
-///
-/// The optional `resolve_component` callback takes an import source (e.g., `./Button.vue`)
-/// and returns that component's analysis snapshot, enabling cross-file prop completions.
 /// A workspace component available for auto-import.
 pub struct WorkspaceComponent {
     /// PascalCase component name (derived from filename).
@@ -35,6 +26,15 @@ pub struct WorkspaceComponent {
     pub import_path: String,
 }
 
+/// Provide completions at a given position using AST-based cursor context detection.
+///
+/// Strategy:
+/// 1. Classify cursor context using TemplateAnalysisSnapshot AST data
+/// 2. Route to appropriate completion provider based on context
+/// 3. For expression contexts, TypeProvider supplements/replaces verter completions
+///
+/// The optional `resolve_component` callback takes an import source (e.g., `./Button.vue`)
+/// and returns that component's analysis snapshot, enabling cross-file prop completions.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn completions_at_position(
     position: &Position,
@@ -48,109 +48,134 @@ pub fn completions_at_position(
 ) -> Option<CompletionResult> {
     let offset = line_index.position_to_offset(position)?;
 
-    // Check SFC structural context BEFORE requiring analysis data.
-    match classify_cursor(offset, blocks) {
-        SfcCursorContext::RootLevel => {
-            return Some(CompletionResult {
-                items: sfc_root_completions(source, blocks),
-                is_incomplete: false,
-            });
-        }
-        SfcCursorContext::OpeningTag { block_index } => {
-            let block = &blocks[block_index];
+    // Classify cursor using AST-based context detection
+    let context = classify_cursor_context(offset, source, blocks, analysis);
+
+    match context {
+        CursorContext::RootLevel => Some(CompletionResult {
+            items: sfc_root_completions(source, blocks),
+            is_incomplete: false,
+        }),
+        CursorContext::BlockOpeningTag { ref tag_name } => {
             // When cursor is inside a `generic`, `attrs`, or `attributes` attribute
             // value on a <script> tag, return None to let the TypeProvider handle
             // completions via sourcemapped TSX positions.
-            if block.tag_name == "script" {
-                let parsed = parse_opening_tag(source, block);
-                let is_in_ts_attr_value = parsed.attrs.iter().any(|a| {
-                    matches!(a.name.as_str(), "generic" | "attrs" | "attributes")
-                        && a.value_start.is_some_and(|vs| offset >= vs)
-                        && a.value_end.is_some_and(|ve| offset <= ve)
-                });
-                if is_in_ts_attr_value {
-                    return None;
-                }
-            }
-            return Some(CompletionResult {
-                items: sfc_attribute_completions(source, &blocks[block_index]),
-                is_incomplete: false,
-            });
-        }
-        SfcCursorContext::ClosingTag { .. } => return None,
-        SfcCursorContext::BlockContent { .. } => {} // fall through
-    }
-
-    let analysis = analysis?;
-    let offset = offset as usize;
-
-    // Determine which block the cursor is in
-    let block = blocks.iter().find(|b| {
-        let (content_start, content_end) = b.content_range();
-        offset >= content_start as usize && offset <= content_end as usize
-    })?;
-
-    match block.tag_name.as_str() {
-        "script" => Some(CompletionResult {
-            items: script_completions(analysis),
-            is_incomplete: false,
-        }),
-        "template" => {
-            // Check if cursor is after an event modifier dot — offer event modifier completions
-            if let Some(result) = event_modifier_completions(offset, source) {
-                return Some(result);
-            }
-            // Check if cursor is after a v-model modifier dot
-            if detect_vmodel_modifier_context(offset, source) {
-                return Some(vmodel_modifier_completions());
-            }
-            // Check if cursor is inside a class attribute — offer CSS class completions
-            if let Some(result) = class_attribute_completions(offset, source, analysis) {
-                return Some(result);
-            }
-            // Check if cursor is inside a component's opening tag — offer prop completions
-            if let Some(items) =
-                component_prop_completions(offset, source, analysis, resolve_component)
-            {
-                return Some(CompletionResult {
-                    items,
-                    is_incomplete: false,
-                });
-            }
-
-            // Context-sensitive template completions
-            match classify_template_cursor(offset, source) {
-                TemplateCursorContext::TagName => {
-                    return Some(CompletionResult {
-                        items: tag_name_completions(analysis, workspace_components, doc_uri),
-                        is_incomplete: false,
+            if tag_name == "script" {
+                if let Some(block) = blocks.iter().find(|b| b.tag_name == "script") {
+                    let parsed = parse_opening_tag(source, block);
+                    let is_in_ts_attr_value = parsed.attrs.iter().any(|a| {
+                        matches!(a.name.as_str(), "generic" | "attrs" | "attributes")
+                            && a.value_start.is_some_and(|vs| offset >= vs)
+                            && a.value_end.is_some_and(|ve| offset <= ve)
                     });
+                    if is_in_ts_attr_value {
+                        return None;
+                    }
                 }
-                TemplateCursorContext::AttributeName => {
-                    return Some(CompletionResult {
-                        items: attribute_name_completions(),
-                        is_incomplete: false,
-                    });
-                }
-                TemplateCursorContext::TextContent => return None,
-                // AttributeValue + MustacheExpr fall through to template_completions()
-                TemplateCursorContext::AttributeValue | TemplateCursorContext::MustacheExpr => {}
             }
-
+            let block = blocks
+                .iter()
+                .find(|b| b.tag_name.as_str() == tag_name.as_str())?;
             Some(CompletionResult {
-                items: template_completions(analysis, workspace_components, doc_uri),
+                items: sfc_attribute_completions(source, block),
                 is_incomplete: false,
             })
         }
-        "style" => {
-            crate::css::css_completions(position, source, blocks, Some(analysis), line_index).map(
+        CursorContext::BlockClosingTag => None,
+        CursorContext::Script => {
+            let analysis = analysis?;
+            Some(CompletionResult {
+                items: script_completions(analysis),
+                is_incomplete: false,
+            })
+        }
+        CursorContext::Style(StyleCursorContext::VBind) => {
+            // Style v-bind: offer reactive bindings via css completions
+            crate::css::css_completions(position, source, blocks, analysis, line_index).map(
                 |items| CompletionResult {
                     items,
                     is_incomplete: false,
                 },
             )
         }
-        _ => None,
+        CursorContext::Style(StyleCursorContext::General) => {
+            crate::css::css_completions(position, source, blocks, analysis, line_index).map(
+                |items| CompletionResult {
+                    items,
+                    is_incomplete: false,
+                },
+            )
+        }
+        CursorContext::CustomBlock { .. } => None,
+        CursorContext::Template(tc) => {
+            let analysis = analysis?;
+            match tc {
+                TemplateCursorContext::TagName { .. } => Some(CompletionResult {
+                    items: tag_name_completions(analysis, workspace_components, doc_uri),
+                    is_incomplete: false,
+                }),
+                TemplateCursorContext::ClosingTagName { .. } => None,
+                TemplateCursorContext::AttributeName {
+                    tag_name: _,
+                    is_component,
+                    ..
+                } => {
+                    // For components, try to offer prop/event completions
+                    if is_component {
+                        let comp_offset = offset as usize;
+                        if let Some(items) = component_prop_completions(
+                            comp_offset,
+                            source,
+                            analysis,
+                            resolve_component,
+                        ) {
+                            return Some(CompletionResult {
+                                items,
+                                is_incomplete: false,
+                            });
+                        }
+                    }
+                    Some(CompletionResult {
+                        items: attribute_name_completions(),
+                        is_incomplete: false,
+                    })
+                }
+                TemplateCursorContext::EventModifier { ref event_name, .. } => {
+                    Some(event_modifier_completions_for(event_name))
+                }
+                TemplateCursorContext::VModelModifier { .. } => Some(vmodel_modifier_completions()),
+                TemplateCursorContext::DirectiveArgument { .. } => None,
+                TemplateCursorContext::Expression { ref kind } => {
+                    // Check if class attribute expression — offer CSS class completions
+                    if matches!(
+                        kind,
+                        ExpressionKind::Prop { ref prop_name } if prop_name == "class"
+                    ) {
+                        if let Some(result) =
+                            class_attribute_completions(offset as usize, source, analysis)
+                        {
+                            return Some(result);
+                        }
+                    }
+                    Some(CompletionResult {
+                        items: template_completions(analysis, workspace_components, doc_uri),
+                        is_incomplete: false,
+                    })
+                }
+                TemplateCursorContext::Interpolation => Some(CompletionResult {
+                    items: template_completions(analysis, workspace_components, doc_uri),
+                    is_incomplete: false,
+                }),
+                TemplateCursorContext::StaticValue { ref attr_name } => {
+                    if attr_name == "class" {
+                        class_attribute_completions(offset as usize, source, analysis)
+                    } else {
+                        None
+                    }
+                }
+                TemplateCursorContext::TextContent => None,
+            }
+        }
     }
 }
 
@@ -334,119 +359,6 @@ fn attr_item(name: &str, value_snippet: Option<&str>, detail: &str) -> Completio
         insert_text_format: Some(format),
         ..Default::default()
     }
-}
-
-// =============================================================================
-// Template Cursor Context Classification
-// =============================================================================
-
-/// Classify the cursor position within a template block to determine what kind
-/// of completions to offer.
-#[derive(Debug, PartialEq)]
-enum TemplateCursorContext {
-    /// Cursor is in tag name position: `<|` or `<div|`
-    TagName,
-    /// Cursor is in attribute name position: `<div |` or `<div cl|`
-    AttributeName,
-    /// Cursor is inside an attribute value: `<div :prop="|"`
-    AttributeValue,
-    /// Cursor is inside a mustache expression: `{{ | }}`
-    MustacheExpr,
-    /// Cursor is in plain text content: `<div>text|</div>`
-    TextContent,
-}
-
-/// Classify the template cursor context by scanning backward from the cursor position.
-///
-/// This is a lightweight text-based scanner that works on raw SFC source — no AST needed.
-fn classify_template_cursor(offset: usize, source: &str) -> TemplateCursorContext {
-    let bytes = source.as_bytes();
-    if offset > bytes.len() {
-        return TemplateCursorContext::TextContent;
-    }
-
-    // Check for mustache context: find `{{` before `}}` scanning backward
-    {
-        let before = &source[..offset];
-        let last_open = before.rfind("{{");
-        let last_close = before.rfind("}}");
-        if let Some(open_pos) = last_open {
-            // If {{ is more recent than }} (or no }}), we're inside mustache
-            if last_close.is_none_or(|close_pos| open_pos > close_pos) {
-                return TemplateCursorContext::MustacheExpr;
-            }
-        }
-    }
-
-    // Scan backward to determine if we're inside a tag or in text content
-    let mut i = offset;
-    while i > 0 {
-        i -= 1;
-        match bytes[i] {
-            b'>' => {
-                // We hit a closing `>` before any `<` — we're in text content
-                return TemplateCursorContext::TextContent;
-            }
-            b'<' => {
-                // We're inside a tag. Now determine if tag name or attribute position.
-                let tag_start = i + 1;
-                if tag_start < bytes.len() && bytes[tag_start] == b'/' {
-                    // Closing tag — no completions
-                    return TemplateCursorContext::TextContent;
-                }
-
-                // Skip past tag name
-                let mut name_end = tag_start;
-                while name_end < bytes.len()
-                    && (bytes[name_end].is_ascii_alphanumeric()
-                        || bytes[name_end] == b'-'
-                        || bytes[name_end] == b'_')
-                {
-                    name_end += 1;
-                }
-
-                if offset <= name_end {
-                    // Cursor is on the tag name itself
-                    return TemplateCursorContext::TagName;
-                }
-
-                // Cursor is past the tag name — check if inside an attribute value
-                // Scan forward from tag name end to cursor looking for unclosed quotes
-                let mut j = name_end;
-                let mut in_quote: Option<u8> = None;
-                let mut after_eq = false;
-                while j < offset {
-                    match bytes[j] {
-                        b'"' | b'\'' if in_quote == Some(bytes[j]) => {
-                            in_quote = None;
-                            after_eq = false;
-                        }
-                        b'"' | b'\'' if in_quote.is_none() && after_eq => {
-                            in_quote = Some(bytes[j]);
-                        }
-                        b'=' if in_quote.is_none() => {
-                            after_eq = true;
-                        }
-                        b' ' | b'\t' | b'\n' | b'\r' if in_quote.is_none() => {
-                            after_eq = false;
-                        }
-                        _ => {}
-                    }
-                    j += 1;
-                }
-
-                return if in_quote.is_some() {
-                    TemplateCursorContext::AttributeValue
-                } else {
-                    TemplateCursorContext::AttributeName
-                };
-            }
-            _ => {}
-        }
-    }
-
-    // Reached start of source without finding `<` or `>` — text content
-    TemplateCursorContext::TextContent
 }
 
 // =============================================================================
@@ -735,52 +647,6 @@ const VMODEL_MODIFIERS: &[(&str, &str)] = &[
     ("number", "Typecast input value to number"),
     ("trim", "Trim whitespace from input"),
 ];
-
-/// Detect v-model modifier context (`v-model.` or `v-model:name.`)
-fn detect_vmodel_modifier_context(offset: usize, source: &str) -> bool {
-    let bytes = source.as_bytes();
-    if offset == 0 || offset > bytes.len() {
-        return false;
-    }
-
-    // Scan backward to find a dot, then check for v-model
-    let mut i = offset;
-    loop {
-        if i == 0 {
-            return false;
-        }
-        i -= 1;
-        match bytes[i] {
-            b'.' => break,
-            b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'<' | b'>' | b'=' => return false,
-            _ => {}
-        }
-    }
-
-    // Walk back through any chained modifiers to find v-model
-    let mut word_end = i;
-    loop {
-        let mut j = word_end;
-        while j > 0
-            && (bytes[j - 1].is_ascii_alphanumeric()
-                || bytes[j - 1] == b'-'
-                || bytes[j - 1] == b'_'
-                || bytes[j - 1] == b':')
-        {
-            j -= 1;
-        }
-
-        let word = &source[j..word_end];
-        if word.starts_with("v-model") {
-            return true;
-        }
-
-        if j == 0 || bytes[j - 1] != b'.' {
-            return false;
-        }
-        word_end = j - 1;
-    }
-}
 
 /// Provide v-model modifier completions.
 fn vmodel_modifier_completions() -> CompletionResult {
@@ -1145,66 +1011,9 @@ const MOUSE_BUTTON_MODIFIERS: &[(&str, &str)] = &[
     ("middle", "Middle mouse button"),
 ];
 
-/// Detect if cursor is in an event modifier context (`@event.` or `@event.stop.`)
-/// and return the event name if so. Scans backward from cursor.
-fn detect_event_modifier_context(offset: usize, source: &str) -> Option<&str> {
-    let bytes = source.as_bytes();
-    if offset == 0 || offset > bytes.len() {
-        return None;
-    }
-
-    // Scan backward from cursor to find a dot, tracking what we pass over
-    let mut i = offset;
-    loop {
-        if i == 0 {
-            return None;
-        }
-        i -= 1;
-        match bytes[i] {
-            b'.' => break, // found a dot
-            // Hit whitespace, quotes, angle brackets, or equals — not a modifier context
-            b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'<' | b'>' | b'=' => return None,
-            _ => {}
-        }
-    }
-
-    // Found a dot at position `i`. Now scan backward for more dots or the event name.
-    // Walk back through any modifier.modifier chain to find the @event
-    let mut event_end = i; // end of event name or modifier
-    loop {
-        // Extract the word before this dot (the modifier or event name)
-        let mut j = event_end;
-        while j > 0
-            && (bytes[j - 1].is_ascii_alphanumeric()
-                || bytes[j - 1] == b'-'
-                || bytes[j - 1] == b'_')
-        {
-            j -= 1;
-        }
-
-        if j == 0 {
-            return None;
-        }
-
-        // Check what's before this word
-        match bytes[j - 1] {
-            b'@' => {
-                // Found `@eventname` — return the event name
-                return Some(&source[j..event_end]);
-            }
-            b'.' => {
-                // Another dot — continue scanning backward (chained modifiers)
-                event_end = j - 1;
-            }
-            _ => return None,
-        }
-    }
-}
-
-/// Provide event modifier completions when cursor is after `@event.` in a template.
-fn event_modifier_completions(offset: usize, source: &str) -> Option<CompletionResult> {
-    let event_name = detect_event_modifier_context(offset, source)?;
-
+/// Provide event modifier completions for a given event name.
+/// The event name is determined by the cursor context module.
+fn event_modifier_completions_for(event_name: &str) -> CompletionResult {
     let is_keyboard = event_name.starts_with("key");
     let is_mouse_button = matches!(
         event_name,
@@ -1261,10 +1070,10 @@ fn event_modifier_completions(offset: usize, source: &str) -> Option<CompletionR
         }
     }
 
-    Some(CompletionResult {
+    CompletionResult {
         items,
         is_incomplete: false,
-    })
+    }
 }
 
 // =============================================================================
@@ -1505,6 +1314,54 @@ fn macro_kind_label(kind: &verter_analysis::AnalyzedMacroKind) -> &'static str {
         verter_analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
         verter_analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
         verter_analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
+    }
+}
+
+/// Returns `true` when the cursor in compiled TSX is in a member access context —
+/// either right after a `.`/`?.` or partway through typing an identifier after one
+/// (e.g. `foo.`, `foo.te`, `foo?.va`). When true, only the TypeProvider should
+/// supply completions (property/method members), not Verter's global bindings.
+///
+/// `tsx_offset` is the byte offset in `tsx_content` where the cursor maps to.
+#[cfg(test)]
+pub(crate) fn is_member_access_in_tsx(tsx_content: &str, tsx_offset: u32) -> bool {
+    if tsx_offset == 0 {
+        return false;
+    }
+    let bytes = tsx_content.as_bytes();
+    let len = bytes.len();
+    let mut i = tsx_offset as usize;
+    if i > len {
+        return false;
+    }
+    // Skip backward past any partial identifier the user is typing (e.g. `foo.te|`)
+    while i > 0
+        && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b'$')
+    {
+        i -= 1;
+    }
+    // Skip whitespace between dot and identifier (rare but possible)
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 || bytes[i - 1] != b'.' {
+        return false;
+    }
+    // We found a '.'. Check for `..` (spread) — not member access.
+    if i >= 2 && bytes[i - 2] == b'.' {
+        return false;
+    }
+    i -= 1; // now pointing at the '.'
+    // Check for optional chaining `?.`
+    if i > 0 && bytes[i - 1] == b'?' {
+        return true;
+    }
+    // The char before `.` must be an identifier char, `)`, or `]`
+    if i > 0 {
+        let c = bytes[i - 1];
+        c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c == b')' || c == b']'
+    } else {
+        false
     }
 }
 

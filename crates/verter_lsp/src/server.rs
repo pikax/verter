@@ -16,6 +16,10 @@ use crate::features::call_hierarchy;
 use crate::features::code_lens::code_lenses;
 use crate::features::color_info;
 use crate::features::completion::completions_at_position;
+use crate::features::cursor_context::{
+    classify_cursor_context, classify_expression_context_with_trigger, CursorContext,
+    ExpressionContext, TemplateCursorContext,
+};
 use crate::features::definition::definition_at_position;
 use crate::features::diagnostics::map_diagnostics;
 use crate::features::document_highlight::highlights_at_position;
@@ -3272,6 +3276,42 @@ impl LanguageServer for VerterLanguageServer {
                         position.character,
                     );
                 }
+                // Detect expression context (Layer 1) and expression sub-context (Layer 2)
+                // to determine whether verter completions should be suppressed.
+                // In member access, literal, type position, or property key contexts,
+                // only TypeProvider results are relevant.
+                let in_expression_context = (|| {
+                    let doc = self.documents.get(uri)?;
+                    let analysis = self.documents.get_analysis(uri);
+                    let blocks = scan_sfc_blocks(&doc.source);
+                    let offset = doc.line_index.position_to_offset(position)?;
+                    let context =
+                        classify_cursor_context(offset, &doc.source, &blocks, analysis.as_ref());
+                    Some(matches!(
+                        context,
+                        CursorContext::Template(
+                            TemplateCursorContext::Expression { .. }
+                                | TemplateCursorContext::Interpolation
+                        )
+                    ))
+                })()
+                .unwrap_or(false);
+                let suppress_verter = in_expression_context
+                    && tsx_offset
+                        .map(|off| {
+                            matches!(
+                                classify_expression_context_with_trigger(
+                                    &ctx.tsx_content,
+                                    off as usize,
+                                    trigger_character,
+                                ),
+                                ExpressionContext::MemberAccess
+                                    | ExpressionContext::Literal
+                                    | ExpressionContext::TypePosition
+                                    | ExpressionContext::PropertyKey
+                            )
+                        })
+                        .unwrap_or(false);
                 if let Some(tsx_offset) = tsx_offset {
                     // Check if a newer completion request has arrived. If so, skip
                     // the expensive type provider call and return verter-only results.
@@ -3309,7 +3349,11 @@ impl LanguageServer for VerterLanguageServer {
                                 type_result.is_incomplete
                             );
                             let (merged, is_incomplete) = merge::merge_completions(
-                                verter_items.unwrap_or_default(),
+                                if suppress_verter {
+                                    Vec::new()
+                                } else {
+                                    verter_items.unwrap_or_default()
+                                },
                                 type_result,
                                 &ctx.mapper,
                                 &ctx.tsx_line_index,

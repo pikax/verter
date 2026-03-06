@@ -16,6 +16,10 @@ verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_span = { path = "../verter_span" }
 verter_mcp = { path = "../verter_mcp" }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
 oxc_sourcemap = "6.0.2"
 tower-lsp-server = "0.23"
 rmcp = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }

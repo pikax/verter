@@ -4,6 +4,7 @@ pub mod call_hierarchy;
 pub mod code_lens;
 pub mod color_info;
 pub mod completion;
+pub mod cursor_context;
 pub mod component_actions;
 pub mod component_diagnostics;
 pub mod cross_file;
