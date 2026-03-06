@@ -174,7 +174,8 @@ fn test_script_block_content() {
 
 #[test]
 fn test_style_block_general() {
-    let source = "<template><div></div></template>\n<style scoped>\n.foo { color: red; }\n</style>\n";
+    let source =
+        "<template><div></div></template>\n<style scoped>\n.foo { color: red; }\n</style>\n";
     let blocks = scan_sfc_blocks(source);
     let analysis = empty_analysis();
 
@@ -249,7 +250,9 @@ fn test_template_tag_name() {
     let blocks = scan_sfc_blocks(source);
 
     let mut template = empty_template();
-    template.elements.push(make_element("div", (10, 20), 14, 15));
+    template
+        .elements
+        .push(make_element("div", (10, 20), 14, 15));
 
     let analysis = analysis_with_template(template);
 
@@ -273,7 +276,9 @@ fn test_template_closing_tag_name() {
     let blocks = scan_sfc_blocks(source);
 
     let mut template = empty_template();
-    template.elements.push(make_element("div", (10, 20), 14, 15));
+    template
+        .elements
+        .push(make_element("div", (10, 20), 14, 15));
 
     let analysis = analysis_with_template(template);
 
@@ -302,8 +307,7 @@ fn test_template_attribute_name_html() {
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 31), 25, 25);
-    el.attributes
-        .push(make_attr("class", (15, 24), 20));
+    el.attributes.push(make_attr("class", (15, 24), 20));
     template.elements.push(el);
 
     let analysis = analysis_with_template(template);
@@ -327,8 +331,7 @@ fn test_template_attribute_name_gap() {
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 33), 27, 27);
-    el.attributes
-        .push(make_attr("class", (15, 24), 20));
+    el.attributes.push(make_attr("class", (15, 24), 20));
     template.elements.push(el);
 
     let analysis = analysis_with_template(template);
@@ -541,11 +544,10 @@ fn test_interpolation() {
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 31), 14, 25);
-    el.text_children
-        .push(TemplateTextSegment::Interpolation {
-            span: Span::new(15, 25),
-            expression_span: Span::new(18, 23),
-        });
+    el.text_children.push(TemplateTextSegment::Interpolation {
+        span: Span::new(15, 25),
+        expression_span: Span::new(18, 23),
+    });
     template.elements.push(el);
 
     let analysis = analysis_with_template(template);
@@ -633,10 +635,8 @@ fn test_attribute_name_existing_attrs() {
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 43), 36, 36);
-    el.attributes
-        .push(make_attr("class", (15, 24), 20));
-    el.attributes
-        .push(make_attr("id", (26, 33), 28));
+    el.attributes.push(make_attr("class", (15, 24), 20));
+    el.attributes.push(make_attr("id", (26, 33), 28));
     template.elements.push(el);
 
     let analysis = analysis_with_template(template);
@@ -656,7 +656,10 @@ fn test_attribute_name_existing_attrs() {
                 "existing_attrs should contain 'id'"
             );
         }
-        other => panic!("expected AttributeName with existing_attrs, got: {:?}", other),
+        other => panic!(
+            "expected AttributeName with existing_attrs, got: {:?}",
+            other
+        ),
     }
 }
 

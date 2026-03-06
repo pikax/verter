@@ -98,14 +98,13 @@ pub fn completions_at_position(
                 },
             )
         }
-        CursorContext::Style(StyleCursorContext::General) => {
-            crate::css::css_completions(position, source, blocks, analysis, line_index).map(
-                |items| CompletionResult {
-                    items,
-                    is_incomplete: false,
-                },
-            )
-        }
+        CursorContext::Style(StyleCursorContext::General) => crate::css::css_completions(
+            position, source, blocks, analysis, line_index,
+        )
+        .map(|items| CompletionResult {
+            items,
+            is_incomplete: false,
+        }),
         CursorContext::CustomBlock { .. } => None,
         CursorContext::Template(tc) => {
             let analysis = analysis?;
@@ -1352,7 +1351,7 @@ pub(crate) fn is_member_access_in_tsx(tsx_content: &str, tsx_offset: u32) -> boo
         return false;
     }
     i -= 1; // now pointing at the '.'
-    // Check for optional chaining `?.`
+            // Check for optional chaining `?.`
     if i > 0 && bytes[i - 1] == b'?' {
         return true;
     }

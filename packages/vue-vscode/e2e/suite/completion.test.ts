@@ -316,4 +316,73 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       ).to.not.equal(vscode.CompletionItemKind.Text);
     }
   });
+
+  test("C13: props member access in interpolation", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // Position after "props." in {{ props.title }}
+    const pos = findPosition(doc, "props.title", 6); // on "t" after "props."
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+    const items = completions!.items;
+    const labels = items.map((i) => i.label);
+    console.log(
+      `    props member: ${items.length} items, first: ${labels.slice(0, 10).join(", ")}`,
+    );
+
+    // POSITIVE: prop members present
+    expect(labels, "should include 'title'").to.include("title");
+
+    // NEGATIVE: no Vue-attr transformations in expression context
+    expect(
+      labels.filter((l) => l.startsWith("@")).length,
+      "no @-prefixed items in expression context",
+    ).to.equal(0);
+    expect(items.length, "member completions, not global").to.be.lessThan(50);
+  });
+
+  test("C14: v-for scoped variable member access has no attr transforms", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // Position after "action." in :disabled="action.disabled"
+    const pos = findPosition(doc, "action.disabled", 7); // on "d" after dot
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+    const items = completions!.items;
+    const labels = items.map((i) => i.label);
+    console.log(
+      `    v-for member attr: ${items.length} items, first: ${labels.slice(0, 10).join(", ")}`,
+    );
+
+    // POSITIVE: Action properties present
+    expect(labels, "should include 'disabled'").to.include("disabled");
+    expect(labels, "should include 'label'").to.include("label");
+    expect(labels, "should include 'handler'").to.include("handler");
+
+    // NEGATIVE: no Vue-attr transformations (no kebab-case, no @-prefix)
+    expect(
+      labels.filter((l) => l.startsWith("@")).length,
+      "no @-prefixed items in expression context",
+    ).to.equal(0);
+    expect(
+      labels.filter((l) => l.includes("-")).length,
+      "no kebab-case transformations in expression context",
+    ).to.equal(0);
+  });
 });

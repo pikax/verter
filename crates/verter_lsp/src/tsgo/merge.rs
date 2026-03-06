@@ -2872,4 +2872,86 @@ mod tests {
             "modelValue should be transformed to model-value"
         );
     }
+
+    #[test]
+    fn merge_expression_context_does_not_transform_jsx() {
+        // When template_attr_context=false (expression context like {{ props. }}),
+        // JSX prop names should NOT be transformed to Vue syntax.
+        let type_result = CompletionResult {
+            items: vec![
+                Completion {
+                    label: "onClick".to_string(),
+                    kind: Some(CompletionKind::Property),
+                    detail: None,
+                    documentation: None,
+                    sort_text: None,
+                    insert_text: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    data: None,
+                },
+                Completion {
+                    label: "modelValue".to_string(),
+                    kind: Some(CompletionKind::Property),
+                    detail: None,
+                    documentation: None,
+                    sort_text: None,
+                    insert_text: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    data: None,
+                },
+                Completion {
+                    label: "title".to_string(),
+                    kind: Some(CompletionKind::Property),
+                    detail: None,
+                    documentation: None,
+                    sort_text: None,
+                    insert_text: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    data: None,
+                },
+            ],
+            is_incomplete: false,
+        };
+
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let (items, _) = merge_completions(
+            vec![],
+            type_result,
+            &mapper,
+            &tsx_li,
+            &vue_li,
+            None,
+            false, // NOT in template attr context — expression context
+        );
+
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+        // POSITIVE: labels should remain as-is
+        assert!(
+            labels.contains(&"onClick"),
+            "onClick should remain as-is, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"modelValue"),
+            "modelValue should remain as-is, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"title"),
+            "title should remain as-is, got: {labels:?}"
+        );
+
+        // NEGATIVE: no Vue-transformed labels
+        assert!(
+            !labels.iter().any(|l| l.starts_with('@')),
+            "no @-prefixed items in expression context, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"model-value"),
+            "no kebab-case transformation in expression context, got: {labels:?}"
+        );
+    }
 }

@@ -3225,19 +3225,25 @@ impl LanguageServer for VerterLanguageServer {
             .unwrap_or(false);
         let verter_items = verter_result.map(|r| r.items);
 
-        // Determine if cursor is in a template block (for JSX→Vue transformation)
-        let in_template = (|| {
+        // Compute cursor context once — derive attribute vs expression context
+        let (is_template_attr_context, in_expression_context) = (|| {
             let doc = self.documents.get(uri)?;
+            let analysis = self.documents.get_analysis(uri);
             let blocks = scan_sfc_blocks(&doc.source);
-            let offset = doc.line_index.position_to_offset(position)? as usize;
-            Some(blocks.iter().any(|b| {
-                b.tag_name == "template" && {
-                    let (cs, ce) = b.content_range();
-                    offset >= cs as usize && offset < ce as usize
+            let offset = doc.line_index.position_to_offset(position)?;
+            let context = classify_cursor_context(offset, &doc.source, &blocks, analysis.as_ref());
+            Some(match &context {
+                CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => {
+                    (true, false)
                 }
-            }))
+                CursorContext::Template(
+                    TemplateCursorContext::Expression { .. } | TemplateCursorContext::Interpolation,
+                ) => (false, true),
+                CursorContext::Template(_) => (false, false),
+                _ => (false, false),
+            })
         })()
-        .unwrap_or(false);
+        .unwrap_or((false, false));
 
         // Enhance with TypeProvider if available.
         // Extract all context synchronously — no DashMap guard held across await.
@@ -3276,26 +3282,10 @@ impl LanguageServer for VerterLanguageServer {
                         position.character,
                     );
                 }
-                // Detect expression context (Layer 1) and expression sub-context (Layer 2)
+                // Detect expression sub-context (Layer 2)
                 // to determine whether verter completions should be suppressed.
                 // In member access, literal, type position, or property key contexts,
                 // only TypeProvider results are relevant.
-                let in_expression_context = (|| {
-                    let doc = self.documents.get(uri)?;
-                    let analysis = self.documents.get_analysis(uri);
-                    let blocks = scan_sfc_blocks(&doc.source);
-                    let offset = doc.line_index.position_to_offset(position)?;
-                    let context =
-                        classify_cursor_context(offset, &doc.source, &blocks, analysis.as_ref());
-                    Some(matches!(
-                        context,
-                        CursorContext::Template(
-                            TemplateCursorContext::Expression { .. }
-                                | TemplateCursorContext::Interpolation
-                        )
-                    ))
-                })()
-                .unwrap_or(false);
                 let suppress_verter = in_expression_context
                     && tsx_offset
                         .map(|off| {
@@ -3359,7 +3349,7 @@ impl LanguageServer for VerterLanguageServer {
                                 &ctx.tsx_line_index,
                                 &ctx.vue_line_index,
                                 Some(&ctx.tsx_path),
-                                in_template,
+                                is_template_attr_context,
                             );
                             return Ok(if merged.is_empty() {
                                 None

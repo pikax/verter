@@ -52,10 +52,7 @@ pub enum TemplateCursorContext {
     /// v-model modifier: `v-model.laz|`
     VModelModifier { existing_modifiers: Vec<String> },
     /// Directive argument: `v-slot:|name` or `v-bind:|prop`
-    DirectiveArgument {
-        directive: String,
-        tag_name: String,
-    },
+    DirectiveArgument { directive: String, tag_name: String },
     /// Expression inside a dynamic prop: `:prop="expr|"`
     /// Or v-if/v-show/v-for/v-slot expression
     Expression {
@@ -277,9 +274,9 @@ fn classify_in_opening_tag(
                     || before_cursor == Some(b'.')
                     || between.contains('.')
                     || (!between.is_empty()
-                        && between
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_'))
+                        && between.bytes().all(|b| {
+                            b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_'
+                        }))
             });
         if !in_directive {
             continue;
@@ -508,10 +505,7 @@ fn extract_partial_after(offset: u32, source: &str, _marker: u8) -> String {
     {
         start -= 1;
     }
-    source
-        .get(start..offset as usize)
-        .unwrap_or("")
-        .to_string()
+    source.get(start..offset as usize).unwrap_or("").to_string()
 }
 
 /// Classify style cursor context.
@@ -522,7 +516,11 @@ fn classify_style_context(
 ) -> CursorContext {
     if let Some(analysis) = analysis {
         // Check all style blocks for v-bind() expressions
-        for (i, style_block) in blocks.iter().enumerate().filter(|(_, b)| b.tag_name == "style") {
+        for (i, style_block) in blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.tag_name == "style")
+        {
             let (cs, ce) = style_block.content_range();
             if offset < cs || offset > ce {
                 continue;
@@ -588,17 +586,11 @@ fn classify_template_text_fallback(offset: u32, source: &str) -> TemplateCursorC
                     name_end += 1;
                 }
                 if offset <= name_end {
-                    let partial = source
-                        .get(tag_start..offset)
-                        .unwrap_or("")
-                        .to_string();
+                    let partial = source.get(tag_start..offset).unwrap_or("").to_string();
                     return TemplateCursorContext::TagName { partial };
                 }
                 return TemplateCursorContext::AttributeName {
-                    tag_name: source
-                        .get(tag_start..name_end)
-                        .unwrap_or("")
-                        .to_string(),
+                    tag_name: source.get(tag_start..name_end).unwrap_or("").to_string(),
                     is_component: source
                         .as_bytes()
                         .get(tag_start)
@@ -720,10 +712,7 @@ fn is_member_access_position(content: &str, offset: usize) -> bool {
 }
 
 /// Walk the OXC AST to classify the expression context at a given offset.
-fn classify_from_ast(
-    program: &oxc_ast::ast::Program<'_>,
-    offset: usize,
-) -> ExpressionContext {
+fn classify_from_ast(program: &oxc_ast::ast::Program<'_>, offset: usize) -> ExpressionContext {
     use oxc_ast::ast::*;
 
     // Walk statements to find the expression

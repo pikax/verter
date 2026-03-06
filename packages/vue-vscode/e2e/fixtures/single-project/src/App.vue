@@ -33,6 +33,7 @@ function handleCustom(payload: string) { console.log(payload) }
 <template>
   <div>
     <h1>{{ title }}</h1>
+    <p>{{ props.title }}</p>
     <p>{{ count }} x 2 = {{ doubled }}</p>
     <p>{{ formatted }}</p>
     <button @click="increment">+</button>

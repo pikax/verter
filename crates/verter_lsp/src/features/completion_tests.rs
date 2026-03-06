@@ -702,8 +702,7 @@ fn test_event_modifier_completions_chained() {
     let source = "<template><div @click.stop.></div></template>\n<script setup>\n</script>";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
-    let analysis =
-        make_event_directive_analysis("div", "click", "@click.stop.", &["stop"], source);
+    let analysis = make_event_directive_analysis("div", "click", "@click.stop.", &["stop"], source);
 
     // Position after the second dot in @click.stop.
     let second_dot = source.find(".stop.").unwrap() + 6;
@@ -766,7 +765,7 @@ fn make_event_directive_analysis(
     // Build modifier spans
     let mut modifier_spans = Vec::new();
     let mut search_from = dir_start as usize + 1; // skip past '@'
-    // Skip past event name
+                                                  // Skip past event name
     if let Some(dot_pos) = source[search_from..].find('.') {
         search_from += dot_pos; // at first dot
     }
@@ -1471,7 +1470,10 @@ fn test_attr_value_shows_bindings() {
     let expr_end = expr_start; // empty
 
     let el_start = source.find("<div").unwrap() as u32;
-    let el_open_end = source[el_start as usize..].find('>').map(|i| el_start + i as u32 + 1).unwrap();
+    let el_open_end = source[el_start as usize..]
+        .find('>')
+        .map(|i| el_start + i as u32 + 1)
+        .unwrap();
     let close_start = source.find("</div>").unwrap() as u32;
     let el_end = close_start + "</div>".len() as u32;
 
