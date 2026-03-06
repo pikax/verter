@@ -983,9 +983,15 @@ fn generate_code(
     } else {
         None
     };
+    let emits_props = build_emits_to_props_type(&state.emits_ts);
+    let props_base = narrowing_props_type.as_deref().unwrap_or(&props_type);
+    let full_props = match &emits_props {
+        Some(ep) => format!("{} & {}", props_base, ep),
+        None => props_base.to_string(),
+    };
     out.push_str(&format!(
         "    $props: import(\"vue\").PublicProps & {},\n",
-        narrowing_props_type.as_deref().unwrap_or(&props_type)
+        full_props
     ));
 
     out.push_str(&format!("    $emit: {},\n", emit_fn_type));
@@ -1113,6 +1119,39 @@ fn build_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> String {
         ));
     }
     overloads.join(" & ")
+}
+
+/// Convert emit entries to event handler props for the `$props` type.
+///
+/// Each emit becomes an optional `onCapitalizedName` prop:
+/// ```text
+/// EmitEntry { name: "clickOverlay", params_ts: "event: MouseEvent" }
+///   → "onClickOverlay"?: (event: MouseEvent) => void
+/// ```
+fn build_emits_to_props_type(emits: &[EmitEntry]) -> Option<String> {
+    if emits.is_empty() {
+        return None;
+    }
+    let fields: Vec<String> = emits
+        .iter()
+        .map(|e| {
+            let cap_name = capitalize_first(&e.name);
+            if e.params_ts.is_empty() {
+                format!("\"on{}\"?: (...args: unknown[]) => void", cap_name)
+            } else {
+                format!("\"on{}\"?: ({}) => void", cap_name, e.params_ts)
+            }
+        })
+        .collect();
+    Some(format!("{{ {} }}", fields.join("; ")))
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+    }
 }
 
 fn build_props_type(props_ts: &Option<PropsTs>, models: &[ModelEntry]) -> String {

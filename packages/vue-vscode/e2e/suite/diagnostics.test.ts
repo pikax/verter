@@ -122,6 +122,40 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
     }
   });
 
+  test("$event on component emit has no implicit any (TS7006)", async function () {
+    const doc = await openVueFile(getAppVuePath());
+
+    // The fixture has @custom="handleCustom($event)" on <MyComp>
+    const eventPos = findPosition(doc, '@custom="handleCustom($event)"');
+    if (!eventPos) {
+      console.log('    @custom="handleCustom($event)" not in fixture — skip');
+      this.skip();
+      return;
+    }
+
+    // Wait for diagnostics to settle
+    await sleep(8_000);
+
+    const diags = vscode.languages.getDiagnostics(doc.uri);
+    const ts7006 = diags.find(
+      (d) =>
+        String(d.code) === "7006" &&
+        d.message.includes("$event") &&
+        d.range.start.line === eventPos.line,
+    );
+
+    // Negative: $event should NOT have implicit any when emits-to-props is working
+    expect(
+      ts7006,
+      `$event should not have TS7006 implicit any on @custom handler. ` +
+        `Diagnostics on line ${eventPos.line}: ${JSON.stringify(
+          diags
+            .filter((d) => d.range.start.line === eventPos.line)
+            .map((d) => ({ msg: d.message, code: d.code })),
+        )}`,
+    ).to.be.undefined;
+  });
+
   test("TS errors persist after inserting newlines", async function () {
     const doc = await openVueFile(getAppVuePath());
 

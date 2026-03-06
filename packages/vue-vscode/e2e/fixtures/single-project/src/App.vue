@@ -35,7 +35,7 @@ function handleCustom(payload: string) { console.log(payload) }
     <ul>
       <li v-for="(item, index) in items" :key="index">{{ item }}</li>
     </ul>
-    <MyComp foo="literal" :bar="count" @custom="handleCustom">
+    <MyComp foo="literal" :bar="count" @custom="handleCustom($event)">
       <template #header>Header Content</template>
     </MyComp>
     <BaseButton label="click me" class="primary" />

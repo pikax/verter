@@ -1658,3 +1658,70 @@ defineProps<{v?: 'a' | 'b'}>()
         "$root should use InstanceType for Other: {r}"
     );
 }
+
+// ── Emits-to-props: emit events should appear as onEventName in $props ───────
+
+#[test]
+fn tsc_codegen_emits_array_to_props() {
+    let r = gen_tsc(
+        r#"<script setup>
+defineEmits(['change', 'clickOverlay'])
+</script><template/>"#,
+    );
+
+    // Positive: emit events become onEventName props
+    assert!(
+        r.contains(r#""onChange"?:"#),
+        "should have onChange in $props: {r}"
+    );
+    assert!(
+        r.contains(r#""onClickOverlay"?:"#),
+        "should have onClickOverlay in $props: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_typed_emits_to_props() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{ (e: 'click', event: MouseEvent): void }>()
+</script><template/>"#,
+    );
+
+    // Typed emits from call-signature style produce onClick prop
+    // (params aren't extracted at TSC level — pre-existing limitation)
+    assert!(
+        r.contains(r#""onClick"?:"#),
+        "should have onClick prop: {r}"
+    );
+    // The event is at least registered so @click on this component won't error
+    assert!(
+        r.contains("'click'"),
+        "should have click event in emits: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_emits_and_models_props() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{ (e: 'submit', data: string): void }>()
+const model = defineModel<string>()
+</script><template/>"#,
+    );
+
+    // Emits produce onEventName props
+    assert!(
+        r.contains(r#""onSubmit"?:"#),
+        "should have onSubmit in $props: {r}"
+    );
+    // Models produce value prop + onUpdate handler (already working)
+    assert!(
+        r.contains("modelValue?:"),
+        "should have modelValue prop: {r}"
+    );
+    assert!(
+        r.contains(r#""onUpdate:modelValue"?:"#),
+        "should have onUpdate:modelValue prop: {r}"
+    );
+}
