@@ -143,6 +143,11 @@ fn hover_in_template(
         return None;
     }
 
+    // Check if cursor is on a slot outlet element — show slot name and props
+    if let Some(hover) = slot_outlet_hover(offset as u32, analysis) {
+        return Some(hover);
+    }
+
     // Check if cursor is on a template element tag name — show matching CSS rules
     if let Some(hover) = element_css_hover(offset as u32, analysis) {
         return Some(hover);
@@ -205,7 +210,8 @@ pub fn merged_attribute_redirect_offset(
                 if attr_name == "class" || attr_name == "style" {
                     // Check if this element also has a dynamic `:class` or `:style`
                     for dir in &el.directives {
-                        if dir.name == "bind" && dir.argument.as_deref() == Some(attr_name.as_str()) {
+                        if dir.name == "bind" && dir.argument.as_deref() == Some(attr_name.as_str())
+                        {
                             // Return the directive argument start (the `class` in `:class`)
                             // which is mapped in TSX to the merged `class={normalizeClass(...)}`
                             if let Some(ref arg_span) = dir.arg_span {
@@ -218,6 +224,70 @@ pub fn merged_attribute_redirect_offset(
         }
     }
     None
+}
+
+/// When hovering on a `<slot>` element (tag name, `name` attribute, or its value),
+/// show slot outlet information: the slot name and any scoped props being passed.
+///
+/// This is the primary hover for slot outlets — the type provider typically returns
+/// the unhelpful generic `() any` from Vue's `Slots` index signature.
+fn slot_outlet_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
+    let template = analysis.template.as_ref()?;
+
+    // Find a <slot> element where the cursor is within the opening tag range.
+    // span.start = `<`, tag_span_end = end of opening tag (after `>` or `/>`)
+    let element = template
+        .elements
+        .iter()
+        .find(|el| el.tag == "slot" && offset >= el.span.start && offset < el.tag_span_end)?;
+
+    // Extract slot name from `name="..."` attribute
+    let slot_name = element
+        .attributes
+        .iter()
+        .find(|a| a.name == "name" && !a.is_dynamic)
+        .and_then(|a| a.value.as_deref())
+        .unwrap_or("default");
+
+    // Collect scoped slot props (non-name attributes and directives with bind)
+    let mut props: Vec<String> = Vec::new();
+    for attr in &element.attributes {
+        if attr.name == "name" && !attr.is_dynamic {
+            continue;
+        }
+        if attr.is_dynamic {
+            if let Some(ref val) = attr.value {
+                props.push(format!(":{} = {}", attr.name, val));
+            } else {
+                props.push(format!(":{}", attr.name));
+            }
+        } else if let Some(ref val) = attr.value {
+            props.push(format!("{} = \"{}\"", attr.name, val));
+        }
+    }
+    for dir in &element.directives {
+        if dir.name == "bind" {
+            if let Some(ref arg) = dir.argument {
+                props.push(format!(":{arg}"));
+            }
+        }
+    }
+
+    let mut lines = Vec::new();
+    lines.push(format!("**`<slot>`** outlet — **\"{slot_name}\"**"));
+    lines.push("Renders content provided by the parent component for this slot.".to_string());
+
+    if !props.is_empty() {
+        lines.push(format!("\n**Scoped props:** {}", props.join(", ")));
+    }
+
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: lines.join("\n\n"),
+        }),
+        range: None,
+    })
 }
 
 /// When hovering on a template element tag name, show matching CSS rules with specificity.
