@@ -775,4 +775,70 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     // Negative: NOT generated .tsx
     expect(def.uri.fsPath, "should NOT be in generated .tsx").to.not.match(/\.vue\.tsx$/);
   });
+
+  // ── G. Event Handler Navigation ────────────────────────────
+
+  test("G1: go-to-definition on @click event arg navigates to handler", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const text = doc.getText();
+    // Find @click.prevent="increment" and position on "click"
+    const match = text.indexOf('@click.prevent="increment"');
+    if (match === -1) {
+      this.skip();
+      return;
+    }
+
+    // Position on "click" (1 char after @)
+    const pos = doc.positionAt(match + 1);
+    const locations = await getDefinitions(doc.uri, pos);
+    console.log(`    Definition on @click (event arg): ${locations.length} location(s)`);
+
+    if (locations.length > 0) {
+      const def = locations[0];
+      expect(def.uri.fsPath, "definition should be in same file").to.equal(doc.uri.fsPath);
+
+      const fnDecl = text.indexOf("function increment()");
+      if (fnDecl !== -1) {
+        const expectedLine = doc.positionAt(fnDecl).line;
+        expect(def.range.start.line, "should navigate to function declaration").to.equal(expectedLine);
+      }
+    }
+  });
+
+  test("G2: go-to-definition on component event handler", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const text = doc.getText();
+    // Find @custom="handleCustom" and position on "handleCustom"
+    const match = text.indexOf('@custom="handleCustom"');
+    if (match === -1) {
+      this.skip();
+      return;
+    }
+
+    // Position on "handleCustom"
+    const pos = doc.positionAt(match + '@custom="'.length);
+    const locations = await getDefinitions(doc.uri, pos);
+    console.log(`    Definition on handleCustom: ${locations.length} location(s)`);
+
+    expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
+
+    const def = locations[0];
+    expect(def.uri.fsPath, "definition should be in same file").to.equal(doc.uri.fsPath);
+
+    const fnDecl = text.indexOf("function handleCustom(");
+    if (fnDecl !== -1) {
+      const expectedLine = doc.positionAt(fnDecl).line;
+      expect(def.range.start.line, "should navigate to handleCustom declaration").to.equal(expectedLine);
+    }
+
+    expect(def.uri.fsPath, "should NOT be in generated .tsx").to.not.match(/\.vue\.tsx$/);
+  });
 });

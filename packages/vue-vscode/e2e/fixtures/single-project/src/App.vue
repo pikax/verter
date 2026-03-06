@@ -13,11 +13,15 @@ const count = ref(0)
 const doubled = computed(() => count.value * 2)
 const props = defineProps<{ title: string }>()
 const formatted = formatCount(count.value)
+const items = ref(['apple', 'banana', 'cherry'])
+const inputVal = ref('')
 
 onMounted(() => { console.log('mounted') })
 watch(count, (val) => { console.log(val) })
 
 function increment() { count.value++ }
+function handleInput(e: Event) { console.log(e) }
+function handleCustom(payload: string) { console.log(payload) }
 </script>
 <template>
   <div>
@@ -25,7 +29,13 @@ function increment() { count.value++ }
     <p>{{ count }} x 2 = {{ doubled }}</p>
     <p>{{ formatted }}</p>
     <button @click="increment">+</button>
-    <MyComp foo="literal" :bar="count" />
+    <button @click.prevent="increment">prevent</button>
+    <input @input="handleInput($event)" />
+    <input v-model="inputVal" />
+    <ul>
+      <li v-for="(item, index) in items" :key="index">{{ item }}</li>
+    </ul>
+    <MyComp foo="literal" :bar="count" @custom="handleCustom" />
     <BaseButton label="click me" class="primary" />
     <WrappedButton variant="danger" class="extra" />
     <FragmentComp msg="hello" data-test="id" />

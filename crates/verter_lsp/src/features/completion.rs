@@ -85,6 +85,10 @@ pub fn completions_at_position(
             if let Some(result) = event_modifier_completions(offset, source) {
                 return Some(result);
             }
+            // Check if cursor is after a v-model modifier dot
+            if detect_vmodel_modifier_context(offset, source) {
+                return Some(vmodel_modifier_completions());
+            }
             // Check if cursor is inside a class attribute — offer CSS class completions
             if let Some(result) = class_attribute_completions(offset, source, analysis) {
                 return Some(result);
@@ -98,6 +102,26 @@ pub fn completions_at_position(
                     is_incomplete: false,
                 });
             }
+
+            // Context-sensitive template completions
+            match classify_template_cursor(offset, source) {
+                TemplateCursorContext::TagName => {
+                    return Some(CompletionResult {
+                        items: tag_name_completions(analysis, workspace_components, doc_uri),
+                        is_incomplete: false,
+                    });
+                }
+                TemplateCursorContext::AttributeName => {
+                    return Some(CompletionResult {
+                        items: attribute_name_completions(),
+                        is_incomplete: false,
+                    });
+                }
+                TemplateCursorContext::TextContent => return None,
+                // AttributeValue + MustacheExpr fall through to template_completions()
+                TemplateCursorContext::AttributeValue | TemplateCursorContext::MustacheExpr => {}
+            }
+
             Some(CompletionResult {
                 items: template_completions(analysis, workspace_components, doc_uri),
                 is_incomplete: false,
@@ -294,6 +318,470 @@ fn attr_item(name: &str, value_snippet: Option<&str>, detail: &str) -> Completio
         insert_text: Some(insert_text),
         insert_text_format: Some(format),
         ..Default::default()
+    }
+}
+
+// =============================================================================
+// Template Cursor Context Classification
+// =============================================================================
+
+/// Classify the cursor position within a template block to determine what kind
+/// of completions to offer.
+#[derive(Debug, PartialEq)]
+enum TemplateCursorContext {
+    /// Cursor is in tag name position: `<|` or `<div|`
+    TagName,
+    /// Cursor is in attribute name position: `<div |` or `<div cl|`
+    AttributeName,
+    /// Cursor is inside an attribute value: `<div :prop="|"`
+    AttributeValue,
+    /// Cursor is inside a mustache expression: `{{ | }}`
+    MustacheExpr,
+    /// Cursor is in plain text content: `<div>text|</div>`
+    TextContent,
+}
+
+/// Classify the template cursor context by scanning backward from the cursor position.
+///
+/// This is a lightweight text-based scanner that works on raw SFC source — no AST needed.
+fn classify_template_cursor(offset: usize, source: &str) -> TemplateCursorContext {
+    let bytes = source.as_bytes();
+    if offset > bytes.len() {
+        return TemplateCursorContext::TextContent;
+    }
+
+    // Check for mustache context: find `{{` before `}}` scanning backward
+    {
+        let before = &source[..offset];
+        let last_open = before.rfind("{{");
+        let last_close = before.rfind("}}");
+        if let Some(open_pos) = last_open {
+            // If {{ is more recent than }} (or no }}), we're inside mustache
+            if last_close.is_none_or(|close_pos| open_pos > close_pos) {
+                return TemplateCursorContext::MustacheExpr;
+            }
+        }
+    }
+
+    // Scan backward to determine if we're inside a tag or in text content
+    let mut i = offset;
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b'>' => {
+                // We hit a closing `>` before any `<` — we're in text content
+                return TemplateCursorContext::TextContent;
+            }
+            b'<' => {
+                // We're inside a tag. Now determine if tag name or attribute position.
+                let tag_start = i + 1;
+                if tag_start < bytes.len() && bytes[tag_start] == b'/' {
+                    // Closing tag — no completions
+                    return TemplateCursorContext::TextContent;
+                }
+
+                // Skip past tag name
+                let mut name_end = tag_start;
+                while name_end < bytes.len()
+                    && (bytes[name_end].is_ascii_alphanumeric()
+                        || bytes[name_end] == b'-'
+                        || bytes[name_end] == b'_')
+                {
+                    name_end += 1;
+                }
+
+                if offset <= name_end {
+                    // Cursor is on the tag name itself
+                    return TemplateCursorContext::TagName;
+                }
+
+                // Cursor is past the tag name — check if inside an attribute value
+                // Scan forward from tag name end to cursor looking for unclosed quotes
+                let mut j = name_end;
+                let mut in_quote: Option<u8> = None;
+                let mut after_eq = false;
+                while j < offset {
+                    match bytes[j] {
+                        b'"' | b'\'' if in_quote == Some(bytes[j]) => {
+                            in_quote = None;
+                            after_eq = false;
+                        }
+                        b'"' | b'\'' if in_quote.is_none() && after_eq => {
+                            in_quote = Some(bytes[j]);
+                        }
+                        b'=' if in_quote.is_none() => {
+                            after_eq = true;
+                        }
+                        b' ' | b'\t' | b'\n' | b'\r' if in_quote.is_none() => {
+                            after_eq = false;
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+
+                return if in_quote.is_some() {
+                    TemplateCursorContext::AttributeValue
+                } else {
+                    TemplateCursorContext::AttributeName
+                };
+            }
+            _ => {}
+        }
+    }
+
+    // Reached start of source without finding `<` or `>` — text content
+    TemplateCursorContext::TextContent
+}
+
+// =============================================================================
+// Tag Name Completions
+// =============================================================================
+
+/// Common HTML element names for tag completion.
+const HTML_ELEMENTS: &[&str] = &[
+    "div",
+    "span",
+    "p",
+    "a",
+    "button",
+    "input",
+    "form",
+    "label",
+    "select",
+    "option",
+    "textarea",
+    "ul",
+    "ol",
+    "li",
+    "table",
+    "tr",
+    "td",
+    "th",
+    "thead",
+    "tbody",
+    "tfoot",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "img",
+    "video",
+    "audio",
+    "canvas",
+    "svg",
+    "section",
+    "nav",
+    "header",
+    "footer",
+    "main",
+    "article",
+    "aside",
+    "details",
+    "summary",
+    "dialog",
+    "pre",
+    "code",
+    "blockquote",
+    "br",
+    "hr",
+    "strong",
+    "em",
+    "b",
+    "i",
+    "small",
+    "sub",
+    "sup",
+];
+
+/// Vue built-in component names for tag completion.
+const VUE_BUILTINS: &[&str] = &[
+    "Transition",
+    "TransitionGroup",
+    "KeepAlive",
+    "Teleport",
+    "Suspense",
+    "component",
+    "slot",
+    "template",
+];
+
+/// Build tag name completions: HTML elements + Vue built-ins + imported components + workspace components.
+fn tag_name_completions(
+    analysis: &FileAnalysisSnapshot,
+    workspace_components: Option<&[WorkspaceComponent]>,
+    doc_uri: Option<&str>,
+) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+
+    // HTML elements
+    for &tag in HTML_ELEMENTS {
+        items.push(CompletionItem {
+            label: tag.to_string(),
+            kind: Some(CompletionItemKind::PROPERTY),
+            detail: Some("HTML element".to_string()),
+            sort_text: Some(format!("2{}", tag)),
+            ..Default::default()
+        });
+    }
+
+    // Vue built-ins
+    for &tag in VUE_BUILTINS {
+        items.push(CompletionItem {
+            label: tag.to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Vue built-in".to_string()),
+            sort_text: Some(format!("1{}", tag)),
+            ..Default::default()
+        });
+    }
+
+    // Imported components from template analysis
+    if let Some(template) = &analysis.template {
+        for comp in &template.components {
+            items.push(CompletionItem {
+                label: comp.name.clone(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: comp.import_source.as_ref().map(|s| format!("from '{}'", s)),
+                sort_text: Some(format!("0{}", comp.name)),
+                ..Default::default()
+            });
+        }
+    }
+
+    // Uppercase bindings (component-like: PascalCase names from script)
+    for binding in &analysis.bindings {
+        if binding
+            .name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+        {
+            // Avoid duplicates with components already added
+            if !items.iter().any(|i| i.label == binding.name) {
+                items.push(CompletionItem {
+                    label: binding.name.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some("component binding".to_string()),
+                    sort_text: Some(format!("0{}", binding.name)),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    // Non-type uppercase imports (component-like)
+    for import in &analysis.imports {
+        if import.is_type_only {
+            continue;
+        }
+        for binding in &import.bindings {
+            if binding.is_type_only {
+                continue;
+            }
+            if binding
+                .name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+                && !items.iter().any(|i| i.label == binding.name)
+            {
+                items.push(CompletionItem {
+                    label: binding.name.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some(format!("from '{}'", import.source)),
+                    sort_text: Some(format!("0{}", binding.name)),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    // Workspace components (auto-import)
+    if let Some(ws_components) = workspace_components {
+        let existing: std::collections::HashSet<String> =
+            items.iter().map(|i| i.label.clone()).collect();
+        for comp in ws_components {
+            if existing.contains(&comp.name) {
+                continue;
+            }
+            let mut data = serde_json::json!({
+                "auto_import": true,
+                "import_path": comp.import_path,
+                "component_name": comp.name,
+            });
+            if let Some(uri) = doc_uri {
+                data["uri"] = serde_json::Value::String(uri.to_string());
+            }
+            items.push(CompletionItem {
+                label: comp.name.clone(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some(format!("Auto import from '{}'", comp.import_path)),
+                sort_text: Some(format!("3{}", comp.name)),
+                data: Some(data),
+                ..Default::default()
+            });
+        }
+    }
+
+    items
+}
+
+// =============================================================================
+// Attribute Name Completions
+// =============================================================================
+
+/// Build attribute name completions: Vue directives + common HTML attributes + event shorthands.
+fn attribute_name_completions() -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+
+    // Vue directives
+    let directives = [
+        ("v-if", "Conditional rendering"),
+        ("v-else", "Else branch for v-if"),
+        ("v-else-if", "Else-if branch for v-if"),
+        ("v-for", "List rendering"),
+        ("v-show", "Toggle element visibility"),
+        ("v-model", "Two-way data binding"),
+        ("v-on", "Event listener"),
+        ("v-bind", "Dynamic attribute binding"),
+        ("v-slot", "Named slot"),
+        ("v-html", "Set innerHTML"),
+        ("v-text", "Set textContent"),
+        ("v-pre", "Skip compilation for this element"),
+        ("v-once", "Render only once"),
+        ("v-memo", "Memoize sub-tree"),
+        ("v-cloak", "Hide until compiled"),
+    ];
+    for (name, desc) in directives {
+        items.push(CompletionItem {
+            label: name.to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some(desc.to_string()),
+            sort_text: Some(format!("0{}", name)),
+            ..Default::default()
+        });
+    }
+
+    // Common HTML attributes
+    let html_attrs = [
+        ("class", "CSS class"),
+        ("id", "Element ID"),
+        ("style", "Inline styles"),
+        ("ref", "Template ref"),
+        ("key", "v-for key"),
+    ];
+    for (name, desc) in html_attrs {
+        items.push(CompletionItem {
+            label: name.to_string(),
+            kind: Some(CompletionItemKind::PROPERTY),
+            detail: Some(desc.to_string()),
+            sort_text: Some(format!("1{}", name)),
+            ..Default::default()
+        });
+    }
+
+    // Event shorthands
+    let events = [
+        ("@click", "Click event"),
+        ("@input", "Input event"),
+        ("@change", "Change event"),
+        ("@submit", "Submit event"),
+        ("@keydown", "Keydown event"),
+        ("@keyup", "Keyup event"),
+        ("@mousedown", "Mousedown event"),
+        ("@focus", "Focus event"),
+        ("@blur", "Blur event"),
+    ];
+    for (name, desc) in events {
+        items.push(CompletionItem {
+            label: name.to_string(),
+            kind: Some(CompletionItemKind::EVENT),
+            detail: Some(desc.to_string()),
+            insert_text: Some(format!("{}=\"$1\"", name)),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            sort_text: Some(format!("2{}", name)),
+            ..Default::default()
+        });
+    }
+
+    items
+}
+
+// =============================================================================
+// v-model / v-bind Modifier Completions
+// =============================================================================
+
+/// v-model modifiers: lazy, number, trim
+const VMODEL_MODIFIERS: &[(&str, &str)] = &[
+    ("lazy", "Sync after change instead of input"),
+    ("number", "Typecast input value to number"),
+    ("trim", "Trim whitespace from input"),
+];
+
+/// Detect v-model modifier context (`v-model.` or `v-model:name.`)
+fn detect_vmodel_modifier_context(offset: usize, source: &str) -> bool {
+    let bytes = source.as_bytes();
+    if offset == 0 || offset > bytes.len() {
+        return false;
+    }
+
+    // Scan backward to find a dot, then check for v-model
+    let mut i = offset;
+    loop {
+        if i == 0 {
+            return false;
+        }
+        i -= 1;
+        match bytes[i] {
+            b'.' => break,
+            b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'<' | b'>' | b'=' => return false,
+            _ => {}
+        }
+    }
+
+    // Walk back through any chained modifiers to find v-model
+    let mut word_end = i;
+    loop {
+        let mut j = word_end;
+        while j > 0
+            && (bytes[j - 1].is_ascii_alphanumeric()
+                || bytes[j - 1] == b'-'
+                || bytes[j - 1] == b'_'
+                || bytes[j - 1] == b':')
+        {
+            j -= 1;
+        }
+
+        let word = &source[j..word_end];
+        if word.starts_with("v-model") {
+            return true;
+        }
+
+        if j == 0 || bytes[j - 1] != b'.' {
+            return false;
+        }
+        word_end = j - 1;
+    }
+}
+
+/// Provide v-model modifier completions.
+fn vmodel_modifier_completions() -> CompletionResult {
+    let items = VMODEL_MODIFIERS
+        .iter()
+        .map(|(name, desc)| CompletionItem {
+            label: name.to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some(desc.to_string()),
+            sort_text: Some(format!("0{}", name)),
+            ..Default::default()
+        })
+        .collect();
+    CompletionResult {
+        items,
+        is_incomplete: false,
     }
 }
 

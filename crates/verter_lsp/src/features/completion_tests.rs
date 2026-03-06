@@ -896,3 +896,469 @@ fn test_no_completions_on_closing_tag() {
         "should not offer completions on closing tag"
     );
 }
+
+// =========================================================================
+// Template Cursor Context Tests (TDD — completion context filtering)
+// =========================================================================
+
+/// Helper to build analysis with a binding and template component list.
+fn make_analysis_with_template(
+    bindings: Vec<AnalyzedBinding>,
+    components: Vec<verter_analysis::template::TemplateComponentUsage>,
+) -> FileAnalysisSnapshot {
+    FileAnalysisSnapshot {
+        bindings,
+        template: Some(verter_analysis::TemplateAnalysisSnapshot {
+            components,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_tag_name_no_script_bindings() {
+    // Cursor after `<` in tag name position — should NOT include script bindings like `count`
+    let source = "<template>\n  <\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis_with_template(
+        vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::Ref,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+        }],
+        vec![],
+    );
+
+    // Position right after `<` on line 1
+    let cursor = source.find("  <\n").unwrap() + 3; // right after `<`
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    // Should return completions (tag names) but NOT include `count`
+    if let Some(cr) = result {
+        assert!(
+            !cr.items.iter().any(|i| i.label == "count"),
+            "tag name position should NOT include script binding 'count', got: {:?}",
+            cr.items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn test_tag_name_includes_html_elements() {
+    // Cursor after `<` — should include HTML element names
+    let source = "<template>\n  <\n</template>\n<script setup>\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis_with_template(vec![], vec![]);
+
+    let cursor = source.find("  <\n").unwrap() + 3;
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_some(), "should return completions for tag names");
+    let items = result.unwrap().items;
+    assert!(
+        items.iter().any(|i| i.label == "div"),
+        "should include 'div': {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    assert!(
+        items.iter().any(|i| i.label == "span"),
+        "should include 'span'"
+    );
+    assert!(
+        items.iter().any(|i| i.label == "button"),
+        "should include 'button'"
+    );
+}
+
+#[test]
+fn test_tag_name_includes_components() {
+    // Cursor after `<` — should include imported components
+    let source = "<template>\n  <\n</template>\n<script setup>\nimport MyComp from './MyComp.vue'\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis_with_template(
+        vec![],
+        vec![verter_analysis::template::TemplateComponentUsage {
+            name: "MyComp".to_string(),
+            import_source: Some("./MyComp.vue".to_string()),
+            is_dynamic: false,
+            props: vec![],
+            has_spread: false,
+            slots_used: vec![],
+            static_classes: vec![],
+            has_dynamic_class: false,
+            dynamic_classes: vec![],
+            v_models: vec![],
+            span: verter_span::Span::new(0, 0),
+        }],
+    );
+
+    let cursor = source.find("  <\n").unwrap() + 3;
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_some(), "should return completions for tag names");
+    let items = result.unwrap().items;
+    assert!(
+        items.iter().any(|i| i.label == "MyComp"),
+        "should include component 'MyComp': {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_tag_name_includes_vue_builtins() {
+    let source = "<template>\n  <\n</template>\n<script setup>\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis_with_template(vec![], vec![]);
+
+    let cursor = source.find("  <\n").unwrap() + 3;
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_some());
+    let items = result.unwrap().items;
+    assert!(
+        items.iter().any(|i| i.label == "Transition"),
+        "should include Vue built-in 'Transition': {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    assert!(
+        items.iter().any(|i| i.label == "KeepAlive"),
+        "should include 'KeepAlive'"
+    );
+    assert!(
+        items.iter().any(|i| i.label == "Teleport"),
+        "should include 'Teleport'"
+    );
+    assert!(
+        items.iter().any(|i| i.label == "Suspense"),
+        "should include 'Suspense'"
+    );
+    assert!(
+        items.iter().any(|i| i.label == "slot"),
+        "should include 'slot'"
+    );
+    assert!(
+        items.iter().any(|i| i.label == "template"),
+        "should include 'template'"
+    );
+}
+
+#[test]
+fn test_attr_name_no_script_bindings() {
+    // Cursor in attribute position `<div |>` — should NOT include `count`
+    let source =
+        "<template>\n  <div >\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis_with_template(
+        vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::Ref,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+        }],
+        vec![],
+    );
+
+    // Position on the space between `div` and `>`
+    let cursor = source.find("<div >").unwrap() + 5; // space before >
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    if let Some(cr) = result {
+        assert!(
+            !cr.items.iter().any(|i| i.label == "count"),
+            "attribute name position should NOT include script binding 'count', got: {:?}",
+            cr.items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn test_attr_name_includes_directives() {
+    // Cursor in attribute position `<div |>` — should include Vue directives
+    let source = "<template>\n  <div >\n</template>\n<script setup>\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis_with_template(vec![], vec![]);
+
+    let cursor = source.find("<div >").unwrap() + 5;
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    assert!(
+        result.is_some(),
+        "should return completions for attribute names"
+    );
+    let items = result.unwrap().items;
+    assert!(
+        items.iter().any(|i| i.label == "v-if"),
+        "should include 'v-if': {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    assert!(
+        items.iter().any(|i| i.label == "v-for"),
+        "should include 'v-for'"
+    );
+    assert!(
+        items.iter().any(|i| i.label == "v-model"),
+        "should include 'v-model'"
+    );
+    assert!(
+        items.iter().any(|i| i.label == "@click"),
+        "should include '@click'"
+    );
+    // Negative: should NOT include tag names
+    assert!(
+        !items.iter().any(|i| i.label == "div"),
+        "should NOT include HTML element 'div' in attribute position"
+    );
+}
+
+#[test]
+fn test_text_content_no_bindings() {
+    // Cursor in text content `<div>text|</div>` — should NOT offer bindings as completions
+    let source =
+        "<template>\n  <div>some text</div>\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis_with_template(
+        vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::Ref,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+        }],
+        vec![],
+    );
+
+    let cursor = source.find("some text").unwrap() + 4; // inside text
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    // Text content should return None (no completions)
+    if let Some(cr) = result {
+        assert!(
+            !cr.items.iter().any(|i| i.label == "count"),
+            "text content position should NOT include 'count', got: {:?}",
+            cr.items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn test_mustache_shows_bindings() {
+    // Cursor inside mustache `{{ | }}` — should include `count` (already works, regression guard)
+    let source =
+        "<template>\n  {{ }}\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis_with_template(
+        vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::Ref,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+        }],
+        vec![],
+    );
+
+    let cursor = source.find("{{ }}").unwrap() + 3; // inside {{ }}
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_some(), "should return completions in mustache");
+    let items = result.unwrap().items;
+    assert!(
+        items.iter().any(|i| i.label == "count"),
+        "mustache should include 'count'"
+    );
+}
+
+#[test]
+fn test_attr_value_shows_bindings() {
+    // Cursor inside attribute value `:prop="|"` — should include `count`
+    let source = "<template>\n  <div :foo=\"\"></div>\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis_with_template(
+        vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::Ref,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+        }],
+        vec![],
+    );
+
+    let cursor = source.find(":foo=\"\"").unwrap() + 6; // between the quotes
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_some(), "should return completions in attr value");
+    let items = result.unwrap().items;
+    assert!(
+        items.iter().any(|i| i.label == "count"),
+        "attribute value should include 'count'"
+    );
+}
+
+// =========================================================================
+// v-model modifier completions
+// =========================================================================
+
+#[test]
+fn test_vmodel_modifier_completions() {
+    let source = "<template><input v-model.></template>\n<script setup>\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = make_analysis(vec![], vec![], vec![]);
+
+    let dot_pos = source.find("v-model.").unwrap() + 8;
+    let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_some(), "should return completions after v-model.");
+    let items = result.unwrap().items;
+    assert!(
+        items.iter().any(|i| i.label == "lazy"),
+        "v-model should include 'lazy': {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    assert!(
+        items.iter().any(|i| i.label == "number"),
+        "v-model should include 'number'"
+    );
+    assert!(
+        items.iter().any(|i| i.label == "trim"),
+        "v-model should include 'trim'"
+    );
+    // Negative: should NOT include event modifiers
+    assert!(
+        !items.iter().any(|i| i.label == "stop"),
+        "v-model should NOT include 'stop'"
+    );
+}

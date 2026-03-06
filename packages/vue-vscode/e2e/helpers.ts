@@ -262,6 +262,133 @@ export function parseStartupTiming(): { activationMs?: number; readyMs?: number;
   return { activationMs, readyMs, deltaMs };
 }
 
+// ── IDE Feature Helpers ────────────────────────────────────────
+
+/**
+ * Get completions at a position.
+ */
+export async function getCompletions(
+  uri: vscode.Uri,
+  position: vscode.Position,
+): Promise<vscode.CompletionList | undefined> {
+  return vscode.commands.executeCommand<vscode.CompletionList>(
+    "vscode.executeCompletionItemProvider",
+    uri,
+    position,
+  );
+}
+
+/**
+ * Get go-to-definition results at a position.
+ */
+export async function getDefinitions(
+  uri: vscode.Uri,
+  pos: vscode.Position,
+): Promise<vscode.Location[]> {
+  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeDefinitionProvider",
+    uri,
+    pos,
+  );
+  return locations || [];
+}
+
+/**
+ * Prepare rename at a position (check if rename is allowed).
+ */
+export async function getPrepareRename(
+  uri: vscode.Uri,
+  position: vscode.Position,
+): Promise<vscode.Range | { range: vscode.Range; placeholder: string } | undefined> {
+  try {
+    return await vscode.commands.executeCommand(
+      "vscode.prepareRename",
+      uri,
+      position,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Execute rename at a position with a new name.
+ */
+export async function getRenameEdits(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  newName: string,
+): Promise<vscode.WorkspaceEdit | undefined> {
+  try {
+    return await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
+      "vscode.executeRenameProvider",
+      uri,
+      position,
+      newName,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Get all references at a position.
+ */
+export async function getReferences(
+  uri: vscode.Uri,
+  position: vscode.Position,
+): Promise<vscode.Location[]> {
+  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeReferenceProvider",
+    uri,
+    position,
+  );
+  return locations || [];
+}
+
+/**
+ * Get document symbols for a file.
+ */
+export async function getDocumentSymbols(
+  uri: vscode.Uri,
+): Promise<vscode.DocumentSymbol[] | vscode.SymbolInformation[]> {
+  const symbols = await vscode.commands.executeCommand<
+    vscode.DocumentSymbol[] | vscode.SymbolInformation[]
+  >("vscode.executeDocumentSymbolProvider", uri);
+  return symbols || [];
+}
+
+/**
+ * Find position of `needle` in document text, offset by `charOffset` into the match.
+ */
+export function findPosition(
+  doc: vscode.TextDocument,
+  needle: string,
+  charOffset = 0,
+): vscode.Position | undefined {
+  const idx = doc.getText().indexOf(needle);
+  if (idx === -1) return undefined;
+  return doc.positionAt(idx + charOffset);
+}
+
+/**
+ * Find the Nth occurrence of `needle` (0-indexed) and return position at charOffset into it.
+ */
+export function findNthPosition(
+  doc: vscode.TextDocument,
+  needle: string,
+  n: number,
+  charOffset = 0,
+): vscode.Position | undefined {
+  const text = doc.getText();
+  let idx = -1;
+  for (let i = 0; i <= n; i++) {
+    idx = text.indexOf(needle, idx + 1);
+    if (idx === -1) return undefined;
+  }
+  return doc.positionAt(idx + charOffset);
+}
+
 // ── Utilities ──────────────────────────────────────────────────
 
 export function sleep(ms: number): Promise<void> {

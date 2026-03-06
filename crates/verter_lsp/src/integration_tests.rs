@@ -157,8 +157,14 @@ const message = 'hello'
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
-    // Position at "c" in template — should suggest bindings
-    let position = position_of(source, "{{ c }}");
+    // Position at "c" inside mustache — should suggest bindings
+    let offset = source.find("{{ c }}").expect("needle not found") + 3; // inside mustache, on "c"
+    let line = source[..offset].matches('\n').count() as u32;
+    let line_start = source[..offset].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let position = Position {
+        line,
+        character: (offset - line_start) as u32,
+    };
     let items = completions_at_position(
         &position,
         &doc.source,

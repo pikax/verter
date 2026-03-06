@@ -145,6 +145,50 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on increment: ${latencyMs}ms, ${hovers.length} result(s)`);
   });
 
+  test("hover on component tag", async function () {
+    const text = doc.getText();
+    const match = text.indexOf("<MyComp");
+    if (match === -1) {
+      console.log("    <MyComp not in fixture — pass (N/A)");
+      return;
+    }
+
+    // Hover on "MyComp" (1 char after "<")
+    const pos = doc.positionAt(match + 1);
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+
+    getTimer().recordHover("MyComp (component tag)", latencyMs);
+    console.log(`    Hover on MyComp: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    if (hovers.length > 0) {
+      expect(hovers[0].contents.length, "Hover on component tag should have content").to.be.greaterThan(0);
+    }
+  });
+
+  test("hover on event handler function", async function () {
+    const text = doc.getText();
+    const match = text.indexOf('@click.prevent="increment"');
+    if (match === -1) {
+      console.log('    @click.prevent="increment" not in fixture — pass (N/A)');
+      return;
+    }
+
+    // Hover on "increment" inside the event handler
+    const pos = doc.positionAt(match + '@click.prevent="'.length);
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+
+    getTimer().recordHover("increment (event handler)", latencyMs);
+    console.log(`    Hover on increment in @click.prevent: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    if (hovers.length > 0) {
+      const content = hovers[0].contents
+        .map((c) => (typeof c === "string" ? c : c.value))
+        .join("\n");
+      console.log(`    Hover content: ${content.slice(0, 120)}`);
+      expect(hovers[0].contents.length, "Hover on event handler should have content").to.be.greaterThan(0);
+    }
+  });
+
   test("hover latency is reasonable", function () {
     const report = getTimer().getReport();
     const samples = report.hover.samples;

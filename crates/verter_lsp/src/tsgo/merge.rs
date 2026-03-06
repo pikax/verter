@@ -229,6 +229,73 @@ fn strip_leading_code_block(text: &str) -> &str {
     text
 }
 
+// ── JSX → Vue Attribute Transformation ──────────────────────────────
+
+/// Convert a JSX prop name to a Vue template attribute name.
+///
+/// Returns `Some(vue_attr)` if a transformation is needed, `None` if the label
+/// should be kept as-is (already valid in Vue template).
+///
+/// Transformations:
+/// - `onClick` → `@click` (strip "on", decapitalize, prepend "@")
+/// - `onCustomEvent` → `@custom-event` (PascalCase → kebab-case)
+/// - `onUpdate:modelValue` → `@update:model-value`
+/// - `modelValue` → `model-value` (camelCase → kebab-case)
+/// - `tabIndex` → `tab-index`
+/// - `class`, `id`, `key`, `ref`, `style` → no change
+/// - `data-*`, `aria-*` → no change
+pub fn jsx_prop_to_vue_attr(label: &str) -> Option<String> {
+    // Already kebab-case or simple lowercase — no transformation
+    if label.contains('-') || label.chars().all(|c| c.is_ascii_lowercase()) {
+        return None;
+    }
+
+    // Event handler: on* → @*
+    if let Some(rest) = label.strip_prefix("on") {
+        if rest.is_empty() {
+            return None;
+        }
+        // First char must be uppercase (onClick) or it's "on" itself (not an event)
+        let first = rest.chars().next()?;
+        if !first.is_ascii_uppercase() && first != 'U' {
+            // Not an event handler pattern
+            return None;
+        }
+
+        // Handle onUpdate:modelValue → @update:model-value
+        if let Some(after_update) = rest.strip_prefix("Update:") {
+            let kebab = camel_to_kebab(after_update);
+            return Some(format!("@update:{}", kebab));
+        }
+
+        let kebab = camel_to_kebab(rest);
+        return Some(format!("@{}", kebab));
+    }
+
+    // camelCase prop → kebab-case (e.g., modelValue → model-value)
+    if label.chars().any(|c| c.is_ascii_uppercase()) {
+        return Some(camel_to_kebab(label));
+    }
+
+    None
+}
+
+/// Convert a camelCase or PascalCase string to kebab-case.
+fn camel_to_kebab(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                result.push('-');
+            }
+            result.push(ch.to_ascii_lowercase());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 // ── Completion merge ───────────────────────────────────────────────
 
 /// Internal verter helper prefix that should be filtered from completions.
@@ -248,6 +315,8 @@ fn is_internal_dunder(label: &str) -> bool {
 /// - Combine both lists
 /// - Filter out internal `___VERTER___` identifiers from TypeProvider results
 /// - Deduplicate by label (verter items take priority for sort ordering)
+/// - When `template_attr_context` is true, transform JSX prop names to Vue syntax
+///   (e.g., `onClick` → `@click`, `modelValue` → `model-value`)
 pub fn merge_completions(
     verter_items: Vec<CompletionItem>,
     type_result: CompletionResult,
@@ -255,6 +324,7 @@ pub fn merge_completions(
     tsx_line_index: &LineIndex,
     vue_line_index: &LineIndex,
     tsx_path: Option<&str>,
+    template_attr_context: bool,
 ) -> (Vec<CompletionItem>, bool) {
     let is_incomplete = type_result.is_incomplete;
     let mut result = verter_items;
@@ -274,8 +344,19 @@ pub fn merge_completions(
         if is_internal_dunder(&item.label) {
             continue;
         }
+        // Apply JSX→Vue transformation when in template attribute context
+        let label = if template_attr_context {
+            if let Some(vue_label) = jsx_prop_to_vue_attr(&item.label) {
+                vue_label
+            } else {
+                item.label.clone()
+            }
+        } else {
+            item.label.clone()
+        };
+
         // Skip if already seen (from verter or a previous TSGO item)
-        if !seen_labels.insert(item.label.clone()) {
+        if !seen_labels.insert(label.clone()) {
             continue;
         }
 
@@ -308,7 +389,7 @@ pub fn merge_completions(
         };
 
         result.push(CompletionItem {
-            label: item.label,
+            label,
             kind: item.kind.map(convert_completion_kind),
             detail: item.detail,
             documentation: item.documentation.map(|d| {
@@ -1199,7 +1280,7 @@ mod tests {
         };
 
         let (result, is_incomplete) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
         assert_eq!(result.len(), 3);
         assert!(!is_incomplete);
         let labels: Vec<&str> = result.iter().map(|i| i.label.as_str()).collect();
@@ -1218,7 +1299,8 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
+        let (result, _) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -1236,7 +1318,8 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
+        let (result, _) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -1252,7 +1335,7 @@ mod tests {
         };
 
         let (result, is_incomplete) =
-            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
         assert_eq!(result.len(), 2);
         assert!(
             is_incomplete,
@@ -1273,7 +1356,8 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
+        let (result, _) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label, "msg");
     }
@@ -1291,7 +1375,8 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
+        let (result, _) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
         let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
         assert_eq!(
             on_mounted_count, 1,
@@ -1314,7 +1399,8 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
+        let (result, _) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
         let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
         assert_eq!(
             on_mounted_count, 1,
@@ -1339,7 +1425,8 @@ mod tests {
             is_incomplete: false,
         };
 
-        let (result, _) = merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None);
+        let (result, _) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
         let labels: Vec<&str> = result.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -2571,5 +2658,122 @@ mod tests {
             None => panic!("expected some definitions"),
             _ => panic!("unexpected response type"),
         }
+    }
+
+    // ── JSX→Vue reverse transformation tests ──────────────────────
+
+    #[test]
+    fn test_jsx_event_to_vue_click() {
+        assert_eq!(jsx_prop_to_vue_attr("onClick"), Some("@click".to_string()));
+    }
+
+    #[test]
+    fn test_jsx_event_to_vue_custom() {
+        assert_eq!(
+            jsx_prop_to_vue_attr("onCustomEvent"),
+            Some("@custom-event".to_string())
+        );
+    }
+
+    #[test]
+    fn test_jsx_event_to_vue_update_model() {
+        assert_eq!(
+            jsx_prop_to_vue_attr("onUpdate:modelValue"),
+            Some("@update:model-value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_jsx_prop_camel_to_kebab() {
+        assert_eq!(
+            jsx_prop_to_vue_attr("modelValue"),
+            Some("model-value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_jsx_data_attr_unchanged() {
+        assert_eq!(
+            jsx_prop_to_vue_attr("data-id"),
+            None // Already kebab, no transformation needed
+        );
+    }
+
+    #[test]
+    fn test_jsx_simple_attr_unchanged() {
+        // Simple lowercase attrs like "class", "id", "key" — no transformation
+        assert_eq!(jsx_prop_to_vue_attr("class"), None);
+        assert_eq!(jsx_prop_to_vue_attr("id"), None);
+        assert_eq!(jsx_prop_to_vue_attr("key"), None);
+        assert_eq!(jsx_prop_to_vue_attr("ref"), None);
+    }
+
+    #[test]
+    fn test_jsx_tab_index_lowercase() {
+        assert_eq!(
+            jsx_prop_to_vue_attr("tabIndex"),
+            Some("tab-index".to_string())
+        );
+    }
+
+    #[test]
+    fn test_merge_completions_transforms_jsx_events() {
+        // Create a TSGO completion result with an onClick item
+        let type_result = CompletionResult {
+            items: vec![
+                Completion {
+                    label: "onClick".to_string(),
+                    kind: Some(CompletionKind::Property),
+                    detail: None,
+                    documentation: None,
+                    sort_text: None,
+                    insert_text: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    data: None,
+                },
+                Completion {
+                    label: "modelValue".to_string(),
+                    kind: Some(CompletionKind::Property),
+                    detail: None,
+                    documentation: None,
+                    sort_text: None,
+                    insert_text: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    data: None,
+                },
+            ],
+            is_incomplete: false,
+        };
+
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        let (items, _) = merge_completions(
+            vec![],
+            type_result,
+            &mapper,
+            &tsx_li,
+            &vue_li,
+            None,
+            true, // template_attr_context
+        );
+
+        // onClick should be transformed to @click
+        assert!(
+            items.iter().any(|i| i.label == "@click"),
+            "onClick should be transformed to @click, got: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        assert!(
+            !items.iter().any(|i| i.label == "onClick"),
+            "onClick should NOT remain"
+        );
+
+        // modelValue should be transformed to model-value
+        assert!(
+            items.iter().any(|i| i.label == "model-value"),
+            "modelValue should be transformed to model-value"
+        );
     }
 }

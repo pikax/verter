@@ -3120,6 +3120,20 @@ impl LanguageServer for VerterLanguageServer {
             .unwrap_or(false);
         let verter_items = verter_result.map(|r| r.items);
 
+        // Determine if cursor is in a template block (for JSX→Vue transformation)
+        let in_template = (|| {
+            let doc = self.documents.get(uri)?;
+            let blocks = scan_sfc_blocks(&doc.source);
+            let offset = doc.line_index.position_to_offset(position)? as usize;
+            Some(blocks.iter().any(|b| {
+                b.tag_name == "template" && {
+                    let (cs, ce) = b.content_range();
+                    offset >= cs as usize && offset < ce as usize
+                }
+            }))
+        })()
+        .unwrap_or(false);
+
         // Enhance with TypeProvider if available.
         // Extract all context synchronously — no DashMap guard held across await.
         if let Some(tp) = &self.type_provider {
@@ -3195,6 +3209,7 @@ impl LanguageServer for VerterLanguageServer {
                                 &ctx.tsx_line_index,
                                 &ctx.vue_line_index,
                                 Some(&ctx.tsx_path),
+                                in_template,
                             );
                             return Ok(if merged.is_empty() {
                                 None
