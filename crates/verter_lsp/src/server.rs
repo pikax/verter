@@ -3271,9 +3271,14 @@ impl LanguageServer for VerterLanguageServer {
                             })
                         }));
                     }
+                    // Only forward trigger characters that tsserver/TSGO recognize.
+                    // Vue-specific triggers (":", "@", " ") are handled by Verter's
+                    // native completions and cause tsserver errors if forwarded.
+                    let tp_trigger = trigger_character
+                        .filter(|t| matches!(*t, "." | "\"" | "'" | "`" | "/" | "<"));
                     match tokio::time::timeout(
                         std::time::Duration::from_millis(500),
-                        tp.get_completions(&ctx.tsx_path, tsx_offset, trigger_character),
+                        tp.get_completions(&ctx.tsx_path, tsx_offset, tp_trigger),
                     )
                     .await
                     {

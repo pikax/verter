@@ -745,7 +745,7 @@ pub(crate) fn build_style_analyses_from_source(
         .collect()
 }
 
-pub(crate) fn parse_non_sfc_snapshot(_canonical_id: &str, source: &str) -> ParseSnapshot {
+pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
     let slices = SliceHashes::default();
     let descriptor = DescriptorMin::default();
@@ -754,31 +754,55 @@ pub(crate) fn parse_non_sfc_snapshot(_canonical_id: &str, source: &str) -> Parse
     // and trigger dependent SFC recompilation.
     let semantic_hash = whole_hash;
 
+    // Use SourceType::d_ts() for declaration files — OXC parses them differently
+    // and panics on certain constructs (e.g. tuple types) with the wrong mode.
+    let source_type = if canonical_id.ends_with(".d.ts")
+        || canonical_id.ends_with(".d.mts")
+        || canonical_id.ends_with(".d.cts")
+    {
+        SourceType::d_ts()
+    } else {
+        SourceType::ts()
+    };
+
     let alloc = Allocator::new();
     let (export_signatures, panic_diag) = catch_analysis_panic(
         "export signature analysis",
         std::panic::AssertUnwindSafe(|| {
-            verter_analysis::build_export_signatures(source, SourceType::ts(), &alloc)
+            verter_analysis::build_export_signatures(source, source_type, &alloc)
         }),
     );
-
-    let parse_diagnostics = match panic_diag {
-        Some(diag) => DiagnosticsSnapshot::from_vec(vec![diag]),
-        None => DiagnosticsSnapshot::default(),
-    };
 
     // Run script analysis for non-SFC files to populate exported_functions
     // (composable return shape data used by cross-file binding enrichment).
     let alloc2 = Allocator::new();
-    let script_analysis = verter_analysis::build_script_analysis_with_scope(
-        source,
-        SourceType::ts(),
-        &alloc2,
-        verter_analysis::AnalysisScope::IMPORTS
-            | verter_analysis::AnalysisScope::BINDINGS
-            | verter_analysis::AnalysisScope::FUNC_RETURNS
-            | verter_analysis::AnalysisScope::REACTIVITY,
+    let (script_analysis, script_panic_diag) = catch_analysis_panic(
+        "script analysis (non-SFC)",
+        std::panic::AssertUnwindSafe(|| {
+            verter_analysis::build_script_analysis_with_scope(
+                source,
+                source_type,
+                &alloc2,
+                verter_analysis::AnalysisScope::IMPORTS
+                    | verter_analysis::AnalysisScope::BINDINGS
+                    | verter_analysis::AnalysisScope::FUNC_RETURNS
+                    | verter_analysis::AnalysisScope::REACTIVITY,
+            )
+        }),
     );
+
+    let mut diags = Vec::new();
+    if let Some(d) = panic_diag {
+        diags.push(d);
+    }
+    if let Some(d) = script_panic_diag {
+        diags.push(d);
+    }
+    let parse_diagnostics = if diags.is_empty() {
+        DiagnosticsSnapshot::default()
+    } else {
+        DiagnosticsSnapshot::from_vec(diags)
+    };
 
     ParseSnapshot {
         whole_hash,
@@ -1523,5 +1547,40 @@ const x = ref(0)
         assert!(types.contains(&PreprocessorBlockType::Template));
         assert!(types.contains(&PreprocessorBlockType::Script));
         assert!(types.contains(&PreprocessorBlockType::Style));
+    }
+
+    #[test]
+    fn parse_non_sfc_dts_does_not_panic() {
+        // This .d.ts content with tuple types triggers an OXC panic when parsed
+        // with SourceType::ts() instead of SourceType::d_ts().
+        let dts_content = r#"
+export type Slot<T extends any = any> = (...args: [T] | (T extends undefined ? [] : never)) => VNode[];
+type InternalSlots = { [name: string]: Slot | undefined; };
+export declare function defineComponent<T>(options: T): T;
+export type VNodeRef = string | Ref | ((ref: Element | null, refs: Record<string, any>) => void);
+"#;
+        // Should not panic — previously crashed with unwrap() on None in oxc_ast::ts.rs
+        let snapshot = parse_non_sfc_snapshot(
+            "node_modules/@vue/runtime-core/dist/runtime-core.d.ts",
+            dts_content,
+        );
+        // Verify no panic diagnostics were emitted
+        assert!(
+            snapshot.parse_diagnostics.diagnostics.is_empty(),
+            "should not have parse diagnostics for valid .d.ts content"
+        );
+    }
+
+    #[test]
+    fn parse_non_sfc_dts_variants() {
+        // All .d.ts extension variants should use the correct SourceType
+        let content = "export declare const foo: string;";
+        for id in &["types.d.ts", "index.d.mts", "utils.d.cts"] {
+            let snapshot = parse_non_sfc_snapshot(id, content);
+            assert!(
+                snapshot.parse_diagnostics.diagnostics.is_empty(),
+                "{id} should parse without diagnostics"
+            );
+        }
     }
 }
