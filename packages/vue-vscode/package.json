@@ -205,6 +205,11 @@
           ],
           "description": "Lint rule preset. Only applies when verter.lint.enabled is true."
         },
+        "verter.inlayHints.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable type inlay hints from the type provider (TSGO/tsserver). Shows resolved types for variable declarations, function return types, and parameter names in both script and template."
+        },
         "verter.viteConfig.enabled": {
           "type": "boolean",
           "default": true,

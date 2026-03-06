@@ -2800,10 +2800,7 @@ fn slot_outlet_tag_name_source_mapped_to_slots() {
     let (output, tokens) = gen_tsx_template_with_map(source, &[]);
 
     // Verify output shape
-    assert!(
-        output.contains("$slots"),
-        "should contain $slots: {output}"
-    );
+    assert!(output.contains("$slots"), "should contain $slots: {output}");
     assert!(
         output.contains(".reference"),
         "should contain .reference: {output}"
@@ -2817,13 +2814,12 @@ fn slot_outlet_tag_name_source_mapped_to_slots() {
 
     // The source map token at `s` should map to `$slots` in generated output,
     // NOT to positions past `$slots` (like `?.()`)
-    let token_for_slot = tokens
-        .iter()
-        .find(|&&(_, _, sc)| sc == slot_src_col);
+    let token_for_slot = tokens.iter().find(|&&(_, _, sc)| sc == slot_src_col);
     assert!(
         token_for_slot.is_some(),
         "should have source map token for `slot` tag name at src col {}. Tokens: {:?}",
-        slot_src_col, tokens
+        slot_src_col,
+        tokens
     );
 
     let &(_, dst_col, _) = token_for_slot.unwrap();
@@ -2831,7 +2827,10 @@ fn slot_outlet_tag_name_source_mapped_to_slots() {
     assert!(
         dst_col >= gen_slots_pos && dst_col < gen_slots_pos + 6,
         "slot tag name should map to `$slots` region (gen cols {}..{}), got gen col {}. Output: {}",
-        gen_slots_pos, gen_slots_pos + 6, dst_col, output
+        gen_slots_pos,
+        gen_slots_pos + 6,
+        dst_col,
+        output
     );
 }
 
@@ -2851,20 +2850,22 @@ fn slot_outlet_name_attr_does_not_map_to_call_site() {
     let gen_ref_start = gen_ref_pos + 1; // skip the `.`
 
     // The token for `reference` should map to the `.reference` region
-    let token_for_ref = tokens
-        .iter()
-        .find(|&&(_, _, sc)| sc == ref_src_col);
+    let token_for_ref = tokens.iter().find(|&&(_, _, sc)| sc == ref_src_col);
     assert!(
         token_for_ref.is_some(),
         "should have source map token for `reference` at src col {}. Tokens: {:?}",
-        ref_src_col, tokens
+        ref_src_col,
+        tokens
     );
 
     let &(_, dst_col, _) = token_for_ref.unwrap();
     assert!(
         dst_col >= gen_ref_start && dst_col < gen_ref_start + 9,
         "reference should map to `.reference` region (gen cols {}..{}), got gen col {}. Output: {}",
-        gen_ref_start, gen_ref_start + 9, dst_col, output
+        gen_ref_start,
+        gen_ref_start + 9,
+        dst_col,
+        output
     );
 }
 
@@ -2929,14 +2930,14 @@ fn class_merge_dynamic_class_position_is_mapped() {
     // The `:class` directive start should have a source map token mapping
     // to the merged `class=` in generated TSX. This is the redirect target
     // used by the hover handler for the static `class` attribute.
-    let token_for_colon = tokens
-        .iter()
-        .find(|&&(_, _, sc)| sc == colon_class_col);
+    let token_for_colon = tokens.iter().find(|&&(_, _, sc)| sc == colon_class_col);
     assert!(
         token_for_colon.is_some(),
         "`:class` at src col {} should have a source map token. \
          Generated output: {}. Tokens: {:?}",
-        colon_class_col, output, tokens
+        colon_class_col,
+        output,
+        tokens
     );
 
     let &(_, dst_col, _) = token_for_colon.unwrap();

@@ -318,13 +318,32 @@ async fn read_loop(
                 // workspace/configuration expects an array of config values matching
                 // the number of requested items. Returning `null` crashes tsgo.
                 "workspace/configuration" => {
-                    let count = msg
+                    let items = msg
                         .get("params")
                         .and_then(|p| p.get("items"))
-                        .and_then(|a| a.as_array())
-                        .map(|a| a.len())
-                        .unwrap_or(0);
-                    serde_json::Value::Array(vec![serde_json::json!({}); count])
+                        .and_then(|a| a.as_array());
+                    let count = items.map(|a| a.len()).unwrap_or(0);
+                    serde_json::Value::Array(
+                        (0..count)
+                            .map(|i| {
+                                let section = items
+                                    .and_then(|arr| arr.get(i))
+                                    .and_then(|item| item.get("section"))
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("");
+                                if section.contains("inlayHints") {
+                                    serde_json::json!({
+                                        "enabled": true,
+                                        "variableTypes": { "enabled": true },
+                                        "functionLikeReturnTypes": { "enabled": true },
+                                        "parameterNames": { "enabled": "literals" }
+                                    })
+                                } else {
+                                    serde_json::json!({})
+                                }
+                            })
+                            .collect(),
+                    )
                 }
                 // Most other requests (client/registerCapability, etc.) accept null.
                 _ => serde_json::Value::Null,

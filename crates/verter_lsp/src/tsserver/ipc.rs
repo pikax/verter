@@ -502,6 +502,10 @@ impl TsserverTypeProvider {
                         "includeCompletionsWithSnippetText": false,
                         "includeAutomaticOptionalChainCompletions": true,
                         "allowRenameOfImportPath": true,
+                        "includeInlayVariableTypeHints": true,
+                        "includeInlayVariableTypeHintsWhenTypeMatchesName": false,
+                        "includeInlayFunctionLikeReturnTypeHints": true,
+                        "includeInlayParameterNameHints": "literals",
                     }
                 }),
             )

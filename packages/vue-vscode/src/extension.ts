@@ -204,6 +204,9 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
       viteConfig: {
         enabled: workspace.getConfiguration("verter").get<boolean>("viteConfig.enabled", true),
       },
+      inlayHints: {
+        enabled: workspace.getConfiguration("verter").get<boolean>("inlayHints.enabled", true),
+      },
     },
     outputChannel: log,
     traceOutputChannel: log,
@@ -557,7 +560,8 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
         e.affectsConfiguration("verter.typeProvider") ||
         e.affectsConfiguration("verter.typescript.tsdk") ||
         e.affectsConfiguration("verter.mcp.enabled") ||
-        e.affectsConfiguration("verter.mcp.port");
+        e.affectsConfiguration("verter.mcp.port") ||
+        e.affectsConfiguration("verter.inlayHints.enabled");
       if (needsRestart) {
         // Debounce: VS Code may fire multiple config change events in rapid succession
         if (configRestartTimer) clearTimeout(configRestartTimer);

@@ -393,6 +393,8 @@ pub struct VerterLanguageServer {
     init_lint_options: tokio::sync::Mutex<Option<serde_json::Value>>,
     /// Whether vite config alias discovery is enabled (from initializationOptions).
     vite_config_enabled: std::sync::atomic::AtomicBool,
+    /// Whether type provider inlay hints are enabled (from initializationOptions).
+    inlay_hints_enabled: std::sync::atomic::AtomicBool,
     /// Cached verter diagnostics per document: URI → (version, diagnostics).
     /// Avoids re-running the linter when both push and pull paths request diagnostics
     /// for the same document version.
@@ -486,6 +488,7 @@ impl VerterLanguageServer {
             action_engine: verter_actions::ActionEngine::default(),
             init_lint_options: tokio::sync::Mutex::new(None),
             vite_config_enabled: std::sync::atomic::AtomicBool::new(true),
+            inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             cached_verter_diags: DashMap::new(),
             background_synced_files: Arc::new(DashMap::new()),
             type_provider_kind: config.type_provider_kind,
@@ -2286,6 +2289,19 @@ impl LanguageServer for VerterLanguageServer {
                 tracing::info!(
                     "vite config alias discovery: {}",
                     if vite_enabled { "enabled" } else { "disabled" }
+                );
+            }
+            // Read inlayHints.enabled setting (default: true)
+            if let Some(enabled) = opts
+                .get("inlayHints")
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool())
+            {
+                self.inlay_hints_enabled
+                    .store(enabled, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(
+                    "type provider inlay hints: {}",
+                    if enabled { "enabled" } else { "disabled" }
                 );
             }
             // Read experimental.conditionalRootNarrowing setting (default: false)
@@ -4310,8 +4326,12 @@ impl LanguageServer for VerterLanguageServer {
         // for interactive requests.
         let typing = self.is_typing_cooldown();
 
-        // Virtual file: route directly through TSGO (positions already in TSX coordinates)
-        if !typing {
+        let inlay_enabled = self
+            .inlay_hints_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        // Virtual file: route directly through type provider (positions already in TSX coordinates)
+        if !typing && inlay_enabled {
             if let Some(tp) = &self.type_provider {
                 if let Some((tsx_path, vf_li)) = self.virtual_file_context(uri) {
                     let start = vf_li.position_to_offset(&range.start);
@@ -4364,9 +4384,9 @@ impl LanguageServer for VerterLanguageServer {
         })()
         .unwrap_or_default();
 
-        // Standard .vue file: merge with TSGO type hints when available.
+        // Standard .vue file: merge with type provider hints when available.
         // Extract all context synchronously — no DashMap guard held across await.
-        if !typing {
+        if !typing && inlay_enabled {
             if let Some(tp) = &self.type_provider {
                 if let Some(ctx) = self.type_provider_context(uri) {
                     let start_offset = merge::vue_position_to_tsx_offset_validated(
@@ -4421,8 +4441,12 @@ impl LanguageServer for VerterLanguageServer {
                 }
             }
         } else {
-            tracing::debug!("inlay_hint: skipped type provider (typing cooldown)");
+            tracing::debug!("inlay_hint: skipped type provider (typing cooldown or disabled)");
         }
+
+        // Deduplicate hints at the same position (prefer type provider hints over Verter placeholders)
+        hints.sort_by_key(|h| (h.position.line, h.position.character));
+        hints.dedup_by(|a, b| a.position == b.position && a.kind == b.kind);
 
         Ok(if hints.is_empty() { None } else { Some(hints) })
     }
