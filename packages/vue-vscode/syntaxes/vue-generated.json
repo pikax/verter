@@ -1217,7 +1217,7 @@
           },
           "patterns": [
             {
-              "include": "source.ts#expression"
+              "include": "#ts-expression-safe"
             }
           ]
         },
@@ -1237,7 +1237,7 @@
           },
           "patterns": [
             {
-              "include": "source.ts#expression"
+              "include": "#ts-expression-safe"
             }
           ]
         },
@@ -1257,9 +1257,35 @@
           },
           "patterns": [
             {
-              "include": "source.ts#expression"
+              "include": "#ts-expression-safe"
             }
           ]
+        }
+      ]
+    },
+    "ts-expression-safe": {
+      "patterns": [
+        {
+          "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(as)\\s+(const)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.as.ts"
+            },
+            "2": {
+              "name": "storage.modifier.ts"
+            }
+          }
+        },
+        {
+          "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(as|satisfies)(?=\\s)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.as.ts"
+            }
+          }
+        },
+        {
+          "include": "source.ts#expression"
         }
       ]
     },
@@ -1281,7 +1307,7 @@
           },
           "patterns": [
             {
-              "include": "source.ts#expression"
+              "include": "#ts-expression-safe"
             }
           ]
         }
