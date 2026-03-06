@@ -303,6 +303,36 @@ export declare function enhanceElementWithProps<T, P>(
       : T & P;
 
 /**
+ * Instantiates a Vue component in a type-safe way that handles both
+ * class-based components (constructors) and functional components (plain functions).
+ *
+ * This is used by the template codegen to generate `Comp{offset}()` functions
+ * that power `getRootComponent()` and `useTemplateRef` typing.
+ *
+ * - **Class-based components** (`{ new(): I }`): Returns the instance type `I`
+ * - **Functional components** (`(props) => VNode`): Returns the return type
+ * - **Other**: Returns `T` as-is
+ *
+ * @example Class-based component
+ * ```ts
+ * const MyComp = defineComponent({ props: { msg: String } });
+ * type R = ReturnType<typeof instantiateComponent<typeof MyComp, { msg: string }>>;
+ * // R is InstanceType<typeof MyComp>
+ * ```
+ *
+ * @example Functional component
+ * ```ts
+ * const FnComp = (props: { label: string }) => h('button');
+ * type R = ReturnType<typeof instantiateComponent<typeof FnComp, { label: string }>>;
+ * // R is VNode (ReturnType<typeof FnComp>)
+ * ```
+ */
+export declare function instantiateComponent<T, P>(
+  comp: T,
+  props: P,
+): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
+
+/**
  * Extracts the props type from a Vue component or HTML element.
  *
  * This utility type handles different input patterns:
