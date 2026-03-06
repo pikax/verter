@@ -929,17 +929,18 @@ fn build_class_completions(
 fn script_completions(analysis: &FileAnalysisSnapshot) -> Vec<CompletionItem> {
     let mut items = Vec::new();
 
-    // Offer existing bindings
+    // Offer existing bindings (sort prefix "0" = highest priority)
     for binding in &analysis.bindings {
         items.push(CompletionItem {
             label: binding.name.clone(),
             kind: Some(binding_completion_kind(&binding.kind)),
             detail: Some(binding_detail(binding)),
+            sort_text: Some(format!("0{}", binding.name)),
             ..Default::default()
         });
     }
 
-    // Offer imports
+    // Offer imports (sort prefix "1" = below locals, above globals)
     for import in &analysis.imports {
         for binding in &import.bindings {
             items.push(CompletionItem {
@@ -950,6 +951,7 @@ fn script_completions(analysis: &FileAnalysisSnapshot) -> Vec<CompletionItem> {
                     CompletionItemKind::MODULE
                 }),
                 detail: Some(format!("from '{}'", import.source)),
+                sort_text: Some(format!("1{}", binding.name)),
                 ..Default::default()
             });
         }

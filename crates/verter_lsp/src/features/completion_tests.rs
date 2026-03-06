@@ -1468,3 +1468,78 @@ const msg = ref('hello')
         "should return attribute completions outside TS attr values"
     );
 }
+
+#[test]
+fn test_script_completions_have_sort_text() {
+    let source = "<script setup>\nlet ddd = 1\n\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis(
+        vec![AnalyzedBinding {
+            name: "ddd".to_string(),
+            kind: AnalyzedBindingKind::Let,
+            is_reactive: false,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+        }],
+        vec![AnalyzedImport {
+            source: "vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "ref".to_string(),
+                is_type_only: false,
+                vue_api: Some(VueApiClassification::Ref),
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: None,
+        }],
+        vec![],
+    );
+
+    // Position on empty line inside script
+    let position = Position {
+        line: 2,
+        character: 0,
+    };
+    let result = completions_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_some());
+    let items = result.unwrap().items;
+
+    // Local binding should have sort_text starting with "0" (highest priority)
+    let ddd_item = items.iter().find(|i| i.label == "ddd").expect("ddd should be in completions");
+    assert!(
+        ddd_item.sort_text.as_ref().is_some_and(|s| s.starts_with('0')),
+        "local binding 'ddd' should have sort_text starting with '0', got {:?}",
+        ddd_item.sort_text
+    );
+
+    // Import should have sort_text starting with "1" (below locals, above globals)
+    let ref_item = items.iter().find(|i| i.label == "ref").expect("ref should be in completions");
+    assert!(
+        ref_item.sort_text.as_ref().is_some_and(|s| s.starts_with('1')),
+        "import 'ref' should have sort_text starting with '1', got {:?}",
+        ref_item.sort_text
+    );
+
+    // Negative: no items should have None sort_text
+    for item in &items {
+        assert!(
+            item.sort_text.is_some(),
+            "all script completion items should have sort_text, but '{}' has None",
+            item.label
+        );
+    }
+}
