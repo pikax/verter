@@ -655,6 +655,7 @@ fn process_tsx_script_setup<'alloc>(
 
     // Extract attrs attribute value for typed $attrs.
     // Priority: `attrs` attribute > `useAttrs<T>()` > `{}` (default)
+    let use_attrs_info = detect_use_attrs_calls(&effective_program.body, effective_content_str);
     let attrs_type = setup
         .attrs
         .and_then(|span| {
@@ -665,7 +666,27 @@ fn process_tsx_script_setup<'alloc>(
                 Some(s.to_string())
             }
         })
-        .or_else(|| detect_use_attrs_type_arg(&effective_program.body, effective_content_str));
+        .or(use_attrs_info.type_arg);
+
+    // Insert type assertion casts for bare useAttrs() calls.
+    // When no explicit attrs type is provided and a template exists (so ___VERTER___Attrs
+    // will be emitted), cast bare `useAttrs()` calls to `___VERTER___Attrs` so the
+    // return type reflects root element fallthrough attributes.
+    if attrs_type.is_none()
+        && template_ast.is_some()
+        && !options.is_jsx
+        && !use_attrs_info.bare_call_ends.is_empty()
+    {
+        let gn = generic_info
+            .as_ref()
+            .map(|g| g.names_bracket())
+            .unwrap_or_default();
+        let cast = format!(" as unknown as {}Attrs{}", PREFIX, gn);
+        for &end_offset in &use_attrs_info.bare_call_ends {
+            let sfc_offset = content_start + end_offset;
+            out.prepend_alloc(sfc_offset, &cast);
+        }
+    }
 
     // Process macros: emit type aliases only (no boxing).
     // Skip macros whose spans overlap with parse errors (damaged by typing).
@@ -2922,11 +2943,25 @@ fn is_simple_type_reference(type_text: &str) -> bool {
             .is_some_and(|c| c.is_alphabetic() || c == '_')
 }
 
-/// Detect `useAttrs<T>()` calls in the script setup body and return the type parameter text.
+/// Result of detecting `useAttrs()` calls in script setup.
+struct UseAttrsDetection {
+    /// Type argument text from `useAttrs<T>()`, if found.
+    type_arg: Option<String>,
+    /// Content-relative end offsets of bare `useAttrs()` calls (no type param).
+    bare_call_ends: Vec<u32>,
+}
+
+/// Detect `useAttrs()` calls in the script setup body.
 ///
-/// Used as a fallback for `attrs_type` when no `attrs` attribute is present on the script tag.
-/// Priority: `attrs` attribute > `useAttrs<T>()` > `{}`.
-fn detect_use_attrs_type_arg<'a>(body: &[Statement<'a>], source: &'a str) -> Option<String> {
+/// Returns both the type parameter text (from `useAttrs<T>()`) and the
+/// end offsets of bare `useAttrs()` calls that need a type assertion cast.
+///
+/// Priority: `attrs` attribute > `useAttrs<T>()` > `{}` (default).
+fn detect_use_attrs_calls<'a>(body: &[Statement<'a>], source: &'a str) -> UseAttrsDetection {
+    let mut result = UseAttrsDetection {
+        type_arg: None,
+        bare_call_ends: Vec::new(),
+    };
     for stmt in body {
         let call = match stmt {
             Statement::VariableDeclaration(var_decl) => var_decl
@@ -2958,15 +2993,18 @@ fn detect_use_attrs_type_arg<'a>(body: &[Statement<'a>], source: &'a str) -> Opt
                             let text = &source[span.start as usize..span.end as usize];
                             let trimmed = text.trim();
                             if !trimmed.is_empty() {
-                                return Some(trimmed.to_string());
+                                result.type_arg = Some(trimmed.to_string());
                             }
                         }
+                    } else {
+                        // Bare useAttrs() — collect end offset for casting
+                        result.bare_call_ends.push(call.span().end);
                     }
                 }
             }
         }
     }
-    None
+    result
 }
 
 /// Detect if script setup body contains a `getCurrentInstance()` call.
@@ -5334,6 +5372,89 @@ import MyComp from './MyComp.vue'
         assert!(
             !code.contains("new MyComp("),
             "should NOT use new for component instantiation: {}",
+            code
+        );
+    }
+
+    // ── Bare useAttrs() cast tests ─────────────────────────────
+
+    #[test]
+    fn bare_use_attrs_with_template_gets_cast() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const attrs = useAttrs()
+</script>
+<template><div>hello</div></template>"#,
+        );
+        // Positive: bare useAttrs() should get cast to ___VERTER___Attrs
+        assert!(
+            code.contains("useAttrs() as unknown as ___VERTER___Attrs"),
+            "bare useAttrs() should be cast to ___VERTER___Attrs: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn bare_use_attrs_with_inherit_attrs_false_still_cast() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+const attrs = useAttrs()
+</script>
+<template><div>hello</div></template>"#,
+        );
+        // Positive: cast is still present (Attrs = attributes only, no RootElementProps)
+        assert!(
+            code.contains("useAttrs() as unknown as ___VERTER___Attrs"),
+            "bare useAttrs() should still be cast when inheritAttrs: false: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn typed_use_attrs_no_cast() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const attrs = useAttrs<{ class?: string }>()
+</script>
+<template><div>hello</div></template>"#,
+        );
+        // Negative: typed useAttrs<T>() should NOT get an additional cast
+        assert!(
+            !code.contains("as unknown as ___VERTER___Attrs"),
+            "useAttrs<T>() should NOT get a cast: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn bare_use_attrs_no_template_no_cast() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const attrs = useAttrs()
+</script>"#,
+        );
+        // Negative: no template means no ___VERTER___Attrs, so no cast
+        assert!(
+            !code.contains("as unknown as ___VERTER___Attrs"),
+            "bare useAttrs() without template should NOT get cast: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn bare_use_attrs_with_generics_includes_names() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts" generic="T">
+const attrs = useAttrs()
+defineProps<{ items: T[] }>()
+</script>
+<template><div>hello</div></template>"#,
+        );
+        // Positive: cast should include generic name bracket
+        assert!(
+            code.contains("useAttrs() as unknown as ___VERTER___Attrs<T>"),
+            "bare useAttrs() with generics should include <T> in cast: {}",
             code
         );
     }

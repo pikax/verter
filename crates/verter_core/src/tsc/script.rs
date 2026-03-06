@@ -97,6 +97,8 @@ struct TscMacroState {
     // defineOptions
     options_name: Option<String>,
     options_extras: Vec<(String, String)>, // (key, raw value text)
+    /// Whether `defineOptions({ inheritAttrs: false })` was detected.
+    has_inherit_attrs_false: bool,
 
     // defineProps — runtime (object-syntax only, as (name, raw_value_text) pairs)
     props_runtime: Vec<(String, String)>,
@@ -195,20 +197,28 @@ pub fn generate_tsc_output_with_options(
         use_attrs_fallback.as_deref()
     };
 
-    // ── 7. Extract root conditions for narrowing ────────────────────
+    // ── 7. Extract root element tag for attrs fallthrough ──────────
+    let root_element_tag = if attrs_type.is_none() && !state.has_inherit_attrs_false {
+        extract_root_element_tag(syntax.template_ast(), sfc_source)
+    } else {
+        None
+    };
+
+    // ── 8. Extract root conditions for narrowing ────────────────────
     let narrowing = if tsc_options.conditional_root_narrowing {
         extract_tsc_narrowing(syntax.template_ast(), &state, sfc_source)
     } else {
         None
     };
 
-    // ── 8. Generate code + source map ────────────────────────────────
+    // ── 9. Generate code + source map ────────────────────────────────
     generate_code(
         component_name,
         &state,
         generic_params,
         attrs_type,
         narrowing.as_ref(),
+        root_element_tag.as_deref(),
     )
 }
 
@@ -401,6 +411,18 @@ fn process_options(obj: &MacroObjectArg<'_>, content_str: &str, state: &mut TscM
             if let Some(v) = value_text {
                 let stripped = v.trim_matches(|c: char| c == '\'' || c == '"');
                 state.options_name = Some(stripped.to_string());
+            }
+        } else if prop.name == "inheritAttrs" {
+            if let Some(v) = value_text {
+                if v == "false" {
+                    state.has_inherit_attrs_false = true;
+                }
+            }
+            // Still add to options_extras for the runtime defineComponent output
+            if let Some(v) = value_text {
+                state
+                    .options_extras
+                    .push((prop.name.to_string(), v.to_string()));
             }
         } else if let Some(v) = value_text {
             state
@@ -690,6 +712,59 @@ struct TscNarrowingInfo {
     branch_tags: Vec<TscBranchTag>,
 }
 
+/// Extract the root element tag name for attrs fallthrough.
+///
+/// Returns `Some(tag_name)` when there is a single native HTML root element
+/// (possibly with v-if/v-else-if/v-else branches that are all the same native tag,
+/// though for simplicity we only check the first branch).
+/// Returns `None` for component roots, fragments, or no template.
+fn extract_root_element_tag(
+    template_ast: Option<&crate::ast::types::TemplateAst>,
+    sfc_source: &str,
+) -> Option<String> {
+    use crate::ast::types::{AstNodeKind, ElementNodeConditionKind, TagType};
+
+    let tpl = template_ast?;
+    let root_children = tpl
+        .root
+        .content
+        .as_ref()
+        .map(|c| c.children.as_slice())
+        .unwrap_or(&[]);
+
+    // Count independent root elements (excluding v-else/v-else-if branches)
+    let mut root_element: Option<&crate::ast::types::ElementNode> = None;
+    let mut independent_count = 0u32;
+    for &child_id in root_children {
+        let node = &tpl.nodes[child_id.0];
+        if let AstNodeKind::Element(el) = &node.kind {
+            let is_branch = matches!(
+                el.v_condition.as_ref().map(|c| &c.kind),
+                Some(ElementNodeConditionKind::Else | ElementNodeConditionKind::ElseIf)
+            );
+            if !is_branch {
+                independent_count += 1;
+                root_element = Some(el);
+            }
+        }
+    }
+
+    // Only single root (possibly with v-if chain)
+    if independent_count != 1 {
+        return None;
+    }
+
+    let el = root_element?;
+    // Skip component roots — we can't resolve their type without import resolution
+    if el.tag_type == TagType::Component {
+        return None;
+    }
+
+    let tag_name =
+        sfc_source.get((el.tag_open.start + 1) as usize..el.tag_open.name_end as usize)?;
+    Some(tag_name.to_string())
+}
+
 struct TscBranchTag {
     tag_name: String,
     is_component: bool,
@@ -779,6 +854,7 @@ fn generate_code(
     generic_params: Option<&str>,
     attrs_type: Option<&str>,
     narrowing: Option<&TscNarrowingInfo>,
+    root_element_tag: Option<&str>,
 ) -> TscOutput {
     let mut out = String::with_capacity(512);
 
@@ -918,8 +994,13 @@ fn generate_code(
     }
     out.push_str("    $data: {},\n");
     if let Some(attrs) = attrs_type {
+        // Explicit attrs type from attrs= attribute or useAttrs<T>()
         out.push_str(&format!("    $attrs: {},\n", attrs));
+    } else if root_element_tag.is_some() {
+        // Native HTML root + inheritAttrs: true → HTMLAttributes for fallthrough
+        out.push_str("    $attrs: import(\"vue\").HTMLAttributes,\n");
     } else {
+        // inheritAttrs: false, component root, fragment, or no template
         out.push_str("    $attrs: {},\n");
     }
     out.push_str("    $refs: {},\n");

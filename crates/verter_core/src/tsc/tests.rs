@@ -1354,6 +1354,116 @@ const attrs = useAttrs()
     );
 }
 
+// ── Root element attrs in external $attrs ────────────────────────────────────
+
+#[test]
+fn tsc_root_element_attrs_native_html_root() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+const x = 1
+</script><template><div>hello</div></template>"#,
+    );
+    // Positive: native HTML root should give HTMLAttributes
+    assert!(
+        r.contains("$attrs: import(\"vue\").HTMLAttributes"),
+        "native HTML root should have HTMLAttributes in $attrs, got:\n{}",
+        r
+    );
+    // Negative: should NOT be empty
+    assert!(
+        !r.contains("$attrs: {},"),
+        "$attrs should NOT be empty when native HTML root exists, got:\n{}",
+        r
+    );
+}
+
+#[test]
+fn tsc_root_element_attrs_inherit_attrs_false() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+</script><template><div>hello</div></template>"#,
+    );
+    // Positive: inheritAttrs: false should give empty $attrs
+    assert!(
+        r.contains("$attrs: {},"),
+        "inheritAttrs: false should have empty $attrs, got:\n{}",
+        r
+    );
+    // Negative: should NOT have HTMLAttributes
+    assert!(
+        !r.contains("HTMLAttributes"),
+        "inheritAttrs: false should NOT have HTMLAttributes, got:\n{}",
+        r
+    );
+}
+
+#[test]
+fn tsc_root_element_attrs_explicit_takes_precedence() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" attrs="{ class?: string }">
+const x = 1
+</script><template><div>hello</div></template>"#,
+    );
+    // Positive: explicit attrs should take precedence
+    assert!(
+        r.contains("$attrs: { class?: string }"),
+        "explicit attrs should take precedence over root element, got:\n{}",
+        r
+    );
+    // Negative: should NOT have HTMLAttributes
+    assert!(
+        !r.contains("HTMLAttributes"),
+        "explicit attrs should NOT include HTMLAttributes, got:\n{}",
+        r
+    );
+}
+
+#[test]
+fn tsc_root_element_attrs_component_root() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script><template><MyComp /></template>"#,
+    );
+    // Positive: component root should give empty $attrs (can't resolve type)
+    assert!(
+        r.contains("$attrs: {},"),
+        "component root should have empty $attrs, got:\n{}",
+        r
+    );
+}
+
+#[test]
+fn tsc_root_element_attrs_fragment() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+const x = 1
+</script><template><div>A</div><span>B</span></template>"#,
+    );
+    // Positive: fragment should give empty $attrs
+    assert!(
+        r.contains("$attrs: {},"),
+        "fragment root should have empty $attrs, got:\n{}",
+        r
+    );
+}
+
+#[test]
+fn tsc_root_element_attrs_no_template() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+const x = 1
+</script>"#,
+    );
+    // Positive: no template should give empty $attrs
+    assert!(
+        r.contains("$attrs: {},"),
+        "no template should have empty $attrs, got:\n{}",
+        r
+    );
+}
+
 // ── Barrel export type preservation: __OmitNew + Omit<CPI> ──────────────────
 //
 // Barrel re-exports (`export { default as X } from './X.vue'`) degrade
