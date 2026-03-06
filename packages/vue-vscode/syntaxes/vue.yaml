@@ -516,7 +516,7 @@ repository:
         endCaptures:
           "0": { name: punctuation.definition.string.end.html }
         patterns:
-          - include: source.js#expression
+          - include: source.ts#expression
       - name: source.directive.vue
         begin: '"'
         beginCaptures:
@@ -525,7 +525,7 @@ repository:
         endCaptures:
           "0": { name: punctuation.definition.string.end.html }
         patterns:
-          - include: source.js#expression
+          - include: source.ts#expression
       - name: source.directive.vue
         begin: "'"
         beginCaptures:
@@ -534,7 +534,7 @@ repository:
         endCaptures:
           "0": { name: punctuation.definition.string.end.html }
         patterns:
-          - include: source.js#expression
+          - include: source.ts#expression
   vue-interpolations:
     patterns:
       - name: expression.embedded.vue
@@ -545,4 +545,4 @@ repository:
         endCaptures:
           "0": { name: punctuation.definition.generic.end.html }
         patterns:
-          - include: source.js#expression
+          - include: source.ts#expression

@@ -476,7 +476,8 @@
         "scopeName": "text.html.vue-html",
         "path": "./syntaxes/vue-html.tmLanguage.json",
         "embeddedLanguages": {
-          "source.js": "javascript"
+          "source.js": "javascript",
+          "source.ts": "typescript"
         }
       },
       {

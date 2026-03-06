@@ -508,7 +508,7 @@
           },
           "patterns": [
             {
-              "include": "source.js#expression"
+              "include": "source.ts#expression"
             }
           ]
         },
@@ -528,7 +528,7 @@
           },
           "patterns": [
             {
-              "include": "source.js#expression"
+              "include": "source.ts#expression"
             }
           ]
         },
@@ -548,7 +548,7 @@
           },
           "patterns": [
             {
-              "include": "source.js#expression"
+              "include": "source.ts#expression"
             }
           ]
         }
