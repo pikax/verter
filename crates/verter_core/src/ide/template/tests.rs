@@ -2947,3 +2947,156 @@ fn class_merge_dynamic_class_position_is_mapped() {
         gen_class_pos, gen_class_pos + 6, dst_col, output
     );
 }
+
+// ── v-for body member access (regression test) ──────────────────
+
+/// v-for iteration variables must NOT get the `___VERTER___instance.` prefix
+/// in TSX output. They are locally scoped via `.map((param) => ...)`.
+#[test]
+fn v_for_body_member_access_no_instance_prefix() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><button v-for="action in actions" :disabled="action.disabled">{{ action.label }}</button></template>"#,
+        &[("actions", BindingType::SetupConst)],
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // Positive: .map() wrapper present
+    assert!(
+        result.contains(".map((action)"),
+        "should have .map((action) wrapper, got: {}",
+        result
+    );
+
+    // Positive: member access expressions preserved bare
+    assert!(
+        result.contains("action.disabled"),
+        "prop expression should contain bare action.disabled, got: {}",
+        result
+    );
+    assert!(
+        result.contains("action.label"),
+        "interpolation should contain bare action.label, got: {}",
+        result
+    );
+
+    // NEGATIVE: v-for locals must NOT get instance prefix
+    assert!(
+        !result.contains("___VERTER___instance.action"),
+        "v-for param must NOT get ___VERTER___instance. prefix, got: {}",
+        result
+    );
+}
+
+/// Source map test: verify that `action.disabled` inside v-for body is source-mapped
+/// back to its original position, enabling TSGO/tsserver to resolve member access.
+#[test]
+fn v_for_body_member_access_source_mapped() {
+    let source = r#"<template><button v-for="action in actions" :disabled="action.disabled">text</button></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("actions", BindingType::SetupConst)]);
+    eprintln!("TSX output:\n{}", output);
+    eprintln!("Tokens (dst_line, dst_col, src_col):");
+    for &(dl, dc, sc) in &tokens {
+        eprintln!("  gen_col={}, src_col={}", dc, sc);
+    }
+
+    // Find "action.disabled" in the generated output
+    let gen_action_pos = output
+        .find("action.disabled")
+        .expect("action.disabled should be in output");
+    let gen_dot_pos = gen_action_pos + "action".len();
+
+    // Find "action.disabled" in the source
+    let src_action_pos = source
+        .find("action.disabled")
+        .expect("action.disabled should be in source");
+    let src_dot_pos = src_action_pos + "action".len();
+
+    eprintln!(
+        "gen 'action' at col={}, gen '.' at col={}",
+        gen_action_pos, gen_dot_pos
+    );
+    eprintln!(
+        "src 'action' at col={}, src '.' at col={}",
+        src_action_pos, src_dot_pos
+    );
+
+    // Find the best token: the one closest to (but not after) the source position,
+    // mimicking the PositionMapper::vue_to_tsx algorithm.
+    let best_token = tokens
+        .iter()
+        .filter(|&&(dl, _, sc)| dl == 0 && (sc as usize) <= src_dot_pos)
+        .max_by_key(|&&(_, _, sc)| sc);
+
+    assert!(
+        best_token.is_some(),
+        "Should have a source map token at or before src_col={}. Tokens: {:?}",
+        src_dot_pos,
+        tokens
+    );
+
+    let &(_, base_dc, base_sc) = best_token.unwrap();
+    let delta = src_dot_pos as u32 - base_sc;
+    let interpolated_gen_dot = base_dc + delta;
+    eprintln!(
+        "best token: gen_col={}, src_col={}, delta={}, interpolated gen_dot={}",
+        base_dc, base_sc, delta, interpolated_gen_dot
+    );
+    assert_eq!(
+        interpolated_gen_dot as usize, gen_dot_pos,
+        "Position interpolation for '.' should map src_col {} to gen_col {} (actual gen_dot={}). \
+         This ensures completion at 'action.' maps to the correct TSX offset.",
+        src_dot_pos, interpolated_gen_dot, gen_dot_pos
+    );
+}
+
+/// Nested v-for: both outer and inner iteration variables must be bare.
+#[test]
+fn nested_v_for_body_no_instance_prefix() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div v-for="user in users" :key="user.id"><span v-for="item in user.items" :key="item.id">{{ user.name }}: {{ item.text }}</span></div></template>"#,
+        &[("users", BindingType::SetupConst)],
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // Positive: both .map() wrappers
+    assert!(
+        result.contains(".map((user)"),
+        "outer .map((user) expected, got: {}",
+        result
+    );
+
+    // NEGATIVE: neither v-for local should get instance prefix
+    assert!(
+        !result.contains("___VERTER___instance.user"),
+        "outer v-for param must NOT get instance prefix, got: {}",
+        result
+    );
+    assert!(
+        !result.contains("___VERTER___instance.item"),
+        "inner v-for param must NOT get instance prefix, got: {}",
+        result
+    );
+}
+
+/// Destructured v-for params should remain bare.
+#[test]
+fn v_for_destructured_no_instance_prefix() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div v-for="{ name, email } in users" :key="email">{{ name }} ({{ email }})</div></template>"#,
+        &[("users", BindingType::SetupConst)],
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // NEGATIVE: destructured params must NOT get instance prefix
+    assert!(
+        !result.contains("___VERTER___instance.name"),
+        "destructured v-for param 'name' must NOT get instance prefix, got: {}",
+        result
+    );
+    assert!(
+        !result.contains("___VERTER___instance.email"),
+        "destructured v-for param 'email' must NOT get instance prefix, got: {}",
+        result
+    );
+}

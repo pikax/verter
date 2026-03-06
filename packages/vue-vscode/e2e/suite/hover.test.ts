@@ -5,6 +5,8 @@ import {
   openVueFile,
   getAppVuePath,
   measureHover,
+  findPosition,
+  findNthPosition,
   sleep,
   FIXTURE_NAME,
 } from "../helpers";
@@ -280,6 +282,120 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     // Re-open App.vue for the latency test
     doc = await openVueFile(getAppVuePath());
     await sleep(1_000);
+  });
+
+  test("hover on v-for iteration variable shows parameter type", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // Hover on "action" in :disabled="action.disabled"
+    const pos = findPosition(doc, "action.disabled", 0); // on "a" in action
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("action (v-for param)", latencyMs);
+    console.log(
+      `    Hover on v-for var 'action': ${latencyMs}ms, ${hovers.length} results`,
+    );
+
+    if (hovers.length > 0) {
+      const content = hovers[0].contents
+        .map((c) => (typeof c === "string" ? c : c.value))
+        .join("\n");
+      console.log(`    Content: ${content.slice(0, 200)}`);
+      // Should show type info (Action interface)
+      expect(content, "should mention Action type").to.include("Action");
+    }
+  });
+
+  test("hover on v-for member access shows property type", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // Hover on "disabled" in action.disabled
+    const pos = findPosition(doc, "action.disabled", 7); // on "d" in disabled
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("disabled (v-for member)", latencyMs);
+    console.log(
+      `    Hover on 'action.disabled': ${latencyMs}ms, ${hovers.length} results`,
+    );
+
+    if (hovers.length > 0) {
+      const content = hovers[0].contents
+        .map((c) => (typeof c === "string" ? c : c.value))
+        .join("\n");
+      console.log(`    Content: ${content.slice(0, 200)}`);
+      expect(content, "should show boolean type").to.include("boolean");
+    }
+  });
+
+  test("hover on nested v-for outer variable shows correct type", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // Hover on "user" in {{ user.name }} (nested v-for, second occurrence)
+    const pos = findNthPosition(doc, "user.name", 1, 0); // 2nd "user.name"
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("user (nested v-for outer)", latencyMs);
+    console.log(
+      `    Hover on nested outer 'user': ${latencyMs}ms, ${hovers.length} results`,
+    );
+
+    if (hovers.length > 0) {
+      const content = hovers[0].contents
+        .map((c) => (typeof c === "string" ? c : c.value))
+        .join("\n");
+      console.log(`    Content: ${content.slice(0, 200)}`);
+      expect(content, "should mention User type").to.include("User");
+    }
+  });
+
+  test("hover on v-if narrowed variable shows narrowed type", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // Hover on "selectedUser" in {{ selectedUser.name }} (after v-if)
+    const pos = findPosition(doc, "selectedUser.name", 0);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("selectedUser (v-if narrowed)", latencyMs);
+    console.log(
+      `    Hover on v-if narrowed 'selectedUser': ${latencyMs}ms, ${hovers.length} results`,
+    );
+
+    if (hovers.length > 0) {
+      const content = hovers[0].contents
+        .map((c) => (typeof c === "string" ? c : c.value))
+        .join("\n");
+      console.log(`    Content: ${content.slice(0, 200)}`);
+      // After v-if narrowing, should be User (not User | null)
+      expect(content, "should mention User type").to.include("User");
+    }
   });
 
   test("hover latency is reasonable", function () {

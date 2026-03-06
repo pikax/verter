@@ -343,21 +343,51 @@ impl DocumentRegistry {
     }
 
     /// Get the IDE output (TSX or JSX) for a document.
+    ///
+    /// If compile_slots were cleared (e.g., by dependency invalidation via `did_open`
+    /// on a `.ts` file), lazily recompiles the Vue file to restore IDE output.
+    /// This prevents "no IDE context" failures after peek definition or go-to-definition
+    /// opens a dependency file.
     pub fn get_ide(&self, uri: &Uri) -> Option<IdeResponse> {
         let canonical_id = self.get_canonical_id(uri)?;
-        self.host.get_ide(&canonical_id, &self.tsx_profile.read())
+        let profile = self.tsx_profile.read().clone();
+
+        // Fast path: cache hit
+        if let Some(resp) = self.host.get_ide(&canonical_id, &profile) {
+            return Some(resp);
+        }
+
+        // Slow path: compile_slots were cleared (e.g., dependency invalidation).
+        // Lazily recompile to restore IDE output.
+        let is_vue = self
+            .documents
+            .get(uri.as_str())
+            .map(|d| d.language_id == "vue")
+            .unwrap_or(false);
+        if !is_vue {
+            return None;
+        }
+
+        self.host.ensure_compiled(&canonical_id, &profile).ok()?;
+        let resp = self.host.get_ide(&canonical_id, &profile)?;
+
+        // Rebuild position mapper since TSX output was regenerated
+        if let Some(mut entry) = self.documents.get_mut(uri.as_str()) {
+            if let Some(mapper) = resp
+                .source_map
+                .as_ref()
+                .and_then(|sm| PositionMapper::from_json(sm).ok())
+            {
+                entry.position_mapper = Some(mapper);
+            }
+        }
+
+        Some(resp)
     }
 
     /// Check if a document's IDE output is JavaScript (JSX) rather than TypeScript (TSX).
     pub fn is_jsx(&self, uri: &Uri) -> bool {
-        let canonical_id = match self.get_canonical_id(uri) {
-            Some(id) => id,
-            None => return false,
-        };
-        self.host
-            .get_ide(&canonical_id, &self.tsx_profile.read())
-            .map(|r| r.is_jsx)
-            .unwrap_or(false)
+        self.get_ide(uri).map(|r| r.is_jsx).unwrap_or(false)
     }
 
     /// Get the analysis snapshot for a document.

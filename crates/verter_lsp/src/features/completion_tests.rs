@@ -1519,17 +1519,29 @@ fn test_script_completions_have_sort_text() {
     let items = result.unwrap().items;
 
     // Local binding should have sort_text starting with "0" (highest priority)
-    let ddd_item = items.iter().find(|i| i.label == "ddd").expect("ddd should be in completions");
+    let ddd_item = items
+        .iter()
+        .find(|i| i.label == "ddd")
+        .expect("ddd should be in completions");
     assert!(
-        ddd_item.sort_text.as_ref().is_some_and(|s| s.starts_with('0')),
+        ddd_item
+            .sort_text
+            .as_ref()
+            .is_some_and(|s| s.starts_with('0')),
         "local binding 'ddd' should have sort_text starting with '0', got {:?}",
         ddd_item.sort_text
     );
 
     // Import should have sort_text starting with "1" (below locals, above globals)
-    let ref_item = items.iter().find(|i| i.label == "ref").expect("ref should be in completions");
+    let ref_item = items
+        .iter()
+        .find(|i| i.label == "ref")
+        .expect("ref should be in completions");
     assert!(
-        ref_item.sort_text.as_ref().is_some_and(|s| s.starts_with('1')),
+        ref_item
+            .sort_text
+            .as_ref()
+            .is_some_and(|s| s.starts_with('1')),
         "import 'ref' should have sort_text starting with '1', got {:?}",
         ref_item.sort_text
     );

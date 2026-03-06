@@ -4553,3 +4553,260 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
         "merged hover should contain slot name, got: {text}"
     );
 }
+
+// ─── Dependency did_open invalidation tests ─────────────────────
+
+/// When a dependency .ts file is opened (e.g., via peek definition),
+/// the host invalidates dependents. `get_ide()` should lazily recompile
+/// so that completions/hover/definition still work on the .vue file.
+#[test]
+fn dep_did_open_preserves_vue_ide_context() {
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let registry = DocumentRegistry::new(host);
+
+    // 1. Open a Vue file that imports from a .ts dependency
+    let vue_source = r#"<script setup lang="ts">
+import { greet } from './utils'
+const msg = greet('world')
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#;
+    let vue_uri: Uri = "file:///test/App.vue".parse().unwrap();
+    let vue_item = TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: vue_source.to_string(),
+    };
+    registry.did_open(&vue_item);
+
+    // Verify IDE output exists after initial open
+    let ide_before = registry.get_ide(&vue_uri);
+    assert!(
+        ide_before.is_some(),
+        "IDE output should exist after opening Vue file"
+    );
+    assert!(
+        ide_before.as_ref().unwrap().code.contains("msg"),
+        "TSX should contain 'msg' binding"
+    );
+
+    // 2. Open the dependency .ts file (simulates peek definition / go-to-definition)
+    let ts_source = r#"export function greet(name: string): string {
+    return `Hello, ${name}!`
+}
+"#;
+    let ts_uri: Uri = "file:///test/utils.ts".parse().unwrap();
+    let ts_item = TextDocumentItem {
+        uri: ts_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: ts_source.to_string(),
+    };
+    registry.did_open(&ts_item);
+
+    // 3. Verify IDE output is still available for the Vue file
+    let ide_after = registry.get_ide(&vue_uri);
+    assert!(
+        ide_after.is_some(),
+        "IDE output should still exist after dependency did_open (lazy recompilation)"
+    );
+    assert!(
+        ide_after.as_ref().unwrap().code.contains("msg"),
+        "TSX should still contain 'msg' binding after dependency invalidation"
+    );
+
+    // 4. Position mapper should also be available
+    let mapper = registry.get_position_mapper(&vue_uri);
+    assert!(
+        mapper.is_some(),
+        "Position mapper should be rebuilt after lazy recompilation"
+    );
+}
+
+/// Simulates peek definition: open .ts dep, then close it. Vue IDE context
+/// should remain available throughout.
+#[test]
+fn dep_peek_open_close_preserves_ide() {
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let registry = DocumentRegistry::new(host);
+
+    // 1. Open a Vue file
+    let vue_source = r#"<script setup lang="ts">
+import { count } from './state'
+</script>
+
+<template>
+  <span>{{ count }}</span>
+</template>
+"#;
+    let vue_uri: Uri = "file:///test/Counter.vue".parse().unwrap();
+    let vue_item = TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: vue_source.to_string(),
+    };
+    registry.did_open(&vue_item);
+
+    // Verify IDE output
+    let ide_initial = registry.get_ide(&vue_uri);
+    assert!(ide_initial.is_some(), "Initial IDE output should exist");
+
+    // 2. Open the .ts dependency (peek definition)
+    let ts_source = "export const count = 42\n";
+    let ts_uri: Uri = "file:///test/state.ts".parse().unwrap();
+    let ts_item = TextDocumentItem {
+        uri: ts_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: ts_source.to_string(),
+    };
+    registry.did_open(&ts_item);
+
+    // 3. IDE output still available after dep open
+    let ide_after_open = registry.get_ide(&vue_uri);
+    assert!(
+        ide_after_open.is_some(),
+        "IDE output should exist after dependency open"
+    );
+    assert!(
+        ide_after_open.as_ref().unwrap().code.contains("count"),
+        "TSX should contain 'count' binding"
+    );
+
+    // 4. Close the .ts file (user closes peek definition panel)
+    registry.did_close(&ts_uri);
+
+    // 5. IDE output still available after dep close
+    let ide_after_close = registry.get_ide(&vue_uri);
+    assert!(
+        ide_after_close.is_some(),
+        "IDE output should exist after dependency close"
+    );
+    assert!(
+        ide_after_close.as_ref().unwrap().code.contains("count"),
+        "TSX should still contain 'count' binding after dependency close"
+    );
+}
+
+/// Verify that v-for iteration variable member access positions map correctly
+/// from Vue source to TSX output. This is the key test for v-for completions:
+/// when a user types `action.` inside a v-for body, the position must map to
+/// the correct TSX offset for tsserver/TSGO to provide member completions.
+#[test]
+fn v_for_member_access_position_mapping() {
+    let host = Arc::new(VerterHost::new(HostConfig::default()));
+    let registry = DocumentRegistry::new(host);
+
+    let vue_source = r#"<script setup lang="ts">
+interface Action { label: string; disabled: boolean }
+const actions: Action[] = [{ label: 'ok', disabled: false }]
+</script>
+
+<template>
+  <button v-for="action in actions" :disabled="action.disabled">{{ action.label }}</button>
+</template>
+"#;
+    let vue_uri: Uri = "file:///test/VForTest.vue".parse().unwrap();
+    let vue_item = TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: vue_source.to_string(),
+    };
+    registry.did_open(&vue_item);
+
+    // Get IDE output
+    let ide = registry.get_ide(&vue_uri);
+    assert!(ide.is_some(), "IDE output should exist");
+    let ide = ide.unwrap();
+    let tsx = &ide.code;
+    eprintln!("TSX output:\n{}", tsx);
+
+    // Verify codegen: action.disabled should be bare (no instance prefix)
+    assert!(
+        tsx.contains("action.disabled"),
+        "TSX should contain bare action.disabled, got: {}",
+        tsx
+    );
+    assert!(
+        !tsx.contains("___VERTER___instance.action"),
+        "v-for local must NOT get instance prefix in TSX"
+    );
+
+    // Get position mapper
+    let mapper = registry.get_position_mapper(&vue_uri);
+    assert!(mapper.is_some(), "Position mapper should exist");
+    let mapper = mapper.unwrap();
+
+    // Find "action.disabled" in Vue source
+    let vue_action_disabled = vue_source.find("action.disabled").unwrap();
+    let vue_dot = vue_action_disabled + "action".len();
+
+    // Convert byte offset to line/col (0-based)
+    let mut vue_line = 0u32;
+    let mut vue_col = 0u32;
+    for (i, &b) in vue_source.as_bytes().iter().enumerate() {
+        if i == vue_dot {
+            break;
+        }
+        if b == b'\n' {
+            vue_line += 1;
+            vue_col = 0;
+        } else {
+            vue_col += 1;
+        }
+    }
+    eprintln!("Vue '.' position: line={}, col={}", vue_line, vue_col);
+
+    // Map Vue position to TSX position
+    let tsx_pos = mapper.vue_to_tsx(vue_line, vue_col);
+    assert!(
+        tsx_pos.is_some(),
+        "Vue position (line={}, col={}) should map to TSX. \
+         This position is the '.' in action.disabled inside v-for body.",
+        vue_line,
+        vue_col
+    );
+    let tsx_pos = tsx_pos.unwrap();
+    eprintln!(
+        "TSX mapped position: line={}, col={}",
+        tsx_pos.line, tsx_pos.column
+    );
+
+    // Find the TSX byte offset of the mapped position
+    let mut tsx_offset = 0u32;
+    let mut current_line = 0u32;
+    for (i, &b) in tsx.as_bytes().iter().enumerate() {
+        if current_line == tsx_pos.line {
+            tsx_offset = i as u32 + tsx_pos.column;
+            break;
+        }
+        if b == b'\n' {
+            current_line += 1;
+        }
+    }
+    eprintln!("TSX byte offset: {}", tsx_offset);
+
+    // Verify the TSX character at the mapped position is '.'
+    let tsx_char = tsx.as_bytes().get(tsx_offset as usize).map(|&b| b as char);
+    eprintln!("TSX char at offset {}: {:?}", tsx_offset, tsx_char);
+    assert_eq!(
+        tsx_char,
+        Some('.'),
+        "TSX position should map to '.' (member access dot). \
+         Vue '.' at (line={}, col={}) mapped to TSX (line={}, col={}) = offset {} = char {:?}. \
+         TSX output: {}",
+        vue_line,
+        vue_col,
+        tsx_pos.line,
+        tsx_pos.column,
+        tsx_offset,
+        tsx_char,
+        tsx
+    );
+}

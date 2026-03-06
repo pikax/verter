@@ -6,6 +6,7 @@ import {
   getAppVuePath,
   getCompletions,
   findPosition,
+  findNthPosition,
   sleep,
   FIXTURE_NAME,
 } from "../helpers";
@@ -122,5 +123,197 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     // The scoped variable `item` should be available (via TSGO, since it's in the generated TSX)
     // This test verifies that the v-for codegen creates proper JS scope
     expect(labels, "should include 'item'").to.include("item");
+  });
+
+  test("C6: v-for member access shows typed properties", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // Position after "action." in :disabled="action.disabled"
+    const pos = findPosition(doc, "action.disabled", 7); // on "d" after dot
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+    const items = completions!.items;
+    const labels = items.map((i) => i.label);
+    console.log(
+      `    v-for member: ${items.length} items, first: ${labels.slice(0, 10).join(", ")}`,
+    );
+    console.log(
+      `    kinds: ${items.slice(0, 10).map((i) => `${i.label}:${i.kind}`).join(", ")}`,
+    );
+
+    // POSITIVE: Action properties present
+    expect(labels, "should include 'disabled'").to.include("disabled");
+    expect(labels, "should include 'label'").to.include("label");
+    expect(labels, "should include 'handler'").to.include("handler");
+
+    // KIND: must be Property/Field, not Text
+    const disabledItem = items.find((i) => i.label === "disabled");
+    expect(disabledItem!.kind, "'disabled' kind").to.be.oneOf([
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+
+    // NEGATIVE: not global scope
+    expect(items.length, "member completions, not global").to.be.lessThan(50);
+    expect(labels.join(",")).to.not.include("___VERTER___");
+  });
+
+  test("C7: v-for iteration variable in mustache shows typed properties", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // Position on "user.name" inside {{ user.name }} in the v-for with index
+    const pos = findPosition(doc, "user.name", 5); // on "n" after "user."
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+    const items = completions!.items;
+    const labels = items.map((i) => i.label);
+    console.log(`    v-for mustache member: ${items.length} items`);
+
+    expect(labels, "should include 'name'").to.include("name");
+    expect(labels, "should include 'email'").to.include("email");
+    expect(labels, "should include 'age'").to.include("age");
+
+    const nameItem = items.find((i) => i.label === "name");
+    expect(nameItem!.kind, "'name' kind").to.be.oneOf([
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expect(items.length, "member completions, not global").to.be.lessThan(50);
+  });
+
+  test("C8: nested v-for inner variable member access", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // In nested v-for: {{ action.label }} inside the inner loop
+    // Use findNthPosition to get the occurrence inside the nested loop
+    const pos = findNthPosition(doc, "action.label", 1, 7); // 2nd occurrence, on "l"
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions).to.exist;
+    const items = completions!.items;
+    const labels = items.map((i) => i.label);
+    console.log(`    nested v-for inner: ${items.length} items`);
+
+    expect(labels).to.include("label");
+    expect(labels).to.include("disabled");
+    expect(items.length, "member completions").to.be.lessThan(50);
+  });
+
+  test("C9: nested v-for outer variable member access", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // In nested v-for: {{ user.name }} inside the inner loop
+    const pos = findNthPosition(doc, "user.name", 1, 5); // 2nd occurrence
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions).to.exist;
+    const items = completions!.items;
+    const labels = items.map((i) => i.label);
+    console.log(`    nested v-for outer: ${items.length} items`);
+
+    expect(labels).to.include("name");
+    expect(labels).to.include("email");
+    expect(items.length, "member completions").to.be.lessThan(50);
+  });
+
+  test("C10: v-if narrowed ref member access", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // {{ selectedUser.name }} inside v-if="selectedUser"
+    const pos = findPosition(doc, "selectedUser.name", 13); // on "n"
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions).to.exist;
+    const items = completions!.items;
+    const labels = items.map((i) => i.label);
+    console.log(`    v-if narrowed: ${items.length} items`);
+
+    expect(labels).to.include("name");
+    expect(labels).to.include("email");
+    expect(items.length, "member completions").to.be.lessThan(50);
+  });
+
+  test("C11: destructured v-for params available", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // {{ name }} inside <div v-for="{ name, email } in users">
+    const pos = findPosition(doc, "{{ name }}", 3); // on "n"
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions).to.exist;
+    const labels = completions!.items.map((i) => i.label);
+    console.log(`    destructured v-for: ${labels.length} items`);
+
+    expect(labels).to.include("name");
+  });
+
+  test("C12: script binding completions are typed", async function () {
+    const pos = findPosition(doc, "{{ count }}", 3);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions).to.exist;
+    const items = completions!.items;
+    const labels = items.map((i) => i.label);
+
+    expect(labels).to.include("count");
+    expect(labels).to.include("doubled");
+    expect(labels).to.include("increment");
+
+    // Script bindings should be Variable/Function kind, not Text
+    const countItem = items.find((i) => i.label === "count");
+    if (countItem) {
+      expect(
+        countItem.kind,
+        "'count' should not be Text",
+      ).to.not.equal(vscode.CompletionItemKind.Text);
+    }
   });
 });
