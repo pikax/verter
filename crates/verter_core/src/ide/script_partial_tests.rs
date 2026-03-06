@@ -43,6 +43,7 @@ fn gen(source: &str) -> (String, FxHashMap<String, BindingType>, String) {
         is_vapor: false,
         embed_ambient_types: true,
         is_jsx: false,
+        conditional_root_narrowing: false,
     };
 
     let template_end = syntax.template_ast().map(|tpl| {

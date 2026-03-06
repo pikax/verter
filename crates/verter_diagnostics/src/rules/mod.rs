@@ -221,6 +221,7 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(vue::NoDeprecatedVueConfigKeycodes));
     registry.register(Box::new(vue::ValidTemplateRoot));
     registry.register(Box::new(vue::NoRootVIf));
+    registry.register(Box::new(vue::ConditionalRootComplex));
     registry.register(Box::new(vue::RequireToggleInsideTransition));
     registry.register(Box::new(vue::UseVOnExact));
     registry.register(Box::new(vue::NoMultipleSlotArgs));

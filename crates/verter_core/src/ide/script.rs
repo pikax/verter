@@ -927,23 +927,40 @@ fn process_tsx_script_setup<'alloc>(
                     .map(|g| g.names_bracket())
                     .unwrap_or_default()
             };
-            let (root_comp_offset, root_props_literal, all_comp_offsets) =
-                emit_comp_functions_to_string(
-                    &mut tail,
-                    &gs,
-                    &gn,
-                    template_ast,
-                    source,
-                    options.is_jsx,
-                );
+            let (root_comp_entries, all_comp_offsets) = emit_comp_functions_to_string(
+                &mut tail,
+                &gs,
+                &gn,
+                template_ast,
+                source,
+                options.is_jsx,
+            );
+            // Analyze root conditions for narrowing (when enabled and multiple branches)
+            let narrowing_result = if options.conditional_root_narrowing
+                && root_comp_entries.len() > 1
+            {
+                let prop_names: rustc_hash::FxHashSet<&str> = bindings
+                    .iter()
+                    .filter(|(_, bt)| bt.is_props())
+                    .map(|(name, _)| *name)
+                    .collect();
+                let conditions: Vec<(Option<&str>, u32)> = root_comp_entries
+                    .iter()
+                    .map(|(offset, _, cond)| (cond.as_deref(), *offset))
+                    .collect();
+                super::condition_narrowing::analyze_conditional_chain(&conditions, &prop_names).ok()
+            } else {
+                None
+            };
+
             // Always emit getRootComponent when there's a template (needed for implicit attrs)
             if template_ast.is_some() {
                 emit_get_root_component_to_string(
                     &mut tail,
                     &gs,
                     &gn,
-                    root_comp_offset,
-                    root_props_literal.as_deref(),
+                    &root_comp_entries,
+                    narrowing_result.as_ref(),
                 );
             }
 
@@ -3338,6 +3355,7 @@ declare module "@verter/types" {
   export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
+  export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
 }
 "#;
 
@@ -3361,6 +3379,7 @@ export type ExtractRenderComponent<T> = T extends { new (): infer I; } ? I exten
 export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
 export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
+export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
 "#;
 
 /// Collect Vue built-in component names used in the template AST.
@@ -3445,7 +3464,7 @@ fn emit_helper_imports(
     // Runtime imports from @verter/types
     writeln!(
         imports,
-        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent }} from \"{}\";",
+        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent }} from \"{}\";",
         options.types_module_name,
         P = PREFIX,
     )
@@ -3586,8 +3605,16 @@ fn emit_attrs_type_aliases(
 }
 
 /// Emit Comp{offset} functions to a string buffer (inside templateBindingFN).
-/// Returns (root_comp_offset, all_emitted_comp_offsets).
-/// Returns (root_comp_offset, root_props_literal, all_comp_offsets).
+/// Emit Comp functions for all template elements and collect root element info.
+///
+/// Returns `(root_comp_entries, all_comp_offsets)` where each root comp entry
+/// is `(offset, props_literal, condition_text)` for elements that are direct
+/// children of the template root. `condition_text` is `Some(expr)` for
+/// v-if/v-else-if branches and `None` for v-else.
+/// A single v-if/v-else-if/v-else chain produces multiple entries (one per
+/// branch) that get unioned in `getRootComponent`.
+/// A true fragment (multiple independent root elements) returns empty root entries.
+#[allow(clippy::type_complexity)]
 fn emit_comp_functions_to_string(
     buf: &mut String,
     gs: &str,
@@ -3595,10 +3622,10 @@ fn emit_comp_functions_to_string(
     template_ast: Option<&TemplateAst>,
     source: &str,
     is_jsx: bool,
-) -> (Option<u32>, Option<String>, Vec<u32>) {
+) -> (Vec<(u32, String, Option<String>)>, Vec<u32>) {
     let ast = match template_ast {
         Some(a) => a,
-        None => return (None, None, vec![]),
+        None => return (vec![], vec![]),
     };
 
     let root_children = ast
@@ -3608,8 +3635,32 @@ fn emit_comp_functions_to_string(
         .map(|c| c.children.as_slice())
         .unwrap_or(&[]);
 
-    let mut root_comp_offset: Option<u32> = None;
-    let mut root_props_literal: Option<String> = None;
+    // Count root elements excluding v-else / v-else-if (they don't create
+    // additional roots — they're part of the same conditional chain).
+    // If there are multiple independent root elements it's a fragment and
+    // attrs fallthrough does not apply (Vue warns at runtime).
+    let root_element_count = root_children
+        .iter()
+        .filter(|id| {
+            if let AstNodeKind::Element(el) = &ast.nodes[id.0].kind {
+                !matches!(
+                    el.v_condition.as_ref().map(|c| &c.kind),
+                    Some(
+                        crate::ast::types::ElementNodeConditionKind::Else
+                            | crate::ast::types::ElementNodeConditionKind::ElseIf
+                    )
+                )
+            } else {
+                false
+            }
+        })
+        .count();
+
+    // Only emit Comp functions for root elements when it's a single root
+    // (possibly a conditional chain). Fragments don't support attrs fallthrough.
+    let emit_root_comps = root_element_count <= 1;
+
+    let mut root_comp_entries: Vec<(u32, String, Option<String>)> = Vec::new();
     let mut all_comp_offsets: Vec<u32> = Vec::new();
 
     walk_children_for_comp(
@@ -3620,41 +3671,35 @@ fn emit_comp_functions_to_string(
         source,
         root_children,
         &[],
-        &mut root_comp_offset,
-        &mut root_props_literal,
+        &mut root_comp_entries,
         &mut all_comp_offsets,
-        true,
+        emit_root_comps,
         is_jsx,
     );
 
-    (root_comp_offset, root_props_literal, all_comp_offsets)
+    (root_comp_entries, all_comp_offsets)
 }
 
 /// Emit getRootComponent + getRootComponentPassedProps to a string buffer.
+///
+/// When `root_comp_entries` has multiple entries (v-if/v-else chain), the
+/// return type is a union of all branch Comp functions so that `RootElement`
+/// correctly resolves to the union of all possible root element types.
+/// `getRootComponentPassedProps` unions all branch props so that Omit removes
+/// props used by ANY branch.
+///
+/// When `narrowing` is `Some(result)`, conditional types are used instead of
+/// `Math.random()` union, and narrowing generics are appended to the function.
 fn emit_get_root_component_to_string(
     buf: &mut String,
     gs: &str,
     gn: &str,
-    root_comp_offset: Option<u32>,
-    root_props_literal: Option<&str>,
+    root_comp_entries: &[(u32, String, Option<String>)],
+    narrowing: Option<&super::condition_narrowing::ConditionalRootNarrowing>,
 ) {
     use std::fmt::Write;
 
-    let props = root_props_literal.unwrap_or("{}");
-
-    if let Some(offset) = root_comp_offset {
-        write!(
-            buf,
-            "\nfunction {P}getRootComponent{gs}() {{ return {P}Comp{offset}{gn}(); }}\
-             \nfunction {P}getRootComponentPassedProps{gs}() {{ return {props}; }}",
-            P = PREFIX,
-            gs = gs,
-            gn = gn,
-            offset = offset,
-            props = props,
-        )
-        .expect("write to String is infallible");
-    } else {
+    if root_comp_entries.is_empty() {
         write!(
             buf,
             "\nfunction {P}getRootComponent{gs}() {{ return {{}}; }}\
@@ -3663,7 +3708,149 @@ fn emit_get_root_component_to_string(
             gs = gs,
         )
         .expect("write to String is infallible");
+        return;
     }
+
+    // ── Build narrowing generics string ────────────────────────
+    // When narrowing is active, append T_{prop} generics to the function signature
+    // and use conditional types instead of Math.random() union.
+    let narrowing_gs = if let Some(nr) = narrowing {
+        let mut extra = String::new();
+        for g in &nr.generics {
+            if !extra.is_empty() {
+                extra.push_str(", ");
+            }
+            write!(
+                extra,
+                "T_{prop} extends {P}defineProps_Type['{prop}'] = {P}defineProps_Type['{prop}']",
+                prop = g.prop_name,
+                P = PREFIX,
+            )
+            .expect("write to String is infallible");
+        }
+        // Merge with existing gs: gs is like "<T extends string>" or ""
+        if gs.is_empty() {
+            format!("<{extra}>")
+        } else {
+            // gs starts with < and ends with >, insert before closing >
+            format!("{}, {extra}>", &gs[..gs.len() - 1])
+        }
+    } else {
+        gs.to_string()
+    };
+
+    // getRootComponent
+    write!(
+        buf,
+        "\nfunction {P}getRootComponent{ngs}() {{ ",
+        P = PREFIX,
+        ngs = narrowing_gs
+    )
+    .expect("write to String is infallible");
+
+    if root_comp_entries.len() == 1 {
+        let (offset, _, _) = &root_comp_entries[0];
+        write!(
+            buf,
+            "return {P}Comp{offset}{gn}();",
+            P = PREFIX,
+            offset = offset,
+            gn = gn,
+        )
+        .expect("write to String is infallible");
+    } else if let Some(nr) = narrowing {
+        // Narrowing: emit `return {} as T_foo extends true ? ReturnType<typeof Comp1<...>> : ...`
+        buf.push_str("return {} as ");
+        for (i, branch) in nr.branches.iter().enumerate() {
+            if let Some(ref cond) = branch.narrowing {
+                let extends_rhs = if let Some(ref lit) = cond.literal {
+                    lit.clone()
+                } else if cond.negated {
+                    "false".to_string()
+                } else {
+                    "true".to_string()
+                };
+                write!(
+                    buf,
+                    "T_{prop} extends {rhs} ? ReturnType<typeof {P}Comp{offset}{gn}> : ",
+                    prop = cond.prop_name,
+                    rhs = extends_rhs,
+                    P = PREFIX,
+                    offset = branch.comp_offset,
+                    gn = gn,
+                )
+                .expect("write to String is infallible");
+            } else {
+                // v-else: terminal fallback
+                write!(
+                    buf,
+                    "ReturnType<typeof {P}Comp{offset}{gn}>",
+                    P = PREFIX,
+                    offset = branch.comp_offset,
+                    gn = gn,
+                )
+                .expect("write to String is infallible");
+            }
+            // If last branch has a condition (no v-else), add never fallback
+            if i == nr.branches.len() - 1 && branch.narrowing.is_some() {
+                buf.push_str("never");
+            }
+        }
+        buf.push(';');
+    } else {
+        // Fallback: Math.random() union
+        for (i, (offset, _, _)) in root_comp_entries.iter().enumerate() {
+            if i == root_comp_entries.len() - 1 {
+                write!(
+                    buf,
+                    "return {P}Comp{offset}{gn}();",
+                    P = PREFIX,
+                    offset = offset,
+                    gn = gn,
+                )
+                .expect("write to String is infallible");
+            } else {
+                write!(
+                    buf,
+                    "if (Math.random()) return {P}Comp{offset}{gn}(); else ",
+                    P = PREFIX,
+                    offset = offset,
+                    gn = gn,
+                )
+                .expect("write to String is infallible");
+            }
+        }
+    }
+    write!(buf, " }}").expect("write to String is infallible");
+
+    // getRootComponentPassedProps: union of all branch props
+    write!(
+        buf,
+        "\nfunction {P}getRootComponentPassedProps{ngs}() {{ ",
+        P = PREFIX,
+        ngs = narrowing_gs,
+    )
+    .expect("write to String is infallible");
+    if root_comp_entries.len() == 1 {
+        let (_, props, _) = &root_comp_entries[0];
+        write!(buf, "return {props};", props = props).expect("write to String is infallible");
+    } else {
+        // Union: same pattern so Omit removes props used by any branch
+        for (i, (_, props, _)) in root_comp_entries.iter().enumerate() {
+            if i == root_comp_entries.len() - 1 {
+                write!(buf, "return {props};", props = props)
+                    .expect("write to String is infallible");
+            } else {
+                write!(
+                    buf,
+                    "if (Math.random()) return {props}; else ",
+                    props = props
+                )
+                .expect("write to String is infallible");
+            }
+        }
+    }
+    write!(buf, " }}").expect("write to String is infallible");
 }
 
 /// Emit Comp{offset} functions for template elements.
@@ -3677,10 +3864,9 @@ fn walk_children_for_comp(
     source: &str,
     children: &[crate::types::NodeId],
     parent_scopes: &[super::condition::ConditionScope],
-    root_comp_offset: &mut Option<u32>,
-    root_props_literal: &mut Option<String>,
+    root_comp_entries: &mut Vec<(u32, String, Option<String>)>,
     all_comp_offsets: &mut Vec<u32>,
-    is_root: bool,
+    emit_root_comps: bool,
     is_jsx: bool,
 ) {
     for &child_id in children {
@@ -3695,10 +3881,9 @@ fn walk_children_for_comp(
 
             // Emit Comp function for:
             // - elements with ref (always, for template ref typing)
-            // - the first root element (for implicit attrs / getRootComponent)
+            // - root elements when emit_root_comps=true (single root / conditional chain)
             let is_eligible = !matches!(el.tag_type, TagType::SlotOutlet | TagType::Template);
-            let is_first_root = is_root && root_comp_offset.is_none();
-            let needs_comp = is_eligible && (el.v_ref.is_some() || is_first_root);
+            let needs_comp = is_eligible && (el.v_ref.is_some() || emit_root_comps);
             if needs_comp {
                 let offset = el.tag_open.start;
                 let props_lit = serialize_element_props(el, source);
@@ -3706,9 +3891,23 @@ fn walk_children_for_comp(
                     buf, gs, gn, el, source, offset, &scopes, is_jsx, &props_lit,
                 );
                 all_comp_offsets.push(offset);
-                if is_first_root {
-                    *root_comp_offset = Some(offset);
-                    *root_props_literal = Some(props_lit);
+                if emit_root_comps {
+                    // Extract condition expression for narrowing analysis
+                    let condition_text = el.v_condition.as_ref().and_then(|cond| {
+                        use crate::ast::types::ElementNodeConditionKind;
+                        match cond.kind {
+                            ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
+                                let (Some(vs), Some(ve)) =
+                                    (cond.prop.value_start, cond.prop.value_end)
+                                else {
+                                    return None;
+                                };
+                                Some(source[vs as usize..ve as usize].to_string())
+                            }
+                            ElementNodeConditionKind::Else => None,
+                        }
+                    });
+                    root_comp_entries.push((offset, props_lit, condition_text));
                 }
             }
 
@@ -3722,8 +3921,7 @@ fn walk_children_for_comp(
                     source,
                     &content.children,
                     &scopes,
-                    root_comp_offset,
-                    root_props_literal,
+                    root_comp_entries,
                     all_comp_offsets,
                     false,
                     is_jsx,
@@ -3953,7 +4151,7 @@ fn emit_comp_function_for_element(
             write!(
                 buf,
                 "\nfunction {P}Comp{offset}{gs}() {{{guard}\
-                 \n  return new {tag}({props});\
+                 \n  return {P}instantiateComponent({tag}, {props});\
                  \n}}",
                 P = PREFIX,
                 offset = offset,
@@ -4010,6 +4208,7 @@ mod tests {
             is_vapor: false,
             embed_ambient_types: true,
             is_jsx: false,
+            conditional_root_narrowing: false,
         };
 
         // Use unified CT mode: pass template_end so comp functions are emitted in code
@@ -4071,6 +4270,85 @@ mod tests {
     fn gen_tsx_script(source: &str) -> (String, FxHashMap<String, BindingType>) {
         let (code, bindings, _) = gen_tsx_script_full(source);
         (code, bindings)
+    }
+
+    /// Like gen_tsx_script_full but with conditional_root_narrowing enabled.
+    fn gen_tsx_script_narrowing(source: &str) -> String {
+        let alloc = Allocator::new();
+        let mut ct = CodeTransform::new(source, &alloc);
+
+        let bytes = source.as_bytes();
+        let mut syntax = crate::parser::Syntax::new(false);
+        crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+            syntax.handle(
+                &e,
+                &crate::diagnostics::SyntaxPluginContext {
+                    input: source,
+                    bytes,
+                    options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                    diagnostics: Vec::new(),
+                },
+            )
+        });
+
+        let options = IdeScriptOptions {
+            component_name: "App",
+            js_component_name: "App",
+            filename: "App.vue",
+            scope_id: "data-v-abc123",
+            has_scoped_style: false,
+            runtime_module_name: "vue",
+            types_module_name: "@verter/types",
+            is_vapor: false,
+            embed_ambient_types: true,
+            is_jsx: false,
+            conditional_root_narrowing: true,
+        };
+
+        let template_end = syntax.template_ast().map(|tpl| {
+            tpl.root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(tpl.root.tag_open.end)
+        });
+
+        let result = generate_ide_script(
+            syntax.script(),
+            syntax.script_setup(),
+            syntax.template_ast(),
+            source,
+            &mut ct,
+            &alloc,
+            &options,
+            template_end,
+        );
+
+        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
+            ct.prepend_left(tpl_end, return_close);
+        }
+
+        if let Some(tpl) = syntax.template_ast() {
+            let start = tpl.root.tag_open.start;
+            let end = tpl
+                .root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(tpl.root.tag_open.end);
+            ct.remove(start, end);
+        }
+        for style_node in syntax.style_nodes() {
+            let start = style_node.tag_open.start;
+            let end = style_node
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(style_node.tag_open.end);
+            ct.remove(start, end);
+        }
+
+        ct.build_string()
     }
 
     /// IDE output rewrites `.vue` import specifiers to `.vue.ts` so that
@@ -4642,8 +4920,8 @@ const el = ref()
 <template><MyComp ref="el" /></template>"#,
         );
         assert!(
-            code.contains("return new MyComp({})"),
-            "should emit new MyComp for component with ref in code: {}",
+            code.contains("instantiateComponent(MyComp, {})"),
+            "should emit instantiateComponent(MyComp) for component with ref in code: {}",
             code
         );
     }
@@ -4713,6 +4991,545 @@ const msg = 'hello'
             !code.contains("___VERTER___getRootComponent"),
             "getRootComponent should NOT be emitted when no template: {}",
             code
+        );
+    }
+
+    // ── Root element attrs fallthrough tests ──────────────────────
+
+    #[test]
+    fn root_attrs_single_native_element() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const msg = 'hi'
+</script>
+<template><div :title="msg" id="app">hi</div></template>"#,
+        );
+        // Positive: getRootComponent delegates to a Comp function
+        assert!(
+            code.contains("getRootComponent()") && code.contains("return ___VERTER___Comp"),
+            "getRootComponent should delegate to Comp: {}",
+            code
+        );
+        // Positive: getRootComponentPassedProps has the static and bound props
+        assert!(
+            code.contains(r#""id": "app""#),
+            "passed props should contain id: {}",
+            code
+        );
+        assert!(
+            code.contains(r#""title": msg"#),
+            "passed props should contain title: {}",
+            code
+        );
+        // Positive: Attrs includes RootElementProps
+        assert!(
+            code.contains("___VERTER___Attrs") && code.contains("___VERTER___RootElementProps"),
+            "Attrs should include RootElementProps: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn root_attrs_native_excludes_class_style() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const x = ''
+const y = {}
+</script>
+<template><div :class="x" :style="y" id="app">hi</div></template>"#,
+        );
+        // Positive: id is in passed props
+        assert!(
+            code.contains(r#""id": "app""#),
+            "passed props should contain id: {}",
+            code
+        );
+        // Negative: class and style are excluded
+        let passed_props_section = code
+            .split("getRootComponentPassedProps")
+            .nth(1)
+            .unwrap_or("");
+        assert!(
+            !passed_props_section.contains(r#""class""#),
+            "class should NOT be in passed props: {}",
+            code
+        );
+        assert!(
+            !passed_props_section.contains(r#""style""#),
+            "style should NOT be in passed props: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn root_attrs_single_component_root() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+<template><MyComp :foo="42" bar="static"/></template>"#,
+        );
+        // Positive: Comp function instantiates MyComp
+        assert!(
+            code.contains("instantiateComponent(MyComp,"),
+            "should instantiate MyComp: {}",
+            code
+        );
+        // Positive: getRootComponent delegates to Comp
+        assert!(
+            code.contains("getRootComponent()") && code.contains("return ___VERTER___Comp"),
+            "getRootComponent should delegate: {}",
+            code
+        );
+        // Positive: passed props include foo and bar
+        assert!(
+            code.contains(r#""foo": 42"#),
+            "passed props should contain foo: {}",
+            code
+        );
+        assert!(
+            code.contains(r#""bar": "static""#),
+            "passed props should contain bar: {}",
+            code
+        );
+        // Negative: getRootComponent does NOT return {}
+        let root_fn = code
+            .split("getRootComponent()")
+            .nth(1)
+            .unwrap_or("")
+            .split('}')
+            .next()
+            .unwrap_or("");
+        assert!(
+            !root_fn.contains("return {};"),
+            "getRootComponent should NOT return empty: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn root_attrs_multi_root_fragment() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const a = 1
+</script>
+<template><div>first</div><span>second</span></template>"#,
+        );
+        // Positive: both functions return {}
+        assert!(
+            code.contains("getRootComponent() { return {};"),
+            "getRootComponent should return empty: {}",
+            code
+        );
+        assert!(
+            code.contains("getRootComponentPassedProps() { return {};"),
+            "getRootComponentPassedProps should return empty: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn root_attrs_inherit_attrs_false() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+</script>
+<template><div id="app">hello</div></template>"#,
+        );
+        // Positive: Attrs type should NOT include RootElementProps
+        let attrs_line = code
+            .lines()
+            .find(|l| l.contains("type ___VERTER___Attrs"))
+            .unwrap_or("");
+        assert!(
+            !attrs_line.contains("RootElementProps"),
+            "Attrs should NOT include RootElementProps when inheritAttrs: false: attrs_line={}, full={}",
+            attrs_line,
+            code
+        );
+        // Positive: Attrs = attributes only
+        assert!(
+            attrs_line.contains("___VERTER___attributes"),
+            "Attrs should include attributes: {}",
+            attrs_line
+        );
+    }
+
+    #[test]
+    fn root_attrs_inherit_attrs_true_default() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><div>hello</div></template>"#,
+        );
+        // Positive: Attrs includes RootElementProps
+        let attrs_line = code
+            .lines()
+            .find(|l| l.contains("type ___VERTER___Attrs"))
+            .unwrap_or("");
+        assert!(
+            attrs_line.contains("___VERTER___RootElementProps"),
+            "Attrs should include RootElementProps by default: {}",
+            attrs_line
+        );
+    }
+
+    #[test]
+    fn root_attrs_v_if_v_else_single_root() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const show = true
+</script>
+<template><div v-if="show">A</div><span v-else>B</span></template>"#,
+        );
+        // Positive: getRootComponent should contain both Comp branches (union)
+        let root_fn_body = code
+            .split("getRootComponent()")
+            .nth(1)
+            .unwrap_or("")
+            .split("getRootComponentPassedProps")
+            .next()
+            .unwrap_or("");
+        // Both Comp offsets should appear — the div and the span
+        let comp_count = root_fn_body.matches("___VERTER___Comp").count();
+        assert!(
+            comp_count == 2,
+            "getRootComponent should union both branches (found {} Comp refs): {}",
+            comp_count,
+            code
+        );
+        // Negative: should NOT return {}
+        assert!(
+            !root_fn_body.contains("return {};"),
+            "getRootComponent should NOT return empty for v-if/v-else: {}",
+            code
+        );
+        // Positive: Math.random() pattern used for union branching
+        assert!(
+            root_fn_body.contains("Math.random()"),
+            "union branches should use Math.random() pattern: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn root_attrs_v_if_elseif_else_triple_union() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const mode = 'a'
+</script>
+<template><div v-if="mode === 'a'">A</div><span v-else-if="mode === 'b'">B</span><p v-else>C</p></template>"#,
+        );
+        // Positive: getRootComponent should contain all 3 Comp branches
+        let root_fn_body = code
+            .split("getRootComponent()")
+            .nth(1)
+            .unwrap_or("")
+            .split("getRootComponentPassedProps")
+            .next()
+            .unwrap_or("");
+        let comp_count = root_fn_body.matches("___VERTER___Comp").count();
+        assert!(
+            comp_count == 3,
+            "getRootComponent should union all 3 branches (found {} Comp refs): {}",
+            comp_count,
+            code
+        );
+        // Negative: should NOT return {}
+        assert!(
+            !root_fn_body.contains("return {};"),
+            "getRootComponent should NOT return empty for triple conditional: {}",
+            code
+        );
+        // Positive: also check getRootComponentPassedProps has 3 branches
+        let props_fn_body = code
+            .split("getRootComponentPassedProps()")
+            .nth(1)
+            .unwrap_or("")
+            .split("type ___VERTER___RootElement")
+            .next()
+            .unwrap_or("");
+        let props_return_count = props_fn_body.matches("return").count();
+        assert!(
+            props_return_count == 3,
+            "getRootComponentPassedProps should have 3 return branches (found {}): {}",
+            props_return_count,
+            code
+        );
+    }
+
+    #[test]
+    fn root_attrs_nested_no_leak() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const x = ''
+</script>
+<template><div><span :title="x">inner</span></div></template>"#,
+        );
+        // Positive: getRootComponentPassedProps returns {} (div has no props)
+        assert!(
+            code.contains("getRootComponentPassedProps() { return {};"),
+            "root div has no props so passed props should be empty: {}",
+            code
+        );
+        // Negative: title should NOT leak to root
+        let passed_section = code
+            .split("getRootComponentPassedProps")
+            .nth(1)
+            .unwrap_or("")
+            .split('}')
+            .next()
+            .unwrap_or("");
+        assert!(
+            !passed_section.contains("title"),
+            "inner span's title should NOT leak to root: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn root_attrs_event_handler_camelized() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+</script>
+<template><div @my-event="() => {}">hello</div></template>"#,
+        );
+        // Positive: event handler is camelized to onMyEvent
+        assert!(
+            code.contains(r#""onMyEvent""#),
+            "event handler should be camelized to onMyEvent: {}",
+            code
+        );
+        // Negative: raw event name should NOT appear
+        let passed_section = code
+            .split("getRootComponentPassedProps")
+            .nth(1)
+            .unwrap_or("")
+            .split("getRootComponent")
+            .next()
+            .unwrap_or("");
+        assert!(
+            !passed_section.contains(r#""my-event""#),
+            "raw event name should NOT appear in passed props: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn root_attrs_functional_component_uses_instantiate() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+<template><MyComp :label="'hello'"/></template>"#,
+        );
+        // Positive: uses instantiateComponent, not new
+        assert!(
+            code.contains("instantiateComponent(MyComp,"),
+            "should use instantiateComponent for components: {}",
+            code
+        );
+        // Negative: should NOT use new
+        assert!(
+            !code.contains("new MyComp("),
+            "should NOT use new for component instantiation: {}",
+            code
+        );
+    }
+
+    // ── Conditional root narrowing tests ─────────────────────────
+
+    #[test]
+    fn narrowing_bare_prop() {
+        let code = gen_tsx_script_narrowing(
+            r#"<script setup lang="ts">
+defineProps<{foo?: boolean}>()
+</script>
+<template><div v-if="foo">A</div><span v-else>B</span></template>"#,
+        );
+        // Positive: getRootComponent should have T_foo generic
+        assert!(
+            code.contains("T_foo extends"),
+            "should have T_foo generic: {code}"
+        );
+        // Positive: conditional type return, not Math.random()
+        assert!(
+            code.contains("T_foo extends true ?"),
+            "should have conditional type T_foo extends true: {code}"
+        );
+        // Negative: getRootComponent should NOT use Math.random()
+        let root_fn = code
+            .split("getRootComponent")
+            .nth(1)
+            .unwrap_or("")
+            .split("getRootComponentPassedProps")
+            .next()
+            .unwrap_or("");
+        assert!(
+            !root_fn.contains("Math.random()"),
+            "getRootComponent should NOT use Math.random() when narrowing is enabled: {code}"
+        );
+    }
+
+    #[test]
+    fn narrowing_multi_prop_chain() {
+        let code = gen_tsx_script_narrowing(
+            r#"<script setup lang="ts">
+defineProps<{foo?: boolean, s?: 'foo' | 'bar'}>()
+</script>
+<template><div v-if="foo">A</div><span v-else-if="s === 'foo'">B</span><canvas v-else-if="s === 'bar'">C</canvas><input v-else /></template>"#,
+        );
+        // Positive: two generics
+        assert!(code.contains("T_foo extends"), "should have T_foo: {code}");
+        assert!(code.contains("T_s extends"), "should have T_s: {code}");
+        // Positive: nested conditional type
+        assert!(
+            code.contains("T_foo extends true ?"),
+            "first condition: {code}"
+        );
+        assert!(
+            code.contains("T_s extends 'foo' ?"),
+            "second condition: {code}"
+        );
+        assert!(
+            code.contains("T_s extends 'bar' ?"),
+            "third condition: {code}"
+        );
+    }
+
+    #[test]
+    fn narrowing_negated() {
+        let code = gen_tsx_script_narrowing(
+            r#"<script setup lang="ts">
+defineProps<{disabled?: boolean}>()
+</script>
+<template><div v-if="!disabled">A</div><span v-else>B</span></template>"#,
+        );
+        // Negated: T_disabled extends false means "!disabled is true"
+        assert!(
+            code.contains("T_disabled extends false ?"),
+            "negated should use extends false: {code}"
+        );
+    }
+
+    #[test]
+    fn narrowing_disabled_by_default() {
+        // Use the standard helper (conditional_root_narrowing: false)
+        let (code, _, _) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+defineProps<{foo?: boolean}>()
+</script>
+<template><div v-if="foo">A</div><span v-else>B</span></template>"#,
+        );
+        // When disabled, should use Math.random() union, not conditional types
+        assert!(
+            code.contains("Math.random()"),
+            "should use Math.random() when narrowing disabled: {code}"
+        );
+        assert!(
+            !code.contains("T_foo extends"),
+            "should NOT have narrowing generics when disabled: {code}"
+        );
+    }
+
+    #[test]
+    fn narrowing_complex_fallback() {
+        let code = gen_tsx_script_narrowing(
+            r#"<script setup lang="ts">
+defineProps<{show?: boolean, count?: number}>()
+</script>
+<template><div v-if="show && count">A</div><span v-else>B</span></template>"#,
+        );
+        // Complex condition: falls back to Math.random() union
+        assert!(
+            code.contains("Math.random()"),
+            "complex conditions should fall back to Math.random(): {code}"
+        );
+        assert!(
+            !code.contains("T_show extends"),
+            "should NOT have narrowing generics for complex conditions: {code}"
+        );
+    }
+
+    #[test]
+    fn narrowing_appends_to_existing_generics() {
+        let code = gen_tsx_script_narrowing(
+            r#"<script setup lang="ts" generic="T extends string">
+defineProps<{show: boolean}>()
+</script>
+<template><div v-if="show">A</div><span v-else>B</span></template>"#,
+        );
+        // Should have both T (existing) and T_show (narrowing)
+        assert!(
+            code.contains("T_show extends"),
+            "should have T_show narrowing generic: {code}"
+        );
+        // The existing generic T should still be present
+        assert!(
+            code.contains("T extends string"),
+            "should preserve existing generic: {code}"
+        );
+    }
+
+    #[test]
+    fn narrowing_triple_same_prop() {
+        let code = gen_tsx_script_narrowing(
+            r#"<script setup lang="ts">
+defineProps<{m?: 'a' | 'b' | 'c'}>()
+</script>
+<template><div v-if="m === 'a'">A</div><span v-else-if="m === 'b'">B</span><p v-else>C</p></template>"#,
+        );
+        // Single generic T_m for same prop across branches
+        assert!(
+            code.contains("T_m extends"),
+            "should have single T_m generic: {code}"
+        );
+        assert!(code.contains("T_m extends 'a' ?"), "first branch: {code}");
+        assert!(code.contains("T_m extends 'b' ?"), "second branch: {code}");
+    }
+
+    #[test]
+    fn narrowing_component_roots() {
+        let code = gen_tsx_script_narrowing(
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import OtherComp from './OtherComp.vue'
+defineProps<{variant?: 'primary' | 'secondary'}>()
+</script>
+<template><MyComp v-if="variant === 'primary'" /><OtherComp v-else /></template>"#,
+        );
+        assert!(
+            code.contains("T_variant extends"),
+            "should have T_variant generic: {code}"
+        );
+        assert!(
+            code.contains("T_variant extends 'primary' ?"),
+            "should narrow on variant: {code}"
+        );
+    }
+
+    #[test]
+    fn narrowing_mixed_native_component() {
+        let code = gen_tsx_script_narrowing(
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+defineProps<{simple?: boolean}>()
+</script>
+<template><div v-if="simple">A</div><MyComp v-else /></template>"#,
+        );
+        assert!(
+            code.contains("T_simple extends"),
+            "should have T_simple generic: {code}"
+        );
+        assert!(
+            code.contains("T_simple extends true ?"),
+            "should narrow: {code}"
+        );
+        // Both branches should be referenced
+        assert!(
+            code.contains("___VERTER___Comp"),
+            "should reference Comp functions: {code}"
         );
     }
 
@@ -5458,6 +6275,7 @@ const el2 = ref<HTMLSpanElement>()
                 is_vapor: false,
                 embed_ambient_types: true,
                 is_jsx: false,
+                conditional_root_narrowing: false,
             },
         );
         assert!(
@@ -6041,6 +6859,7 @@ const props = defineProps<{ msg: string }>()
                 is_vapor: false,
                 embed_ambient_types: false,
                 is_jsx: false,
+                conditional_root_narrowing: false,
             },
         );
 
@@ -6369,10 +7188,10 @@ import Foo from './Foo.vue'
             "Comp function should be emitted for component with ref: {}",
             code
         );
-        // Positive: Comp function references Foo via new
+        // Positive: Comp function references Foo via instantiateComponent
         assert!(
-            code.contains("new Foo("),
-            "Comp function should construct Foo: {}",
+            code.contains("instantiateComponent(Foo,"),
+            "Comp function should instantiate Foo: {}",
             code
         );
         // Negative: no GlobalComponents fallback since Foo is imported
@@ -7062,6 +7881,7 @@ count.
             is_vapor: false,
             embed_ambient_types: true,
             is_jsx: true,
+            conditional_root_narrowing: false,
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -7521,6 +8341,7 @@ const props = defineProps<{ msg: string }>()
             is_vapor: false,
             embed_ambient_types: true,
             is_jsx: false,
+            conditional_root_narrowing: false,
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -7616,6 +8437,7 @@ function handleClick(event) {}
             is_vapor: false,
             embed_ambient_types: true,
             is_jsx: false,
+            conditional_root_narrowing: false,
         };
 
         let template_end = syntax.template_ast().map(|tpl| {

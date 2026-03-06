@@ -142,6 +142,8 @@ pub struct CodegenOptions {
     /// When `false` (default), the ambient module block is omitted, relying
     /// on `@verter/types` being installed in `node_modules`.
     pub embed_ambient_types: bool,
+    /// Experimental: Enable conditional root generic narrowing.
+    pub conditional_root_narrowing: bool,
 }
 
 impl CodegenOptions {

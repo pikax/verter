@@ -716,6 +716,7 @@ pub fn compile(
             is_vapor: use_vapor,
             embed_ambient_types: options.embed_ambient_types,
             is_jsx,
+            conditional_root_narrowing: options.conditional_root_narrowing,
         };
 
         // Unified single CodeTransform for both script and template.
@@ -874,7 +875,13 @@ pub fn compile(
     // Macro-only extraction — generates a minimal .tsc.tsx declaration file.
     let tsc_block = if options.target.needs_tsc() {
         let tsc_start = Instant::now();
-        let tsc_out = tsc::generate_tsc_output(input, &component_name);
+        let tsc_out = tsc::generate_tsc_output_with_options(
+            input,
+            &component_name,
+            &tsc::TscGenOptions {
+                conditional_root_narrowing: options.conditional_root_narrowing,
+            },
+        );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;
         Some(VerterTsxBlock {
             code: tsc_out.code,

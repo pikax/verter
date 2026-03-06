@@ -493,6 +493,7 @@ impl VerterHost {
             types_module_name: profile.types_module_name.clone(),
             target: profile.target,
             embed_ambient_types: profile.embed_ambient_types,
+            conditional_root_narrowing: profile.conditional_root_narrowing,
             ..CodegenOptions::default()
         };
 

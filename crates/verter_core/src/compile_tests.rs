@@ -11029,32 +11029,59 @@ const el = ref<HTMLDivElement>()
 
 #[test]
 fn tsx_comp_emitted_for_root_element_without_ref() {
+    // Single root: Comp function emitted for root element (for implicit attrs)
     let result = compile_tsx(
         r#"<script setup lang="ts">
 const msg = 'hello'
 </script>
-<template><div>{{ msg }}</div><MyComp /></template>"#,
+<template><div>{{ msg }}</div></template>"#,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
-    // Positive: Comp function emitted for root element (for implicit attrs)
     assert!(
         tsx.code.contains("function ___VERTER___Comp"),
-        "Should have Comp function for root element, got:\n{}",
+        "Should have Comp function for single root element, got:\n{}",
         tsx.code
     );
-    // Positive: getRootComponent emitted when template present
     assert!(
         tsx.code.contains("___VERTER___getRootComponent"),
         "Should have getRootComponent with template, got:\n{}",
         tsx.code
     );
-    // Negative: only ONE Comp function (root element only, no ref elements)
     let comp_count = tsx.code.matches("function ___VERTER___Comp").count();
     assert_eq!(
         comp_count, 1,
-        "Should have exactly 1 Comp function (root only), got {} in:\n{}",
+        "Should have exactly 1 Comp function (single root), got {} in:\n{}",
         comp_count, tsx.code
+    );
+
+    // Multi-root (fragment): no Comp functions for root (no ref, no attrs fallthrough)
+    let result2 = compile_tsx(
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div><MyComp /></template>"#,
+    );
+    assert!(result2.errors.is_empty(), "errors: {:?}", result2.errors);
+    let tsx2 = result2.tsx.as_ref().expect("tsx block");
+    // getRootComponent still emitted (returns {})
+    assert!(
+        tsx2.code.contains("___VERTER___getRootComponent"),
+        "Should have getRootComponent with template, got:\n{}",
+        tsx2.code
+    );
+    // No Comp functions (fragment, no ref elements)
+    let comp_count2 = tsx2.code.matches("function ___VERTER___Comp").count();
+    assert_eq!(
+        comp_count2, 0,
+        "Fragment should have 0 Comp functions (no ref), got {} in:\n{}",
+        comp_count2, tsx2.code
+    );
+    // getRootComponent returns {}
+    assert!(
+        tsx2.code.contains("getRootComponent() { return {};"),
+        "Fragment getRootComponent should return empty, got:\n{}",
+        tsx2.code
     );
 }
 

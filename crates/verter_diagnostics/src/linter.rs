@@ -120,6 +120,11 @@ impl Linter {
     pub fn config(&self) -> &LintConfig {
         &self.config
     }
+
+    /// Get a mutable reference to the configuration.
+    pub fn config_mut(&mut self) -> &mut LintConfig {
+        &mut self.config
+    }
 }
 
 impl Default for Linter {

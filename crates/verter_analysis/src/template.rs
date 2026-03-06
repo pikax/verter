@@ -360,6 +360,9 @@ pub struct TemplateElement {
     pub has_v_else: bool,
     /// Whether v-else-if is present.
     pub has_v_else_if: bool,
+    /// The v-if or v-else-if condition expression text (e.g., `"show"`, `"mode === 'dark'"`).
+    /// `None` for v-else or when no condition directive is present.
+    pub v_if_condition: Option<String>,
     /// Whether v-show is present.
     pub has_v_show: bool,
     /// Whether v-html is present (security: XSS risk).
@@ -1706,6 +1709,9 @@ impl serde::Serialize for TemplateElement {
         map.serialize_entry("hasVIf", &self.has_v_if)?;
         map.serialize_entry("hasVElse", &self.has_v_else)?;
         map.serialize_entry("hasVElseIf", &self.has_v_else_if)?;
+        if self.v_if_condition.is_some() {
+            map.serialize_entry("vIfCondition", &self.v_if_condition)?;
+        }
         map.serialize_entry("hasVShow", &self.has_v_show)?;
         map.serialize_entry("hasVHtml", &self.has_v_html)?;
         map.serialize_entry("hasVText", &self.has_v_text)?;
@@ -1772,6 +1778,8 @@ impl<'de> serde::Deserialize<'de> for TemplateElement {
             #[serde(default)]
             has_v_else_if: bool,
             #[serde(default)]
+            v_if_condition: Option<String>,
+            #[serde(default)]
             has_v_show: bool,
             #[serde(default)]
             has_v_html: bool,
@@ -1813,6 +1821,7 @@ impl<'de> serde::Deserialize<'de> for TemplateElement {
             has_v_if: w.has_v_if,
             has_v_else: w.has_v_else,
             has_v_else_if: w.has_v_else_if,
+            v_if_condition: w.v_if_condition,
             has_v_show: w.has_v_show,
             has_v_html: w.has_v_html,
             has_v_text: w.has_v_text,
@@ -2295,6 +2304,7 @@ mod tests {
             has_v_if: true,
             has_v_else: false,
             has_v_else_if: false,
+            v_if_condition: Some("visible".to_string()),
             has_v_show: false,
             has_v_html: false,
             has_v_text: false,

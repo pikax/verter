@@ -21,6 +21,10 @@ pub struct LintConfig {
     /// SSR mode: enables SSR-specific rules.
     #[serde(default)]
     pub ssr_mode: bool,
+    /// Experimental: conditional root narrowing enabled.
+    /// When true, enables the `conditional-root-complex` diagnostic.
+    #[serde(default)]
+    pub conditional_root_narrowing: bool,
 }
 
 impl Default for LintConfig {
@@ -30,6 +34,7 @@ impl Default for LintConfig {
             rules: FxHashMap::default(),
             vapor_mode: false,
             ssr_mode: false,
+            conditional_root_narrowing: false,
         }
     }
 }
@@ -123,6 +128,7 @@ mod tests {
             preset: LintPreset::A11y,
             vapor_mode: true,
             ssr_mode: false,
+            conditional_root_narrowing: false,
             rules: {
                 let mut m = FxHashMap::default();
                 m.insert("no-v-html".to_string(), Some(Severity::Error));

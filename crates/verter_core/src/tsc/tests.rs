@@ -1,7 +1,18 @@
-use super::script::generate_tsc_output;
+use super::script::{generate_tsc_output, generate_tsc_output_with_options, TscGenOptions};
 
 fn gen_tsc(sfc: &str) -> String {
     generate_tsc_output(sfc, "TestComp").code
+}
+
+fn gen_tsc_narrowing(sfc: &str) -> String {
+    generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            conditional_root_narrowing: true,
+        },
+    )
+    .code
 }
 
 // ── defineProps<ImportedType>() — type-only, no runtime props ────────────────
@@ -1434,5 +1445,106 @@ defineProps<{ items: T[] }>()
         r.contains("__OmitNew<typeof __comp>"),
         "should use __OmitNew: got:\n{}",
         r
+    );
+}
+
+// ── Conditional root narrowing ──────────────────────────────────────────────
+
+#[test]
+fn tsc_narrowing_basic() {
+    let r = gen_tsc_narrowing(
+        r#"<script setup lang="ts">
+defineProps<{foo?: boolean}>()
+</script>
+<template><div v-if="foo">A</div><span v-else>B</span></template>"#,
+    );
+    // Positive: narrowing generic on new()
+    assert!(
+        r.contains("T_foo extends boolean = boolean"),
+        "should have T_foo generic: {r}"
+    );
+    // Positive: $props uses generic type
+    assert!(
+        r.contains("foo?: T_foo"),
+        "should substitute generic in $props: {r}"
+    );
+    // Positive: $root with conditional type
+    assert!(
+        r.contains("$root: T_foo extends true ? HTMLDivElement : HTMLSpanElement"),
+        "$root should have conditional type: {r}"
+    );
+}
+
+#[test]
+fn tsc_narrowing_multi() {
+    let r = gen_tsc_narrowing(
+        r#"<script setup lang="ts">
+defineProps<{foo?: boolean, s?: 'foo' | 'bar'}>()
+</script>
+<template><div v-if="foo">A</div><span v-else-if="s === 'foo'">B</span><canvas v-else-if="s === 'bar'">C</canvas><input v-else /></template>"#,
+    );
+    assert!(
+        r.contains("T_foo extends boolean = boolean"),
+        "should have T_foo: {r}"
+    );
+    assert!(
+        r.contains("T_s extends 'foo' | 'bar' = 'foo' | 'bar'"),
+        "should have T_s: {r}"
+    );
+    assert!(r.contains("$root:"), "should have $root: {r}");
+}
+
+#[test]
+fn tsc_narrowing_with_sfc_generics() {
+    let r = gen_tsc_narrowing(
+        r#"<script setup lang="ts" generic="T extends string">
+defineProps<{show?: boolean}>()
+</script>
+<template><div v-if="show">A</div><span v-else>B</span></template>"#,
+    );
+    // Both existing generic and narrowing generic
+    assert!(
+        r.contains("T extends string, T_show extends boolean = boolean"),
+        "should append narrowing to existing generics: {r}"
+    );
+}
+
+#[test]
+fn tsc_narrowing_disabled() {
+    // Use default (narrowing disabled)
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineProps<{foo?: boolean}>()
+</script>
+<template><div v-if="foo">A</div><span v-else>B</span></template>"#,
+    );
+    assert!(
+        !r.contains("T_foo"),
+        "should NOT have narrowing when disabled: {r}"
+    );
+    assert!(
+        !r.contains("$root"),
+        "should NOT have $root when disabled: {r}"
+    );
+}
+
+#[test]
+fn tsc_narrowing_component_roots() {
+    let r = gen_tsc_narrowing(
+        r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import Other from './Other.vue'
+defineProps<{v?: 'a' | 'b'}>()
+</script>
+<template><MyComp v-if="v === 'a'" /><Other v-else /></template>"#,
+    );
+    assert!(r.contains("T_v extends"), "should have T_v generic: {r}");
+    assert!(
+        r.contains("InstanceType<typeof MyComp>"),
+        "$root should use InstanceType for components: {r}"
+    );
+    assert!(
+        r.contains("InstanceType<typeof Other>"),
+        "$root should use InstanceType for Other: {r}"
     );
 }

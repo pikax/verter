@@ -2076,6 +2076,15 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         }
     }
 
+    // 3b. Propagate conditional_root_narrowing to lint configs
+    if tsx_profile.read().conditional_root_narrowing {
+        registry.set_conditional_root_narrowing(true);
+        fallback_linter
+            .write()
+            .config_mut()
+            .conditional_root_narrowing = true;
+    }
+
     // 4. Generation check → commit registry
     if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
         tracing::info!("init gen={my_gen} superseded, discarding registry");
@@ -2276,6 +2285,21 @@ impl LanguageServer for VerterLanguageServer {
                 tracing::info!(
                     "vite config alias discovery: {}",
                     if vite_enabled { "enabled" } else { "disabled" }
+                );
+            }
+            // Read experimental.conditionalRootNarrowing setting (default: false)
+            if let Some(enabled) = opts
+                .get("experimental")
+                .and_then(|v| v.get("conditionalRootNarrowing"))
+                .and_then(|v| v.as_bool())
+            {
+                self.documents
+                    .tsx_profile
+                    .write()
+                    .conditional_root_narrowing = enabled;
+                tracing::info!(
+                    "conditional root narrowing: {}",
+                    if enabled { "enabled" } else { "disabled" }
                 );
             }
         }

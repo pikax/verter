@@ -93,6 +93,7 @@ pub struct RawElementData {
     pub has_v_if: bool,
     pub has_v_else: bool,
     pub has_v_else_if: bool,
+    pub v_if_condition: Option<String>,
     pub has_v_show: bool,
     pub has_v_html: bool,
     pub has_v_text: bool,
@@ -715,6 +716,16 @@ fn extract_element_data(
             .v_condition
             .as_ref()
             .is_some_and(|c| c.kind == ElementNodeConditionKind::ElseIf),
+        v_if_condition: el.v_condition.as_ref().and_then(|c| {
+            if c.kind == ElementNodeConditionKind::Else {
+                return None;
+            }
+            c.prop
+                .value_start
+                .zip(c.prop.value_end)
+                .and_then(|(s, e)| source.get(s as usize..e as usize))
+                .map(|s| s.to_string())
+        }),
         has_v_show: el.prop_flag.has(crate::ast::types::PropFlags::HasShow),
         has_v_html: el.prop_flag.has(crate::ast::types::PropFlags::HasVHtml),
         has_v_text: el.prop_flag.has(crate::ast::types::PropFlags::HasVText),

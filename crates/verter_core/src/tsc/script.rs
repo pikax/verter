@@ -55,9 +55,12 @@ pub struct TscOutput {
     pub source_map: String,
 }
 
-/// Options for tsc codegen (reserved for future use).
+/// Options for tsc codegen.
 #[derive(Debug, Default)]
-pub struct TscGenOptions {}
+pub struct TscGenOptions {
+    /// Experimental: Enable conditional root generic narrowing.
+    pub conditional_root_narrowing: bool,
+}
 
 // ── Internal state ───────────────────────────────────────────────────────────
 
@@ -123,12 +126,21 @@ struct TscMacroState {
 /// Generate a minimal TypeScript declaration file for a Vue SFC.
 ///
 /// Only `<script setup>` is parsed (OXC macro extraction only).
-/// Template compilation is entirely skipped.
+/// Template compilation is entirely skipped (unless narrowing is enabled).
 ///
 /// # Arguments
 /// * `sfc_source` — full SFC source text
 /// * `component_name` — component name used in the `declare const` statement
 pub fn generate_tsc_output(sfc_source: &str, component_name: &str) -> TscOutput {
+    generate_tsc_output_with_options(sfc_source, component_name, &TscGenOptions::default())
+}
+
+/// Like [`generate_tsc_output`] but with explicit options.
+pub fn generate_tsc_output_with_options(
+    sfc_source: &str,
+    component_name: &str,
+    tsc_options: &TscGenOptions,
+) -> TscOutput {
     // ── 1. Tokenize SFC to locate <script setup> ──────────────────────
     let bytes = sfc_source.as_bytes();
     let ctx = SyntaxPluginContext {
@@ -183,8 +195,21 @@ pub fn generate_tsc_output(sfc_source: &str, component_name: &str) -> TscOutput 
         use_attrs_fallback.as_deref()
     };
 
-    // ── 7. Generate code + source map ────────────────────────────────
-    generate_code(component_name, &state, generic_params, attrs_type)
+    // ── 7. Extract root conditions for narrowing ────────────────────
+    let narrowing = if tsc_options.conditional_root_narrowing {
+        extract_tsc_narrowing(syntax.template_ast(), &state, sfc_source)
+    } else {
+        None
+    };
+
+    // ── 8. Generate code + source map ────────────────────────────────
+    generate_code(
+        component_name,
+        &state,
+        generic_params,
+        attrs_type,
+        narrowing.as_ref(),
+    )
 }
 
 // ── Step 4: collect type imports ─────────────────────────────────────────────
@@ -655,11 +680,105 @@ fn generate_empty_stub(component_name: &str) -> TscOutput {
     TscOutput { code, source_map }
 }
 
+// ── Narrowing types for TSC path ──────────────────────────────────────────
+
+/// Narrowing info extracted from template AST for TSC codegen.
+struct TscNarrowingInfo {
+    /// Narrowing analysis result from condition_narrowing module.
+    narrowing: crate::ide::condition_narrowing::ConditionalRootNarrowing,
+    /// Root element tag names for each branch (for $root type).
+    branch_tags: Vec<TscBranchTag>,
+}
+
+struct TscBranchTag {
+    tag_name: String,
+    is_component: bool,
+}
+
+/// Extract narrowing info from the template AST for TSC codegen.
+fn extract_tsc_narrowing(
+    template_ast: Option<&crate::ast::types::TemplateAst>,
+    state: &TscMacroState,
+    sfc_source: &str,
+) -> Option<TscNarrowingInfo> {
+    use crate::ast::types::{AstNodeKind, ElementNodeConditionKind, TagType};
+    use rustc_hash::FxHashSet;
+
+    let tpl = template_ast?;
+    let root_children = tpl
+        .root
+        .content
+        .as_ref()
+        .map(|c| c.children.as_slice())
+        .unwrap_or(&[]);
+
+    // Collect root element conditions and tag names
+    let mut conditions: Vec<(Option<String>, u32)> = Vec::new();
+    let mut branch_tags: Vec<TscBranchTag> = Vec::new();
+
+    for &child_id in root_children {
+        let node = &tpl.nodes[child_id.0];
+        if let AstNodeKind::Element(el) = &node.kind {
+            // Extract tag name from source: between `<` (start+1) and name_end
+            let tag_name = sfc_source
+                .get((el.tag_open.start + 1) as usize..el.tag_open.name_end as usize)
+                .unwrap_or("div")
+                .to_string();
+            let is_component = el.tag_type == TagType::Component;
+
+            let condition_text = el.v_condition.as_ref().and_then(|cond| match cond.kind {
+                ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
+                    let (Some(vs), Some(ve)) = (cond.prop.value_start, cond.prop.value_end) else {
+                        return None;
+                    };
+                    sfc_source
+                        .get(vs as usize..ve as usize)
+                        .map(|s| s.to_string())
+                }
+                ElementNodeConditionKind::Else => None,
+            });
+
+            conditions.push((condition_text, el.tag_open.start));
+            branch_tags.push(TscBranchTag {
+                tag_name,
+                is_component,
+            });
+        }
+    }
+
+    if conditions.len() <= 1 {
+        return None; // Single root or no root — no narrowing needed
+    }
+
+    // Collect prop names from state
+    let prop_names: FxHashSet<&str> = match &state.props_ts {
+        Some(PropsTs::Inline(entries)) => entries.iter().map(|e| e.name.as_str()).collect(),
+        _ => FxHashSet::default(),
+    };
+
+    if prop_names.is_empty() {
+        return None;
+    }
+
+    let conditions_ref: Vec<(Option<&str>, u32)> =
+        conditions.iter().map(|(c, o)| (c.as_deref(), *o)).collect();
+
+    let narrowing =
+        crate::ide::condition_narrowing::analyze_conditional_chain(&conditions_ref, &prop_names)
+            .ok()?;
+
+    Some(TscNarrowingInfo {
+        narrowing,
+        branch_tags,
+    })
+}
+
 fn generate_code(
     component_name: &str,
     state: &TscMacroState,
     generic_params: Option<&str>,
     attrs_type: Option<&str>,
+    narrowing: Option<&TscNarrowingInfo>,
 ) -> TscOutput {
     let mut out = String::with_capacity(512);
 
@@ -742,7 +861,36 @@ fn generate_code(
     // Omit instance members we provide explicitly, so CPI defaults don't conflict.
     const CPI_OMIT: &str =
         "\"$props\" | \"$emit\" | \"$slots\" | \"$data\" | \"$attrs\" | \"$refs\"";
-    match generic_params {
+
+    // Build generic params for new(), appending narrowing generics if present
+    let full_gp = if let Some(nr) = narrowing {
+        let mut narrowing_parts: Vec<String> = Vec::new();
+        for g in &nr.narrowing.generics {
+            // Find the prop type from inline entries
+            let prop_type = match &state.props_ts {
+                Some(PropsTs::Inline(entries)) => entries
+                    .iter()
+                    .find(|e| e.name == g.prop_name)
+                    .map(|e| e.ts_type.as_str())
+                    .unwrap_or("unknown"),
+                _ => "unknown",
+            };
+            narrowing_parts.push(format!(
+                "T_{prop} extends {pt} = {pt}",
+                prop = g.prop_name,
+                pt = prop_type,
+            ));
+        }
+        let nr_str = narrowing_parts.join(", ");
+        match generic_params {
+            Some(gp) => Some(format!("{gp}, {nr_str}")),
+            None => Some(nr_str),
+        }
+    } else {
+        generic_params.map(|s| s.to_string())
+    };
+
+    match &full_gp {
         Some(gp) => out.push_str(&format!(
             "  new<{gp}>(): Omit<import(\"vue\").ComponentPublicInstance<{{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {emits}>, {CPI_OMIT}> & {{\n",
             emits = emits_type,
@@ -752,11 +900,18 @@ fn generate_code(
             emits = emits_type,
         )),
     }
-    // PublicProps (AllowedComponentProps & VNodeProps & …) first, so class/style/key are available.
+
+    // $props — substitute generic types for narrowing props
+    let narrowing_props_type = if let Some(nr) = narrowing {
+        build_narrowing_props_type(&state.props_ts, &state.models, &nr.narrowing)
+    } else {
+        None
+    };
     out.push_str(&format!(
         "    $props: import(\"vue\").PublicProps & {},\n",
-        props_type
+        narrowing_props_type.as_deref().unwrap_or(&props_type)
     ));
+
     out.push_str(&format!("    $emit: {},\n", emit_fn_type));
     if let Some(ref slots) = state.slots_ts {
         out.push_str(&format!("    $slots: {},\n", slots));
@@ -768,6 +923,46 @@ fn generate_code(
         out.push_str("    $attrs: {},\n");
     }
     out.push_str("    $refs: {},\n");
+
+    // $root — conditional type for narrowing
+    if let Some(nr) = narrowing {
+        out.push_str("    $root: ");
+        for (i, branch) in nr.narrowing.branches.iter().enumerate() {
+            let tag_type = if i < nr.branch_tags.len() {
+                let bt = &nr.branch_tags[i];
+                if bt.is_component {
+                    format!("InstanceType<typeof {}>", bt.tag_name)
+                } else {
+                    html_tag_to_element_type(&bt.tag_name)
+                }
+            } else {
+                "unknown".to_string()
+            };
+
+            if let Some(ref cond) = branch.narrowing {
+                let extends_rhs = if let Some(ref lit) = cond.literal {
+                    lit.clone()
+                } else if cond.negated {
+                    "false".to_string()
+                } else {
+                    "true".to_string()
+                };
+                out.push_str(&format!(
+                    "T_{prop} extends {rhs} ? {tag_type} : ",
+                    prop = cond.prop_name,
+                    rhs = extends_rhs,
+                ));
+            } else {
+                // v-else: terminal
+                out.push_str(&tag_type);
+            }
+            if i == nr.narrowing.branches.len() - 1 && branch.narrowing.is_some() {
+                out.push_str("never");
+            }
+        }
+        out.push_str(",\n");
+    }
+
     out.push_str("  }\n");
     out.push_str("}\n");
     out.push_str(&format!("export default {}\n", component_name));
@@ -881,6 +1076,85 @@ fn build_props_type(props_ts: &Option<PropsTs>, models: &[ModelEntry]) -> String
     } else {
         parts.join(" & ")
     }
+}
+
+/// Build props type with narrowing generic substitutions.
+/// For inline props, replaces the type of narrowing props with T_{prop}.
+fn build_narrowing_props_type(
+    props_ts: &Option<PropsTs>,
+    models: &[ModelEntry],
+    narrowing: &crate::ide::condition_narrowing::ConditionalRootNarrowing,
+) -> Option<String> {
+    let entries = match props_ts {
+        Some(PropsTs::Inline(entries)) if !entries.is_empty() => entries,
+        _ => return None, // Can't substitute for TypeRef/TypeText
+    };
+
+    let generic_props: rustc_hash::FxHashSet<&str> = narrowing
+        .generics
+        .iter()
+        .map(|g| g.prop_name.as_str())
+        .collect();
+
+    let fields: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            let ts_type = if generic_props.contains(e.name.as_str()) {
+                format!("T_{}", e.name)
+            } else {
+                e.ts_type.clone()
+            };
+            let field = if e.optional {
+                format!("{}?: {}", e.name, ts_type)
+            } else {
+                format!("{}: {}", e.name, ts_type)
+            };
+            match &e.comment {
+                Some(comment) => format!("{} {}", comment, field),
+                None => field,
+            }
+        })
+        .collect();
+
+    let mut parts = vec![format!("{{ {} }}", fields.join("; "))];
+
+    for model in models {
+        parts.push(format!(
+            "{{ {}?: {}; \"onUpdate:{}\"?: (v: {}) => void }}",
+            model.name, model.ts_type, model.name, model.ts_type,
+        ));
+    }
+
+    Some(parts.join(" & "))
+}
+
+/// Map HTML tag name to TypeScript DOM element type.
+fn html_tag_to_element_type(tag: &str) -> String {
+    let element = match tag {
+        "a" => "HTMLAnchorElement",
+        "button" => "HTMLButtonElement",
+        "canvas" => "HTMLCanvasElement",
+        "div" => "HTMLDivElement",
+        "form" => "HTMLFormElement",
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "HTMLHeadingElement",
+        "img" => "HTMLImageElement",
+        "input" => "HTMLInputElement",
+        "label" => "HTMLLabelElement",
+        "li" => "HTMLLIElement",
+        "nav" => "HTMLElement",
+        "ol" => "HTMLOListElement",
+        "p" => "HTMLParagraphElement",
+        "pre" => "HTMLPreElement",
+        "section" | "article" | "aside" | "footer" | "header" | "main" => "HTMLElement",
+        "select" => "HTMLSelectElement",
+        "span" => "HTMLSpanElement",
+        "table" => "HTMLTableElement",
+        "textarea" => "HTMLTextAreaElement",
+        "ul" => "HTMLUListElement",
+        "video" => "HTMLVideoElement",
+        _ => "HTMLElement",
+    };
+    element.to_string()
 }
 
 // ── Value conversion helpers ──────────────────────────────────────────────────

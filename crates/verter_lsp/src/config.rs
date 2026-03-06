@@ -1454,6 +1454,14 @@ impl ProjectRegistry {
         }
     }
 
+    /// Set `conditional_root_narrowing` on all project lint configs and rebuild linters.
+    pub fn set_conditional_root_narrowing(&mut self, enabled: bool) {
+        for project in &mut self.projects {
+            project.lint_config.config.conditional_root_narrowing = enabled;
+            project.linter = verter_diagnostics::Linter::new(project.lint_config.config.clone());
+        }
+    }
+
     /// Get all project configs.
     pub fn projects(&self) -> &[ProjectConfig] {
         &self.projects

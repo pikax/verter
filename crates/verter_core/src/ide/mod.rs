@@ -32,6 +32,7 @@
 //! ```
 
 pub mod condition;
+pub mod condition_narrowing;
 pub mod script;
 pub mod script_recover;
 pub mod template;
@@ -63,6 +64,10 @@ pub struct IdeScriptOptions<'a> {
     /// `false` → `.tsx` with type annotations and generics.
     /// `true` → `.jsx` with JSDoc annotations, no TS syntax.
     pub is_jsx: bool,
+    /// Experimental: Enable conditional root generic narrowing.
+    /// When a root v-if references a prop, the component's type signature
+    /// narrows based on the prop value passed by the parent.
+    pub conditional_root_narrowing: bool,
 }
 
 /// Options for IDE template generation.

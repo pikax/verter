@@ -317,6 +317,7 @@ pub fn convert_raw_to_analysis(
                 has_v_if: e.has_v_if,
                 has_v_else: e.has_v_else,
                 has_v_else_if: e.has_v_else_if,
+                v_if_condition: e.v_if_condition.clone(),
                 has_v_show: e.has_v_show,
                 has_v_html: e.has_v_html,
                 has_v_text: e.has_v_text,

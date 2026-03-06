@@ -3,6 +3,7 @@
 mod attribute_hyphenation;
 mod attribute_order;
 mod block_order;
+mod conditional_root_complex;
 mod html_self_closing;
 mod match_component_file_name;
 mod multi_word_component_names;
@@ -100,6 +101,7 @@ mod no_v_text_directive;
 pub use attribute_hyphenation::AttributeHyphenation;
 pub use attribute_order::AttributeOrder;
 pub use block_order::BlockOrder;
+pub use conditional_root_complex::ConditionalRootComplex;
 pub use html_self_closing::HtmlSelfClosing;
 pub use match_component_file_name::MatchComponentFileName;
 pub use multi_word_component_names::MultiWordComponentNames;

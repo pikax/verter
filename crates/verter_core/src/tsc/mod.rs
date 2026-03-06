@@ -12,4 +12,4 @@ pub mod script;
 #[cfg(test)]
 mod tests;
 
-pub use script::{generate_tsc_output, TscGenOptions, TscOutput};
+pub use script::{generate_tsc_output, generate_tsc_output_with_options, TscGenOptions, TscOutput};

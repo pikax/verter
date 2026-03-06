@@ -181,6 +181,8 @@ pub struct CompileProfile {
     /// Embed `declare module "@verter/types"` in generated TSX.
     /// When `false` (default), relies on the real `@verter/types` package.
     pub embed_ambient_types: bool,
+    /// Experimental: Enable conditional root generic narrowing.
+    pub conditional_root_narrowing: bool,
 }
 
 impl Default for CompileProfile {
@@ -201,6 +203,7 @@ impl Default for CompileProfile {
             source_map: false,
             target: verter_core::compile::CompileTarget::BUNDLER,
             embed_ambient_types: false,
+            conditional_root_narrowing: false,
         }
     }
 }
