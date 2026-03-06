@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashSet;
 use tokio::sync::mpsc;
+use tower_lsp_server::Client;
 use verter_host::VerterHost;
 
 use crate::tsgo::project_sync::ProjectSync;
@@ -49,6 +50,7 @@ pub struct SyncCoordinatorDeps {
     pub project_sync: ProjectSync,
     pub needs_provider_sync: Arc<DashSet<String>>,
     pub tsx_profile: parking_lot::RwLock<verter_host::CompileProfile>,
+    pub client: Client,
 }
 
 /// Debounce interval: sync fires after 300ms of silence for a given file.
@@ -100,12 +102,22 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
                     .map(|(id, (_, uri))| (id.clone(), uri.clone()))
                     .collect();
 
+                let mut synced_any = false;
                 for (canonical_id, uri_str) in ready {
                     pending_files.remove(&canonical_id);
                     // Only sync if the file is still marked dirty
                     if deps.needs_provider_sync.remove(&canonical_id).is_some() {
                         sync_file(&deps, &canonical_id, &uri_str).await;
+                        synced_any = true;
                     }
+                }
+
+                // After syncing, ask VS Code to re-pull diagnostics so that
+                // type provider errors (TS2304, etc.) appear. Without this,
+                // pull diagnostics requested during typing cooldown return
+                // verter-only results and are never refreshed.
+                if synced_any {
+                    let _ = deps.client.workspace_diagnostic_refresh().await;
                 }
             }
         }
@@ -114,11 +126,10 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
 
 /// Perform the actual sync: sync TSX/DTS to the type provider.
 ///
-/// IMPORTANT: This function must NOT call `publish_diagnostics` or write to the
-/// LSP stdout pipe. Stdout writes from the coordinator can cause runtime starvation
-/// (pipe backpressure → blocking thread exhaustion → total freeze). Pull diagnostics
-/// (`textDocument/diagnostic`) will serve fresh results automatically since the
-/// document version changes on each edit.
+/// This function must NOT call `publish_diagnostics` (large payloads can cause
+/// pipe backpressure → blocking thread exhaustion → total freeze). Instead, the
+/// coordinator sends a lightweight `workspace/diagnosticRefresh` notification
+/// after all syncs complete, which asks VS Code to re-pull diagnostics.
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
     // Sync IDE (TSX) output to type provider

@@ -5,6 +5,7 @@ import {
   openVueFile,
   getAppVuePath,
   waitForDiagnostics,
+  findPosition,
   sleep,
   FIXTURE_NAME,
 } from "../helpers";
@@ -77,6 +78,107 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
         d.range.start.isBeforeOrEqual(d.range.end),
         `Diagnostic range should be valid: ${d.message}`,
       ).to.be.true;
+    }
+  });
+
+  test("undeclared variable in script setup gets TS2304", async function () {
+    const doc = await openVueFile(getAppVuePath());
+
+    // Find the line with "const count = ref(0)" to insert the undeclared variable after
+    const insertPos = findPosition(doc, "const count = ref(0)");
+    expect(insertPos, "should find 'const count = ref(0)' in App.vue").to.exist;
+
+    // Insert undeclared variable on the next line
+    const lineEnd = doc.lineAt(insertPos!.line).range.end;
+    const edit = new vscode.WorkspaceEdit();
+    edit.insert(doc.uri, lineEnd, "\nunknownVar123");
+    await vscode.workspace.applyEdit(edit);
+
+    try {
+      // Wait for TS diagnostics to appear (source: "ts")
+      const diags = await waitForDiagnostics(doc.uri, {
+        source: "ts",
+        minCount: 1,
+        timeoutMs: 15_000,
+      });
+
+      // Positive: at least one TS diagnostic referencing the undeclared variable
+      const ts2304 = diags.find(
+        (d) =>
+          d.message.includes("Cannot find name") &&
+          d.message.includes("unknownVar123"),
+      );
+      expect(
+        ts2304,
+        `Expected TS2304 for unknownVar123. Got diagnostics: ${JSON.stringify(diags.map((d) => ({ msg: d.message, code: d.code, src: d.source })))}`,
+      ).to.exist;
+
+      // The diagnostic should point to the inserted line
+      expect(ts2304!.range.start.line).to.equal(insertPos!.line + 1);
+    } finally {
+      // Clean up: undo the edit
+      await vscode.commands.executeCommand("undo");
+      await sleep(500);
+    }
+  });
+
+  test("TS errors persist after inserting newlines", async function () {
+    const doc = await openVueFile(getAppVuePath());
+
+    // Insert undeclared variable to create a known TS error
+    const insertPos = findPosition(doc, "const count = ref(0)");
+    expect(insertPos, "should find insertion point").to.exist;
+
+    const lineEnd = doc.lineAt(insertPos!.line).range.end;
+    const edit = new vscode.WorkspaceEdit();
+    edit.insert(doc.uri, lineEnd, "\nunknownVar456");
+    await vscode.workspace.applyEdit(edit);
+
+    try {
+      // Wait for the TS error to appear
+      const initialDiags = await waitForDiagnostics(doc.uri, {
+        source: "ts",
+        minCount: 1,
+        timeoutMs: 15_000,
+      });
+      const initialTs2304 = initialDiags.find((d) =>
+        d.message.includes("unknownVar456"),
+      );
+      expect(
+        initialTs2304,
+        "TS error for unknownVar456 should appear before newline edit",
+      ).to.exist;
+
+      // Now insert a blank newline elsewhere (at the top of script, after imports)
+      const importLine = findPosition(doc, "import { ref");
+      expect(importLine, "should find import line").to.exist;
+      const importLineEnd = doc.lineAt(importLine!.line).range.end;
+      const newlineEdit = new vscode.WorkspaceEdit();
+      newlineEdit.insert(doc.uri, importLineEnd, "\n");
+      await vscode.workspace.applyEdit(newlineEdit);
+
+      // Wait for diagnostics to settle after the newline insertion
+      await sleep(3_000);
+
+      // TS diagnostics should still be present
+      const afterDiags = await waitForDiagnostics(doc.uri, {
+        source: "ts",
+        minCount: 1,
+        timeoutMs: 15_000,
+      });
+      const afterTs2304 = afterDiags.find((d) =>
+        d.message.includes("unknownVar456"),
+      );
+      expect(
+        afterTs2304,
+        `TS error for unknownVar456 should survive newline insertion. Got: ${JSON.stringify(afterDiags.map((d) => ({ msg: d.message, src: d.source })))}`,
+      ).to.exist;
+    } finally {
+      // Clean up: undo both edits
+      await vscode.commands.executeCommand("undo");
+      await sleep(200);
+      await vscode.commands.executeCommand("undo");
+      await sleep(500);
     }
   });
 });

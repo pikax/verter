@@ -469,6 +469,7 @@ impl VerterLanguageServer {
                     project_sync: ps.clone(),
                     needs_provider_sync: Arc::clone(&needs_provider_sync),
                     tsx_profile: parking_lot::RwLock::new(documents.tsx_profile.read().clone()),
+                    client: client.clone(),
                 },
             )
         });
