@@ -6,7 +6,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::diagnostics::{Diagnostic, DiagnosticSeverity};
-use crate::parser::Syntax;
+use crate::parser::types::ParsedSfc;
 
 use super::types::{CompileDiagnostic, CompileDiagnosticSeverity};
 
@@ -109,11 +109,11 @@ pub fn format_import_specifier(name: &str) -> String {
 }
 
 /// Extract SFC block byte ranges from root nodes for inter-block gap removal.
-pub(super) fn extract_block_ranges(syntax: &Syntax, _input: &str) -> Vec<(u32, u32)> {
+pub(super) fn extract_block_ranges(parsed: &ParsedSfc, _input: &str) -> Vec<(u32, u32)> {
     let mut ranges = Vec::new();
 
     // Template
-    if let Some(ast) = syntax.template_ast() {
+    if let Some(ast) = parsed.template_ast() {
         let start = ast.root.tag_open.start;
         let end = ast
             .root
@@ -125,7 +125,7 @@ pub(super) fn extract_block_ranges(syntax: &Syntax, _input: &str) -> Vec<(u32, u
     }
 
     // Script(s)
-    for script in [syntax.script(), syntax.script_setup()]
+    for script in [parsed.script(), parsed.script_setup()]
         .into_iter()
         .flatten()
     {
@@ -139,7 +139,7 @@ pub(super) fn extract_block_ranges(syntax: &Syntax, _input: &str) -> Vec<(u32, u
     }
 
     // Styles
-    for style in syntax.style_nodes() {
+    for style in parsed.style_nodes() {
         let start = style.tag_open.start;
         let end = style
             .tag_close
@@ -150,7 +150,7 @@ pub(super) fn extract_block_ranges(syntax: &Syntax, _input: &str) -> Vec<(u32, u
     }
 
     // Unknown blocks
-    for node in syntax.unknown_nodes() {
+    for node in parsed.unknown_nodes() {
         let start = node.tag_open.start;
         let end = node
             .tag_close

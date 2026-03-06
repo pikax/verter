@@ -345,6 +345,7 @@ mod tests {
             compile_slots: HashMap::new(),
             latest_diagnostics: HashMap::new(),
             generation: 1,
+            cached_parse: None,
         }
     }
 
@@ -397,7 +398,7 @@ mod tests {
     fn build_upsert_result_first_insert() {
         let src =
             "<script setup>const n = 1</script><template><div/></template><style>.a{}</style>";
-        let snapshot = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
+        let (snapshot, _) = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
         let data = UpsertResultData {
             new_meta: snapshot.meta,
             parse_diagnostics: snapshot.parse_diagnostics,
@@ -444,7 +445,7 @@ mod tests {
     #[test]
     fn build_upsert_result_no_change() {
         let src = "<script setup>const n = 1</script><template><div/></template>";
-        let snapshot = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
+        let (snapshot, _) = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
         let data = UpsertResultData {
             new_meta: snapshot.meta,
             parse_diagnostics: snapshot.parse_diagnostics,
@@ -617,7 +618,7 @@ mod tests {
     /// @ai-generated - compute_upsert_changes: first insert (no old entry) → changed=true
     #[test]
     fn compute_upsert_changes_first_insert() {
-        let new = parse_vue_snapshot(
+        let (new, _) = parse_vue_snapshot(
             "Comp.vue",
             "<script setup>const n = 1</script><template><div/></template>",
             AnalysisScope::LSP,
@@ -638,8 +639,8 @@ mod tests {
     #[test]
     fn compute_upsert_changes_identical_content() {
         let src = "<script setup>const n = 1</script><template><div/></template>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
-        let new_snap = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
+        let (old_snap, _) = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
+        let (new_snap, _) = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(!result.changed, "identical content should not be changed");
@@ -651,8 +652,8 @@ mod tests {
     fn compute_upsert_changes_script_change() {
         let src1 = "<script setup>const n = 1</script><template><div/></template>";
         let src2 = "<script setup>const n = 2</script><template><div/></template>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
-        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
+        let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
+        let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(result.changed);
@@ -666,8 +667,8 @@ mod tests {
         let src1 = "<script setup>const n = 1</script><template><div/></template>";
         let src2 =
             "<script setup>const n = 1</script><template><div/></template><style>.a{}</style>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
-        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
+        let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
+        let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(result.changed);
@@ -679,8 +680,8 @@ mod tests {
     fn compute_upsert_changes_template_change() {
         let src1 = "<script setup>const n = 1</script><template><div/></template>";
         let src2 = "<script setup>const n = 1</script><template><section/></template>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
-        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
+        let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
+        let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(result.changed);
@@ -695,8 +696,8 @@ mod tests {
             "<script setup>const n = 1</script><template><div/></template><style>.a{}</style>";
         let src2 =
             "<script setup>const n = 1</script><template><div/></template><style>.b{}</style>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
-        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
+        let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
+        let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(result.changed);
@@ -717,8 +718,8 @@ mod tests {
             "<script setup>const n = 1</script><template><div/></template><style>.a{}</style>";
         let src2 =
             "<script setup>const n = 2</script><template><div/></template><style>.b{}</style>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
-        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
+        let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
+        let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(result.changed);
@@ -859,6 +860,7 @@ mod tests {
             compile_slots: HashMap::new(),
             latest_diagnostics: HashMap::new(),
             generation: 0,
+            cached_parse: None,
         };
         let exts = vec![".ts".to_string()];
         assert!(import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -897,6 +899,7 @@ mod tests {
             compile_slots: HashMap::new(),
             latest_diagnostics: HashMap::new(),
             generation: 0,
+            cached_parse: None,
         };
         let exts = vec![".ts".to_string()];
         assert!(!import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -929,6 +932,7 @@ mod tests {
             compile_slots: HashMap::new(),
             latest_diagnostics: HashMap::new(),
             generation: 0,
+            cached_parse: None,
         };
         let exts = vec![".ts".to_string(), ".js".to_string()];
         assert!(import_resolves_to_dep(&entry, "./B", "/src/B", &exts));
@@ -965,6 +969,7 @@ mod tests {
             compile_slots: HashMap::new(),
             latest_diagnostics: HashMap::new(),
             generation: 0,
+            cached_parse: None,
         };
         let exts = vec![".ts".to_string(), ".js".to_string()];
         // ./types resolves to /src/types, dep is /src/types.ts

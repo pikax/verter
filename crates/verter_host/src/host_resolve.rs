@@ -16,7 +16,9 @@ use web_time::Instant;
 
 use oxc_allocator::Allocator;
 use verter_core::compile::CodegenOptions;
-use verter_core::compile::{compile as compile_sfc, format_import_specifier, VerterCompileOptions};
+use verter_core::compile::{
+    compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
+};
 
 use crate::cache::enforce_profile_cap;
 use crate::compile::{assemble_main_module, merge_external_sources};
@@ -223,6 +225,7 @@ impl VerterHost {
                     style_override_layer: entry.style_overrides.get(&profile_hash).cloned(),
                     content_override_layer: entry.content_overrides.get(&profile_hash).cloned(),
                     macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
+                    cached_parse: entry.cached_parse.clone(),
                 },
                 fallback_last_good,
                 meta: entry.meta.clone(),
@@ -548,7 +551,21 @@ impl VerterHost {
             prop_constness_overrides: None, // TODO(Phase 6): populated by cross-file optimizer
         };
 
-        let compiled = compile_sfc(&merged_source, &core_opts, &verter_opts, &alloc);
+        // Reuse cached parse when source wasn't modified by external src= merging
+        // and no custom delimiters/elements that would change parse behavior.
+        let can_use_cache = snapshot.src_blocks.is_empty()
+            && profile.delimiters.is_none()
+            && profile.custom_elements.is_none();
+
+        let compiled = if can_use_cache {
+            if let Some(ref cached) = snapshot.cached_parse {
+                compile_from_parsed(&merged_source, cached, &core_opts, &verter_opts, &alloc)
+            } else {
+                compile_sfc(&merged_source, &core_opts, &verter_opts, &alloc)
+            }
+        } else {
+            compile_sfc(&merged_source, &core_opts, &verter_opts, &alloc)
+        };
 
         let mut compile_diags = diagnostics.clone();
         if !compiled.errors.is_empty() {

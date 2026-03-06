@@ -814,6 +814,8 @@ pub(crate) struct CompileInput {
     pub(crate) content_override_layer: Option<ContentOverrideLayer>,
     /// Macro type dependencies for cross-file type resolution.
     pub(crate) macro_type_deps: Vec<verter_analysis::MacroTypeDep>,
+    /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
+    pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -846,6 +848,8 @@ pub(crate) struct FileEntry {
     pub(crate) compile_slots: HashMap<u64, CompileSlot>,
     pub(crate) latest_diagnostics: HashMap<u64, DiagnosticsSnapshot>,
     pub(crate) generation: u64,
+    /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
+    pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
 }
 
 impl FileMeta {

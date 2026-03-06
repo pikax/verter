@@ -39,11 +39,13 @@ impl VerterHost {
             .unwrap_or_else(|| canonicalize_id(&req.input_id).into_owned());
 
         let parse_start = Instant::now();
-        let mut snapshot = match req.file_kind {
+        let (mut snapshot, cached_parse) = match req.file_kind {
             FileKind::VueSfc => {
-                parse_vue_snapshot(&canonical_id, &req.source, self.config.effective_scope())
+                let (snap, parsed) =
+                    parse_vue_snapshot(&canonical_id, &req.source, self.config.effective_scope());
+                (snap, Some(parsed))
             }
-            FileKind::NonSfc => parse_non_sfc_snapshot(&canonical_id, &req.source),
+            FileKind::NonSfc => (parse_non_sfc_snapshot(&canonical_id, &req.source), None),
         };
         let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
         #[cfg(feature = "host_metrics")]
@@ -165,6 +167,7 @@ impl VerterHost {
                     compile_slots: HashMap::new(),
                     latest_diagnostics: HashMap::new(),
                     generation: 0,
+                    cached_parse: None,
                 });
 
             entry.file_kind = req.file_kind;
@@ -180,6 +183,7 @@ impl VerterHost {
             entry.script_analysis = snapshot.script_analysis;
             entry.export_signatures = new_export_signatures.clone();
             entry.style_analyses = snapshot.style_analyses;
+            entry.cached_parse = cached_parse.map(Arc::new);
             entry.generation = entry.generation.saturating_add(1);
             entry.aliases = alias_set.clone();
             entry.dependencies = new_deps.clone();
@@ -479,7 +483,7 @@ impl VerterHost {
 
         // Re-parse the synthetic source to get updated template AST and metadata.
         // The reparse sees native lang (html/ts) since we stripped the lang attr.
-        let new_snapshot =
+        let (new_snapshot, new_parsed) =
             parse_vue_snapshot(&canonical, &synthetic_source, self.config.effective_scope());
 
         // Update entry fields that come from parsing
@@ -492,6 +496,7 @@ impl VerterHost {
         entry.parse_diagnostics = new_snapshot.parse_diagnostics;
         entry.script_analysis = new_snapshot.script_analysis;
         entry.style_analyses = new_snapshot.style_analyses;
+        entry.cached_parse = Some(Arc::new(new_parsed));
 
         // Store content override layer
         entry.content_overrides.insert(

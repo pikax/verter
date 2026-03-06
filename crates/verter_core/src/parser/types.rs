@@ -12,8 +12,10 @@
 use smallvec::SmallVec;
 
 use crate::{
+    ast::types::TemplateAst,
     common::Span,
     cursor::ScriptLanguage,
+    diagnostics::Diagnostic,
     types::{NodeId, NodeProp, NodeTag},
 };
 
@@ -126,6 +128,65 @@ pub struct RootNodeTemplateContent {
     pub end: u32,
     /// Root-level children of the template (arena node IDs).
     pub children: SmallVec<[NodeId; 4]>,
+}
+
+/// Finalized SFC parse result, suitable for caching and borrowing during codegen.
+///
+/// Produced by [`super::Syntax::into_parsed_sfc()`] after tokenization completes.
+/// All fields are owned; consumers borrow via accessor methods. Stored behind
+/// `Arc` in the host for zero-copy reuse across compile profiles.
+#[derive(Debug, Clone)]
+pub struct ParsedSfc {
+    pub template_ast: Option<TemplateAst>,
+    pub script_node: Option<RootNodeScript>,
+    pub script_setup_node: Option<RootNodeScript>,
+    pub style_nodes: Vec<RootNodeStyle>,
+    pub unknown_nodes: Vec<RootNodeUnknown>,
+    pub has_style_scope: bool,
+    pub has_style_module: bool,
+    pub is_vapor: bool,
+    pub diagnostics: Vec<Diagnostic>,
+    pub has_errors: bool,
+}
+
+impl ParsedSfc {
+    pub fn script(&self) -> Option<&RootNodeScript> {
+        self.script_node.as_ref().filter(|s| !s.is_setup)
+    }
+
+    pub fn script_setup(&self) -> Option<&RootNodeScript> {
+        self.script_setup_node.as_ref().filter(|s| s.is_setup)
+    }
+
+    pub fn style_nodes(&self) -> &[RootNodeStyle] {
+        &self.style_nodes
+    }
+
+    pub fn unknown_nodes(&self) -> &[RootNodeUnknown] {
+        &self.unknown_nodes
+    }
+
+    pub fn template_ast(&self) -> Option<&TemplateAst> {
+        self.template_ast.as_ref()
+    }
+
+    pub fn has_errors(&self) -> bool {
+        self.has_errors
+    }
+
+    pub fn has_style_scope(&self) -> bool {
+        self.has_style_scope
+    }
+
+    pub fn is_vapor(&self) -> bool {
+        self.is_vapor
+    }
+
+    /// Clone diagnostics out for ownership transfer to compile results.
+    /// This is the only clone needed — all other accesses are borrows.
+    pub fn clone_diagnostics(&self) -> Vec<Diagnostic> {
+        self.diagnostics.clone()
+    }
 }
 
 impl StyleLang {

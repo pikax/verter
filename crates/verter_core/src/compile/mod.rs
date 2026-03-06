@@ -38,7 +38,7 @@ use crate::diagnostics::{
     CompilerErrorCode, Diagnostic, DiagnosticSeverity, SyntaxPluginContext, SyntaxPluginOptions,
 };
 use crate::ide;
-use crate::parser::types::StyleLang;
+use crate::parser::types::{ParsedSfc, StyleLang};
 use crate::parser::Syntax;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style::generate_style;
@@ -53,42 +53,20 @@ use helpers::{extract_attrs, extract_block_ranges};
 
 // ── Orchestrator ───────────────────────────────────────────────────
 
-/// Compile a Vue SFC source string into script, template, and style outputs.
+/// Parse an SFC source string into a [`ParsedSfc`].
 ///
-/// Drives the full pipeline: tokenize the SFC, generate style CSS (with scoped
-/// rewriting and `v-bind()` extraction), generate script JS/TS (macro expansion,
-/// bindings, imports), and generate the template render function (VDOM or Vapor).
-///
-/// The caller-supplied [`Allocator`] is used for the main script `CodeTransform`;
-/// template and style codegen create their own short-lived allocators internally.
-///
-/// Returns a [`VerterCompileResult`] containing the generated code for each block,
-/// timing information, and any diagnostics emitted during compilation.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub fn compile(
+/// Tokenizes in SFC mode with optional custom delimiters and custom element
+/// prefixes. The result can be cached and passed to [`compile_from_parsed`]
+/// to avoid re-parsing the same source.
+pub fn parse_sfc(
     input: &str,
-    options: &CodegenOptions,
-    verter_options: &VerterCompileOptions,
-    allocator: &Allocator,
-) -> VerterCompileResult {
-    let total_start = Instant::now();
+    delimiters: Option<(&str, &str)>,
+    custom_elements: Option<&[String]>,
+) -> ParsedSfc {
     let bytes = input.as_bytes();
 
-    // Merge legacy `extract_template_data` flag into the compile target.
-    let options = if verter_options.extract_template_data && !options.target.needs_template_data() {
-        let mut opts = options.clone();
-        opts.target |= CompileTarget::TEMPLATE_DATA;
-        std::borrow::Cow::Owned(opts)
-    } else {
-        std::borrow::Cow::Borrowed(options)
-    };
-    let options = &*options;
-
-    // ── 1. Parse ──────────────────────────────────────────────────
-    let parse_start = Instant::now();
-
-    let syntax_options = if let Some(ref prefixes) = options.custom_elements {
-        let prefixes = prefixes.clone();
+    let syntax_options = if let Some(prefixes) = custom_elements {
+        let prefixes = prefixes.to_vec();
         SyntaxPluginOptions {
             is_custom_element: Box::new(move |tag_name: &[u8]| {
                 prefixes
@@ -108,7 +86,7 @@ pub fn compile(
     };
 
     let mut syntax = Syntax::new(false);
-    if let Some((ref open, ref close)) = options.delimiters {
+    if let Some((open, close)) = delimiters {
         tokenize_sfc_with_delimiters(
             bytes,
             |e| syntax.handle(&e, &ctx),
@@ -119,16 +97,88 @@ pub fn compile(
         tokenize_sfc(bytes, |e| syntax.handle(&e, &ctx));
     }
 
+    syntax.into_parsed_sfc()
+}
+
+/// Compile a Vue SFC source string into script, template, and style outputs.
+///
+/// Drives the full pipeline: tokenize the SFC, generate style CSS (with scoped
+/// rewriting and `v-bind()` extraction), generate script JS/TS (macro expansion,
+/// bindings, imports), and generate the template render function (VDOM or Vapor).
+///
+/// The caller-supplied [`Allocator`] is used for the main script `CodeTransform`;
+/// template and style codegen create their own short-lived allocators internally.
+///
+/// Returns a [`VerterCompileResult`] containing the generated code for each block,
+/// timing information, and any diagnostics emitted during compilation.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub fn compile(
+    input: &str,
+    options: &CodegenOptions,
+    verter_options: &VerterCompileOptions,
+    allocator: &Allocator,
+) -> VerterCompileResult {
+    let parse_start = Instant::now();
+    let parsed = parse_sfc(
+        input,
+        options
+            .delimiters
+            .as_ref()
+            .map(|(o, c)| (o.as_str(), c.as_str())),
+        options.custom_elements.as_deref(),
+    );
     let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
+    compile_inner(
+        input,
+        &parsed,
+        options,
+        verter_options,
+        allocator,
+        parse_duration_ms,
+    )
+}
 
-    // Collect diagnostics from parse phase
-    let mut all_diagnostics = syntax.take_diagnostics();
+/// Compile a pre-parsed SFC. Skips tokenization and parsing.
+///
+/// The `parsed` must have been produced from the same `input` string.
+/// Parse-affecting options (delimiters, custom_elements) must match those
+/// used to create the [`ParsedSfc`] — the caller is responsible for cache
+/// key correctness.
+pub fn compile_from_parsed(
+    input: &str,
+    parsed: &ParsedSfc,
+    options: &CodegenOptions,
+    verter_options: &VerterCompileOptions,
+    allocator: &Allocator,
+) -> VerterCompileResult {
+    compile_inner(input, parsed, options, verter_options, allocator, 0.0)
+}
 
-    // Note: we continue processing even after parse errors to provide
-    // partial results. Script and style blocks may still be valid even
-    // when the template has errors, and returning partial results allows
-    // the LSP to provide completions and diagnostics for those blocks.
-    let has_parse_errors = syntax.has_errors();
+/// Internal compilation driver. Borrows a pre-parsed [`ParsedSfc`] — no cloning
+/// of template AST, script nodes, or style nodes.
+fn compile_inner(
+    input: &str,
+    parsed: &ParsedSfc,
+    options: &CodegenOptions,
+    verter_options: &VerterCompileOptions,
+    allocator: &Allocator,
+    parse_duration_ms: f64,
+) -> VerterCompileResult {
+    let total_start = Instant::now();
+
+    // Merge legacy `extract_template_data` flag into the compile target.
+    let options = if verter_options.extract_template_data && !options.target.needs_template_data() {
+        let mut opts = options.clone();
+        opts.target |= CompileTarget::TEMPLATE_DATA;
+        std::borrow::Cow::Owned(opts)
+    } else {
+        std::borrow::Cow::Borrowed(options)
+    };
+    let options = &*options;
+
+    // Clone diagnostics — this is the only clone needed from ParsedSfc.
+    let mut all_diagnostics = parsed.clone_diagnostics();
+    let has_parse_errors = parsed.has_errors();
 
     // ── 2. Extract metadata ───────────────────────────────────────
     let component_name = options
@@ -149,14 +199,14 @@ pub fn compile(
     let scope_id_str = std::str::from_utf8(&scope_id_bytes).unwrap_or("00000000");
     let scope_id_full = format!("data-v-{}", scope_id_str);
 
-    let use_vapor = verter_options.force_vapor || syntax.is_vapor();
-    let has_scoped_style = syntax.has_style_scope();
+    let use_vapor = verter_options.force_vapor || parsed.is_vapor();
+    let has_scoped_style = parsed.has_style_scope();
 
     // Collect block ranges for inter-block gap removal
-    let block_ranges = extract_block_ranges(&syntax, input);
+    let block_ranges = extract_block_ranges(parsed, input);
 
     // Collect custom blocks before taking template ast
-    let custom_blocks: Vec<VerterCustomBlock> = syntax
+    let custom_blocks: Vec<VerterCustomBlock> = parsed
         .unknown_nodes()
         .iter()
         .map(|node| {
@@ -181,7 +231,7 @@ pub fn compile(
     let mut style_blocks: Vec<VerterStyleBlock> = Vec::new();
 
     if options.target.needs_style() {
-        for style in syntax.style_nodes() {
+        for style in parsed.style_nodes() {
             let style_start = Instant::now();
             let style_result = generate_style(style, input, allocator, scope_id_str);
             all_v_bind_vars.extend(style_result.v_bind_vars);
@@ -271,7 +321,7 @@ pub fn compile(
         // actually used in the template (for import elision in script codegen).
         // This avoids the text-based heuristic and correctly handles TS type positions.
         early_oxc_ast = if !has_parse_errors {
-            syntax.template_ast().map(|template_ast_ref| {
+            parsed.template_ast().map(|template_ast_ref| {
                 parse_template_expressions(template_ast_ref, input, allocator, source_type)
             })
         } else {
@@ -280,7 +330,7 @@ pub fn compile(
 
         let template_used_vars: Option<FxHashSet<String>> =
             if let (Some(ref oxc_ast), Some(template_ast_ref)) =
-                (&early_oxc_ast, syntax.template_ast())
+                (&early_oxc_ast, parsed.template_ast())
             {
                 let mut vars = FxHashSet::default();
 
@@ -341,8 +391,8 @@ pub fn compile(
         };
 
         let script_result = generate_script(
-            syntax.script(),
-            syntax.script_setup(),
+            parsed.script(),
+            parsed.script_setup(),
             input,
             &mut ct,
             allocator,
@@ -353,7 +403,7 @@ pub fn compile(
         script_bindings = script_result.bindings;
 
         // Remove template and style blocks from script output
-        if let Some(template_ast) = syntax.template_ast() {
+        if let Some(template_ast) = parsed.template_ast() {
             let root = &template_ast.root;
             let tpl_start = root.tag_open.start;
             let tpl_end = root
@@ -364,7 +414,7 @@ pub fn compile(
             ct.remove(tpl_start, tpl_end);
         }
 
-        for style in syntax.style_nodes() {
+        for style in parsed.style_nodes() {
             let s_start = style.tag_open.start;
             let s_end = style
                 .tag_close
@@ -374,7 +424,7 @@ pub fn compile(
             ct.remove(s_start, s_end);
         }
 
-        for node in syntax.unknown_nodes() {
+        for node in parsed.unknown_nodes() {
             let s_start = node.tag_open.start;
             let s_end = node
                 .tag_close
@@ -388,8 +438,8 @@ pub fn compile(
         // keep the content. Named runtime exports (export enum, export const,
         // export function, etc.) must remain in the output so importers can
         // access them. The force_js pass below handles any TS-only constructs.
-        if syntax.script_setup().is_some() {
-            if let Some(script) = syntax.script() {
+        if parsed.script_setup().is_some() {
+            if let Some(script) = parsed.script() {
                 // Remove the <script ...> open tag
                 ct.remove(script.tag_open.start, script.tag_open.end);
                 // Remove the </script> close tag
@@ -405,7 +455,7 @@ pub fn compile(
         // Strip remaining TypeScript syntax if requested
         if verter_options.force_js {
             // Parse the script content with OXC and strip type annotations
-            if let Some(script_setup) = syntax.script_setup() {
+            if let Some(script_setup) = parsed.script_setup() {
                 if let Some(content) = &script_setup.content {
                     let script_source = &input[content.start as usize..content.end as usize];
                     let strip_alloc = Allocator::new();
@@ -420,7 +470,7 @@ pub fn compile(
                     );
                 }
             }
-            if let Some(script) = syntax.script() {
+            if let Some(script) = parsed.script() {
                 if let Some(content) = &script.content {
                     let script_source = &input[content.start as usize..content.end as usize];
                     let strip_alloc = Allocator::new();
@@ -466,16 +516,16 @@ pub fn compile(
         };
         let script_duration_ms = script_start.elapsed().as_secs_f64() * 1000.0;
 
-        let has_script_setup = syntax.script_setup().is_some();
-        let script_attrs = if let Some(ss) = syntax.script_setup() {
+        let has_script_setup = parsed.script_setup().is_some();
+        let script_attrs = if let Some(ss) = parsed.script_setup() {
             extract_attrs(&ss.attributes, input)
-        } else if let Some(s) = syntax.script() {
+        } else if let Some(s) = parsed.script() {
             extract_attrs(&s.attributes, input)
         } else {
             Vec::new()
         };
 
-        script_block = if syntax.script().is_some() || syntax.script_setup().is_some() {
+        script_block = if parsed.script().is_some() || parsed.script_setup().is_some() {
             Some(VerterScriptBlock {
                 code: script_code,
                 duration_ms: script_duration_ms,
@@ -514,9 +564,9 @@ pub fn compile(
     } // end if needs_script
 
     // ── 5. Template codegen ───────────────────────────────────────
-    // Take the template AST once (it may be needed for both VDOM and TSX codegen).
-    let taken_template_ast = if !has_parse_errors {
-        syntax.take_template_ast()
+    // Borrow the template AST (it may be needed for both VDOM and TSX codegen).
+    let template_ast_opt: Option<&_> = if !has_parse_errors {
+        parsed.template_ast()
     } else {
         None
     };
@@ -529,7 +579,7 @@ pub fn compile(
             // Template AST may be invalid after parse errors, or target
             // doesn't need VDOM/template data — skip codegen.
             (None, None)
-        } else if let Some(ref template_ast) = taken_template_ast {
+        } else if let Some(template_ast) = template_ast_opt {
             // Skip codegen for non-HTML template languages (e.g. Pug).
             // The AST positions are from the raw source and don't represent HTML.
             let is_non_html_lang = template_ast.root.lang.as_ref().is_some_and(|span| {
@@ -682,11 +732,11 @@ pub fn compile(
         // Determine if this is a JS SFC (needs JSX+JSDoc output instead of TSX)
         let is_jsx = {
             use crate::cursor::ScriptLanguage;
-            let has_any_script = syntax.script_setup().is_some() || syntax.script().is_some();
-            let lang = syntax
+            let has_any_script = parsed.script_setup().is_some() || parsed.script().is_some();
+            let lang = parsed
                 .script_setup()
                 .and_then(|s| s.lang)
-                .or_else(|| syntax.script().and_then(|s| s.lang));
+                .or_else(|| parsed.script().and_then(|s| s.lang));
             match lang {
                 // Explicit TS/TSX → TypeScript mode
                 Some(ScriptLanguage::TypeScript | ScriptLanguage::TSX) => false,
@@ -725,7 +775,7 @@ pub fn compile(
         let mut tsx_ct = CodeTransform::new(input, &tsx_alloc);
 
         // Compute template end position (byte offset after </template> close tag)
-        let template_end: Option<u32> = taken_template_ast.as_ref().map(|tpl| {
+        let template_end: Option<u32> = template_ast_opt.map(|tpl| {
             tpl.root.tag_close.as_ref().map(|tc| tc.end).unwrap_or(
                 tpl.root
                     .content
@@ -737,9 +787,9 @@ pub fn compile(
 
         // Script codegen — emits function wrapper spanning script to template end
         let tsx_script_result = ide::script::generate_ide_script(
-            syntax.script(),
-            syntax.script_setup(),
-            taken_template_ast.as_ref(),
+            parsed.script(),
+            parsed.script_setup(),
+            template_ast_opt,
             input,
             &mut tsx_ct,
             &tsx_alloc,
@@ -748,7 +798,7 @@ pub fn compile(
         );
 
         // Remove style/custom blocks (NOT template — template codegen transforms it)
-        for style in syntax.style_nodes() {
+        for style in parsed.style_nodes() {
             let s_s = style.tag_open.start;
             let s_e = style
                 .tag_close
@@ -757,7 +807,7 @@ pub fn compile(
                 .unwrap_or(style.tag_open.end);
             tsx_ct.remove(s_s, s_e);
         }
-        for node in syntax.unknown_nodes() {
+        for node in parsed.unknown_nodes() {
             let s_s = node.tag_open.start;
             let s_e = node
                 .tag_close
@@ -770,7 +820,7 @@ pub fn compile(
 
         // Template codegen — transforms template JSX in place on the same CT
         if !has_parse_errors {
-            if let Some(ref template_ast) = taken_template_ast {
+            if let Some(template_ast) = template_ast_opt {
                 let is_non_html = template_ast.root.lang.as_ref().is_some_and(|span| {
                     let v = &input[span.start as usize..span.end as usize];
                     !v.is_empty() && v != "html"

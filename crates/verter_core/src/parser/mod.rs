@@ -246,6 +246,26 @@ impl Syntax {
     pub fn is_vapor(&self) -> bool {
         self.is_vapor
     }
+
+    /// Consume the parser and produce a [`ParsedSfc`] with all finalized results.
+    ///
+    /// Moves (not clones) all fields — the `Syntax` is consumed. Transient parser
+    /// state (stack, current_prop, builder) is dropped.
+    pub fn into_parsed_sfc(mut self) -> types::ParsedSfc {
+        let has_errors = self.has_errors();
+        types::ParsedSfc {
+            template_ast: self.template_ast.take(),
+            script_node: self.script_node.take(),
+            script_setup_node: self.script_setup_node.take(),
+            style_nodes: std::mem::take(&mut self.style_nodes),
+            unknown_nodes: std::mem::take(&mut self.unknown_nodes),
+            has_style_scope: self.has_style_scope,
+            has_style_module: self.has_style_module,
+            is_vapor: self.is_vapor,
+            diagnostics: std::mem::take(&mut self.diagnostics),
+            has_errors,
+        }
+    }
 }
 
 // helpers
