@@ -669,22 +669,31 @@ fn process_tsx_script_setup<'alloc>(
         .or(use_attrs_info.type_arg);
 
     // Insert type assertion casts for bare useAttrs() calls.
+    // When explicit `attrs` attribute is specified and the function has `_attrs` param,
+    // cast bare `useAttrs()` calls to `typeof _attrs` for type-safe attrs access.
     // When no explicit attrs type is provided and a template exists (so ___VERTER___Attrs
     // will be emitted), cast bare `useAttrs()` calls to `___VERTER___Attrs` so the
     // return type reflects root element fallthrough attributes.
-    if attrs_type.is_none()
-        && template_ast.is_some()
-        && !options.is_jsx
-        && !use_attrs_info.bare_call_ends.is_empty()
-    {
-        let gn = generic_info
-            .as_ref()
-            .map(|g| g.names_bracket())
-            .unwrap_or_default();
-        let cast = format!(" as unknown as {}Attrs{}", PREFIX, gn);
-        for &end_offset in &use_attrs_info.bare_call_ends {
-            let sfc_offset = content_start + end_offset;
-            out.prepend_alloc(sfc_offset, &cast);
+    if !options.is_jsx && !use_attrs_info.bare_call_ends.is_empty() {
+        let has_explicit_attrs = setup.attrs.is_some() && attrs_type.is_some();
+        if has_explicit_attrs {
+            // Explicit attrs="..." → cast to typeof _attrs (sourcemapped parameter)
+            let cast = " as typeof _attrs";
+            for &end_offset in &use_attrs_info.bare_call_ends {
+                let sfc_offset = content_start + end_offset;
+                out.prepend_alloc(sfc_offset, cast);
+            }
+        } else if attrs_type.is_none() && template_ast.is_some() {
+            // No explicit attrs → cast to ___VERTER___Attrs (root element fallthrough)
+            let gn = generic_info
+                .as_ref()
+                .map(|g| g.names_bracket())
+                .unwrap_or_default();
+            let cast = format!(" as unknown as {}Attrs{}", PREFIX, gn);
+            for &end_offset in &use_attrs_info.bare_call_ends {
+                let sfc_offset = content_start + end_offset;
+                out.prepend_alloc(sfc_offset, &cast);
+            }
         }
     }
 
@@ -747,23 +756,118 @@ fn process_tsx_script_setup<'alloc>(
 
     // Build component function wrapper opening
     // Replace <script setup> tag with ___VERTER___TemplateBindingFN function declaration.
-    // Use parsed generic if available, otherwise raw fallback for invalid syntax.
-    // In JSX mode, drop generics (no TypeScript syntax in JS output).
-    let generic_bracket = if options.is_jsx {
-        String::new()
-    } else {
-        generic_info
-            .as_ref()
-            .map(|g| g.source_bracket())
-            .or_else(|| raw_generic.as_ref().map(|r| format!("<{}>", r)))
-            .unwrap_or_default()
-    };
+    //
+    // When `generic` or `attrs` attribute values are present, the overwrite is split
+    // into segments that skip over those value spans, preserving them as original
+    // content in the CodeTransform. This keeps sourcemaps accurate so that
+    // hover/completions inside `generic="..."` and `attrs="..."` resolve correctly.
+    //
+    // In JSX mode, drop generics and attrs annotations (no TypeScript syntax in JS output).
     let async_prefix = if parse_result.is_async { "async " } else { "" };
-    let wrapper_start = format!(
-        ";export {}function {}TemplateBindingFN{}() {{\n",
-        async_prefix, PREFIX, generic_bracket,
-    );
-    out.overwrite(setup.tag_open.start, setup.tag_open.end, &wrapper_start);
+
+    // Determine which sourcemapped spans to preserve in the function signature.
+    // TypeScript syntax requires: function FN<Generic>(params)
+    // So generic MUST appear before params, regardless of source attribute order.
+    let gen_span = if !options.is_jsx {
+        setup.generic.and_then(|s| {
+            let content = &source[s.start as usize..s.end as usize];
+            if content.trim().is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        })
+    } else {
+        None
+    };
+    let attr_span = if !options.is_jsx {
+        setup.attrs.and_then(|s| {
+            let content = &source[s.start as usize..s.end as usize];
+            if content.trim().is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        })
+    } else {
+        None
+    };
+
+    match (gen_span, attr_span) {
+        (None, None) => {
+            // No preserved spans — single overwrite.
+            let generic_bracket = if options.is_jsx {
+                String::new()
+            } else {
+                generic_info
+                    .as_ref()
+                    .map(|g| g.source_bracket())
+                    .or_else(|| raw_generic.as_ref().map(|r| format!("<{}>", r)))
+                    .unwrap_or_default()
+            };
+            let wrapper_start = format!(
+                ";export {}function {}TemplateBindingFN{}() {{\n",
+                async_prefix, PREFIX, generic_bracket,
+            );
+            out.overwrite(setup.tag_open.start, setup.tag_open.end, &wrapper_start);
+        }
+        (Some(gen), None) => {
+            // Only generic: preserve its span with <> wrapping.
+            let fn_prefix = format!(
+                ";export {}function {}TemplateBindingFN<",
+                async_prefix, PREFIX
+            );
+            out.overwrite(setup.tag_open.start, gen.start, &fn_prefix);
+            out.overwrite(gen.end, setup.tag_open.end, ">() {\n");
+        }
+        (None, Some(attr)) => {
+            // Only attrs: preserve its span with (_attrs: ) wrapping.
+            let fn_prefix = format!(
+                ";export {}function {}TemplateBindingFN(_attrs: ",
+                async_prefix, PREFIX
+            );
+            out.overwrite(setup.tag_open.start, attr.start, &fn_prefix);
+            out.overwrite(attr.end, setup.tag_open.end, ") {\n");
+        }
+        (Some(gen), Some(attr)) => {
+            // Both present. Output must be: FN<generic>(_attrs: attrs)
+            // Source order may differ — handle both cases.
+            if gen.start < attr.start {
+                // Source order matches desired order: generic before attrs.
+                // Emit segments left-to-right around both preserved spans.
+                let fn_prefix = format!(
+                    ";export {}function {}TemplateBindingFN<",
+                    async_prefix, PREFIX
+                );
+                out.overwrite(setup.tag_open.start, gen.start, &fn_prefix);
+                out.overwrite(gen.end, attr.start, ">(_attrs: ");
+                out.overwrite(attr.end, setup.tag_open.end, ") {\n");
+            } else {
+                // Source order is attrs before generic — need to reorder.
+                // Use move_wrapped to relocate generic content before attrs.
+                //
+                // Source: ...attrs="ATTRS"...generic="GEN"...>
+                // Output: ...FN<GEN>(_attrs: ATTRS) {\n
+                //
+                // 1. Overwrite [tag_open.start, attr.start) → function prefix with "<"
+                // 2. Move generic content to attr.start with suffix ">(_attrs: "
+                //    This inserts "GEN>(_attrs: " just before attrs content.
+                // 3. Attrs content stays in place (preserved, sourcemapped).
+                // 4. Overwrite [attr.end, gen.start) → empty (removes gap text)
+                // 5. Overwrite [gen.end, tag_open.end) → ") {\n"
+                //    (gen content was moved away, original position is empty)
+                let fn_prefix = format!(
+                    ";export {}function {}TemplateBindingFN<",
+                    async_prefix, PREFIX
+                );
+                out.overwrite(setup.tag_open.start, attr.start, &fn_prefix);
+                out.move_wrapped(gen.start, gen.end, attr.start, "", ">(_attrs: ");
+                // attrs content preserved at [attr.start, attr.end)
+                out.overwrite(attr.end, gen.start, "");
+                out.overwrite(gen.end, setup.tag_open.end, ") {\n");
+            }
+        }
+    }
 
     // Replace </script> tag with block scope opening; close deferred to template end
     if let Some(tag_close) = &setup.tag_close {
@@ -1018,13 +1122,12 @@ fn process_tsx_script_setup<'alloc>(
 
             // Emit instance completion probe line (LSP uses this for autocomplete)
             tail.push_str(&instance_probe_line());
-
-            tail.push_str("\n} // close templateBindingFN\n");
+            tail.push_str("\nreturn {};\n} // close templateBindingFN\n");
             deferred_return_close = Some(tail);
         } else {
             // No template: emit block scope + close immediately.
             wrapper_end.push_str("\n} // close block scope\n");
-            wrapper_end.push_str("\n} // close templateBindingFN\n");
+            wrapper_end.push_str("\nreturn {};\n} // close templateBindingFN\n");
             out.overwrite(tag_close.start, tag_close.end, &wrapper_end);
         }
     }
@@ -1084,7 +1187,7 @@ fn process_tsx_script_setup_error_mode(
             out.overwrite(tag_close.start, tag_close.end, &wrapper_open);
             let mut close = String::from("\n");
             close.push_str(&instance_probe_line());
-            close.push_str("} // close templateBindingFN\n");
+            close.push_str("return {};\n} // close templateBindingFN\n");
             deferred_return_close = Some(close);
         } else {
             // No template: just remove the tag
@@ -3220,11 +3323,14 @@ fn emit_minimal_wrapper(
         out.prepend_alloc(pos, &start);
         let mut close = String::from("\n");
         close.push_str(&instance_probe_line());
-        close.push_str("}\n");
+        close.push_str("return {};\n}\n");
         Some(close)
     } else {
         // No template: emit everything at pos
-        let wrapper = format!("export function {}TemplateBindingFN() {{\n}}\n", PREFIX,);
+        let wrapper = format!(
+            "export function {}TemplateBindingFN() {{\nreturn {{}};\n}}\n",
+            PREFIX,
+        );
         out.prepend_alloc(pos, &wrapper);
         None
     }

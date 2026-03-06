@@ -999,8 +999,12 @@ impl Syntax {
                 b"setup" if root_kind == RootNodeKind::Script => self.prop_setup = true,
                 b"src" if root_kind == RootNodeKind::Script => self.prop_src = value_span,
                 b"generic" if root_kind == RootNodeKind::Script => self.prop_generic = value_span,
-                b"attrs" | b"attributes" if root_kind == RootNodeKind::Script => {
-                    self.prop_attrs = value_span
+                b"attrs" if root_kind == RootNodeKind::Script => self.prop_attrs = value_span,
+                b"attributes" if root_kind == RootNodeKind::Script => {
+                    // Only set if `attrs` hasn't already been set (attrs takes priority)
+                    if self.prop_attrs.is_none() {
+                        self.prop_attrs = value_span
+                    }
                 }
                 // style-only
                 b"scoped" if root_kind == RootNodeKind::Style => self.prop_scoped = true,

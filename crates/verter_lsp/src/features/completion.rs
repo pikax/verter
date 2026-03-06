@@ -57,6 +57,21 @@ pub fn completions_at_position(
             });
         }
         SfcCursorContext::OpeningTag { block_index } => {
+            let block = &blocks[block_index];
+            // When cursor is inside a `generic`, `attrs`, or `attributes` attribute
+            // value on a <script> tag, return None to let the TypeProvider handle
+            // completions via sourcemapped TSX positions.
+            if block.tag_name == "script" {
+                let parsed = parse_opening_tag(source, block);
+                let is_in_ts_attr_value = parsed.attrs.iter().any(|a| {
+                    matches!(a.name.as_str(), "generic" | "attrs" | "attributes")
+                        && a.value_start.is_some_and(|vs| offset >= vs)
+                        && a.value_end.is_some_and(|ve| offset <= ve)
+                });
+                if is_in_ts_attr_value {
+                    return None;
+                }
+            }
             return Some(CompletionResult {
                 items: sfc_attribute_completions(source, &blocks[block_index]),
                 is_incomplete: false,

@@ -7,6 +7,7 @@ import FragmentComp from './FragmentComp.vue'
 import NoInheritComp from './NoInheritComp.vue'
 import ConditionalRoot from './ConditionalRoot.vue'
 import FunctionalBtn from './FunctionalBtn'
+import GenericAttrsComp from './GenericAttrsComp.vue'
 import { formatCount } from './utils'
 
 const count = ref(0)
@@ -44,5 +45,6 @@ function handleCustom(payload: string) { console.log(payload) }
     <NoInheritComp label="ok" data-custom="val" />
     <ConditionalRoot :show="true" text="hi" class="cond" />
     <FunctionalBtn label="fn" class="fn-class" />
+    <GenericAttrsComp :value="'hello'" class="generic-test" />
   </div>
 </template>

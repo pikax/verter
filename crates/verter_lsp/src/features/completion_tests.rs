@@ -1362,3 +1362,109 @@ fn test_vmodel_modifier_completions() {
         "v-model should NOT include 'stop'"
     );
 }
+
+// ── Suppress completions inside generic/attrs attribute values ───────────────
+
+#[test]
+fn test_no_completions_inside_generic_attr_value() {
+    let source = r#"<script setup lang="ts" generic="T extends string">
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Position inside generic="T extends |string" (line 0, character 43)
+    let generic_value_pos = source.find("T extends string").unwrap();
+    let col = generic_value_pos; // All on line 0
+    let position = Position {
+        line: 0,
+        character: col as u32 + 10, // Inside the value
+    };
+    let result = completions_at_position(
+        &position,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    // Positive: should return None (delegate to TypeProvider)
+    assert!(
+        result.is_none(),
+        "should return None for cursor inside generic attribute value, got: {:?}",
+        result.map(|r| r.items.len())
+    );
+}
+
+#[test]
+fn test_no_completions_inside_attrs_attr_value() {
+    let source = r#"<script setup lang="ts" attrs="{ class: string }">
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Position inside attrs="{ class: |string }" (line 0)
+    let attrs_value_pos = source.find("{ class: string }").unwrap();
+    let col = attrs_value_pos;
+    let position = Position {
+        line: 0,
+        character: col as u32 + 5, // Inside the value
+    };
+    let result = completions_at_position(
+        &position,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    // Positive: should return None (delegate to TypeProvider)
+    assert!(
+        result.is_none(),
+        "should return None for cursor inside attrs attribute value, got: {:?}",
+        result.map(|r| r.items.len())
+    );
+}
+
+#[test]
+fn test_normal_script_attr_completions_outside_ts_values() {
+    let source = r#"<script setup lang="ts" generic="T" >
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Position on the opening tag but outside any attribute value (after generic="T" )
+    // The space before > at line 0
+    let pos = source.find(" >").unwrap();
+    let position = Position {
+        line: 0,
+        character: pos as u32,
+    };
+    let result = completions_at_position(
+        &position,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        None,
+    );
+
+    // Positive: should return completions (not suppressed)
+    assert!(
+        result.is_some(),
+        "should return attribute completions outside TS attr values"
+    );
+}

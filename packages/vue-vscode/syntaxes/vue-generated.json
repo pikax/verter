@@ -852,7 +852,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         }
       ]
     },
@@ -880,7 +880,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         },
         {
           "begin": "(>)",
@@ -917,7 +917,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         },
         {
           "contentName": "source.ts",
@@ -960,7 +960,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         },
         {
           "contentName": "source.coffee",
@@ -1003,7 +1003,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         },
         {
           "contentName": "source.js",
@@ -1159,6 +1159,118 @@
     },
     "tag-stuff": {
       "patterns": [
+        {
+          "include": "#vue-directives"
+        },
+        {
+          "include": "#tag-id-attribute"
+        },
+        {
+          "include": "#tag-generic-attribute"
+        },
+        {
+          "include": "#string-double-quoted"
+        },
+        {
+          "include": "#string-single-quoted"
+        }
+      ]
+    },
+    "script-ts-generic-attr": {
+      "name": "meta.attribute.generic.vue",
+      "begin": "\\b(generic)\\s*(=)",
+      "beginCaptures": {
+        "1": {
+          "name": "entity.other.attribute-name.html"
+        },
+        "2": {
+          "name": "punctuation.separator.key-value.html"
+        }
+      },
+      "end": "(?<='|\")",
+      "patterns": [
+        {
+          "begin": "('|\")",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.html"
+            }
+          },
+          "end": "(\\1)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.end.html"
+            }
+          },
+          "contentName": "meta.type.parameters.vue",
+          "patterns": [
+            {
+              "include": "source.ts#comment"
+            },
+            {
+              "name": "storage.modifier.ts",
+              "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(extends)(?![_$[:alnum:]])(?:(?=\\.\\.\\.)|(?!\\.))"
+            },
+            {
+              "include": "source.ts#type"
+            },
+            {
+              "include": "source.ts#punctuation-comma"
+            },
+            {
+              "name": "keyword.operator.assignment.ts",
+              "match": "(=)(?!>)"
+            }
+          ]
+        }
+      ]
+    },
+    "script-ts-attrs-attr": {
+      "name": "meta.attribute.attrs.vue",
+      "begin": "\\b(attrs|attributes)\\s*(=)",
+      "beginCaptures": {
+        "1": {
+          "name": "entity.other.attribute-name.html"
+        },
+        "2": {
+          "name": "punctuation.separator.key-value.html"
+        }
+      },
+      "end": "(?<='|\")",
+      "patterns": [
+        {
+          "begin": "('|\")",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.html"
+            }
+          },
+          "end": "(\\1)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.end.html"
+            }
+          },
+          "contentName": "meta.type.annotation.vue",
+          "patterns": [
+            {
+              "include": "source.ts#comment"
+            },
+            {
+              "include": "source.ts#type"
+            }
+          ]
+        }
+      ]
+    },
+    "script-tag-stuff": {
+      "patterns": [
+        {
+          "include": "#script-ts-generic-attr"
+        },
+        {
+          "include": "#script-ts-attrs-attr"
+        },
         {
           "include": "#vue-directives"
         },

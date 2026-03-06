@@ -910,3 +910,78 @@ fn test_hover_on_ref_in_interpolation_still_shows_import() {
         contents
     );
 }
+
+// ── Delegate to TypeProvider for generic/attrs attribute values ──────────────
+
+#[test]
+fn test_hover_on_generic_attr_name_shows_docs() {
+    let source = r#"<script setup lang="ts" generic="T extends string">
+const x = 1;
+</script>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Hover on the "generic" attribute NAME → should show SFC docs
+    let name_offset = source.find("generic").unwrap();
+    let pos = line_index.offset_to_position(name_offset as u32).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+    assert!(
+        hover.is_some(),
+        "should show SFC docs when hovering on 'generic' attribute name"
+    );
+}
+
+#[test]
+fn test_hover_on_generic_attr_value_returns_none() {
+    let source = r#"<script setup lang="ts" generic="T extends string">
+const x = 1;
+</script>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Hover INSIDE the generic value "T extends string" → should return None
+    // to delegate to TypeProvider
+    let value_offset = source.find("T extends").unwrap();
+    let pos = line_index.offset_to_position(value_offset as u32).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+    assert!(
+        hover.is_none(),
+        "should return None for cursor inside generic value (delegates to TypeProvider)"
+    );
+}
+
+#[test]
+fn test_hover_on_attrs_attr_value_returns_none() {
+    let source = r#"<script setup lang="ts" attrs="{ class: string }">
+const x = 1;
+</script>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Hover INSIDE the attrs value "{ class: string }" → should return None
+    let value_offset = source.find("class: string").unwrap();
+    let pos = line_index.offset_to_position(value_offset as u32).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+    assert!(
+        hover.is_none(),
+        "should return None for cursor inside attrs value (delegates to TypeProvider)"
+    );
+}
+
+#[test]
+fn test_hover_on_lang_attr_value_still_works() {
+    let source = r#"<script setup lang="ts" generic="T">
+const x = 1;
+</script>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Hover inside `lang="ts"` value → should still show SFC attr docs (not generic/attrs)
+    let value_offset = source.find("ts").unwrap();
+    let pos = line_index.offset_to_position(value_offset as u32).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
+    assert!(
+        hover.is_some(),
+        "should show SFC docs for lang attribute value (not delegated)"
+    );
+}

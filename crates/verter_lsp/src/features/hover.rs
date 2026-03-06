@@ -75,6 +75,8 @@ pub fn hover_at_position(
 // ── SFC Tag Hover ────────────────────────────────────────────────────────────
 
 /// Hover on an SFC opening tag — dispatches to tag name or attribute hover.
+/// Returns `None` for cursor inside `generic`/`attrs`/`attributes` attribute values
+/// on script tags, letting the TypeProvider handle those via sourcemapped TSX positions.
 fn sfc_tag_hover(source: &str, block: &SfcBlock, offset: u32) -> Option<Hover> {
     let ctx = parse_opening_tag(source, block);
 
@@ -90,6 +92,13 @@ fn sfc_tag_hover(source: &str, block: &SfcBlock, offset: u32) -> Option<Hover> {
         }
         if let (Some(vs), Some(ve)) = (attr.value_start, attr.value_end) {
             if offset >= vs && offset < ve {
+                // For generic/attrs/attributes values on script tags, return None
+                // to delegate to TypeProvider for TS intellisense.
+                if block.tag_name == "script"
+                    && matches!(attr.name.as_str(), "generic" | "attrs" | "attributes")
+                {
+                    return None;
+                }
                 return sfc_attr_hover(&ctx.tag_name, &attr.name);
             }
         }

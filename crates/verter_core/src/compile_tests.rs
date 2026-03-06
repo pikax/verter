@@ -12562,3 +12562,374 @@ fn tsx_instance_declaration_template_only_uses_instance_type() {
         tsx.code
     );
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── _attrs parameter on TemplateBindingFN — IDE codegen ─────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn tsx_attrs_param_inline_type() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts" attrs="{ class: string }">
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: _attrs parameter in function signature
+    assert!(
+        tsx.code
+            .contains("TemplateBindingFN(_attrs: { class: string })"),
+        "should have _attrs param with inline type, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: should NOT have empty parens
+    assert!(
+        !tsx.code.contains("TemplateBindingFN()"),
+        "should not have empty parens when attrs specified, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_attrs_param_with_generics() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts" generic="T extends string" attrs="{ value: T }">
+defineProps<{ items: T[] }>()
+</script>
+<template><div /></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: both generic bracket and _attrs param, generic BEFORE params
+    assert!(
+        tsx.code
+            .contains("TemplateBindingFN<T extends string>(_attrs: { value: T })"),
+        "should have generic bracket + _attrs param, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_attrs_before_generic_in_source_order() {
+    // When attrs appears BEFORE generic in the SFC source,
+    // the generated TSX must still have generic before params.
+    let result = compile_tsx(
+        r#"<script setup lang="ts" attrs="{ class: string }" generic="T extends string">
+defineProps<{ value: T }>()
+</script>
+<template><div /></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: generic BEFORE params regardless of source order
+    assert!(
+        tsx.code
+            .contains("TemplateBindingFN<T extends string>(_attrs: { class: string })"),
+        "generic must come before params even when attrs is first in source, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: must NOT have generic after params
+    assert!(
+        !tsx.code.contains("})<"),
+        "generic must not appear after closing paren, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_no_attrs_param_without_attrs_attr() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: empty parens when no attrs
+    assert!(
+        tsx.code.contains("TemplateBindingFN()"),
+        "should have empty parens without attrs, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: no _attrs parameter
+    assert!(
+        !tsx.code.contains("_attrs"),
+        "should not have _attrs param without attrs attribute, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_no_attrs_param_jsx_mode() {
+    let result = compile_tsx_with_force_js(
+        r#"<script setup attrs="{ class: string }">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        true,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: JSX mode → empty parens (no TS annotations)
+    assert!(
+        tsx.code.contains("TemplateBindingFN()"),
+        "JSX mode should have empty parens (no TS annotations), got:\n{}",
+        tsx.code
+    );
+
+    // Negative: no _attrs in JSX mode
+    assert!(
+        !tsx.code.contains("_attrs:"),
+        "JSX mode should not have _attrs TS annotation, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_attrs_priority_over_attributes() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts" attrs="{ role: string }" attributes="{ id: string }">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: attrs value wins
+    assert!(
+        tsx.code.contains("{ role: string }"),
+        "attrs should take priority over attributes, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: attributes value should NOT appear
+    assert!(
+        !tsx.code.contains("{ id: string }"),
+        "attributes value should not appear when attrs is present, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_bare_use_attrs_with_explicit_attrs_typeof_cast() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts" attrs="{ class: string }">
+import { useAttrs } from 'vue'
+const attrs = useAttrs()
+</script>
+<template><div>hello</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: bare useAttrs() gets `as typeof _attrs` cast
+    assert!(
+        tsx.code.contains("useAttrs() as typeof _attrs"),
+        "bare useAttrs() should be cast to typeof _attrs when attrs specified, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: should NOT use the old ___VERTER___Attrs cast
+    assert!(
+        !tsx.code.contains("as unknown as ___VERTER___Attrs"),
+        "should not use ___VERTER___Attrs cast when explicit attrs, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_bare_use_attrs_without_explicit_attrs_keeps_verter_cast() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { useAttrs } from 'vue'
+const attrs = useAttrs()
+</script>
+<template><div>hello</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: bare useAttrs() still gets ___VERTER___Attrs cast when no explicit attrs
+    assert!(
+        tsx.code.contains("as unknown as ___VERTER___Attrs"),
+        "bare useAttrs() should use ___VERTER___Attrs cast without explicit attrs, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: should NOT use typeof _attrs
+    assert!(
+        !tsx.code.contains("as typeof _attrs"),
+        "should not use typeof _attrs when no explicit attrs, got:\n{}",
+        tsx.code
+    );
+}
+
+// ── Sourcemap tests for attrs/generic content ───────────────────────────────
+
+#[test]
+fn tsx_attrs_content_is_sourcemapped() {
+    let source = r#"<script setup lang="ts" attrs="{ class: string }">
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    let sm =
+        oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).expect("valid source map JSON");
+    let lookup = sm.generate_lookup_table();
+
+    // Find "{ class: string }" in the generated TSX output
+    let target = "{ class: string }";
+    let gen_pos = tsx
+        .code
+        .find(target)
+        .expect("should find attrs content in TSX output");
+
+    // Find the same text in the original SFC source
+    let src_pos = source
+        .find(target)
+        .expect("should find attrs content in SFC source");
+
+    // Look up the sourcemap token at the generated position
+    let gen_line = tsx.code[..gen_pos].matches('\n').count() as u32;
+    let gen_col = (gen_pos - tsx.code[..gen_pos].rfind('\n').map_or(0, |p| p + 1)) as u32;
+
+    let token = sm
+        .lookup_token(&lookup, gen_line, gen_col)
+        .expect("should have sourcemap token for attrs content");
+
+    // The token should map back to the original source position
+    let src_line = source[..src_pos].matches('\n').count() as u32;
+    let src_col = (src_pos - source[..src_pos].rfind('\n').map_or(0, |p| p + 1)) as u32;
+
+    assert_eq!(
+        token.get_src_line(),
+        src_line,
+        "attrs content should map back to SFC source line"
+    );
+    assert_eq!(
+        token.get_src_col(),
+        src_col,
+        "attrs content should map back to SFC source column"
+    );
+}
+
+#[test]
+fn tsx_generic_content_is_sourcemapped() {
+    let source = r#"<script setup lang="ts" generic="T extends string">
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let result = compile_tsx_with_source_map(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    let sm =
+        oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map).expect("valid source map JSON");
+    let lookup = sm.generate_lookup_table();
+
+    // Find "T extends string" in the generated TSX output
+    let gen_pos = tsx
+        .code
+        .find("T extends string")
+        .expect("should find 'T extends string' in TSX output");
+
+    // Find "T extends string" in the original SFC source
+    let src_pos = source
+        .find("T extends string")
+        .expect("should find 'T extends string' in SFC source");
+
+    // Look up the sourcemap token at the generated position
+    let gen_line = tsx.code[..gen_pos].matches('\n').count() as u32;
+    let gen_col = (gen_pos - tsx.code[..gen_pos].rfind('\n').map_or(0, |p| p + 1)) as u32;
+
+    let token = sm
+        .lookup_token(&lookup, gen_line, gen_col)
+        .expect("should have sourcemap token for generic content");
+
+    // The token should map back to the original source position
+    let src_line = source[..src_pos].matches('\n').count() as u32;
+    let src_col = (src_pos - source[..src_pos].rfind('\n').map_or(0, |p| p + 1)) as u32;
+
+    assert_eq!(
+        token.get_src_line(),
+        src_line,
+        "generic content should map back to SFC source line"
+    );
+    assert_eq!(
+        token.get_src_col(),
+        src_col,
+        "generic content should map back to SFC source column"
+    );
+}
+
+// ── TemplateBindingFN empty return ──────────────────────────────────────────
+
+#[test]
+fn tsx_template_binding_fn_has_return_statement() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: should have return statement before close
+    assert!(
+        tsx.code
+            .contains("return {};\n} // close templateBindingFN"),
+        "should have empty return before closing brace of TemplateBindingFN, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: no `: any` return type annotation
+    assert!(
+        !tsx.code.contains(": any"),
+        "TemplateBindingFN should not have `: any` return type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn jsx_template_binding_fn_has_return_statement() {
+    let result = compile_tsx_with_force_js(
+        r#"<script setup>
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        true,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: JS mode should have `return {};` (no `as any`)
+    assert!(
+        tsx.code
+            .contains("return {};\n} // close templateBindingFN"),
+        "JSX mode should have `return {{}};` before closing brace, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: no `as any` in JS mode
+    assert!(
+        !tsx.code.contains("as any"),
+        "JSX mode should not have `as any`, got:\n{}",
+        tsx.code
+    );
+}
