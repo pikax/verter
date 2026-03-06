@@ -2789,3 +2789,160 @@ fn v_bind_longform_prop_name_source_map_accuracy() {
         tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
     );
 }
+
+// ── Slot outlet source map accuracy ─────────────────────────────
+
+#[test]
+fn slot_outlet_tag_name_source_mapped_to_slots() {
+    // Hovering on `slot` in `<slot name="reference" />` should map to `$slots`
+    // in the generated TSX, NOT to `?.()` or other synthetic regions.
+    let source = r#"<template><slot name="reference" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    // Verify output shape
+    assert!(
+        output.contains("$slots"),
+        "should contain $slots: {output}"
+    );
+    assert!(
+        output.contains(".reference"),
+        "should contain .reference: {output}"
+    );
+
+    // Find source position of `s` in `<slot`
+    let slot_src_col = source.find("<slot").unwrap() as u32 + 1; // position of `s`
+
+    // Find the generated position of `$slots`
+    let gen_slots_pos = output.find("$slots").unwrap() as u32;
+
+    // The source map token at `s` should map to `$slots` in generated output,
+    // NOT to positions past `$slots` (like `?.()`)
+    let token_for_slot = tokens
+        .iter()
+        .find(|&&(_, _, sc)| sc == slot_src_col);
+    assert!(
+        token_for_slot.is_some(),
+        "should have source map token for `slot` tag name at src col {}. Tokens: {:?}",
+        slot_src_col, tokens
+    );
+
+    let &(_, dst_col, _) = token_for_slot.unwrap();
+    // dst_col should be within the `$slots` region, not past it
+    assert!(
+        dst_col >= gen_slots_pos && dst_col < gen_slots_pos + 6,
+        "slot tag name should map to `$slots` region (gen cols {}..{}), got gen col {}. Output: {}",
+        gen_slots_pos, gen_slots_pos + 6, dst_col, output
+    );
+}
+
+#[test]
+fn slot_outlet_name_attr_does_not_map_to_call_site() {
+    // Positions within the `name="reference"` attribute should NOT map to `?.()`.
+    // The slot name value `reference` should map to `.reference` in generated output.
+    let source = r#"<template><slot name="reference" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    // Find source position of `reference` value (inside quotes)
+    let ref_src_col = source.find("reference").unwrap() as u32;
+
+    // Find generated position of `reference` (in `.reference`)
+    let gen_ref_text = ".reference";
+    let gen_ref_pos = output.find(gen_ref_text).unwrap() as u32;
+    let gen_ref_start = gen_ref_pos + 1; // skip the `.`
+
+    // The token for `reference` should map to the `.reference` region
+    let token_for_ref = tokens
+        .iter()
+        .find(|&&(_, _, sc)| sc == ref_src_col);
+    assert!(
+        token_for_ref.is_some(),
+        "should have source map token for `reference` at src col {}. Tokens: {:?}",
+        ref_src_col, tokens
+    );
+
+    let &(_, dst_col, _) = token_for_ref.unwrap();
+    assert!(
+        dst_col >= gen_ref_start && dst_col < gen_ref_start + 9,
+        "reference should map to `.reference` region (gen cols {}..{}), got gen col {}. Output: {}",
+        gen_ref_start, gen_ref_start + 9, dst_col, output
+    );
+}
+
+#[test]
+fn slot_outlet_no_interpolation_past_mapped_content() {
+    // Simulates vue_to_tsx interpolation for the meaningful parts of the slot tag:
+    // tag name (`slot`), attribute name (`name`), and attribute value (`reference`).
+    // These positions must NOT land on the `(` of `?.()` — that causes `() any` hover.
+    // Structural syntax (closing `"`, ` />`) may map to the `?.` operator, which is fine.
+    let source = r#"<template><slot name="reference" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    // Find the generated position of `(` in `?.()` — this is where TSGO shows `() any`
+    let call_paren_pos = output.find("?.()").unwrap() as u32 + 2; // position of `(`
+
+    // Meaningful source positions: `<slot name="reference`
+    // (excludes closing `"` and ` />` which are structural syntax)
+    let tag_start = source.find("<slot").unwrap() as u32;
+    let ref_end = source.find("reference").unwrap() as u32 + "reference".len() as u32;
+
+    // Simulate vue_to_tsx for meaningful positions
+    for query_col in tag_start..ref_end {
+        let best = tokens
+            .iter()
+            .filter(|&&(_, _, sc)| sc <= query_col)
+            .max_by_key(|&&(_, _, sc)| sc);
+
+        if let Some(&(_, dst_col, src_col)) = best {
+            let delta = query_col - src_col;
+            let interpolated_dst = dst_col + delta;
+
+            assert!(
+                interpolated_dst < call_paren_pos,
+                "source col {} interpolates to gen col {} (token src={} dst={} + delta={}), \
+                 which is at/past `(` in `?.()` (gen col {}). This causes `() any` hover. Output: {}",
+                query_col, interpolated_dst, src_col, dst_col, delta,
+                call_paren_pos, output
+            );
+        }
+    }
+}
+
+// ── Class/style merge source map accuracy ───────────────────────
+
+#[test]
+fn class_merge_dynamic_class_position_is_mapped() {
+    // When both `class="foo"` and `:class="bar"` exist, the `:class` directive's
+    // argument position should have a source map token pointing to the merged
+    // `class={normalizeClass(...)}` attribute. The static `class` position is NOT
+    // mapped in the codegen (the static attribute is removed from TSX); hover for
+    // the static `class` is handled by the LSP hover handler which redirects the
+    // TSGO query to the `:class` directive's position.
+    let source = r#"<template><div class="foo" :class="bar"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    // Find source position of the `:` in `:class` (the directive start / overwrite origin)
+    let colon_class_col = source.find(":class").unwrap() as u32;
+
+    // Find generated position of the merged `class=` attribute
+    let gen_class_pos = output.find("class=").unwrap() as u32;
+
+    // The `:class` directive start should have a source map token mapping
+    // to the merged `class=` in generated TSX. This is the redirect target
+    // used by the hover handler for the static `class` attribute.
+    let token_for_colon = tokens
+        .iter()
+        .find(|&&(_, _, sc)| sc == colon_class_col);
+    assert!(
+        token_for_colon.is_some(),
+        "`:class` at src col {} should have a source map token. \
+         Generated output: {}. Tokens: {:?}",
+        colon_class_col, output, tokens
+    );
+
+    let &(_, dst_col, _) = token_for_colon.unwrap();
+    assert!(
+        dst_col >= gen_class_pos && dst_col < gen_class_pos + 6,
+        "`:class` should map to merged `class=` region (gen cols {}..{}), got gen col {}. Output: {}",
+        gen_class_pos, gen_class_pos + 6, dst_col, output
+    );
+}

@@ -16,7 +16,9 @@ export type ExtractHidden<T, R = never> = T extends {
   ? U
   : R;
 
-export declare function removeHiddenPatch<T>(t: T): Omit<T, typeof UniqueKey> & {};
+export declare function removeHiddenPatch<T>(
+  t: T,
+): Omit<T, typeof UniqueKey> & {};
 
 export declare function extractHiddenPatch<T>(t: T): ExtractHidden<T>;
 
@@ -24,7 +26,10 @@ export declare function extractHiddenPatch<T>(t: T): ExtractHidden<T>;
  * A utility type that converts a function type representing event emissions
  * into an object type mapping event names to their argument tuples.
  */
-export type FunctionToObject<T> = T extends (e: infer X extends string, ...args: infer A) => void
+export type FunctionToObject<T> = T extends (
+  e: infer X extends string,
+  ...args: infer A
+) => void
   ? // using PatchHidden here does not work
     { [UniqueKey]?: { [K in X]: A } } & ((e: X, ...args: A) => void)
   : never;
@@ -33,7 +38,8 @@ export type FunctionToObject<T> = T extends (e: infer X extends string, ...args:
  * A utility type that converts an intersection of function types
  * representing event emissions into an object type mapping event names to their argument tuples.
  */
-export type IntersectionFunctionToObject<T> = T extends FunctionToObject<T> & (infer N)
+export type IntersectionFunctionToObject<T> = T extends FunctionToObject<T> &
+  infer N
   ? FunctionToObject<T> & IntersectionFunctionToObject<N>
   : {};
 
@@ -65,9 +71,9 @@ export type PickByValue<T, V> = {
 // Posted by jcalz, modified by community. See post 'Timeline' for change history
 // Retrieved 2025-11-14, License - CC BY-SA 4.0
 
-export type UnionToIntersection<U> = (U extends any ? (x: U) => void : never) extends (
-  x: infer I,
-) => void
+export type UnionToIntersection<U> = (
+  U extends any ? (x: U) => void : never
+) extends (x: infer I) => void
   ? I
   : never;
 

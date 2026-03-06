@@ -23,6 +23,7 @@ use crate::features::document_link::build_document_links;
 use crate::features::document_symbol::build_document_symbols;
 use crate::features::folding_range::build_folding_ranges;
 use crate::features::formatting::format_document;
+use crate::features::hover;
 use crate::features::hover::hover_at_position;
 use crate::features::linked_editing::linked_editing_ranges;
 use crate::features::organize_imports::organize_imports_actions;
@@ -2893,12 +2894,14 @@ impl LanguageServer for VerterLanguageServer {
             if let Some(ctx) = self.type_provider_context(uri) {
                 // Use validated mapping to avoid querying TSGO at synthetic TSX
                 // positions (e.g., <div> → generated JSX) which can crash it.
-                if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+                let tsx_offset = merge::vue_position_to_tsx_offset_validated(
                     position,
                     &ctx.vue_line_index,
                     &ctx.mapper,
                     &ctx.tsx_line_index,
-                ) {
+                );
+
+                let type_hover = if let Some(tsx_offset) = tsx_offset {
                     // Log TSX context snippet around the hover offset for debugging
                     if let Some((before, after)) =
                         debug_snippet(&ctx.tsx_content, tsx_offset as usize)
@@ -2916,11 +2919,11 @@ impl LanguageServer for VerterLanguageServer {
                     )
                     .await
                     {
-                        Ok(Ok(type_hover)) => {
+                        Ok(Ok(hover)) => {
                             tracing::info!(
                                 "hover type provider result: {}",
-                                if type_hover.is_some() {
-                                    type_hover
+                                if hover.is_some() {
+                                    hover
                                         .as_ref()
                                         .map(|h| h.contents.as_str())
                                         .unwrap_or("Some(empty)")
@@ -2928,19 +2931,15 @@ impl LanguageServer for VerterLanguageServer {
                                     "None"
                                 }
                             );
-                            return Ok(merge::merge_hover(
-                                verter_result,
-                                type_hover,
-                                &ctx.mapper,
-                                &ctx.tsx_line_index,
-                                &ctx.vue_line_index,
-                            ));
+                            hover
                         }
                         Ok(Err(e)) => {
                             tracing::warn!("hover type provider error: {}", e);
+                            None
                         }
                         Err(_) => {
                             tracing::warn!("hover: type provider timed out");
+                            None
                         }
                     }
                 } else {
@@ -2949,7 +2948,73 @@ impl LanguageServer for VerterLanguageServer {
                         position.line,
                         position.character
                     );
+                    None
+                };
+
+                // If TSGO returned a result, merge and return.
+                if type_hover.is_some() {
+                    return Ok(merge::merge_hover(
+                        verter_result,
+                        type_hover,
+                        &ctx.mapper,
+                        &ctx.tsx_line_index,
+                        &ctx.vue_line_index,
+                    ));
                 }
+
+                // Redirect: when TSGO returned nothing and the cursor is on a static
+                // `class`/`style` attribute that was merged with a dynamic binding,
+                // the static attribute's source position maps to removed TSX content.
+                // Retry at the dynamic directive's position instead.
+                if let Some(analysis) = self.documents.get_analysis(uri) {
+                    let vue_offset = ctx.vue_line_index.position_to_offset(position);
+                    if let Some(vue_offset) = vue_offset {
+                        if let Some(redirect_offset) =
+                            hover::merged_attribute_redirect_offset(vue_offset, &analysis)
+                        {
+                            // Convert the redirect SFC offset to a Vue line:col position
+                            if let Some(redirect_pos) =
+                                ctx.vue_line_index.offset_to_position(redirect_offset)
+                            {
+                                if let Some(redirect_tsx) =
+                                    merge::vue_position_to_tsx_offset_validated(
+                                        &redirect_pos,
+                                        &ctx.vue_line_index,
+                                        &ctx.mapper,
+                                        &ctx.tsx_line_index,
+                                    )
+                                {
+                                    tracing::info!(
+                                        "hover: redirecting merged class/style from vue offset {} to {} (tsx offset {})",
+                                        vue_offset, redirect_offset, redirect_tsx
+                                    );
+                                    if let Ok(Ok(redirect_hover)) = tokio::time::timeout(
+                                        std::time::Duration::from_millis(500),
+                                        tp.get_hover(&ctx.tsx_path, redirect_tsx),
+                                    )
+                                    .await
+                                    {
+                                        return Ok(merge::merge_hover(
+                                            verter_result,
+                                            redirect_hover,
+                                            &ctx.mapper,
+                                            &ctx.tsx_line_index,
+                                            &ctx.vue_line_index,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return Ok(merge::merge_hover(
+                    verter_result,
+                    None,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                    &ctx.vue_line_index,
+                ));
             } else {
                 tracing::info!("hover: no ide_context for {}", uri.as_str());
             }

@@ -292,73 +292,20 @@ fn walk_element<'a, 'alloc>(
             // <slot name="x" :prop="val">fallback</slot>
             // → {___VERTER___instance.$slots.x?.({ prop: val }) ?? <>fallback</>}
             //
-            // For TSX type checking, emit the slot call so TypeScript can
-            // verify slot props and return types.
-            //
-            // Uses fine-grained mapped emissions so that:
-            // - Hovering `<slot` in source → resolves to `$slots` type
-            // - Hovering `name="header"` → resolves to the slot property type
+            // Uses fine-grained overwrites (not overwrite-all + prepends) so that
+            // vue_to_tsx interpolation stays bounded. Each overwrite creates a source
+            // map boundary, preventing positions within the tag from interpolating
+            // past `$slots.name` into the `?.()` call site (which caused `() any` hover).
             let has_children = el.content.as_ref().is_some_and(|c| !c.children.is_empty());
 
-            // Extract slot name + source position from props (static `name` or `:name`)
+            // Extract slot name + source positions from props
             let slot_info = extract_slot_name(el, ctx.source);
-            let (slot_name, slot_name_pos) = match &slot_info {
-                Some((name, pos)) => (*name, Some(*pos)),
-                None => ("default", None),
-            };
 
             // Collect slot props (non-name, non-structural attributes)
             let slot_props = collect_slot_props(el, oxc_el, ctx.source, ctx.resolver);
 
-            // Remove the entire open tag — we'll replace it with mapped prepends
-            ctx.out.overwrite(el.tag_open.start, el.tag_open.end, "");
-
-            let insert_pos = el.tag_open.start;
-
-            // 1. Emit `{___VERTER___instance.$slots` mapped so `$slots` → `<slot` position
-            let prefix = "{___VERTER___instance.";
-            let slots_content = format!("{}$slots", prefix);
-            ctx.out.prepend_alloc_mapped_with_offset(
-                insert_pos,
-                el.tag_open.start + 1, // source position of `s` in `<slot`
-                prefix.len() as u32,   // content_offset: past prefix, at `$slots`
-                &slots_content,
-            );
-
-            // 2. Emit slot name access
-            if let Some(name_pos) = slot_name_pos {
-                if is_valid_js_ident(slot_name) {
-                    // Dot notation: `.header` with token at `header`
-                    let name_content = format!(".{}", slot_name);
-                    ctx.out.prepend_alloc_mapped_with_offset(
-                        insert_pos,
-                        name_pos,
-                        1, // content_offset: past `.`, at slot name
-                        &name_content,
-                    );
-                } else {
-                    // Bracket notation: `['overlay-content']` with token at name
-                    let name_content = format!("['{}']", slot_name);
-                    ctx.out.prepend_alloc_mapped_with_offset(
-                        insert_pos,
-                        name_pos,
-                        2, // content_offset: past `['`, at slot name
-                        &name_content,
-                    );
-                }
-            } else {
-                // Default slot or dynamic — unmapped
-                let name_content = ".default";
-                ctx.out.prepend_alloc_mapped_with_offset(
-                    insert_pos,
-                    0,
-                    name_content.len() as u32,
-                    name_content,
-                );
-            }
-
-            // 3. Emit call suffix
-            let suffix = if slot_props.is_empty() {
+            // Build the call suffix: `?.()` or `?.({ props })`, with `}` or `?? <>`
+            let call_suffix = if slot_props.is_empty() {
                 if has_children {
                     "?.() ?? <>".to_string()
                 } else {
@@ -369,9 +316,51 @@ fn walk_element<'a, 'alloc>(
             } else {
                 format!("?.({{ {} }})}}", slot_props)
             };
-            let suffix_len = suffix.len() as u32;
+
+            // Fine-grained overwrites for source map accuracy:
+            // 1. `<` → `{___VERTER___instance.`
+            ctx.out.overwrite(
+                el.tag_open.start,
+                el.tag_open.start + 1,
+                "{___VERTER___instance.",
+            );
+            // 2. `slot` → `$slots`
             ctx.out
-                .prepend_alloc_mapped_with_offset(insert_pos, 0, suffix_len, &suffix);
+                .overwrite(el.tag_open.start + 1, el.tag_open.name_end, "$slots");
+
+            if let Some(ref info) = slot_info {
+                // Static name: overwrite gap between tag name and value to `.`,
+                // keep the name value in place, overwrite rest to call suffix.
+                if is_valid_js_ident(info.name) {
+                    // Dot notation: ` name="` → `.`
+                    ctx.out
+                        .overwrite(el.tag_open.name_end, info.value_start, ".");
+                    // Keep slot name value (source mapped)
+                    // `" />` or `" >` → call suffix
+                    ctx.out
+                        .overwrite(info.value_end, el.tag_open.end, &call_suffix);
+                } else {
+                    // Bracket notation for non-ident names (e.g., `overlay-content`):
+                    // ` name="` → `['`
+                    ctx.out
+                        .overwrite(el.tag_open.name_end, info.value_start, "['");
+                    // Keep slot name value (source mapped)
+                    // `" />` → `']` + call suffix
+                    ctx.out.overwrite(
+                        info.value_end,
+                        el.tag_open.end,
+                        &format!("']{}", call_suffix),
+                    );
+                }
+            } else {
+                // No static name (default slot or dynamic :name):
+                // overwrite everything after tag name to `.default` + call suffix
+                ctx.out.overwrite(
+                    el.tag_open.name_end,
+                    el.tag_open.end,
+                    &format!(".default{}", call_suffix),
+                );
+            }
 
             // Close tag
             if let Some(tag_close) = &el.tag_close {
@@ -970,13 +959,23 @@ fn is_valid_js_ident(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
+/// Extracted slot name info for fine-grained source map overwrites.
+struct SlotNameInfo<'a> {
+    /// The slot name string (e.g., "header")
+    name: &'a str,
+    /// Source position of the name value start (inside quotes)
+    value_start: u32,
+    /// Source position of the name value end (before closing quote)
+    value_end: u32,
+}
+
 /// Extract the slot name from a `<slot>` element's attributes.
-/// Returns the name string and its source position (value_start) for sourcemap mapping.
+/// Returns the name string and its source positions for sourcemap mapping.
 ///
 /// - `<slot>` → `None` (will use "default")
-/// - `<slot name="header">` → `Some(("header", value_start_pos))`
+/// - `<slot name="header">` → `Some(SlotNameInfo { name: "header", value_start, value_end })`
 /// - `<slot :name="dynamicName">` → `None` (dynamic, falls back to "default")
-fn extract_slot_name<'a>(el: &ElementNode, source: &'a str) -> Option<(&'a str, u32)> {
+fn extract_slot_name<'a>(el: &ElementNode, source: &'a str) -> Option<SlotNameInfo<'a>> {
     for prop in &el.props {
         if !prop.is_directive {
             let attr_name = &source[prop.start as usize..prop.name_end as usize];
@@ -984,7 +983,11 @@ fn extract_slot_name<'a>(el: &ElementNode, source: &'a str) -> Option<(&'a str, 
                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                     let name = source[vs as usize..ve as usize].trim();
                     if !name.is_empty() {
-                        return Some((name, vs));
+                        return Some(SlotNameInfo {
+                            name,
+                            value_start: vs,
+                            value_end: ve,
+                        });
                     }
                 }
             }

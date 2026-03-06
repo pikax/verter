@@ -184,6 +184,42 @@ fn is_on_attribute_name(offset: u32, analysis: &FileAnalysisSnapshot) -> bool {
     false
 }
 
+/// When the cursor is on a static `class` or `style` attribute that has been merged
+/// with a dynamic `:class`/`:style` binding, the static attribute is removed from
+/// the generated TSX and TSGO can't provide hover at that position.
+///
+/// This function detects that case and returns the corresponding directive's argument
+/// start position (the `class` in `:class`) — which IS mapped in the generated TSX
+/// and can be used to redirect the TSGO hover query.
+pub fn merged_attribute_redirect_offset(
+    offset: u32,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<u32> {
+    let template = analysis.template.as_ref()?;
+
+    for el in &template.elements {
+        // Check if cursor is on a static `class` or `style` attribute
+        for attr in &el.attributes {
+            if offset >= attr.span.start && offset < attr.name_end {
+                let attr_name = &attr.name;
+                if attr_name == "class" || attr_name == "style" {
+                    // Check if this element also has a dynamic `:class` or `:style`
+                    for dir in &el.directives {
+                        if dir.name == "bind" && dir.argument.as_deref() == Some(attr_name.as_str()) {
+                            // Return the directive argument start (the `class` in `:class`)
+                            // which is mapped in TSX to the merged `class={normalizeClass(...)}`
+                            if let Some(ref arg_span) = dir.arg_span {
+                                return Some(arg_span.start);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// When hovering on a template element tag name, show matching CSS rules with specificity.
 fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
     let template = analysis.template.as_ref()?;
