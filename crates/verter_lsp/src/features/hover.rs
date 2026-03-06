@@ -9,6 +9,23 @@ use crate::documents::sfc_scanner::{
     classify_cursor, parse_opening_tag, SfcBlock, SfcCursorContext,
 };
 
+/// Hover result from verter's own analysis, optionally carrying a Vue-specific
+/// kind label (e.g., "ref", "computed") to replace the type provider's generic kind prefix.
+pub struct VerterHoverResult {
+    pub hover: Hover,
+    /// If set, replaces the type provider's `({kind})` prefix in the merged hover.
+    pub vue_kind_label: Option<String>,
+}
+
+impl From<Hover> for VerterHoverResult {
+    fn from(hover: Hover) -> Self {
+        Self {
+            hover,
+            vue_kind_label: None,
+        }
+    }
+}
+
 /// Attempt to provide hover information at a given position.
 ///
 /// Strategy:
@@ -21,17 +38,17 @@ pub fn hover_at_position(
     blocks: &[SfcBlock],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
-) -> Option<Hover> {
+) -> Option<VerterHoverResult> {
     let offset = line_index.position_to_offset(position)?;
 
     // Check SFC structural context BEFORE requiring analysis data.
     // This allows hover on tags even when analysis hasn't completed.
     match classify_cursor(offset, blocks) {
         SfcCursorContext::OpeningTag { block_index } => {
-            return sfc_tag_hover(source, &blocks[block_index], offset);
+            return sfc_tag_hover(source, &blocks[block_index], offset).map(|h| h.into());
         }
         SfcCursorContext::ClosingTag { block_index } => {
-            return sfc_tag_name_hover(&blocks[block_index].tag_name);
+            return sfc_tag_name_hover(&blocks[block_index].tag_name).map(|h| h.into());
         }
         SfcCursorContext::RootLevel => return None,
         SfcCursorContext::BlockContent { .. } => {} // fall through to analysis-based hover
@@ -49,7 +66,8 @@ pub fn hover_at_position(
     match block.tag_name.as_str() {
         "script" => hover_in_script(offset, source, analysis),
         "template" => hover_in_template(offset, source, analysis),
-        "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index),
+        "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index)
+            .map(|h| h.into()),
         _ => None,
     }
 }
@@ -123,10 +141,14 @@ fn make_hover(value: String) -> Hover {
     }
 }
 
-fn hover_in_script(offset: usize, source: &str, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
+fn hover_in_script(
+    offset: usize,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<VerterHoverResult> {
     // Check if the cursor is on a Vue API call site — add context if so
     if let Some(api_hover) = vue_api_hover_at_offset(offset as u32, analysis) {
-        return Some(api_hover);
+        return Some(api_hover.into());
     }
 
     let word = word_at_offset(source, offset)?;
@@ -137,7 +159,7 @@ fn hover_in_template(
     offset: usize,
     source: &str,
     analysis: &FileAnalysisSnapshot,
-) -> Option<Hover> {
+) -> Option<VerterHoverResult> {
     // Don't provide hover inside HTML comments
     if crate::features::definition::is_inside_html_comment(source, offset) {
         return None;
@@ -145,17 +167,17 @@ fn hover_in_template(
 
     // Check if cursor is on a slot outlet element — show slot name and props
     if let Some(hover) = slot_outlet_hover(offset as u32, analysis) {
-        return Some(hover);
+        return Some(hover.into());
     }
 
     // Check if cursor is on a template element tag name — show matching CSS rules
     if let Some(hover) = element_css_hover(offset as u32, analysis) {
-        return Some(hover);
+        return Some(hover.into());
     }
 
     // Check if cursor is on a component element tag name — show prop constness info
     if let Some(hover) = component_prop_constness_hover(offset as u32, source, analysis) {
-        return Some(hover);
+        return Some(hover.into());
     }
 
     // In template, look for bindings used in expressions like {{ myVar }}
@@ -501,27 +523,49 @@ fn vue_api_hover_at_offset(offset: u32, analysis: &FileAnalysisSnapshot) -> Opti
     })
 }
 
-fn hover_for_word(word: &str, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
+fn hover_for_word(word: &str, analysis: &FileAnalysisSnapshot) -> Option<VerterHoverResult> {
     // Check bindings
     if let Some(binding) = analysis.bindings.iter().find(|b| b.name == word) {
-        return Some(format_binding_hover(binding));
+        let vue_kind_label = reactivity_kind_label(binding);
+        return Some(VerterHoverResult {
+            hover: format_binding_hover(binding),
+            vue_kind_label,
+        });
     }
 
     // Check imports
     for import in &analysis.imports {
         if let Some(binding) = import.bindings.iter().find(|b| b.name == word) {
-            return Some(format_import_hover(binding, &import.source));
+            return Some(format_import_hover(binding, &import.source).into());
         }
     }
 
     // Check macros
     for mac in &analysis.macros {
         if mac.binding_name.as_ref().is_some_and(|name| name == word) {
-            return Some(format_macro_hover(mac));
+            return Some(format_macro_hover(mac).into());
         }
     }
 
     None
+}
+
+/// Map a binding's reactivity kind to a label for the hover kind prefix.
+fn reactivity_kind_label(binding: &verter_analysis::AnalyzedBinding) -> Option<String> {
+    match binding.reactivity_kind {
+        verter_analysis::ReactivityKind::Ref => Some("ref".to_string()),
+        verter_analysis::ReactivityKind::Computed => Some("computed".to_string()),
+        verter_analysis::ReactivityKind::Reactive => Some("reactive".to_string()),
+        verter_analysis::ReactivityKind::MaybeRef => Some("maybe ref".to_string()),
+        verter_analysis::ReactivityKind::Mutable => Some("mutable".to_string()),
+        verter_analysis::ReactivityKind::None => {
+            if binding.is_reactive {
+                Some("reactive".to_string())
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn format_binding_hover(binding: &verter_analysis::AnalyzedBinding) -> Hover {

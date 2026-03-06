@@ -780,11 +780,7 @@ impl TypeProvider for TsserverTypeProvider {
                         return Ok(None);
                     }
 
-                    let contents = if docs.is_empty() {
-                        format!("```typescript\n({kind}) {display}\n```")
-                    } else {
-                        format!("```typescript\n({kind}) {display}\n```\n\n{docs}")
-                    };
+                    let contents = format_quickinfo_hover(kind, display, docs);
 
                     Ok(Some(HoverInfo {
                         contents,
@@ -1587,6 +1583,28 @@ fn concat_display_parts(parts: &[serde_json::Value]) -> String {
         .join("")
 }
 
+/// Format tsserver quickinfo into hover markdown.
+///
+/// tsserver's `displayString` may already include a `({kind})` prefix for certain
+/// symbol kinds (e.g., `(alias) const Foo`). This function avoids duplicating it.
+fn format_quickinfo_hover(kind: &str, display: &str, docs: &str) -> String {
+    let display_with_kind = if kind.is_empty() {
+        display.to_string()
+    } else {
+        let prefix = format!("({kind}) ");
+        if display.starts_with(&prefix) {
+            display.to_string()
+        } else {
+            format!("({kind}) {display}")
+        }
+    };
+    if docs.is_empty() {
+        format!("```typescript\n{display_with_kind}\n```")
+    } else {
+        format!("```typescript\n{display_with_kind}\n```\n\n{docs}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1735,5 +1753,64 @@ mod tests {
             result.is_ok(),
             "Shutdown should complete within 5s even when tsserver is unresponsive"
         );
+    }
+
+    #[test]
+    fn test_format_quickinfo_hover_no_duplicate_kind() {
+        // tsserver returns displayString that already includes (alias) prefix
+        let result = format_quickinfo_hover("alias", "(alias) const Foo: number", "");
+        assert!(
+            result.contains("(alias) const Foo: number"),
+            "should contain single (alias) prefix"
+        );
+        assert!(
+            !result.contains("(alias) (alias)"),
+            "must not duplicate kind prefix"
+        );
+    }
+
+    #[test]
+    fn test_format_quickinfo_hover_empty_kind() {
+        // Non-existent variable: kind is empty
+        let result = format_quickinfo_hover("", "any", "");
+        assert!(result.contains("\nany\n"), "should contain bare 'any'");
+        assert!(
+            !result.contains("()"),
+            "must not produce empty parens for empty kind"
+        );
+    }
+
+    #[test]
+    fn test_format_quickinfo_hover_normal_kind() {
+        // Normal case: kind is not already in displayString
+        let result = format_quickinfo_hover("const", "const foo: number", "");
+        assert!(
+            result.contains("(const) const foo: number"),
+            "should prepend kind prefix"
+        );
+    }
+
+    #[test]
+    fn test_format_quickinfo_hover_local_function_no_duplicate() {
+        let result = format_quickinfo_hover(
+            "local function",
+            "(local function) onPopupTransform(transform: string, v: number): string",
+            "",
+        );
+        assert!(
+            !result.contains("(local function) (local function)"),
+            "must not duplicate local function prefix"
+        );
+        assert!(
+            result.contains("(local function) onPopupTransform"),
+            "should contain single prefix"
+        );
+    }
+
+    #[test]
+    fn test_format_quickinfo_hover_with_docs() {
+        let result = format_quickinfo_hover("const", "const x: string", "A string variable");
+        assert!(result.contains("(const) const x: string"));
+        assert!(result.contains("A string variable"));
     }
 }

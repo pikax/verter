@@ -2891,7 +2891,7 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
-        let verter_result = (|| {
+        let verter_full = (|| {
             let doc = self.documents.get(uri)?;
             let analysis = self.documents.get_analysis(uri);
             let blocks = scan_sfc_blocks(&doc.source);
@@ -2903,6 +2903,8 @@ impl LanguageServer for VerterLanguageServer {
                 &doc.line_index,
             )
         })();
+        let vue_kind_label = verter_full.as_ref().and_then(|r| r.vue_kind_label.clone());
+        let verter_result = verter_full.map(|r| r.hover);
 
         // Enhance with TypeProvider if available.
         // Extract all context synchronously — no DashMap guard held across await.
@@ -2975,6 +2977,7 @@ impl LanguageServer for VerterLanguageServer {
                         &ctx.mapper,
                         &ctx.tsx_line_index,
                         &ctx.vue_line_index,
+                        vue_kind_label.as_deref(),
                     ));
                 }
 
@@ -3016,6 +3019,7 @@ impl LanguageServer for VerterLanguageServer {
                                             &ctx.mapper,
                                             &ctx.tsx_line_index,
                                             &ctx.vue_line_index,
+                                            vue_kind_label.as_deref(),
                                         ));
                                     }
                                 }
@@ -3030,6 +3034,7 @@ impl LanguageServer for VerterLanguageServer {
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                     &ctx.vue_line_index,
+                    vue_kind_label.as_deref(),
                 ));
             } else {
                 tracing::info!("hover: no ide_context for {}", uri.as_str());

@@ -126,6 +126,7 @@ pub fn merge_hover(
     _mapper: &PositionMapper,
     _tsx_line_index: &LineIndex,
     _vue_line_index: &LineIndex,
+    vue_kind_label: Option<&str>,
 ) -> Option<Hover> {
     match (verter_hover, type_hover) {
         (Some(verter), Some(type_info)) => {
@@ -133,7 +134,10 @@ pub fn merge_hover(
             // to avoid duplicate fenced blocks in the merged hover.
             let verter_text = extract_hover_text(&verter);
             let context = strip_leading_code_block(&verter_text);
-            let type_block = wrap_type_block(&type_info.contents);
+            let mut type_block = wrap_type_block(&type_info.contents);
+            if let Some(label) = vue_kind_label {
+                type_block = replace_kind_prefix(&type_block, label);
+            }
             let merged = if context.trim().is_empty() {
                 type_block
             } else {
@@ -148,13 +152,19 @@ pub fn merge_hover(
             })
         }
         (Some(verter), None) => Some(verter),
-        (None, Some(type_info)) => Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: wrap_type_block(&type_info.contents),
-            }),
-            range: None,
-        }),
+        (None, Some(type_info)) => {
+            let mut type_block = wrap_type_block(&type_info.contents);
+            if let Some(label) = vue_kind_label {
+                type_block = replace_kind_prefix(&type_block, label);
+            }
+            Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: type_block,
+                }),
+                range: None,
+            })
+        }
         (None, None) => None,
     }
 }
@@ -227,6 +237,36 @@ fn strip_leading_code_block(text: &str) -> &str {
         }
     }
     text
+}
+
+/// Replace the `({kind})` prefix in a fenced code block with a Vue-specific label.
+///
+/// E.g., `(const) const count` with vue_label `"ref"` becomes `(ref) const count`.
+fn replace_kind_prefix(content: &str, vue_label: &str) -> String {
+    // Look for the pattern `({word}) ` or `({words}) ` at the start of a line inside a code fence
+    if let Some(fence_end) = content.find("\n```") {
+        // Find the first content line after the opening fence
+        if let Some(first_nl) = content.find('\n') {
+            let after_fence = &content[first_nl + 1..];
+            // Check if line starts with `(word) ` pattern
+            if after_fence.starts_with('(') {
+                if let Some(paren_end) = after_fence.find(") ") {
+                    let new_prefix = format!("({vue_label}) ");
+                    // Reconstruct: opening fence + new prefix + rest of content
+                    let rest_start = first_nl + 1 + paren_end + 2;
+                    if rest_start <= fence_end + 1 {
+                        return format!(
+                            "{}\n{}{}",
+                            &content[..first_nl],
+                            new_prefix,
+                            &content[rest_start..]
+                        );
+                    }
+                }
+            }
+        }
+    }
+    content.to_string()
 }
 
 // ── JSX → Vue Attribute Transformation ──────────────────────────────
@@ -1203,7 +1243,14 @@ mod tests {
             range_end: None,
         };
 
-        let result = merge_hover(Some(verter), Some(type_hover), &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(
+            Some(verter),
+            Some(type_hover),
+            &mapper,
+            &tsx_li,
+            &vue_li,
+            None,
+        );
         let text = extract_hover_text(&result.unwrap());
         assert!(text.contains("const msg: string"));
         assert!(text.contains("SetupConst"));
@@ -1215,7 +1262,7 @@ mod tests {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
         let verter = make_verter_hover("**msg** (SetupConst)");
 
-        let result = merge_hover(Some(verter), None, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(Some(verter), None, &mapper, &tsx_li, &vue_li, None);
         assert!(result.is_some());
         let text = extract_hover_text(&result.unwrap());
         assert!(text.contains("SetupConst"));
@@ -1231,7 +1278,7 @@ mod tests {
             range_end: None,
         };
 
-        let result = merge_hover(None, Some(type_hover), &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(None, Some(type_hover), &mapper, &tsx_li, &vue_li, None);
         assert!(result.is_some());
         let text = extract_hover_text(&result.unwrap());
         assert!(text.contains("const msg: string"));
@@ -1241,7 +1288,7 @@ mod tests {
     #[test]
     fn merge_hover_neither() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_hover(None, None, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(None, None, &mapper, &tsx_li, &vue_li, None);
         assert!(result.is_none());
     }
 
@@ -2187,7 +2234,7 @@ mod tests {
             contents: "const count: Ref<number>".to_string(),
         });
 
-        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2221,7 +2268,7 @@ mod tests {
             contents: "const x: string".to_string(),
         });
 
-        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2246,7 +2293,7 @@ mod tests {
             contents: "```typescript\n(property) msg: string\n```\nThe message.".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2283,7 +2330,7 @@ mod tests {
             contents: "(property) msg: string".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2305,7 +2352,7 @@ mod tests {
             contents: "```typescript\n(property) select: (action: Action) => true\n```\nEmitted when selected.\n当选择时触发。".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2347,7 +2394,7 @@ mod tests {
             contents: "```typescript\nconst count: Ref<number>\n```\nA counter.".to_string(),
         });
 
-        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &vue_li, None);
         assert!(result.is_some());
 
         let text = match result.unwrap().contents {
@@ -2385,7 +2432,7 @@ mod tests {
                 .to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
@@ -2424,7 +2471,7 @@ mod tests {
             contents: "(property) game: GameVo\nThe game data.".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
@@ -2457,13 +2504,62 @@ mod tests {
             contents: "(property) msg: string".to_string(),
         });
 
-        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li);
+        let result = merge_hover(None, tsgo, &mapper, &tsx_li, &vue_li, None);
         let text = match result.unwrap().contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
         };
 
         assert_eq!(text, "```typescript\n(property) msg: string\n```");
+    }
+
+    #[test]
+    fn replace_kind_prefix_replaces_const_with_ref() {
+        let input = "```typescript\n(const) const count: Ref<number>\n```";
+        let result = replace_kind_prefix(input, "ref");
+        assert_eq!(result, "```typescript\n(ref) const count: Ref<number>\n```");
+        assert!(!result.contains("(const)"), "old prefix must be replaced");
+    }
+
+    #[test]
+    fn replace_kind_prefix_no_prefix_passthrough() {
+        let input = "```typescript\nconst count: number\n```";
+        let result = replace_kind_prefix(input, "ref");
+        // No `(...)` prefix to replace, so content passes through unchanged
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn merge_hover_with_vue_kind_label() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let verter =
+            make_verter_hover("```typescript\nconst count\n```\n\n*(ref — needs `.value`)*");
+        let type_hover = HoverInfo {
+            contents: "```typescript\n(const) const count: Ref<number>\n```".to_string(),
+            range_start: None,
+            range_end: None,
+        };
+
+        let result = merge_hover(
+            Some(verter),
+            Some(type_hover),
+            &mapper,
+            &tsx_li,
+            &vue_li,
+            Some("ref"),
+        );
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(
+            text.contains("(ref) const count"),
+            "kind prefix should be replaced with vue label: {text}"
+        );
+        assert!(
+            !text.contains("(const)"),
+            "generic kind prefix must be replaced: {text}"
+        );
     }
 
     /// External resolver provides correct position mapping for cross-file definitions.

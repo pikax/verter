@@ -88,7 +88,7 @@ const count = ref(0)
     );
 
     assert!(hover.is_some(), "Should get hover info for 'count' binding");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -2855,7 +2855,7 @@ const count = 42
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
-    let verter_hover = hover_at_position(
+    let verter_result = hover_at_position(
         &position,
         &doc.source,
         &blocks,
@@ -2865,10 +2865,10 @@ const count = 42
 
     // Verter-only hover should exist but NOT contain TSGO type info
     assert!(
-        verter_hover.is_some(),
+        verter_result.is_some(),
         "verter should provide hover for count"
     );
-    let verter_text = match &verter_hover.as_ref().unwrap().contents {
+    let verter_text = match &verter_result.as_ref().unwrap().hover.contents {
         HoverContents::Markup(m) => m.value.clone(),
         _ => String::new(),
     };
@@ -2876,6 +2876,7 @@ const count = 42
         !verter_text.contains("const count: 42"),
         "verter-only hover must NOT contain TSGO type signature (negative assertion)"
     );
+    let verter_hover = verter_result.map(|r| r.hover);
 
     // Step 2: get TSX + mapper
     let tsx_response = registry.get_ide(&uri).expect("TSX should be generated");
@@ -2910,7 +2911,14 @@ const count = 42
     assert!(type_hover.is_some(), "mock must return configured hover");
 
     // Step 5: merge — the exact same call as server.rs:1743
-    let merged = merge::merge_hover(verter_hover, type_hover, &mapper, &tsx_li, &doc.line_index);
+    let merged = merge::merge_hover(
+        verter_hover,
+        type_hover,
+        &mapper,
+        &tsx_li,
+        &doc.line_index,
+        None,
+    );
 
     // Positive: merged result contains TSGO type signature
     assert!(merged.is_some(), "merged hover must exist");
@@ -2964,7 +2972,7 @@ const count = 42
 
     // Positive: verter hover exists and has content
     assert!(hover.is_some(), "verter hover must exist for 'count'");
-    let text = match &hover.unwrap().contents {
+    let text = match &hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value.clone(),
         _ => String::new(),
     };
@@ -4237,7 +4245,7 @@ fn integration_hover_on_slot_tag_name() {
         hover.is_some(),
         "hover on <slot> tag name should produce a result"
     );
-    let text = match &hover.unwrap().contents {
+    let text = match &hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value.clone(),
         _ => String::new(),
     };
@@ -4284,7 +4292,7 @@ fn integration_hover_on_slot_name_attr_value() {
         hover.is_some(),
         "hover on slot name value should produce a result"
     );
-    let text = match &hover.unwrap().contents {
+    let text = match &hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value.clone(),
         _ => String::new(),
     };
@@ -4325,7 +4333,7 @@ fn integration_hover_on_default_slot_outlet() {
         hover.is_some(),
         "hover on default <slot> should produce a result"
     );
-    let text = match &hover.unwrap().contents {
+    let text = match &hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value.clone(),
         _ => String::new(),
     };
@@ -4372,6 +4380,7 @@ async fn integration_hover_slot_merge_suppresses_unhelpful_type() {
         verter_hover.is_some(),
         "verter should provide hover for slot outlet"
     );
+    let verter_hover = verter_hover.map(|r| r.hover);
 
     // Step 2: get TSX context
     let tsx_response = registry.get_ide(&uri).expect("TSX should be generated");
@@ -4401,7 +4410,7 @@ async fn integration_hover_slot_merge_suppresses_unhelpful_type() {
     let type_hover = mock.get_hover(&tsx_path, tsx_offset).await.unwrap();
 
     // Step 4: merge
-    let merged = merge::merge_hover(verter_hover, type_hover, &mapper, &tsx_li, &doc.line_index);
+    let merged = merge::merge_hover(verter_hover, type_hover, &mapper, &tsx_li, &doc.line_index, None);
     assert!(merged.is_some(), "merged hover should exist");
     let text = match &merged.unwrap().contents {
         HoverContents::Markup(m) => m.value.clone(),

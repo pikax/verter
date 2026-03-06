@@ -55,7 +55,7 @@ fn test_hover_on_binding() {
 
     let hover = hover_at_position(&position, source, &blocks, Some(&analysis), &line_index);
     assert!(hover.is_some());
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -92,7 +92,7 @@ fn test_hover_on_import() {
 
     let hover = hover_at_position(&position, source, &blocks, Some(&analysis), &line_index);
     assert!(hover.is_some());
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -173,7 +173,7 @@ fn test_hover_on_vue_api_call_site() {
 
     let hover = hover_at_position(&position, source, &blocks, Some(&analysis), &line_index);
     assert!(hover.is_some());
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -297,7 +297,7 @@ fn test_hover_on_component_shows_prop_constness() {
     let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index);
 
     assert!(hover.is_some(), "should provide hover on component element");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -354,7 +354,7 @@ fn test_hover_on_component_with_no_props() {
         hover.is_some(),
         "should provide hover on component even without props"
     );
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -444,7 +444,7 @@ fn test_hover_on_element_shows_css_rules() {
     let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index);
 
     assert!(hover.is_some(), "should provide hover on template element");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -470,7 +470,7 @@ fn test_hover_on_script_tag_name() {
     let pos = line_index.offset_to_position(1).unwrap();
     let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
     assert!(hover.is_some(), "should hover on script tag name");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -490,7 +490,7 @@ fn test_hover_on_template_tag_name() {
     let pos = line_index.offset_to_position(1).unwrap();
     let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
     assert!(hover.is_some(), "should hover on template tag name");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -511,7 +511,7 @@ fn test_hover_on_setup_attr() {
     let pos = line_index.offset_to_position(setup_offset as u32).unwrap();
     let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
     assert!(hover.is_some(), "should hover on setup attribute");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -535,7 +535,7 @@ fn test_hover_on_lang_attr() {
     let pos = line_index.offset_to_position(lang_offset as u32).unwrap();
     let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
     assert!(hover.is_some(), "should hover on lang attribute");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -552,7 +552,7 @@ fn test_hover_on_scoped_attr() {
     let pos = line_index.offset_to_position(scoped_offset as u32).unwrap();
     let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
     assert!(hover.is_some(), "should hover on scoped attribute");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -573,7 +573,7 @@ fn test_hover_on_closing_tag() {
     let pos = line_index.offset_to_position(close_offset).unwrap();
     let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
     assert!(hover.is_some(), "should hover on closing tag");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -603,7 +603,7 @@ fn test_hover_on_attrs_attribute() {
     let pos = line_index.offset_to_position(attrs_offset as u32).unwrap();
     let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
     assert!(hover.is_some(), "should hover on attrs attribute");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -620,7 +620,7 @@ fn test_hover_on_custom_block_tag() {
     let pos = line_index.offset_to_position(1).unwrap();
     let hover = hover_at_position(&pos, source, &blocks, None, &line_index);
     assert!(hover.is_some(), "should hover on custom block tag");
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
@@ -681,7 +681,7 @@ fn test_hover_on_component_attr_does_not_show_constness() {
 
     // Should be None (or at least not contain constness info)
     if let Some(h) = hover {
-        let contents = match h.contents {
+        let contents = match h.hover.contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
         };
@@ -767,7 +767,7 @@ fn test_hover_on_div_class_attr_does_not_show_css() {
     let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index);
 
     if let Some(h) = hover {
-        let contents = match h.contents {
+        let contents = match h.hover.contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
         };
@@ -852,7 +852,7 @@ fn test_hover_on_ref_attr_does_not_show_import() {
     let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index);
 
     if let Some(h) = hover {
-        let contents = match h.contents {
+        let contents = match h.hover.contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
         };
@@ -900,7 +900,7 @@ fn test_hover_on_ref_in_interpolation_still_shows_import() {
         hover.is_some(),
         "should show hover for ref in interpolation"
     );
-    let contents = match hover.unwrap().contents {
+    let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
     };
