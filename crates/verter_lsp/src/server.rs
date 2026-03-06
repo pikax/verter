@@ -2907,6 +2907,20 @@ impl LanguageServer for VerterLanguageServer {
         let vue_kind_label = verter_full.as_ref().and_then(|r| r.vue_kind_label.clone());
         let verter_result = verter_full.map(|r| r.hover);
 
+        // Slot syntax: verter provides rich hover; type provider returns unhelpful
+        // generic types (`() any`, `string`). Skip type provider merge entirely.
+        if verter_result.is_some() {
+            if let Some(analysis) = self.documents.get_analysis(uri) {
+                if let Some(doc) = self.documents.get(uri) {
+                    if let Some(vue_offset) = doc.line_index.position_to_offset(position) {
+                        if hover::is_on_slot_syntax(vue_offset, &analysis) {
+                            return Ok(verter_result);
+                        }
+                    }
+                }
+            }
+        }
+
         // Enhance with TypeProvider if available.
         // Extract all context synchronously — no DashMap guard held across await.
         if let Some(tp) = &self.type_provider {

@@ -4210,11 +4210,20 @@ const x = 1
     );
 }
 
-// ─── Slot outlet hover E2E tests ────────────────────────────────
+// ─── Slot hover E2E tests ────────────────────────────────────
 
-/// Hovering on the `slot` tag name in `<slot name="reference" />` should
-/// produce a Verter-level hover describing the slot outlet — NOT just the
-/// generic `() any` from the type provider.
+/// Helper: extract hover text from VerterHoverResult
+fn hover_text(result: Option<crate::features::hover::VerterHoverResult>) -> String {
+    match result.map(|r| r.hover) {
+        Some(Hover {
+            contents: HoverContents::Markup(m),
+            ..
+        }) => m.value,
+        _ => String::new(),
+    }
+}
+
+/// Hovering on the `slot` tag name in `<slot name="reference" />`.
 #[test]
 fn integration_hover_on_slot_tag_name() {
     let source = r#"<script setup lang="ts">
@@ -4231,30 +4240,19 @@ fn integration_hover_on_slot_tag_name() {
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
-    // Hover on "slot" in <slot name="reference" />
     let pos = position_of(source, "slot name");
-    let hover = hover_at_position(
+    let text = hover_text(hover_at_position(
         &pos,
         &doc.source,
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
-    );
+    ));
 
-    assert!(
-        hover.is_some(),
-        "hover on <slot> tag name should produce a result"
-    );
-    let text = match &hover.unwrap().hover.contents {
-        HoverContents::Markup(m) => m.value.clone(),
-        _ => String::new(),
-    };
-    // Positive: should mention slot outlet info
     assert!(
         text.contains("slot") && text.contains("reference"),
         "hover should describe the slot outlet with its name, got: {text}"
     );
-    // Negative: must NOT show `() any` — that's the unhelpful generic Slots type
     assert!(
         !text.contains("() any"),
         "hover must not contain the generic `() any` type, got: {text}"
@@ -4278,24 +4276,15 @@ fn integration_hover_on_slot_name_attr_value() {
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
-    // Hover on "reference" in name="reference"
     let pos = position_of(source, "reference");
-    let hover = hover_at_position(
+    let text = hover_text(hover_at_position(
         &pos,
         &doc.source,
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
-    );
+    ));
 
-    assert!(
-        hover.is_some(),
-        "hover on slot name value should produce a result"
-    );
-    let text = match &hover.unwrap().hover.contents {
-        HoverContents::Markup(m) => m.value.clone(),
-        _ => String::new(),
-    };
     assert!(
         text.contains("reference"),
         "hover should mention the slot name 'reference', got: {text}"
@@ -4319,34 +4308,174 @@ fn integration_hover_on_default_slot_outlet() {
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
-    // Hover on "slot" in <slot />
     let pos = position_of(source, "slot />");
-    let hover = hover_at_position(
+    let text = hover_text(hover_at_position(
         &pos,
         &doc.source,
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
-    );
+    ));
 
-    assert!(
-        hover.is_some(),
-        "hover on default <slot> should produce a result"
-    );
-    let text = match &hover.unwrap().hover.contents {
-        HoverContents::Markup(m) => m.value.clone(),
-        _ => String::new(),
-    };
     assert!(
         text.contains("slot") && text.contains("default"),
         "hover should describe the default slot outlet, got: {text}"
     );
 }
 
-/// E2E: when mock type provider returns `() any` for a slot, the merged hover
-/// should still show useful Verter slot outlet info and suppress the unhelpful type.
+/// Hovering on `#header` in `<template #header>`.
+#[test]
+fn integration_hover_on_template_hash_slot() {
+    let source = r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+
+<template>
+  <MyComp>
+    <template #header>Header</template>
+  </MyComp>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let analysis = registry.get_analysis(&uri);
+    let blocks = scan_sfc_blocks(&doc.source);
+
+    let pos = position_of(source, "#header");
+    let text = hover_text(hover_at_position(
+        &pos,
+        &doc.source,
+        &blocks,
+        analysis.as_ref(),
+        &doc.line_index,
+    ));
+
+    assert!(
+        text.contains("header"),
+        "hover should mention the slot name 'header', got: {text}"
+    );
+    assert!(
+        text.contains("Slot content") || text.contains("slot"),
+        "hover should indicate this is slot content, got: {text}"
+    );
+}
+
+/// Hovering on `v-slot:footer` directive.
+#[test]
+fn integration_hover_on_v_slot_directive() {
+    let source = r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+
+<template>
+  <MyComp>
+    <template v-slot:footer>Footer</template>
+  </MyComp>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let analysis = registry.get_analysis(&uri);
+    let blocks = scan_sfc_blocks(&doc.source);
+
+    let pos = position_of(source, "v-slot:footer");
+    let text = hover_text(hover_at_position(
+        &pos,
+        &doc.source,
+        &blocks,
+        analysis.as_ref(),
+        &doc.line_index,
+    ));
+
+    assert!(
+        text.contains("footer"),
+        "hover should mention the slot name 'footer', got: {text}"
+    );
+}
+
+/// Hovering on `v-slot="{ item }"` with scoped params.
+#[test]
+fn integration_hover_on_v_slot_with_params() {
+    let source = r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+
+<template>
+  <MyComp v-slot="{ item }">
+    {{ item }}
+  </MyComp>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let analysis = registry.get_analysis(&uri);
+    let blocks = scan_sfc_blocks(&doc.source);
+
+    let pos = position_of(source, "v-slot=");
+    let text = hover_text(hover_at_position(
+        &pos,
+        &doc.source,
+        &blocks,
+        analysis.as_ref(),
+        &doc.line_index,
+    ));
+
+    assert!(
+        text.contains("default"),
+        "hover on v-slot without arg should show default slot, got: {text}"
+    );
+    assert!(
+        text.contains("{ item }"),
+        "hover should show scoped params, got: {text}"
+    );
+}
+
+/// `is_on_slot_syntax` returns true for both slot outlets and v-slot directives.
+#[test]
+fn integration_is_on_slot_syntax_covers_both() {
+    use crate::features::hover::is_on_slot_syntax;
+
+    let source = r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+
+<template>
+  <div>
+    <slot name="header" />
+    <MyComp>
+      <template #footer>content</template>
+    </MyComp>
+  </div>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let analysis = registry.get_analysis(&uri).expect("analysis should exist");
+
+    // Slot outlet: cursor on "slot"
+    let slot_offset = source.find("slot name").unwrap() as u32;
+    assert!(
+        is_on_slot_syntax(slot_offset, &analysis),
+        "should detect slot outlet"
+    );
+
+    // v-slot: cursor on "#footer"
+    let hash_offset = source.find("#footer").unwrap() as u32;
+    assert!(
+        is_on_slot_syntax(hash_offset, &analysis),
+        "should detect #slot directive"
+    );
+
+    // Regular element: cursor on "div"
+    let div_offset = source.find("div").unwrap() as u32;
+    assert!(
+        !is_on_slot_syntax(div_offset, &analysis),
+        "should NOT detect regular element as slot syntax"
+    );
+}
+
+/// E2E: merge with mock type provider — verter slot info preserved.
 #[tokio::test]
-async fn integration_hover_slot_merge_suppresses_unhelpful_type() {
+async fn integration_hover_slot_merge_preserves_verter_info() {
     use crate::documents::line_index::LineIndex;
     use crate::tsgo::merge;
     use crate::tsgo::mock::MockTypeProvider;
@@ -4367,7 +4496,6 @@ async fn integration_hover_slot_merge_suppresses_unhelpful_type() {
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
-    // Step 1: verter hover on "slot" tag
     let pos = position_of(source, "slot name");
     let verter_hover = hover_at_position(
         &pos,
@@ -4375,14 +4503,13 @@ async fn integration_hover_slot_merge_suppresses_unhelpful_type() {
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
-    );
+    )
+    .map(|r| r.hover);
     assert!(
         verter_hover.is_some(),
         "verter should provide hover for slot outlet"
     );
-    let verter_hover = verter_hover.map(|r| r.hover);
 
-    // Step 2: get TSX context
     let tsx_response = registry.get_ide(&uri).expect("TSX should be generated");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -4394,7 +4521,6 @@ async fn integration_hover_slot_merge_suppresses_unhelpful_type() {
     assert!(tsx_offset.is_some(), "slot tag should map to TSX");
     let tsx_offset = tsx_offset.unwrap();
 
-    // Step 3: mock type provider returns `() any` (the unhelpful generic Slots type)
     let mock = MockTypeProvider::new();
     let tsx_path = format!("{}.tsx", crate::documents::uri_to_canonical_id(&uri));
     mock.set_hover(
@@ -4409,14 +4535,19 @@ async fn integration_hover_slot_merge_suppresses_unhelpful_type() {
 
     let type_hover = mock.get_hover(&tsx_path, tsx_offset).await.unwrap();
 
-    // Step 4: merge
-    let merged = merge::merge_hover(verter_hover, type_hover, &mapper, &tsx_li, &doc.line_index, None);
+    let merged = merge::merge_hover(
+        verter_hover,
+        type_hover,
+        &mapper,
+        &tsx_li,
+        &doc.line_index,
+        None,
+    );
     assert!(merged.is_some(), "merged hover should exist");
     let text = match &merged.unwrap().contents {
         HoverContents::Markup(m) => m.value.clone(),
         _ => String::new(),
     };
-    // Positive: merged result should contain slot info from verter
     assert!(
         text.contains("reference"),
         "merged hover should contain slot name, got: {text}"
