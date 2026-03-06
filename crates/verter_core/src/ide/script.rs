@@ -3815,6 +3815,7 @@ fn emit_comp_functions_to_string(
         source,
         root_children,
         &[],
+        &[],
         &mut root_comp_entries,
         &mut all_comp_offsets,
         emit_root_comps,
@@ -3997,6 +3998,102 @@ fn emit_get_root_component_to_string(
     write!(buf, " }}").expect("write to String is infallible");
 }
 
+/// Scope introduced by v-slot or v-for that provides template-local bindings.
+///
+/// When a Comp function's tag name comes from one of these scopes (e.g.
+/// `<Comp ref="x" />` inside `<MyComp v-slot="{ Comp }">`), the Comp function
+/// must reconstruct the type through the parent's instantiated slot type rather
+/// than referencing the tag name directly (which isn't in scope at the top level).
+#[derive(Debug, Clone)]
+enum CompScope {
+    /// v-slot on a component: bindings come from the parent's slot props.
+    VSlot {
+        /// Offset of the parent element's Comp function (its tag_open.start).
+        parent_comp_offset: u32,
+        /// Slot name ("default" for `v-slot`, custom for `#name`).
+        slot_name: String,
+        /// Raw scope expression text (e.g. "{ Comp, data }" or "data").
+        params_expr: String,
+        /// Binding names extracted from the destructuring (e.g. ["Comp", "data"]).
+        binding_names: Vec<String>,
+    },
+    /// v-for: bindings come from iterating over an expression.
+    VFor {
+        /// The iterable source expression (e.g. "components").
+        iterable_expr: String,
+        /// The iterator variable names (e.g. ["comp"] or ["comp", "index"]).
+        binding_names: Vec<String>,
+    },
+}
+
+/// Extract binding names from a v-slot scope expression.
+///
+/// Handles destructuring: `"{ Comp, data }"` → `["Comp", "data"]`
+/// and simple: `"data"` → `["data"]`.
+fn extract_vslot_binding_names(expr: &str) -> Vec<String> {
+    let trimmed = expr.trim();
+    if let Some(inner) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        // Destructuring: { Comp, data, other: alias }
+        inner
+            .split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                if part.is_empty() {
+                    return None;
+                }
+                // Handle renaming: `original: alias` → use `alias`
+                // Handle rest: `...rest` → use `rest`
+                if let Some(alias) = part.split(':').nth(1) {
+                    Some(alias.trim().to_string())
+                } else if let Some(rest) = part.strip_prefix("...") {
+                    Some(rest.trim().to_string())
+                } else {
+                    // Handle default value: `name = default` → use `name`
+                    let name = part.split('=').next().unwrap_or(part).trim();
+                    Some(name.to_string())
+                }
+            })
+            .collect()
+    } else {
+        // Simple binding: data
+        vec![trimmed.to_string()]
+    }
+}
+
+/// Extract v-for iterator binding names from the params portion (before "in"/"of").
+///
+/// `"comp"` → `["comp"]`
+/// `"comp, index"` → `["comp", "index"]`
+fn extract_vfor_binding_names(params: &str) -> Vec<String> {
+    params
+        .split(',')
+        .filter_map(|p| {
+            let p = p.trim();
+            if p.is_empty() {
+                None
+            } else {
+                Some(p.to_string())
+            }
+        })
+        .collect()
+}
+
+/// Check if a tag name is introduced by any scope in the chain.
+/// Returns the innermost scope that introduces this binding.
+fn find_scope_for_tag<'a>(tag_name: &str, comp_scopes: &'a [CompScope]) -> Option<&'a CompScope> {
+    // Walk from innermost (last) to outermost (first)
+    for scope in comp_scopes.iter().rev() {
+        let names = match scope {
+            CompScope::VSlot { binding_names, .. } => binding_names,
+            CompScope::VFor { binding_names, .. } => binding_names,
+        };
+        if names.iter().any(|n| n == tag_name) {
+            return Some(scope);
+        }
+    }
+    None
+}
+
 /// Emit Comp{offset} functions for template elements.
 /// Recursively walk children to emit Comp functions with condition scope tracking.
 #[allow(clippy::too_many_arguments)]
@@ -4008,6 +4105,7 @@ fn walk_children_for_comp(
     source: &str,
     children: &[crate::types::NodeId],
     parent_scopes: &[super::condition::ConditionScope],
+    comp_scopes: &[CompScope],
     root_comp_entries: &mut Vec<(u32, String, Option<String>)>,
     all_comp_offsets: &mut Vec<u32>,
     emit_root_comps: bool,
@@ -4023,16 +4121,93 @@ fn walk_children_for_comp(
                 scopes.push(scope);
             }
 
+            // Build comp scope chain for v-slot and v-for
+            let mut new_comp_scopes = comp_scopes.to_vec();
+
+            // If this element is a component with v-slot, it needs a Comp function
+            // (even without ref) so that child scope-aware Comp functions can reference it.
+            let has_vslot_children =
+                el.v_slot.is_some() && matches!(el.tag_type, TagType::Component);
+
+            // If this element has v-slot, push a VSlot scope for its children
+            if let Some(v_slot) = &el.v_slot {
+                if matches!(el.tag_type, TagType::Component) {
+                    let slot_name =
+                        if let (Some(as_), Some(ae)) = (v_slot.arg_start, v_slot.arg_end) {
+                            source[as_ as usize..ae as usize].to_string()
+                        } else {
+                            "default".to_string()
+                        };
+                    let params_expr =
+                        if let (Some(vs), Some(ve)) = (v_slot.value_start, v_slot.value_end) {
+                            source[vs as usize..ve as usize].to_string()
+                        } else {
+                            String::new()
+                        };
+                    let binding_names = if !params_expr.is_empty() {
+                        extract_vslot_binding_names(&params_expr)
+                    } else {
+                        vec![]
+                    };
+                    new_comp_scopes.push(CompScope::VSlot {
+                        parent_comp_offset: el.tag_open.start,
+                        slot_name,
+                        params_expr,
+                        binding_names,
+                    });
+                }
+            }
+
+            // Check children for v-slot via <template #name="params"> (named slots)
+            // These are handled when recursing into <template> elements below.
+
+            // If this element has v-for, push a VFor scope
+            if let Some(v_for) = &el.v_for {
+                if let (Some(vs), Some(ve)) = (v_for.value_start, v_for.value_end) {
+                    let full_expr = &source[vs as usize..ve as usize];
+                    // Parse "item in items" → params="item", source_expr="items"
+                    if let Some(sep_pos) = full_expr
+                        .find(" in ")
+                        .map(|p| (p, 4))
+                        .or_else(|| full_expr.find(" of ").map(|p| (p, 4)))
+                    {
+                        let params = full_expr[..sep_pos.0].trim();
+                        let iterable = full_expr[sep_pos.0 + sep_pos.1..].trim();
+                        // Strip parens from params
+                        let params = params
+                            .strip_prefix('(')
+                            .and_then(|p| p.strip_suffix(')'))
+                            .unwrap_or(params);
+                        let binding_names = extract_vfor_binding_names(params);
+                        new_comp_scopes.push(CompScope::VFor {
+                            iterable_expr: iterable.to_string(),
+                            binding_names,
+                        });
+                    }
+                }
+            }
+
             // Emit Comp function for:
             // - elements with ref (always, for template ref typing)
             // - root elements when emit_root_comps=true (single root / conditional chain)
+            // - component elements with v-slot (so child scope-aware Comp functions can reference parent)
             let is_eligible = !matches!(el.tag_type, TagType::SlotOutlet | TagType::Template);
-            let needs_comp = is_eligible && (el.v_ref.is_some() || emit_root_comps);
+            let needs_comp =
+                is_eligible && (el.v_ref.is_some() || emit_root_comps || has_vslot_children);
             if needs_comp {
                 let offset = el.tag_open.start;
                 let props_lit = serialize_element_props(el, source);
                 emit_comp_function_for_element(
-                    buf, gs, gn, el, source, offset, &scopes, is_jsx, &props_lit,
+                    buf,
+                    gs,
+                    gn,
+                    el,
+                    source,
+                    offset,
+                    &scopes,
+                    &new_comp_scopes,
+                    is_jsx,
+                    &props_lit,
                 );
                 all_comp_offsets.push(offset);
                 if emit_root_comps {
@@ -4057,6 +4232,56 @@ fn walk_children_for_comp(
 
             // Recurse into children
             if let Some(content) = &el.content {
+                // For <template> elements with v-slot (named slots), push a VSlot scope
+                // scoped to the template's children
+                let child_comp_scopes = if matches!(el.tag_type, TagType::Template) {
+                    if let Some(v_slot) = &el.v_slot {
+                        let slot_name =
+                            if let (Some(as_), Some(ae)) = (v_slot.arg_start, v_slot.arg_end) {
+                                source[as_ as usize..ae as usize].to_string()
+                            } else {
+                                "default".to_string()
+                            };
+                        let params_expr =
+                            if let (Some(vs), Some(ve)) = (v_slot.value_start, v_slot.value_end) {
+                                source[vs as usize..ve as usize].to_string()
+                            } else {
+                                String::new()
+                            };
+                        let binding_names = if !params_expr.is_empty() {
+                            extract_vslot_binding_names(&params_expr)
+                        } else {
+                            vec![]
+                        };
+                        // Find the parent component's comp offset by walking up
+                        if let Some(parent_id) = node.parent {
+                            let parent_node = &ast.nodes[parent_id.0];
+                            if let AstNodeKind::Element(parent_el) = &parent_node.kind {
+                                if matches!(parent_el.tag_type, TagType::Component) {
+                                    let mut scopes_with_named = new_comp_scopes.clone();
+                                    scopes_with_named.push(CompScope::VSlot {
+                                        parent_comp_offset: parent_el.tag_open.start,
+                                        slot_name,
+                                        params_expr,
+                                        binding_names,
+                                    });
+                                    scopes_with_named
+                                } else {
+                                    new_comp_scopes.clone()
+                                }
+                            } else {
+                                new_comp_scopes.clone()
+                            }
+                        } else {
+                            new_comp_scopes.clone()
+                        }
+                    } else {
+                        new_comp_scopes.clone()
+                    }
+                } else {
+                    new_comp_scopes.clone()
+                };
+
                 walk_children_for_comp(
                     buf,
                     gs,
@@ -4065,6 +4290,7 @@ fn walk_children_for_comp(
                     source,
                     &content.children,
                     &scopes,
+                    &child_comp_scopes,
                     root_comp_entries,
                     all_comp_offsets,
                     false,
@@ -4238,6 +4464,10 @@ fn camelize_event(name: &str) -> String {
 }
 
 /// Emit a single Comp{offset} function for an element, with optional condition guards.
+///
+/// When `comp_scopes` indicates the tag comes from a v-slot or v-for scope,
+/// the function reconstructs the type through the parent's instantiated type
+/// rather than referencing the tag name directly (which isn't in top-level scope).
 #[allow(clippy::too_many_arguments)]
 fn emit_comp_function_for_element(
     buf: &mut String,
@@ -4247,6 +4477,7 @@ fn emit_comp_function_for_element(
     source: &str,
     offset: u32,
     condition_scopes: &[super::condition::ConditionScope],
+    comp_scopes: &[CompScope],
     is_jsx: bool,
     props_literal: &str,
 ) {
@@ -4292,19 +4523,75 @@ fn emit_comp_function_for_element(
             }
         }
         TagType::Component => {
-            write!(
-                buf,
-                "\nfunction {P}Comp{offset}{gs}() {{{guard}\
-                 \n  return {P}instantiateComponent({tag}, {props});\
-                 \n}}",
-                P = PREFIX,
-                offset = offset,
-                gs = gs,
-                guard = guard,
-                tag = tag_name,
-                props = props_literal,
-            )
-            .expect("write to String is infallible");
+            // Check if the tag comes from a v-slot or v-for scope
+            if let Some(scope) = find_scope_for_tag(tag_name, comp_scopes) {
+                match scope {
+                    CompScope::VSlot {
+                        parent_comp_offset,
+                        slot_name,
+                        params_expr,
+                        ..
+                    } => {
+                        // Reconstruct type through parent's instantiated slot type.
+                        // The parent Comp function instantiates the parent component with
+                        // its actual props, so TypeScript infers generics correctly.
+                        // We drill into $slots to extract the slot prop type, then
+                        // destructure to get the specific binding.
+                        write!(
+                            buf,
+                            "\nfunction {P}Comp{offset}{gs}() {{{guard}\
+                             \n  type __Parent = ReturnType<typeof {P}Comp{parent_offset}>;\
+                             \n  type __SlotFn = NonNullable<__Parent['$slots']['{slot}']>;\
+                             \n  type __SlotProps = __SlotFn extends (...args: infer A) => any ? A[0] : {{}};\
+                             \n  const {params} = {{}} as __SlotProps;\
+                             \n  return {P}instantiateComponent({tag}, {props});\
+                             \n}}",
+                            P = PREFIX,
+                            offset = offset,
+                            gs = gs,
+                            guard = guard,
+                            parent_offset = parent_comp_offset,
+                            slot = slot_name,
+                            params = params_expr,
+                            tag = tag_name,
+                            props = props_literal,
+                        )
+                        .expect("write to String is infallible");
+                    }
+                    CompScope::VFor { iterable_expr, .. } => {
+                        // Reconstruct type from the v-for iterable's element type.
+                        write!(
+                            buf,
+                            "\nfunction {P}Comp{offset}{gs}() {{{guard}\
+                             \n  const {tag} = {{}} as (typeof {iter})[number];\
+                             \n  return {P}instantiateComponent({tag}, {props});\
+                             \n}}",
+                            P = PREFIX,
+                            offset = offset,
+                            gs = gs,
+                            guard = guard,
+                            tag = tag_name,
+                            iter = iterable_expr,
+                            props = props_literal,
+                        )
+                        .expect("write to String is infallible");
+                    }
+                }
+            } else {
+                write!(
+                    buf,
+                    "\nfunction {P}Comp{offset}{gs}() {{{guard}\
+                     \n  return {P}instantiateComponent({tag}, {props});\
+                     \n}}",
+                    P = PREFIX,
+                    offset = offset,
+                    gs = gs,
+                    guard = guard,
+                    tag = tag_name,
+                    props = props_literal,
+                )
+                .expect("write to String is infallible");
+            }
         }
         TagType::SlotOutlet | TagType::Template => {
             // Skip <slot> and <template> wrappers
@@ -8754,6 +9041,130 @@ function handleDrag(startEvent, endEvent) {}
         assert!(
             code.contains("endEvent"),
             "endEvent should be in output: {code}"
+        );
+    }
+
+    // ── Scope-Aware Comp Functions (v-slot / v-for) ─────────────────
+
+    #[test]
+    fn comp_function_vslot_component_references_parent_slot_type() {
+        // When <Comp /> comes from v-slot="{Comp}" on a parent component,
+        // the Comp function should reconstruct the type through the parent's
+        // instantiated slot type.
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import { useTemplateRef } from 'vue'
+const myRef = useTemplateRef('myRef')
+</script>
+<template>
+  <MyComp v-slot="{ Comp }">
+    <Comp ref="myRef" />
+  </MyComp>
+</template>"#,
+        );
+
+        // Positive: parent MyComp should have a Comp function emitted
+        assert!(
+            code.contains("instantiateComponent(MyComp,"),
+            "parent MyComp should have a Comp function: {code}"
+        );
+
+        // Positive: child Comp should reference parent's slot type
+        // The child Comp function should drill into $slots.default to get the slot props
+        assert!(
+            code.contains("$slots") && code.contains("default"),
+            "child Comp should reference parent's $slots.default: {code}"
+        );
+
+        // Negative: child Comp should NOT directly use `instantiateComponent(Comp, {})`
+        // WITHOUT the slot type reconstruction preamble. The scope-aware Comp function
+        // DOES use instantiateComponent(Comp, {}) but only after reconstructing the type.
+        // So we verify the preamble is present (the __Parent type alias).
+        assert!(
+            code.contains("type __Parent = ReturnType<typeof ___VERTER___Comp"),
+            "child Comp should have __Parent type reconstruction preamble: {code}"
+        );
+    }
+
+    #[test]
+    fn comp_function_vslot_named_slot() {
+        // Named slot: <template #items="{Comp}"> should reference $slots['items']
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import { useTemplateRef } from 'vue'
+const myRef = useTemplateRef('myRef')
+</script>
+<template>
+  <MyComp>
+    <template #items="{ Comp }">
+      <Comp ref="myRef" />
+    </template>
+  </MyComp>
+</template>"#,
+        );
+
+        // Positive: should reference the named slot 'items'
+        assert!(
+            code.contains("$slots") && code.contains("items"),
+            "named slot should reference $slots['items']: {code}"
+        );
+    }
+
+    #[test]
+    fn comp_function_vfor_scope_component_ref() {
+        // v-for with PascalCase iterator used as component tag:
+        // <MyComp v-slot="{ items }">
+        //   <template v-for="Comp in items">
+        //     <Comp ref="compRef" />
+        //   </template>
+        // </MyComp>
+        // The Comp comes from v-for iteration, so the Comp function should
+        // reconstruct the iterator element type.
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import { useTemplateRef } from 'vue'
+const compRef = useTemplateRef('compRef')
+const components = [() => {}]
+</script>
+<template>
+  <div v-for="Comp in components">
+    <Comp ref="compRef" />
+  </div>
+</template>"#,
+        );
+
+        // Positive: Comp function should reconstruct the v-for iterator type
+        assert!(
+            code.contains("(typeof components)[number]"),
+            "v-for Comp should use iterable element type: {code}"
+        );
+    }
+
+    #[test]
+    fn comp_function_parent_vslot_emits_comp_even_without_ref() {
+        // Parent elements with v-slot should always emit a Comp function
+        // even without a ref, since child scope-aware Comp functions reference the parent offset
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import { useTemplateRef } from 'vue'
+const myRef = useTemplateRef('myRef')
+</script>
+<template>
+  <MyComp v-slot="{ Comp }">
+    <Comp ref="myRef" />
+  </MyComp>
+</template>"#,
+        );
+
+        // Count Comp functions: should have at least 2 (one for MyComp parent, one for Comp child)
+        let comp_fn_count = code.matches("function ___VERTER___Comp").count();
+        assert!(
+            comp_fn_count >= 2,
+            "should emit Comp function for both parent (MyComp) and child (Comp from v-slot), found {comp_fn_count}: {code}"
         );
     }
 }

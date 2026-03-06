@@ -7563,6 +7563,169 @@ let el = useTemplateRef('el')
 }
 
 #[test]
+fn tsx_template_ref_vslot_component_scope_aware() {
+    // When a component comes from v-slot destructuring, its ref type should
+    // resolve through the parent component's slot type, not directly.
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import { useTemplateRef } from 'vue'
+const myRef = useTemplateRef('myRef')
+</script>
+<template>
+  <MyComp v-slot="{ Comp }">
+    <Comp ref="myRef" />
+  </MyComp>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: useTemplateRef should get a type argument
+    assert!(
+        tsx.code.contains("useTemplateRef<"),
+        "useTemplateRef should have inferred type arguments: {}",
+        tsx.code
+    );
+
+    // Positive: The Comp function for the slot-scoped component should drill
+    // into the parent's $slots type
+    assert!(
+        tsx.code.contains("$slots") && tsx.code.contains("default"),
+        "Comp function should reference parent's $slots['default']: {}",
+        tsx.code
+    );
+
+    // Positive: parent MyComp should have its own Comp function with instantiateComponent
+    assert!(
+        tsx.code.contains("instantiateComponent(MyComp,"),
+        "parent MyComp should be instantiated: {}",
+        tsx.code
+    );
+
+    // Negative: should NOT have a bare `instantiateComponent(Comp,` without
+    // the slot type reconstruction preamble
+    assert!(
+        tsx.code.contains("type __Parent"),
+        "slot-scoped component should use __Parent type reconstruction: {}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_named_slot_scope_aware() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import { useTemplateRef } from 'vue'
+const myRef = useTemplateRef('myRef')
+</script>
+<template>
+  <MyComp>
+    <template #items="{ Item }">
+      <Item ref="myRef" />
+    </template>
+  </MyComp>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: should reference the named slot 'items'
+    assert!(
+        tsx.code.contains("$slots") && tsx.code.contains("items"),
+        "named slot should reference $slots['items']: {}",
+        tsx.code
+    );
+
+    // Negative: should NOT reference 'default' slot
+    assert!(
+        !tsx.code.contains("$slots']['default']"),
+        "named slot should not reference default slot: {}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_multiple_refs_union() {
+    // Multiple refs with different elements should create a union for the second generic
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { useTemplateRef } from 'vue'
+const x = useTemplateRef('foo')
+</script>
+<template>
+  <div ref="foo"></div>
+  <span ref="bar"></span>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: second generic should contain both ref names
+    assert!(
+        tsx.code.contains(r#""foo""#) && tsx.code.contains(r#""bar""#),
+        "second generic should contain all ref name literals: {}",
+        tsx.code
+    );
+
+    // Positive: first generic should match 'foo' ref type (not union, since selector matches)
+    assert!(
+        tsx.code
+            .contains("useTemplateRef<ReturnType<typeof ___VERTER___Comp"),
+        "first generic should be the matched ref's type: {}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_unmatched_arg_produces_unknown() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { useTemplateRef } from 'vue'
+const x = useTemplateRef('nonexistent')
+</script>
+<template>
+  <div ref="foo"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: unmatched arg should produce unknown as first generic
+    assert!(
+        tsx.code.contains("useTemplateRef<unknown,"),
+        "unmatched arg should produce unknown first generic: {}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_vfor_scope_component_ref() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { useTemplateRef } from 'vue'
+const compRef = useTemplateRef('compRef')
+const components = [() => {}]
+</script>
+<template>
+  <div v-for="Comp in components">
+    <Comp ref="compRef" />
+  </div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Positive: should reconstruct the v-for iterable element type
+    assert!(
+        tsx.code.contains("(typeof components)[number]"),
+        "v-for component should use iterable element type: {}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_binding_v5_process_parity_matrix() {
     let cases: [(&str, &[&str], &[&str]); 8] = [
         (
