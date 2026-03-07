@@ -521,6 +521,11 @@ impl DocumentRegistry {
         }
     }
 
+    /// Return the URI strings of all currently open documents.
+    pub fn open_uris(&self) -> Vec<String> {
+        self.documents.iter().map(|e| e.key().clone()).collect()
+    }
+
     /// Get the underlying verter_host reference.
     pub fn host(&self) -> &VerterHost {
         &self.host
@@ -743,6 +748,52 @@ mod tests {
     fn test_parse_virtual_uri_non_virtual() {
         let uri = "file:///home/user/App.vue";
         assert_eq!(parse_virtual_uri(uri), None);
+    }
+
+    #[test]
+    fn open_uris_returns_open_documents() {
+        let host = Arc::new(verter_host::VerterHost::new(
+            verter_host::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+
+        // Open two documents
+        registry.did_open(&TextDocumentItem {
+            uri: "file:///home/user/App.vue".parse().unwrap(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<template><div>hello</div></template>".to_string(),
+        });
+        registry.did_open(&TextDocumentItem {
+            uri: "file:///home/user/Main.vue".parse().unwrap(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<template><span>world</span></template>".to_string(),
+        });
+
+        let uris = registry.open_uris();
+        assert_eq!(uris.len(), 2, "should have 2 open documents");
+        assert!(
+            uris.contains(&"file:///home/user/App.vue".to_string()),
+            "should contain App.vue URI"
+        );
+        assert!(
+            uris.contains(&"file:///home/user/Main.vue".to_string()),
+            "should contain Main.vue URI"
+        );
+
+        // Close one
+        registry.did_close(&"file:///home/user/App.vue".parse().unwrap());
+        let uris = registry.open_uris();
+        assert_eq!(uris.len(), 1, "should have 1 open document after close");
+        assert!(
+            !uris.contains(&"file:///home/user/App.vue".to_string()),
+            "should not contain closed App.vue URI"
+        );
+        assert!(
+            uris.contains(&"file:///home/user/Main.vue".to_string()),
+            "should still contain Main.vue URI"
+        );
     }
 
     #[test]

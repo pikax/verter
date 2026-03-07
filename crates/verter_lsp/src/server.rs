@@ -376,7 +376,7 @@ struct TypeProviderContext {
 /// Pattern: check project_registry → drop guard → acquire fallback_linter if needed.
 pub struct VerterLanguageServer {
     client: Client,
-    documents: DocumentRegistry,
+    documents: Arc<DocumentRegistry>,
     type_provider: Option<Arc<dyn TypeProvider>>,
     project_sync: Option<ProjectSync>,
     workspace_roots: tokio::sync::Mutex<Vec<String>>,
@@ -461,24 +461,28 @@ impl VerterLanguageServer {
             .map(|tp| ProjectSync::new(Arc::clone(tp), config.project_sync_mode));
 
         let needs_provider_sync = Arc::new(DashSet::new());
-        let host = Arc::clone(&config.host);
-        let documents = DocumentRegistry::new(config.host);
+        let documents = Arc::new(DocumentRegistry::new(config.host));
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
+        let project_registry = Arc::new(parking_lot::RwLock::new(None));
+        let fallback_linter = Arc::new(parking_lot::RwLock::new(
+            verter_diagnostics::Linter::default(),
+        ));
 
         // Create SyncCoordinator if a type provider is connected.
         // The coordinator's debounced loop replaces the old spawn-per-keystroke pattern.
         let sync_coordinator = project_sync.as_ref().map(|ps| {
             crate::sync_coordinator::spawn_sync_coordinator(
                 crate::sync_coordinator::SyncCoordinatorDeps {
-                    host: Arc::clone(&host),
+                    documents: Arc::clone(&documents),
                     project_sync: ps.clone(),
                     needs_provider_sync: Arc::clone(&needs_provider_sync),
-                    tsx_profile: parking_lot::RwLock::new(documents.tsx_profile.read().clone()),
                     client: client.clone(),
                     type_provider: config.type_provider.clone(),
                     cached_verter_diags: Arc::clone(&cached_verter_diags),
                     position_encoding: Arc::clone(&position_encoding),
+                    project_registry: Arc::clone(&project_registry),
+                    fallback_linter: Arc::clone(&fallback_linter),
                 },
             )
         });
@@ -491,10 +495,8 @@ impl VerterLanguageServer {
             workspace_roots: tokio::sync::Mutex::new(Vec::new()),
             statistics: Arc::new(Statistics::new(500)),
             position_encoding,
-            project_registry: Arc::new(parking_lot::RwLock::new(None)),
-            fallback_linter: Arc::new(parking_lot::RwLock::new(
-                verter_diagnostics::Linter::default(),
-            )),
+            project_registry,
+            fallback_linter,
             action_engine: verter_actions::ActionEngine::default(),
             init_lint_options: tokio::sync::Mutex::new(None),
             vite_config_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -517,99 +519,13 @@ impl VerterLanguageServer {
     /// Caches results per document version to avoid redundant re-computation when both
     /// push (didChange) and pull (textDocument/diagnostic) paths request diagnostics.
     fn compute_verter_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
-        // Check cache: if version matches, return cached diagnostics.
-        let uri_str = uri.as_str();
-        if let Some(doc) = self.documents.get(uri) {
-            if let Some(cached) = self.cached_verter_diags.get(uri_str) {
-                if cached.0 == doc.version {
-                    return cached.1.clone();
-                }
-            }
-        }
-
-        let mut diags = if let Some(doc) = self.documents.get(uri) {
-            let host_diags = self.documents.get_diagnostics(uri);
-            match host_diags {
-                Some(snapshot) => map_diagnostics(&snapshot, &doc.line_index),
-                None => vec![],
-            }
-        } else {
-            vec![]
-        };
-
-        // Run the diagnostics engine (lint rules: CSS, template, a11y, etc.)
-        if let Some(doc) = self.documents.get(uri) {
-            if let Some(analysis) = self.documents.get_analysis(uri) {
-                let canonical_id = uri_to_canonical_id(uri);
-
-                // Look up per-project lint config (determines which linter + suppress behavior)
-                let lint_explicitly_configured = {
-                    let registry_guard = self.project_registry.read();
-                    registry_guard
-                        .as_ref()
-                        .and_then(|r| r.linter_for(&canonical_id))
-                        .map(|p| p.lint_explicitly_configured)
-                        .unwrap_or(false)
-                };
-
-                // Run lint rules using per-project linter.
-                // Lock ordering: project_registry → release → fallback_linter (never nested).
-                {
-                    let used_project = {
-                        let registry_guard = self.project_registry.read();
-                        if let Some(project) = registry_guard
-                            .as_ref()
-                            .and_then(|r| r.linter_for(&canonical_id))
-                        {
-                            diags.extend(crate::features::diagnostics_bridge::run_linter(
-                                &project.linter,
-                                &analysis,
-                                &doc.source,
-                                &doc.line_index,
-                            ));
-                            true
-                        } else {
-                            false
-                        }
-                    }; // registry_guard dropped here
-
-                    if !used_project {
-                        let fl = self.fallback_linter.read();
-                        diags.extend(crate::features::diagnostics_bridge::run_linter(
-                            &fl,
-                            &analysis,
-                            &doc.source,
-                            &doc.line_index,
-                        ));
-                    }
-                }
-
-                // Component usage diagnostics (unknown props, unknown v-models).
-                diags.extend(
-                    crate::features::component_diagnostics::component_usage_diagnostics(
-                        &analysis,
-                        &doc.line_index,
-                        &|import_source| self.resolve_component(uri, import_source),
-                    ),
-                );
-
-                // When lint is not explicitly configured, suppress all lint diagnostics.
-                if !lint_explicitly_configured {
-                    diags.retain(|d| match &d.code {
-                        Some(NumberOrString::String(code)) => !code.starts_with("verter/"),
-                        _ => true,
-                    });
-                }
-            }
-        }
-
-        // Cache the result
-        if let Some(doc) = self.documents.get(uri) {
-            self.cached_verter_diags
-                .insert(uri_str.to_string(), (doc.version, diags.clone()));
-        }
-
-        diags
+        compute_verter_diagnostics_for(
+            &self.documents,
+            uri,
+            &self.cached_verter_diags,
+            &self.project_registry,
+            &self.fallback_linter,
+        )
     }
 
     /// Compute and push **merged** (Verter lint + TypeScript type) diagnostics.
@@ -1028,31 +944,12 @@ impl VerterLanguageServer {
         import_source: &str,
     ) -> Option<verter_host::FileAnalysisSnapshot> {
         let canonical_id = uri_to_canonical_id(parent_uri);
-
-        // Try 1: Relative import
-        if import_source.starts_with('.') {
-            let parts: Vec<&str> = canonical_id.split('/').collect();
-            let dir = parts[..parts.len().saturating_sub(1)].join("/");
-            let resolved = resolve_import_path(&dir, import_source);
-            if let Some(a) = self.documents.host().get_analysis(&resolved) {
-                return Some(a);
-            }
-        }
-
-        // Try 2: Path alias resolution (per-project)
-        {
-            let registry_guard = self.project_registry.read();
-            if let Some(ref registry) = *registry_guard {
-                if let Some(resolved_path) = registry.resolve_alias(&canonical_id, import_source) {
-                    if let Some(a) = self.documents.host().get_analysis(&resolved_path) {
-                        return Some(a);
-                    }
-                }
-            }
-        }
-
-        // Try 3: Direct lookup
-        self.documents.host().get_analysis(import_source)
+        resolve_component_for(
+            self.documents.host(),
+            &self.project_registry,
+            &canonical_id,
+            import_source,
+        )
     }
 
     /// Resolve a child component with full context for cross-file editing.
@@ -1906,6 +1803,152 @@ fn import_resolved_matches_target(resolved: &str, target: &str) -> bool {
     false
 }
 
+/// Resolve a component's analysis snapshot from an import source.
+///
+/// Extracted as a free function so both `VerterLanguageServer` and `SyncCoordinator`
+/// can resolve component types for diagnostic computation.
+pub(crate) fn resolve_component_for(
+    host: &verter_host::VerterHost,
+    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
+    parent_canonical_id: &str,
+    import_source: &str,
+) -> Option<verter_host::FileAnalysisSnapshot> {
+    // Try 1: Relative import
+    if import_source.starts_with('.') {
+        let parts: Vec<&str> = parent_canonical_id.split('/').collect();
+        let dir = parts[..parts.len().saturating_sub(1)].join("/");
+        let resolved = resolve_import_path(&dir, import_source);
+        if let Some(a) = host.get_analysis(&resolved) {
+            return Some(a);
+        }
+    }
+
+    // Try 2: Path alias resolution (per-project)
+    {
+        let registry_guard = project_registry.read();
+        if let Some(ref registry) = *registry_guard {
+            if let Some(resolved_path) = registry.resolve_alias(parent_canonical_id, import_source)
+            {
+                if let Some(a) = host.get_analysis(&resolved_path) {
+                    return Some(a);
+                }
+            }
+        }
+    }
+
+    // Try 3: Direct lookup
+    host.get_analysis(import_source)
+}
+
+/// Compute verter diagnostics (host errors + lint rules + component usage) for a document.
+///
+/// Extracted as a free function so both `VerterLanguageServer::compute_verter_diagnostics()`
+/// and the `SyncCoordinator` can produce fresh diagnostics. Results are cached per document
+/// version in `cached_verter_diags` to avoid redundant re-computation.
+pub(crate) fn compute_verter_diagnostics_for(
+    documents: &DocumentRegistry,
+    uri: &Uri,
+    cached_verter_diags: &DashMap<String, (i32, Vec<Diagnostic>)>,
+    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
+    fallback_linter: &parking_lot::RwLock<verter_diagnostics::Linter>,
+) -> Vec<Diagnostic> {
+    // Check cache: if version matches, return cached diagnostics.
+    let uri_str = uri.as_str();
+    if let Some(doc) = documents.get(uri) {
+        if let Some(cached) = cached_verter_diags.get(uri_str) {
+            if cached.0 == doc.version {
+                return cached.1.clone();
+            }
+        }
+    }
+
+    let mut diags = if let Some(doc) = documents.get(uri) {
+        let host_diags = documents.get_diagnostics(uri);
+        match host_diags {
+            Some(snapshot) => map_diagnostics(&snapshot, &doc.line_index),
+            None => vec![],
+        }
+    } else {
+        vec![]
+    };
+
+    // Run the diagnostics engine (lint rules: CSS, template, a11y, etc.)
+    if let Some(doc) = documents.get(uri) {
+        if let Some(analysis) = documents.get_analysis(uri) {
+            let canonical_id = uri_to_canonical_id(uri);
+
+            // Look up per-project lint config
+            let lint_explicitly_configured = {
+                let registry_guard = project_registry.read();
+                registry_guard
+                    .as_ref()
+                    .and_then(|r| r.linter_for(&canonical_id))
+                    .map(|p| p.lint_explicitly_configured)
+                    .unwrap_or(false)
+            };
+
+            // Run lint rules using per-project linter.
+            // Lock ordering: project_registry → release → fallback_linter (never nested).
+            {
+                let used_project = {
+                    let registry_guard = project_registry.read();
+                    if let Some(project) = registry_guard
+                        .as_ref()
+                        .and_then(|r| r.linter_for(&canonical_id))
+                    {
+                        diags.extend(crate::features::diagnostics_bridge::run_linter(
+                            &project.linter,
+                            &analysis,
+                            &doc.source,
+                            &doc.line_index,
+                        ));
+                        true
+                    } else {
+                        false
+                    }
+                }; // registry_guard dropped here
+
+                if !used_project {
+                    let fl = fallback_linter.read();
+                    diags.extend(crate::features::diagnostics_bridge::run_linter(
+                        &fl,
+                        &analysis,
+                        &doc.source,
+                        &doc.line_index,
+                    ));
+                }
+            }
+
+            // Component usage diagnostics (unknown props, unknown v-models).
+            let host = documents.host();
+            diags.extend(
+                crate::features::component_diagnostics::component_usage_diagnostics(
+                    &analysis,
+                    &doc.line_index,
+                    &|import_source| {
+                        resolve_component_for(host, project_registry, &canonical_id, import_source)
+                    },
+                ),
+            );
+
+            // When lint is not explicitly configured, suppress all lint diagnostics.
+            if !lint_explicitly_configured {
+                diags.retain(|d| match &d.code {
+                    Some(NumberOrString::String(code)) => !code.starts_with("verter/"),
+                    _ => true,
+                });
+            }
+        }
+    }
+
+    // Cache the result
+    if let Some(doc) = documents.get(uri) {
+        cached_verter_diags.insert(uri_str.to_string(), (doc.version, diags.clone()));
+    }
+
+    diags
+}
+
 fn resolve_import_path(importer_dir: &str, import_source: &str) -> String {
     if !import_source.starts_with('.') {
         // Not a relative import — return as-is (alias import)
@@ -2001,10 +2044,11 @@ struct BackgroundInitArgs {
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
     init_generation: Arc<std::sync::atomic::AtomicU64>,
     project_sync: Option<ProjectSync>,
-    host: Arc<verter_host::VerterHost>,
+    documents: Arc<DocumentRegistry>,
     background_synced_files: Arc<DashMap<String, ()>>,
     is_tsgo: bool,
-    tsx_profile: Arc<parking_lot::RwLock<verter_host::CompileProfile>>,
+    cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
+    position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
 }
 
 /// Run all blocking initialization work in the background.
@@ -2032,11 +2076,15 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         workspace_scanner,
         init_generation,
         project_sync,
-        host,
+        documents,
         background_synced_files,
         is_tsgo,
-        tsx_profile,
+        cached_verter_diags,
+        position_encoding,
     } = args;
+
+    let host = documents.host_arc();
+    let tsx_profile = Arc::clone(&documents.tsx_profile);
 
     // 1. Build project registry (spawn_blocking — blocking I/O: vite eval, tsconfig)
     let roots_for_registry = roots.clone();
@@ -2194,8 +2242,66 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 7a. Diagnostic refresh is handled by push diagnostics now —
-    // open files will get fresh diagnostics on their next did_change / did_open.
+    // 7a. Publish fresh diagnostics for all open files now that project_registry
+    // is built and type_provider is synced. This ensures TS diagnostics appear
+    // after background init without requiring an edit.
+    {
+        let open_uris = documents.open_uris();
+        for uri_str in &open_uris {
+            let uri: Uri = match uri_str.parse() {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+
+            let verter_diags = compute_verter_diagnostics_for(
+                &documents,
+                &uri,
+                &cached_verter_diags,
+                &project_registry,
+                &fallback_linter,
+            );
+
+            let diagnostics = if let Some(tp) = &type_provider {
+                let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+                let profile = tsx_profile.read().clone();
+                let ide = documents.host.get_ide(&canonical_id, &profile);
+
+                if let Some(ide) = ide {
+                    let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
+                    let tsx_path = format!("{canonical_id}{ext}");
+                    let encoding = position_encoding.read().clone();
+                    let tsx_li =
+                        crate::documents::line_index::LineIndex::new(&ide.code, encoding.clone());
+                    let mapper = ide
+                        .source_map
+                        .as_ref()
+                        .and_then(|sm| PositionMapper::from_json(sm).ok());
+                    let vue_source = documents.host.get_source(&canonical_id);
+
+                    match (tp.get_diagnostics(&tsx_path).await, mapper, vue_source) {
+                        (Ok(type_diags), Some(mapper), Some(vue_src)) => {
+                            let vue_li =
+                                crate::documents::line_index::LineIndex::new(&vue_src, encoding);
+                            crate::tsgo::merge::merge_diagnostics(
+                                verter_diags,
+                                type_diags,
+                                &tsx_li,
+                                &mapper,
+                                &vue_li,
+                            )
+                        }
+                        _ => verter_diags,
+                    }
+                } else {
+                    verter_diags
+                }
+            } else {
+                verter_diags
+            };
+
+            client.publish_diagnostics(uri, diagnostics, None).await;
+        }
+    }
 
     client
         .send_notification::<VerterReady>(VerterReadyParams { gen: my_gen })
@@ -2494,10 +2600,11 @@ impl LanguageServer for VerterLanguageServer {
             workspace_scanner: Arc::clone(&self.workspace_scanner),
             init_generation: Arc::clone(&self.init_generation),
             project_sync: self.project_sync.clone(),
-            host: Arc::clone(&self.documents.host),
+            documents: Arc::clone(&self.documents),
             background_synced_files: Arc::clone(&self.background_synced_files),
             is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-            tsx_profile: Arc::clone(&self.documents.tsx_profile),
+            cached_verter_diags: Arc::clone(&self.cached_verter_diags),
+            position_encoding: Arc::clone(&self.position_encoding),
         };
 
         // E. Spawn background init (fire-and-forget)
@@ -2754,10 +2861,11 @@ impl LanguageServer for VerterLanguageServer {
             workspace_scanner: Arc::clone(&self.workspace_scanner),
             init_generation: Arc::clone(&self.init_generation),
             project_sync: self.project_sync.clone(),
-            host: Arc::clone(&self.documents.host),
+            documents: Arc::clone(&self.documents),
             background_synced_files: Arc::clone(&self.background_synced_files),
             is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-            tsx_profile: Arc::clone(&self.documents.tsx_profile),
+            cached_verter_diags: Arc::clone(&self.cached_verter_diags),
+            position_encoding: Arc::clone(&self.position_encoding),
         };
 
         tokio::spawn(async move {

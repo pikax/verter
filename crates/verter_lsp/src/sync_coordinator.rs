@@ -17,10 +17,12 @@ use dashmap::{DashMap, DashSet};
 use tokio::sync::mpsc;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::Client;
-use verter_host::VerterHost;
 
+use crate::config::ProjectRegistry;
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
+use crate::documents::DocumentRegistry;
+use crate::server::compute_verter_diagnostics_for;
 use crate::tsgo::merge;
 use crate::tsgo::project_sync::ProjectSync;
 use crate::tsgo::traits::TypeProvider;
@@ -55,10 +57,9 @@ impl SyncCoordinatorHandle {
 
 /// Shared state the coordinator needs to perform syncs and publish diagnostics.
 pub struct SyncCoordinatorDeps {
-    pub host: Arc<VerterHost>,
+    pub documents: Arc<DocumentRegistry>,
     pub project_sync: ProjectSync,
     pub needs_provider_sync: Arc<DashSet<String>>,
-    pub tsx_profile: parking_lot::RwLock<verter_host::CompileProfile>,
     pub client: Client,
     /// Type provider for fetching TS diagnostics after sync.
     pub type_provider: Option<Arc<dyn TypeProvider>>,
@@ -67,6 +68,10 @@ pub struct SyncCoordinatorDeps {
     pub cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
     /// Negotiated position encoding for building line indexes.
     pub position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
+    /// Per-project configuration registry.
+    pub project_registry: Arc<parking_lot::RwLock<Option<ProjectRegistry>>>,
+    /// Fallback linter for files outside any project.
+    pub fallback_linter: Arc<parking_lot::RwLock<verter_diagnostics::Linter>>,
 }
 
 /// Debounce interval: sync fires after 300ms of silence for a given file.
@@ -144,9 +149,9 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
     // Sync IDE (TSX) output to type provider
-    let profile = deps.tsx_profile.read().clone();
+    let profile = deps.documents.tsx_profile.read().clone();
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
-    let ide = tokio::task::block_in_place(|| deps.host.get_ide(canonical_id, &profile));
+    let ide = tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
     if let Some(ide) = ide {
         tracing::info!("sync_coordinator: HOST_GET_IDE_DONE {canonical_id}");
         let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
@@ -162,7 +167,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
 
     // Sync API (DTS) output to type provider
     tracing::info!("sync_coordinator: HOST_GET_API_START {canonical_id}");
-    let api = tokio::task::block_in_place(|| deps.host.get_public_api(canonical_id));
+    let api = tokio::task::block_in_place(|| deps.documents.host.get_public_api(canonical_id));
     if let Some(api) = api {
         tracing::info!("sync_coordinator: HOST_GET_API_DONE {canonical_id}");
         let base = canonical_id.strip_suffix(".vue").unwrap_or(canonical_id);
@@ -179,26 +184,29 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
 
 /// Publish merged (Verter lint + TypeScript type) diagnostics for a synced file.
 ///
-/// Uses cached verter diagnostics (computed during `did_open` / previous publish)
-/// and fetches fresh TS diagnostics from the type provider. Falls back to cached
-/// verter-only diagnostics if the type provider is unavailable or returns an error.
+/// Recomputes fresh verter diagnostics (host errors + lint rules) for the current
+/// document version, then merges with fresh TS diagnostics from the type provider.
+/// This ensures lint violations introduced during typing appear without reopening.
 async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &str, uri_str: &str) {
     let uri: Uri = match uri_str.parse() {
         Ok(u) => u,
         Err(_) => return,
     };
 
-    // Read cached verter diagnostics (computed by server during did_open or prior publish)
-    let verter_diags = deps
-        .cached_verter_diags
-        .get(uri_str)
-        .map(|entry| entry.1.clone())
-        .unwrap_or_default();
+    // Recompute verter diagnostics fresh (lint + host errors) instead of reading stale cache.
+    let verter_diags = compute_verter_diagnostics_for(
+        &deps.documents,
+        &uri,
+        &deps.cached_verter_diags,
+        &deps.project_registry,
+        &deps.fallback_linter,
+    );
 
     let diagnostics = if let Some(tp) = &deps.type_provider {
         // Build IDE context from the host
-        let profile = deps.tsx_profile.read().clone();
-        let ide = tokio::task::block_in_place(|| deps.host.get_ide(canonical_id, &profile));
+        let profile = deps.documents.tsx_profile.read().clone();
+        let ide =
+            tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
 
         if let Some(ide) = ide {
             let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
@@ -213,7 +221,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
                 .and_then(|sm| PositionMapper::from_json(sm).ok());
 
             // Build Vue source line index
-            let vue_source = deps.host.get_source(canonical_id);
+            let vue_source = deps.documents.host.get_source(canonical_id);
 
             match (tp.get_diagnostics(&tsx_path).await, mapper, vue_source) {
                 (Ok(type_diags), Some(mapper), Some(vue_src)) => {

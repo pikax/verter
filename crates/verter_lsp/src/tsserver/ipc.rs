@@ -1468,9 +1468,7 @@ fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion> {
     // Reference: https://github.com/microsoft/vscode/blob/main/extensions/typescript-language-features/src/languageFeatures/completions.ts
     let kind = Some(match kind_str {
         "primitive type" | "keyword" => CompletionKind::Keyword,
-        "const" | "let" | "var" | "local var" | "alias" | "parameter" => {
-            CompletionKind::Variable
-        }
+        "const" | "let" | "var" | "local var" | "alias" | "parameter" => CompletionKind::Variable,
         "property" | "getter" | "setter" => CompletionKind::Field,
         "function" | "local function" => CompletionKind::Function,
         "method" | "construct" | "call" | "index" => CompletionKind::Method,
