@@ -3372,7 +3372,7 @@ impl LanguageServer for VerterLanguageServer {
                 // | IdentifierExpected   | false           | true               |
                 // | MemberAccess         | true            | false              |
                 // | Literal/Type/PropKey | true            | false              |
-                // | Unknown              | false           | false (conservative)|
+                // | Unknown              | false           | false (filtered)   |
                 let expr_context = if in_expression_context {
                     tsx_offset.map(|off| {
                         classify_expression_context_with_trigger(
@@ -3444,12 +3444,33 @@ impl LanguageServer for VerterLanguageServer {
                     )
                     .await
                     {
-                        Ok(Ok(type_result)) => {
+                        Ok(Ok(mut type_result)) => {
                             tracing::debug!(
                                 "completion: type provider returned {} items (incomplete={})",
                                 type_result.items.len(),
                                 type_result.is_incomplete
                             );
+
+                            // For Unknown expression context, filter type provider results
+                            // to only items matching verter's known template bindings.
+                            // Prevents global pollution (AbortController, HTMLElement, etc.)
+                            // while preserving richer type provider metadata for known bindings.
+                            if matches!(expr_context, Some(ExpressionContext::Unknown)) {
+                                let allowlist: std::collections::HashSet<&str> = verter_items
+                                    .as_ref()
+                                    .map(|items| items.iter().map(|i| i.label.as_str()).collect())
+                                    .unwrap_or_default();
+                                let before = type_result.items.len();
+                                type_result
+                                    .items
+                                    .retain(|item| allowlist.contains(item.label.as_str()));
+                                tracing::debug!(
+                                    "completion: filtered type provider for Unknown context: {} → {} items",
+                                    before,
+                                    type_result.items.len()
+                                );
+                            }
+
                             let (merged, is_incomplete) = merge::merge_completions(
                                 if suppress_verter {
                                     Vec::new()

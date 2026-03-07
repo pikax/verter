@@ -32,7 +32,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
 
-    const labels = completions!.items.map((i) => i.label);
+    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    Mustache completions: ${labels.length} items`);
 
     expect(labels, "should include 'count'").to.include("count");
@@ -53,7 +53,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
 
-    const labels = completions!.items.map((i) => i.label);
+    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    Event handler completions: ${labels.length} items`);
 
     expect(labels, "should include 'increment'").to.include("increment");
@@ -75,7 +75,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
 
-    const labels = completions!.items.map((i) => i.label);
+    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    Component prop completions: ${labels.length} items, labels: ${labels.slice(0, 10).join(", ")}`);
 
     // Should include component props
@@ -95,7 +95,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     // Event modifier completions may or may not trigger depending on timing
     if (completions && completions.items.length > 0) {
-      const labels = completions.items.map((i) => i.label);
+      const labels = completions.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
       console.log(`    Event modifier completions: ${labels.length} items`);
       // If we got modifier completions, verify they include modifiers
       if (labels.some((l) => ["prevent", "stop", "once", "capture", "self", "passive"].includes(l))) {
@@ -117,7 +117,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
 
-    const labels = completions!.items.map((i) => i.label);
+    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    v-for scoped completions: ${labels.length} items`);
 
     // The scoped variable `item` should be available (via TSGO, since it's in the generated TSX)
@@ -151,7 +151,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
     const items = completions!.items;
-    const labels = items.map((i) => i.label);
+    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(
       `    v-for member: ${items.length} items, first: ${labels.slice(0, 10).join(", ")}`,
     );
@@ -192,7 +192,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
     const items = completions!.items;
-    const labels = items.map((i) => i.label);
+    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    v-for mustache member: ${items.length} items`);
 
     expect(labels, "should include 'name'").to.include("name");
@@ -224,7 +224,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions).to.exist;
     const items = completions!.items;
-    const labels = items.map((i) => i.label);
+    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    nested v-for inner: ${items.length} items`);
 
     expect(labels).to.include("label");
@@ -248,7 +248,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions).to.exist;
     const items = completions!.items;
-    const labels = items.map((i) => i.label);
+    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    nested v-for outer: ${items.length} items`);
 
     expect(labels).to.include("name");
@@ -272,7 +272,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions).to.exist;
     const items = completions!.items;
-    const labels = items.map((i) => i.label);
+    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    v-if narrowed: ${items.length} items`);
 
     expect(labels).to.include("name");
@@ -295,7 +295,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     const completions = await getCompletions(doc.uri, pos);
     expect(completions).to.exist;
-    const labels = completions!.items.map((i) => i.label);
+    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    destructured v-for: ${labels.length} items`);
 
     expect(labels).to.include("name");
@@ -311,7 +311,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions).to.exist;
     const items = completions!.items;
-    const labels = items.map((i) => i.label);
+    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
 
     expect(labels).to.include("count");
     expect(labels).to.include("doubled");
@@ -343,7 +343,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
     const items = completions!.items;
-    const labels = items.map((i) => i.label);
+    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(
       `    props member: ${items.length} items, first: ${labels.slice(0, 10).join(", ")}`,
     );
@@ -375,7 +375,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
     const items = completions!.items;
-    const labels = items.map((i) => i.label);
+    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(
       `    v-for member attr: ${items.length} items, first: ${labels.slice(0, 10).join(", ")}`,
     );
@@ -396,6 +396,29 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     ).to.equal(0);
   });
 
+  test("C16: broken expression excludes globals (Unknown context)", async function () {
+    // {{ count + }} is an incomplete expression — OXC returns Unknown
+    const pos = findPosition(doc, "{{ count + }}", 11); // after "+ "
+    if (!pos) {
+      this.skip();
+      return;
+    }
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions).to.exist;
+    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
+    console.log(`    broken expr completions: ${labels.length} items`);
+
+    // POSITIVE: script setup bindings should still be present
+    expect(labels).to.include("count");
+
+    // NEGATIVE: globals must NOT appear even in Unknown context
+    expect(labels).to.not.include("AbortController");
+    expect(labels).to.not.include("HTMLDivElement");
+    expect(labels).to.not.include("document");
+    expect(labels).to.not.include("window");
+    expect(completions!.items.length).to.be.lessThan(200);
+  });
+
   test("C15: template identifier completions exclude globals", async function () {
     const pos = findPosition(doc, "{{ count }}", 3);
     if (!pos) {
@@ -404,7 +427,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
     const completions = await getCompletions(doc.uri, pos);
     expect(completions).to.exist;
-    const labels = completions!.items.map((i) => i.label);
+    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
     console.log(`    identifier completions: ${labels.length} items`);
 
     // POSITIVE: script setup bindings are present

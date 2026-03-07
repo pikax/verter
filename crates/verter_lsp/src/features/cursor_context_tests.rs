@@ -852,6 +852,34 @@ fn test_expression_context_empty() {
 }
 
 // =============================================================================
+// Layer 2: Expression Sub-Context — Unknown (broken expressions)
+// =============================================================================
+
+#[test]
+fn test_expression_context_unknown_broken_binary() {
+    // "count +" is a broken binary expression — OXC panics → Unknown
+    let tsx = "count +";
+    let ctx = classify_expression_context(tsx, 7);
+    assert!(
+        matches!(ctx, ExpressionContext::Unknown),
+        "expected Unknown for broken binary 'count +', got: {:?}",
+        ctx
+    );
+}
+
+#[test]
+fn test_expression_context_unknown_trailing_pipe() {
+    // "count |" is also broken — Unknown
+    let tsx = "count |";
+    let ctx = classify_expression_context(tsx, 7);
+    assert!(
+        matches!(ctx, ExpressionContext::Unknown),
+        "expected Unknown for broken 'count |', got: {:?}",
+        ctx
+    );
+}
+
+// =============================================================================
 // Layer 1: Nested elements — deepest wins
 // =============================================================================
 
