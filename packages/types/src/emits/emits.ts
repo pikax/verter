@@ -1,16 +1,18 @@
+import { Camelize } from "../name/name";
 import { ExtractHidden, IntersectionFunctionToObject } from "../helpers";
 
 /**
  * Converts event emission function types into Vue props types.
- * For each event name `K`, it creates a prop named `onK` (capitalized)
- * that is a function accepting the same arguments as the event.
+ * For each event name `K`, it creates props named `onK` (capitalized)
+ * and `onCamelizedK` (camelized) that accept the same arguments.
+ * For non-hyphenated names, both branches produce the same key (no duplicate).
  */
 export type EmitsToProps<T> = T extends () => any
   ? {}
   : IntersectionFunctionToObject<T> extends infer O
     ? ExtractHidden<O> extends infer E extends Record<PropertyKey, any>
       ? {
-          [K in keyof E as `on${Capitalize<K & string>}`]?: (...args: E[K]) => void;
+          [K in keyof E as `on${Capitalize<K & string>}` | `on${Capitalize<Camelize<K & string>>}`]?: (...args: E[K]) => void;
         }
       : {}
     : {};

@@ -165,30 +165,48 @@ describe('"emits" helper', () => {
         props.onBaz;
       });
 
-      it("kebab-case event names", () => {
+      it("kebab-case event names produce both casings", () => {
         type Fn = ((e: "update-value", value: string) => void) &
           ((e: "click-item", id: number) => void);
 
         type Props = EmitsToProps<Fn>;
-        type ExpectedProps = {
-          "onUpdate-value": (value: string) => void;
-          "onClick-item": (id: number) => void;
-        };
-
-        assertType<Props>({} as ExpectedProps);
 
         const props = {} as Props;
+        // capitalize-only form (Vue runtime compat)
         props["onUpdate-value"];
         props["onUpdate-value"]?.("test");
         props["onClick-item"];
         props["onClick-item"]?.(123);
 
-        // @ts-expect-error optional
+        // camelized form (IDE template codegen compat)
+        props["onUpdateValue"];
+        props["onUpdateValue"]?.("test");
+        props["onClickItem"];
+        props["onClickItem"]?.(123);
+
+        // @ts-expect-error optional (capitalize-only)
         props["onUpdate-value"]("test");
-        // @ts-expect-error wrong arg type
+        // @ts-expect-error wrong arg type (capitalize-only)
         props["onUpdate-value"]?.(123);
-        // @ts-expect-error wrong arg type
+        // @ts-expect-error wrong arg type (camelized)
+        props["onUpdateValue"]?.(123);
+        // @ts-expect-error wrong arg type (capitalize-only)
         props["onClick-item"]?.("test");
+        // @ts-expect-error wrong arg type (camelized)
+        props["onClickItem"]?.("test");
+      });
+
+      it("camelCase event produces single key, no duplicate", () => {
+        type Fn = (e: "myEvent", value: number) => void;
+        type Props = EmitsToProps<Fn>;
+
+        const props = {} as Props;
+        props.onMyEvent;
+        props.onMyEvent?.(42);
+        // @ts-expect-error wrong arg type
+        props.onMyEvent?.("test");
+        // @ts-expect-error non-existent kebab form
+        props["onMy-event"];
       });
 
       it("multiple arguments", () => {
@@ -632,7 +650,7 @@ describe('"emits" helper', () => {
         });
       });
 
-      it("kebab-case event names", () => {
+      it("kebab-case event names produce both casings", () => {
         const component = defineComponent({
           emits: {
             "update-value": (value: string) => true,
@@ -642,22 +660,28 @@ describe('"emits" helper', () => {
 
         type Component = typeof component;
         type Props = ComponentEmitsToProps<Component>;
-        type ExpectedProps = {
-          "onUpdate-value": (value: string) => void;
-          "onClick-item": (id: number) => void;
-        };
-
-        assertType<Props>({} as ExpectedProps);
 
         const props = {} as Props;
+        // capitalize-only form
         props["onUpdate-value"];
         props["onUpdate-value"]?.("test");
         props["onClick-item"];
         props["onClick-item"]?.(123);
-        // @ts-expect-error wrong arg type
+
+        // camelized form
+        props["onUpdateValue"];
+        props["onUpdateValue"]?.("test");
+        props["onClickItem"];
+        props["onClickItem"]?.(123);
+
+        // @ts-expect-error wrong arg type (capitalize-only)
         props["onUpdate-value"]?.(123);
-        // @ts-expect-error wrong arg type
+        // @ts-expect-error wrong arg type (camelized)
+        props["onUpdateValue"]?.(123);
+        // @ts-expect-error wrong arg type (capitalize-only)
         props["onClick-item"]?.("test");
+        // @ts-expect-error wrong arg type (camelized)
+        props["onClickItem"]?.("test");
       });
 
       it("multiple arguments", () => {

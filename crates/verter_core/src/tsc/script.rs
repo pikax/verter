@@ -1132,17 +1132,23 @@ fn build_emits_to_props_type(emits: &[EmitEntry]) -> Option<String> {
     if emits.is_empty() {
         return None;
     }
-    let fields: Vec<String> = emits
-        .iter()
-        .map(|e| {
-            let cap_name = capitalize_first(&e.name);
-            if e.params_ts.is_empty() {
-                format!("\"on{}\"?: (...args: unknown[]) => void", cap_name)
-            } else {
-                format!("\"on{}\"?: ({}) => void", cap_name, e.params_ts)
-            }
-        })
-        .collect();
+    let mut fields: Vec<String> = Vec::new();
+    for e in emits {
+        let cap_name = capitalize_first(&e.name);
+        let handler = if e.params_ts.is_empty() {
+            "(...args: unknown[]) => void".to_string()
+        } else {
+            format!("({}) => void", e.params_ts)
+        };
+        fields.push(format!("\"on{}\"?: {}", cap_name, handler));
+
+        // If name has hyphens, also emit camelized form as a separate prop
+        if e.name.contains('-') {
+            let camelized = camelize_event_name(&e.name);
+            let camel_cap = capitalize_first(&camelized);
+            fields.push(format!("\"on{}\"?: {}", camel_cap, handler));
+        }
+    }
     Some(format!("{{ {} }}", fields.join("; ")))
 }
 
@@ -1152,6 +1158,27 @@ fn capitalize_first(s: &str) -> String {
         None => String::new(),
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
+}
+
+/// Camelize a kebab-case string: `"my-custom-event"` → `"myCustomEvent"`.
+fn camelize_event_name(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut capitalize_next = false;
+    for ch in s.chars() {
+        if ch == '-' {
+            capitalize_next = true;
+            continue;
+        }
+        if capitalize_next {
+            for upper in ch.to_uppercase() {
+                result.push(upper);
+            }
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 fn build_props_type(props_ts: &Option<PropsTs>, models: &[ModelEntry]) -> String {

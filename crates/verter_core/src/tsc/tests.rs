@@ -1725,3 +1725,107 @@ const model = defineModel<string>()
         "should have onUpdate:modelValue prop: {r}"
     );
 }
+
+// ── Kebab-case emit → dual $props keys ──────────────────────────────────────
+
+#[test]
+fn tsc_codegen_kebab_emit_produces_both_prop_keys() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{ (e: 'my-event', value: string): void }>()
+</script><template/>"#,
+    );
+
+    // capitalize-only form (matches Vue runtime)
+    assert!(
+        r.contains(r#""onMy-event"?:"#),
+        "should have capitalize-only onMy-event prop: {r}"
+    );
+    // camelized form (matches IDE template codegen)
+    assert!(
+        r.contains(r#""onMyEvent"?:"#),
+        "should have camelized onMyEvent prop: {r}"
+    );
+    // both should be separate optional props
+    let count_kebab = r.matches(r#""onMy-event"?:"#).count();
+    let count_camel = r.matches(r#""onMyEvent"?:"#).count();
+    assert_eq!(count_kebab, 1, "exactly one capitalize-only key: {r}");
+    assert_eq!(count_camel, 1, "exactly one camelized key: {r}");
+}
+
+#[test]
+fn tsc_codegen_multi_segment_kebab_emit() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{ (e: 'my-custom-event'): void }>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains(r#""onMy-custom-event"?:"#),
+        "should have capitalize-only form: {r}"
+    );
+    assert!(
+        r.contains(r#""onMyCustomEvent"?:"#),
+        "should have fully camelized form: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_camel_emit_no_duplicate_prop() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{ (e: 'myEvent'): void }>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains(r#""onMyEvent"?:"#),
+        "should have onMyEvent prop: {r}"
+    );
+    // No hyphen → no duplicate key
+    let count = r.matches(r#""onMyEvent"?:"#).count();
+    assert_eq!(
+        count, 1,
+        "camelCase emit should produce exactly one prop key, got {count}: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_simple_emit_no_duplicate_prop() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{ (e: 'click'): void }>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains(r#""onClick"?:"#),
+        "should have onClick prop: {r}"
+    );
+    let count = r.matches(r#""onClick"?:"#).count();
+    assert_eq!(
+        count, 1,
+        "simple emit should produce exactly one prop key, got {count}: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_update_prefix_emit_no_camelize() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{ (e: 'update:modelValue'): void }>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains(r#""onUpdate:modelValue"?:"#),
+        "should have onUpdate:modelValue prop: {r}"
+    );
+    // No hyphen in "update:modelValue" → no camelized duplicate
+    let count = r.matches(r#""onUpdate:modelValue"?:"#).count();
+    assert_eq!(
+        count, 1,
+        "update: prefix emit should produce exactly one prop key: {r}"
+    );
+}
