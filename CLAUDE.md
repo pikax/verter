@@ -323,6 +323,26 @@ The extracted file contains the module contents directly (no wrapping `mod tests
 
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, E2E best practices, and server cleanup.
 
+### VS Code Extension Testing (MANDATORY)
+
+Changes to the VS Code extension (`packages/vue-vscode/`) MUST be verified with automated tests, NOT manual testing. Two test tiers exist:
+
+**Unit tests** (Vitest, `*.spec.ts` co-located in `src/`):
+- For pure logic: utility functions, response parsing, restart logic, CSS scanning
+- Run: `pnpm vitest --run packages/vue-vscode/src/path/to/file.spec.ts`
+
+**E2E tests** (Mocha + @vscode/test-cli, `e2e/suite/*.test.ts`):
+- For LSP integration: completions, hover, diagnostics, go-to-definition, rename, decorations
+- Run: `pnpm run build:lsp && pnpm --filter verter-vscode build:dev && E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e`
+- See `.claude/skills/e2e-vscode-testing.md` for fixture design, helpers API, and adding new tests
+
+**When to use which:**
+- New utility/parser logic → unit test
+- New/changed LSP feature (hover, completion, diagnostics, decoration) → E2E test
+- Both if the change spans utility logic + LSP behavior
+
+**Never acceptable:** "Test manually by opening VS Code" as the sole verification step in a plan.
+
 ### Agent Feedback Capture
 
 During work sessions, agents encounter issues, discover improvement opportunities, and gain insights that may be lost when context is compacted. To preserve these observations, agents MUST continuously log feedback to a per-conversation file.
