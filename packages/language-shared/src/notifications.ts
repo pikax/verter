@@ -40,6 +40,7 @@ export enum NotificationType {
   TypeProviderStarted = "$/verter/typeProviderStarted",
   Heartbeat = "$/verter/heartbeat",
   Ready = "$/verter/ready",
+  McpReady = "$/verter/mcpReady",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -77,5 +78,8 @@ export type NotificationParams = {
   };
   [NotificationType.Ready]: {
     gen: number;
+  };
+  [NotificationType.McpReady]: {
+    port: number;
   };
 };

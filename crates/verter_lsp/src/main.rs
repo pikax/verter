@@ -50,15 +50,32 @@ async fn main() {
     let args = CliArgs::parse();
 
     // Optionally start the MCP HTTP server alongside LSP (shares the same VerterHost).
-    if let Some(mcp_port) = args.mcp_port {
-        let mcp_host = Arc::clone(&host);
-        let mcp_lint_preset = args.mcp_lint_preset.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_mcp_http(mcp_host, mcp_port, &mcp_lint_preset).await {
-                tracing::warn!("MCP HTTP server failed to start: {e}");
+    // Port 0 lets the OS pick a free port, avoiding conflicts when multiple VS Code
+    // windows each running their own Verter instance. We bind the listener here so the
+    // actual port is known immediately — no async coordination needed.
+    let mcp_actual_port: Option<u16> = if let Some(mcp_port) = args.mcp_port {
+        match tokio::net::TcpListener::bind(format!("127.0.0.1:{mcp_port}")).await {
+            Ok(listener) => {
+                let actual_port = listener.local_addr().unwrap().port();
+                let mcp_host = Arc::clone(&host);
+                let mcp_lint_preset = args.mcp_lint_preset.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        serve_mcp_http(mcp_host, listener, &mcp_lint_preset).await
+                    {
+                        tracing::warn!("MCP HTTP server failed: {e}");
+                    }
+                });
+                Some(actual_port)
             }
-        });
-    }
+            Err(e) => {
+                tracing::warn!("MCP HTTP server failed to bind port {mcp_port}: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Deferred client cell — populated inside LspService::build, used by
     // ResilientTypeProvider's crash monitor to send user notifications.
@@ -74,6 +91,8 @@ async fn main() {
         project_sync_mode: ProjectSyncMode::TsxOnly,
         type_provider_kind: provider_kind,
         suggest_tsgo,
+        mcp_port: mcp_actual_port,
+
     };
 
     let client_cell_for_build = Arc::clone(&client_cell);
@@ -377,10 +396,11 @@ fn path_to_file_uri(path: &str) -> String {
     }
 }
 
-/// Start an HTTP MCP server that shares the LSP's VerterHost.
-async fn start_mcp_http(
+/// Serve the MCP HTTP endpoint on an already-bound listener.
+/// The listener is bound in `main()` so the actual port is known immediately.
+async fn serve_mcp_http(
     host: Arc<VerterHost>,
-    port: u16,
+    listener: tokio::net::TcpListener,
     lint_preset: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
@@ -400,7 +420,6 @@ async fn start_mcp_http(
     );
 
     let router = axum::Router::new().nest_service("/mcp", http_service);
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     let actual_port = listener.local_addr()?.port();
 
     tracing::info!("MCP HTTP server running at http://127.0.0.1:{actual_port}/mcp");

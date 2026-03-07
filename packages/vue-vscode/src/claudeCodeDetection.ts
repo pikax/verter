@@ -51,7 +51,6 @@ export function setupMcpForClaudeCode(context: ExtensionContext, log: LogOutputC
     return;
   }
 
-  const port = workspace.getConfiguration("verter").get<number>("mcp.port", 6772);
   const mcpJsonPath = join(workspaceRoot, ".mcp.json");
 
   let mcpConfig: Record<string, unknown> = {};
@@ -68,16 +67,18 @@ export function setupMcpForClaudeCode(context: ExtensionContext, log: LogOutputC
     mcpConfig.mcpServers = {};
   }
 
-  // Add/update the verter entry
+  // Add/update the verter entry with a placeholder URL.
+  // The actual port is dynamic (OS-assigned) and will be updated
+  // by updateMcpPort() when the MCP server sends $/verter/mcpReady.
   (mcpConfig.mcpServers as Record<string, unknown>).verter = {
-    url: `http://localhost:${port}/mcp`,
+    url: `http://localhost:0/mcp`,
   };
 
   writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
 
   log.info(`Wrote MCP config to ${mcpJsonPath}`);
   window.showInformationMessage(
-    `Verter MCP configured in .mcp.json (port ${port}). Restart Claude Code to activate.`,
+    "Verter MCP configured in .mcp.json. The port will be updated automatically when the server starts. Restart Claude Code to activate.",
   );
 }
 
@@ -90,6 +91,34 @@ function isClaudeCodeInstalled(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Update the verter entry in `.mcp.json` with the actual MCP port.
+ * Called when the LSP sends `$/verter/mcpReady` with the dynamic port.
+ * Only writes if `.mcp.json` already has a verter entry (avoids creating
+ * the file for users who haven't opted in).
+ */
+export function updateMcpPort(workspaceRoot: string, port: number, log: LogOutputChannel): void {
+  const mcpJsonPath = join(workspaceRoot, ".mcp.json");
+  let mcpConfig: Record<string, unknown> = {};
+  if (existsSync(mcpJsonPath)) {
+    try {
+      mcpConfig = JSON.parse(readFileSync(mcpJsonPath, "utf-8"));
+    } catch {
+      return; // Malformed file — don't overwrite
+    }
+  } else {
+    return; // No .mcp.json — user hasn't opted in
+  }
+
+  if (!mcpConfig.mcpServers || typeof mcpConfig.mcpServers !== "object") return;
+  const servers = mcpConfig.mcpServers as Record<string, unknown>;
+  if (!servers.verter) return; // No verter entry — don't create one
+
+  servers.verter = { url: `http://localhost:${port}/mcp` };
+  writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
+  log.info(`Updated .mcp.json with MCP port ${port}`);
 }
 
 /** Check if .mcp.json already has a verter entry. */

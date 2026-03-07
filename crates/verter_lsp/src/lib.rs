@@ -55,6 +55,9 @@ pub struct LspConfig {
     /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
     /// Set by `auto` mode when tsserver is chosen because TS 5.x was detected.
     pub suggest_tsgo: bool,
+    /// Actual MCP HTTP port (already bound). `None` when MCP is disabled.
+    /// The LSP sends a `$/verter/mcpReady` notification during `initialized()`.
+    pub mcp_port: Option<u16>,
 }
 
 /// Controls what data `verter_lsp` sends to the type provider.

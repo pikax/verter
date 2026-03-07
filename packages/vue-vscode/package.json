@@ -72,6 +72,11 @@
     }
   },
   "contributes": {
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "verter"
+      }
+    ],
     "configuration": {
       "type": "object",
       "title": "Verter",

@@ -65,6 +65,37 @@ suite(`Activation & LSP Health [${FIXTURE_NAME}]`, function () {
     ).to.be.true;
   });
 
+  test("server sends $/verter/mcpReady with valid port", function () {
+    expect(isLspReady(), "LSP should reach ready state").to.be.true;
+
+    const log = readTestLog();
+
+    // The extension logs this when it receives the mcpReady notification
+    assertLogContains(
+      "MCP HTTP server ready on port",
+      "Extension should log the MCP ready notification",
+    );
+
+    // Verify port is a valid number
+    const portMatch = log.match(/MCP HTTP server ready on port (\d+)/);
+    expect(portMatch, "Log should contain a port number").to.exist;
+    const port = parseInt(portMatch![1], 10);
+    expect(port, "Port should be > 0").to.be.greaterThan(0);
+    expect(port, "Port should be < 65536").to.be.lessThan(65536);
+  });
+
+  test("MCP server registered with VS Code", function () {
+    expect(isLspReady(), "LSP should reach ready state").to.be.true;
+    assertLogContains(
+      "Registered MCP server with VS Code",
+      "Extension should log successful MCP provider registration",
+    );
+    assertLogNotContains(
+      "Failed to register MCP server",
+      "MCP registration should not have failed",
+    );
+  });
+
   test("no panics or crashes in log", function () {
     assertLogNotContains("panicked at", "Should not have Rust panics");
     assertLogNotContains(

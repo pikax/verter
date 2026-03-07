@@ -144,6 +144,21 @@ pub struct VerterReadyParams {
     pub gen: u64,
 }
 
+/// Server → client notification: MCP HTTP server is ready.
+/// Sent during `initialized()` with the actual bound port (may differ from requested
+/// when port 0 is used for OS-assigned dynamic ports).
+pub enum McpReady {}
+
+impl tower_lsp_server::ls_types::notification::Notification for McpReady {
+    type Params = McpReadyParams;
+    const METHOD: &'static str = "$/verter/mcpReady";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct McpReadyParams {
+    pub port: u16,
+}
+
 /// Params for `$/onDidChangeTsOrJsFile` notification.
 #[derive(Debug, Deserialize)]
 pub struct OnDidChangeTsOrJsFileParams {
@@ -451,6 +466,8 @@ pub struct VerterLanguageServer {
     /// init task. Background tasks check this before committing results to discard
     /// stale work when a newer init supersedes them.
     init_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Actual MCP HTTP port (already bound). Sent to the extension during `initialized()`.
+    mcp_port: Option<u16>,
 }
 
 impl VerterLanguageServer {
@@ -512,6 +529,7 @@ impl VerterLanguageServer {
             did_change_mutex: tokio::sync::Mutex::new(()),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            mcp_port: config.mcp_port,
         }
     }
 
@@ -2537,6 +2555,14 @@ impl LanguageServer for VerterLanguageServer {
                      verter.typeProvider to \"tsserver\".",
                 )
                 .await;
+        }
+
+        // Notify extension of MCP HTTP port (dynamic, OS-assigned).
+        if let Some(port) = self.mcp_port {
+            self.client
+                .send_notification::<McpReady>(McpReadyParams { port })
+                .await;
+            tracing::info!("Sent $/verter/mcpReady with port {port}");
         }
 
         // C. Read inputs, release locks

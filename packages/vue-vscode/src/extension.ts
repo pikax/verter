@@ -10,6 +10,10 @@ import {
   OutputChannel,
   LogOutputChannel,
   languages,
+  lm,
+  Uri,
+  McpHttpServerDefinition,
+  type Disposable,
   type TextDocument,
   Diagnostic as VDiagnostic,
   Range as VRange,
@@ -43,7 +47,7 @@ import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
 import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
 import { restartLanguageServer } from "./restart";
-import { checkClaudeCodeAndNotify, setupMcpForClaudeCode } from "./claudeCodeDetection";
+import { checkClaudeCodeAndNotify, setupMcpForClaudeCode, updateMcpPort } from "./claudeCodeDetection";
 
 type GetClient = () => PatchClient<LanguageClient>;
 
@@ -396,6 +400,46 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
   }
   registerTypeProviderPidListener(client);
 
+  // ── MCP server auto-registration ────────────────────────────────
+  // When the MCP HTTP server binds a dynamic port, it sends $/verter/mcpReady.
+  // We register it with VS Code's MCP provider API so Copilot Chat discovers it,
+  // and update .mcp.json for Claude Code CLI.
+  let mcpProviderDisposable: Disposable | undefined;
+  function registerMcpListener(lc: LanguageClient) {
+    lc.onNotification(
+      NotificationType.McpReady,
+      (params: { port: number }) => {
+        log.info(`MCP HTTP server ready on port ${params.port}`);
+
+        // Register with VS Code's MCP provider API (Copilot Chat auto-discovery)
+        try {
+          mcpProviderDisposable?.dispose();
+          mcpProviderDisposable = lm.registerMcpServerDefinitionProvider("verter", {
+            provideMcpServerDefinitions() {
+              return [
+                new McpHttpServerDefinition(
+                  "Verter Vue Analysis",
+                  Uri.parse(`http://localhost:${params.port}/mcp`),
+                ),
+              ];
+            },
+          });
+          context.subscriptions.push(mcpProviderDisposable);
+          log.info("Registered MCP server with VS Code MCP provider API");
+        } catch (e) {
+          log.warn(`Failed to register MCP server with VS Code: ${e}`);
+        }
+
+        // Update .mcp.json for Claude Code CLI
+        const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (wsRoot) {
+          updateMcpPort(wsRoot, params.port, log);
+        }
+      },
+    );
+  }
+  registerMcpListener(client);
+
   // ── Heartbeat watchdog ──────────────────────────────────────────
   // The Rust server sends $/verter/heartbeat every 5 seconds. If we don't
   // receive one for 30 seconds, the server is likely frozen (e.g., tokio
@@ -533,6 +577,7 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
           );
           registerTypeProviderPidListener(client);
           registerHeartbeatMonitor(client);
+          registerMcpListener(client);
           await client.start();
         },
         killTrackedTypeProvider,
@@ -617,7 +662,6 @@ function buildServerOptions(
   const tsdk = userTsdk || bundledTsdk;
 
   const mcpEnabled = verterConfig.get<boolean>("mcp.enabled", true);
-  const mcpPort = verterConfig.get<number>("mcp.port", 6772);
   const mcpLintPreset = verterConfig.get<string>("mcp.lintPreset", "recommended");
 
   const args: string[] = [];
@@ -625,7 +669,7 @@ function buildServerOptions(
   args.push(`--tsdk=${tsdk}`);
   args.push(`--plugin-path=${join(extensionPath, "node_modules")}`);
   if (mcpEnabled) {
-    args.push(`--mcp-port=${mcpPort}`);
+    args.push(`--mcp-port=0`);
     args.push(`--mcp-lint-preset=${mcpLintPreset}`);
   }
   if (rootPath) args.push(rootPath);
