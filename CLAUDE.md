@@ -325,7 +325,7 @@ See `/testing` skill for full TS/Rust test patterns, sourcemap testing, E2E best
 
 ### VS Code Extension Testing (MANDATORY)
 
-Changes to the VS Code extension (`packages/vue-vscode/`) MUST be verified with automated tests, NOT manual testing. Two test tiers exist:
+Changes to the VS Code extension (`packages/vue-vscode/`) or the LSP server (`crates/verter_lsp/`) MUST be verified with automated tests, NOT manual testing. LSP changes directly affect extension behavior — hover, completions, diagnostics, etc. Two test tiers exist:
 
 **Unit tests** (Vitest, `*.spec.ts` co-located in `src/`):
 - For pure logic: utility functions, response parsing, restart logic, CSS scanning
@@ -337,8 +337,9 @@ Changes to the VS Code extension (`packages/vue-vscode/`) MUST be verified with 
 - See `.claude/skills/e2e-vscode-testing.md` for fixture design, helpers API, and adding new tests
 
 **When to use which:**
-- New utility/parser logic → unit test
-- New/changed LSP feature (hover, completion, diagnostics, decoration) → E2E test
+- New extension utility/parser logic → unit test
+- New/changed LSP feature (hover, completion, diagnostics, definition, rename, decorations) → E2E test
+- `verter_lsp` changes (new handler, changed response format, sync behavior) → E2E test
 - Both if the change spans utility logic + LSP behavior
 
 **Never acceptable:** "Test manually by opening VS Code" as the sole verification step in a plan.
