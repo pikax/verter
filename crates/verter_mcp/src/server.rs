@@ -1183,24 +1183,35 @@ impl VerterMcpServer {
                     .unwrap_or("")
                     .to_string();
 
-                if let Some(tpl) = &analysis.template {
-                    let prop_names: Vec<String> = tpl
-                        .prop_definitions
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect();
-                    let required: Vec<String> = tpl
-                        .prop_definitions
-                        .iter()
-                        .filter(|p| p.is_required)
-                        .map(|p| p.name.clone())
-                        .collect();
-                    if !prop_names.is_empty() {
-                        component_props.insert(comp_name.clone(), prop_names);
+                // Primary source: macro prop_fields
+                let mut prop_names: Vec<String> = Vec::new();
+                let mut required: Vec<String> = Vec::new();
+                for m in &analysis.macros {
+                    if matches!(
+                        m.kind,
+                        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+                    ) {
+                        for f in &m.prop_fields {
+                            prop_names.push(f.name.clone());
+                        }
                     }
-                    if !required.is_empty() {
-                        component_required.insert(comp_name, required);
+                }
+                // Fallback: template prop_definitions (if macros had no prop_fields)
+                if prop_names.is_empty() {
+                    if let Some(tpl) = &analysis.template {
+                        for p in &tpl.prop_definitions {
+                            prop_names.push(p.name.clone());
+                            if p.is_required {
+                                required.push(p.name.clone());
+                            }
+                        }
                     }
+                }
+                if !prop_names.is_empty() {
+                    component_props.insert(comp_name.clone(), prop_names);
+                }
+                if !required.is_empty() {
+                    component_required.insert(comp_name, required);
                 }
             }
         }
@@ -1314,12 +1325,37 @@ impl VerterMcpServer {
             .filter(|d| d.severity == Severity::Warning)
             .count();
 
-        // API surface
-        let mut api = serde_json::json!({});
+        // API surface — primary source is analysis.macros (same as get_component_api)
+        let mut api = serde_json::json!({
+            "props": [],
+            "emits": [],
+            "slots": [],
+            "models": [],
+        });
+        for m in &analysis.macros {
+            match m.kind {
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+                    api["props"] = serde_json::to_value(m).unwrap_or_default();
+                }
+                AnalyzedMacroKind::DefineEmits => {
+                    api["emits"] = serde_json::to_value(m).unwrap_or_default();
+                }
+                AnalyzedMacroKind::DefineModel => {
+                    if let Some(models) = api["models"].as_array_mut() {
+                        models.push(serde_json::to_value(m).unwrap_or_default());
+                    }
+                }
+                AnalyzedMacroKind::DefineSlots => {
+                    api["slots"] = serde_json::to_value(m).unwrap_or_default();
+                }
+                _ => {}
+            }
+        }
         if let Some(tpl) = &analysis.template {
-            api["props"] = serde_json::to_value(&tpl.prop_definitions).unwrap_or_default();
-            api["emits"] = serde_json::to_value(&tpl.emit_definitions).unwrap_or_default();
-            api["slots"] = serde_json::to_value(&tpl.defined_slots).unwrap_or_default();
+            if !tpl.defined_slots.is_empty() {
+                api["template_slots"] =
+                    serde_json::to_value(&tpl.defined_slots).unwrap_or_default();
+            }
             api["components_used"] =
                 serde_json::json!(tpl.components.iter().map(|c| &c.name).collect::<Vec<_>>());
         }
@@ -1346,9 +1382,15 @@ impl VerterMcpServer {
                 .iter()
                 .map(|b| b.name.as_str())
                 .collect();
+            // Also consider event handler bindings as template references
+            let handler_refs: HashSet<&str> = tpl
+                .event_handlers
+                .iter()
+                .filter_map(|h| h.handler_binding.as_deref())
+                .collect();
             for binding in &analysis.bindings {
                 if !template_refs.contains(binding.name.as_str())
-                    && binding.kind != verter_analysis::types::AnalyzedBindingKind::Function
+                    && !handler_refs.contains(binding.name.as_str())
                 {
                     unused_bindings.push(&binding.name);
                 }
@@ -2542,6 +2584,247 @@ impl ServerHandler for VerterMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_host::{HostConfig, UpsertRequest};
+
+    fn make_host() -> Arc<VerterHost> {
+        Arc::new(VerterHost::new(HostConfig::default()))
+    }
+
+    fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(id.to_string()),
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: verter_host::FileKind::VueSfc,
+            aliases: vec![],
+        });
+    }
+
+    fn compile_analysis(host: &VerterHost, id: &str) {
+        let profile = verter_host::CompileProfile {
+            target: verter_host::CompileTarget::ANALYSIS,
+            ..verter_host::CompileProfile::default()
+        };
+        let _ = host.ensure_compiled(id, &profile);
+    }
+
+    // ── Bug 1: get_component_summary API section should use macros ──
+
+    #[test]
+    fn summary_api_props_from_macros() {
+        let host = make_host();
+        let src = r#"<script setup lang="ts">
+const props = defineProps<{ count: number; label: string }>()
+</script>
+<template><div>{{ count }}</div></template>"#;
+        upsert_vue(&host, "/test/Comp.vue", src);
+        compile_analysis(&host, "/test/Comp.vue");
+
+        let analysis = host.get_analysis("/test/Comp.vue").unwrap();
+
+        // Verify macros have prop_fields (the correct source)
+        let has_props_macro = analysis
+            .macros
+            .iter()
+            .any(|m| m.kind == AnalyzedMacroKind::DefineProps && !m.prop_fields.is_empty());
+        assert!(
+            has_props_macro,
+            "macros should contain DefineProps with prop_fields"
+        );
+
+        // Build API the same way get_component_summary now does (from macros)
+        let mut api = serde_json::json!({
+            "props": [],
+            "emits": [],
+            "slots": [],
+            "models": [],
+        });
+        for m in &analysis.macros {
+            match m.kind {
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+                    api["props"] = serde_json::to_value(m).unwrap_or_default();
+                }
+                _ => {}
+            }
+        }
+
+        // After fix, props should be non-empty (the macro has prop_fields)
+        let props_val = &api["props"];
+        assert!(
+            !props_val.is_null() && props_val != &serde_json::json!([]),
+            "Bug 1: API props should be non-empty for component with defineProps, got: {}",
+            serde_json::to_string_pretty(&api).unwrap()
+        );
+        // Verify prop_fields are present in the serialized output
+        let prop_fields = props_val.get("propFields").and_then(|v| v.as_array());
+        assert!(
+            prop_fields.map_or(false, |a| !a.is_empty()),
+            "Bug 1: propFields should be populated, got: {}",
+            serde_json::to_string_pretty(&props_val).unwrap()
+        );
+    }
+
+    // ── Bug 2: check_component_props should use macros for prop names ──
+
+    #[test]
+    fn check_props_from_macros() {
+        let host = make_host();
+        // Parent component
+        let child_src = r#"<script setup lang="ts">
+defineProps<{ title: string; visible: boolean }>()
+</script>
+<template><div>{{ title }}</div></template>"#;
+        upsert_vue(&host, "/test/Child.vue", child_src);
+        compile_analysis(&host, "/test/Child.vue");
+
+        let analysis = host.get_analysis("/test/Child.vue").unwrap();
+
+        // Build component_props map the way check_component_props now does (from macros)
+        let mut prop_names: Vec<String> = Vec::new();
+        for m in &analysis.macros {
+            if matches!(
+                m.kind,
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+            ) {
+                for f in &m.prop_fields {
+                    prop_names.push(f.name.clone());
+                }
+            }
+        }
+
+        assert!(
+            !prop_names.is_empty(),
+            "Bug 2: prop_names should be populated from macro prop_fields"
+        );
+        assert!(
+            prop_names.contains(&"title".to_string()),
+            "Bug 2: should contain 'title' prop, got: {:?}",
+            prop_names
+        );
+        assert!(
+            prop_names.contains(&"visible".to_string()),
+            "Bug 2: should contain 'visible' prop, got: {:?}",
+            prop_names
+        );
+    }
+
+    // ── Bug 3: dead code detection should not exclude ALL functions ──
+
+    #[test]
+    fn dead_code_detects_unused_functions() {
+        let host = make_host();
+        let src = r#"<script setup lang="ts">
+function unusedHelper() { return 42 }
+function handleClick() { }
+const count = ref(0)
+</script>
+<template><div @click="handleClick">{{ count }}</div></template>"#;
+        upsert_vue(&host, "/test/Comp.vue", src);
+        compile_analysis(&host, "/test/Comp.vue");
+
+        let analysis = host.get_analysis("/test/Comp.vue").unwrap();
+        let tpl = analysis.template.as_ref().unwrap();
+
+        let template_refs: HashSet<&str> = tpl
+            .binding_occurrences
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
+        let handler_refs: HashSet<&str> = tpl
+            .event_handlers
+            .iter()
+            .filter_map(|h| h.handler_binding.as_deref())
+            .collect();
+
+        // Fixed code: checks template refs + event handlers, no blanket function exclusion
+        let mut unused: Vec<&str> = Vec::new();
+        for binding in &analysis.bindings {
+            if !template_refs.contains(binding.name.as_str())
+                && !handler_refs.contains(binding.name.as_str())
+            {
+                unused.push(&binding.name);
+            }
+        }
+
+        // unusedHelper should be detected as unused
+        assert!(
+            unused.iter().any(|n| *n == "unusedHelper"),
+            "Bug 3: unusedHelper should appear in unused bindings, got: {:?}",
+            unused
+        );
+        // handleClick is used in @click, should NOT be in unused
+        assert!(
+            !unused.iter().any(|n| *n == "handleClick"),
+            "Bug 3: handleClick should NOT appear in unused (used in event handler), got: {:?}",
+            unused
+        );
+    }
+
+    // ── Bug 4: scoring should use prop_fields.len() not type_references.len() ──
+
+    #[test]
+    fn scoring_uses_prop_fields_not_type_references() {
+        // Construct a script snapshot with many type_references but few prop_fields
+        let script = verter_analysis::types::ScriptAnalysisSnapshot {
+            macros: vec![verter_analysis::types::AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec![
+                    "Type1".into(),
+                    "Type2".into(),
+                    "Type3".into(),
+                    "Type4".into(),
+                    "Type5".into(),
+                    "Type6".into(),
+                    "Type7".into(),
+                    "Type8".into(),
+                    "Type9".into(),
+                    "Type10".into(),
+                    "Type11".into(),
+                    "Type12".into(),
+                ],
+                binding_name: None,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: vec![
+                    // Only 3 actual props — should NOT be penalized
+                    verter_analysis::types::AnalyzedPropField {
+                        name: "a".into(),
+                        span: verter_span::Span::new(0, 1),
+                    },
+                    verter_analysis::types::AnalyzedPropField {
+                        name: "b".into(),
+                        span: verter_span::Span::new(2, 3),
+                    },
+                    verter_analysis::types::AnalyzedPropField {
+                        name: "c".into(),
+                        span: verter_span::Span::new(4, 5),
+                    },
+                ],
+                span: verter_span::Span::new(0, 100),
+            }],
+            bindings: vec![],
+            imports: vec![],
+            macro_type_deps: vec![],
+            flags: verter_analysis::types::AnalysisFlags::empty(),
+            exported_functions: vec![],
+            vue_api_calls: vec![],
+            dom_query_calls: vec![],
+            css_var_manipulations: vec![],
+            first_await_offset: None,
+            type_enhancements: None,
+        };
+
+        let quality = scoring::compute_quality_score(Some(&script), None, &[], None);
+
+        // With 12 type_references (>10), current code penalizes API surface dim: (12-10)*2 = 4 points → score 96.
+        // With only 3 prop_fields (<15), correct code should NOT penalize → score 100.
+        assert_eq!(
+            quality.api_surface.score, 100,
+            "Bug 4: API surface score should be 100 (not penalized for type_references), got {}",
+            quality.api_surface.score
+        );
+    }
 
     #[test]
     fn chrono_now_iso_format() {

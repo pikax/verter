@@ -209,12 +209,12 @@ pub fn compute_quality_score(
             penalty += ((s.bindings.len() - 30) / 5) as i32 * 3;
         }
         if prop_count > 0 {
-            // Check type_references count as proxy for prop count
+            // Penalize components with too many props (>15 is a design smell)
             for m in &s.macros {
                 if m.kind == verter_analysis::types::AnalyzedMacroKind::DefineProps
-                    && m.type_references.len() > 10
+                    && m.prop_fields.len() > 15
                 {
-                    penalty += (m.type_references.len() as i32 - 10) * 2;
+                    penalty += (m.prop_fields.len() as i32 - 15) * 2;
                 }
             }
         }
