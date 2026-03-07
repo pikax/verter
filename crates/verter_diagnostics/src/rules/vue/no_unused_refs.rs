@@ -56,15 +56,26 @@ impl LintRule for NoUnusedRefs {
         };
 
         // Collect all binding names from script
-        let binding_names: Vec<&str> = script.bindings.iter().map(|b| b.name.as_str()).collect();
+        let binding_names: std::collections::HashSet<&str> =
+            script.bindings.iter().map(|b| b.name.as_str()).collect();
+
+        // Also collect ref names from useTemplateRef() calls
+        let use_template_ref_names: std::collections::HashSet<&str> = script
+            .vue_api_calls
+            .iter()
+            .filter(|c| c.api == verter_analysis::types::VueApiClassification::UseTemplateRef)
+            .filter_map(|c| c.arg_value.as_deref())
+            .collect();
 
         for tref in &template.template_refs {
             if tref.is_dynamic {
                 continue;
             }
 
-            // Check if there's a script binding matching the ref name
-            if !binding_names.contains(&tref.name.as_str()) {
+            // Check if there's a script binding or useTemplateRef call matching the ref name
+            if !binding_names.contains(tref.name.as_str())
+                && !use_template_ref_names.contains(tref.name.as_str())
+            {
                 ctx.report_with_severity(
                     self.name(),
                     self.category().as_str(),
@@ -170,6 +181,31 @@ mod tests {
         let script = ScriptAnalysisSnapshot::default();
         let diags = run_rule_with_file(&template, &script);
         assert!(diags.is_empty(), "no refs should pass");
+    }
+
+    #[test]
+    fn ref_with_use_template_ref_passes() {
+        // FP3: useTemplateRef('myEl') should count as a valid ref binding,
+        // even if there's no matching script binding name.
+        let template = TemplateAnalysisSnapshot {
+            template_refs: vec![make_template_ref("myEl")],
+            ..Default::default()
+        };
+        let script = ScriptAnalysisSnapshot {
+            vue_api_calls: vec![VueApiCallSite {
+                api: VueApiClassification::UseTemplateRef,
+                span: Span::new(0, 30),
+                arg_value: Some("myEl".to_string()),
+                is_async_callback: false,
+                callback_params: vec![],
+            }],
+            ..Default::default()
+        };
+        let diags = run_rule_with_file(&template, &script);
+        assert!(
+            diags.is_empty(),
+            "ref covered by useTemplateRef should NOT be reported unused"
+        );
     }
 
     #[test]

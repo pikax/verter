@@ -26,19 +26,20 @@ impl LintRule for CustomEventNameCasing {
     }
 
     fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {
-        for handler in &tpl.event_handlers {
-            // Skip native DOM events (they never have hyphens anyway)
-            // Only check custom events which may use kebab-case
-            if handler.event_name.contains('-') {
+        // Check emit DEFINITIONS (events this component declares it can emit),
+        // not event HANDLERS (listeners on child components). Kebab-case in
+        // template @event-name listeners is standard Vue convention.
+        for emit_def in &tpl.emit_definitions {
+            if emit_def.event_name.contains('-') {
                 ctx.report_with_severity(
                     self.name(),
                     self.category().as_str(),
                     format!(
                         "Custom event '{}' should use camelCase instead of kebab-case.",
-                        handler.event_name
+                        emit_def.event_name
                     ),
-                    handler.span.start,
-                    handler.span.end,
+                    emit_def.span.start,
+                    emit_def.span.end,
                     self.default_severity(),
                     DiagnosticSpanKind::Directive,
                 );
@@ -64,6 +65,16 @@ mod tests {
         ctx.into_diagnostics()
     }
 
+    fn make_emit_def(event_name: &str) -> AnalyzedEmitDefinition {
+        AnalyzedEmitDefinition {
+            event_name: event_name.to_string(),
+            has_validator: false,
+            is_declared: true,
+            emit_locations: vec![],
+            span: Span::new(10, 30),
+        }
+    }
+
     fn make_handler(event_name: &str) -> TemplateEventHandler {
         TemplateEventHandler {
             event_name: event_name.to_string(),
@@ -75,13 +86,16 @@ mod tests {
     }
 
     #[test]
-    fn kebab_case_event_reports() {
+    fn kebab_case_emit_def_reports() {
         let template = TemplateAnalysisSnapshot {
-            event_handlers: vec![make_handler("my-event")],
+            emit_definitions: vec![make_emit_def("my-event")],
             ..Default::default()
         };
         let diags = run_rule(&template);
-        assert!(!diags.is_empty(), "kebab-case event should trigger");
+        assert!(
+            !diags.is_empty(),
+            "kebab-case emit definition should trigger"
+        );
         assert!(diags.iter().any(|d| d.rule == "custom-event-name-casing"));
         assert!(
             diags[0].message.contains("camelCase"),
@@ -94,23 +108,39 @@ mod tests {
     }
 
     #[test]
-    fn camel_case_event_passes() {
+    fn camel_case_emit_def_passes() {
         let template = TemplateAnalysisSnapshot {
-            event_handlers: vec![make_handler("myEvent")],
+            emit_definitions: vec![make_emit_def("myEvent")],
             ..Default::default()
         };
         let diags = run_rule(&template);
-        assert!(diags.is_empty(), "camelCase event should pass");
+        assert!(diags.is_empty(), "camelCase emit definition should pass");
     }
 
     #[test]
-    fn simple_event_passes() {
+    fn simple_emit_def_passes() {
         let template = TemplateAnalysisSnapshot {
-            event_handlers: vec![make_handler("click")],
+            emit_definitions: vec![make_emit_def("click")],
             ..Default::default()
         };
         let diags = run_rule(&template);
         assert!(diags.is_empty(), "simple event name should pass");
+    }
+
+    #[test]
+    fn kebab_case_listener_on_child_component_passes() {
+        // FP5: @click-overlay on a child component is a LISTENER, not an emit
+        // declaration. Kebab-case is the correct Vue convention in templates.
+        // Only emit DECLARATIONS should be checked for casing.
+        let template = TemplateAnalysisSnapshot {
+            event_handlers: vec![make_handler("click-overlay")],
+            ..Default::default()
+        };
+        let diags = run_rule(&template);
+        assert!(
+            diags.is_empty(),
+            "kebab-case event listener on child component should NOT trigger"
+        );
     }
 
     #[test]

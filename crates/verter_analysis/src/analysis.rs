@@ -180,8 +180,9 @@ pub fn build_script_analysis_with_scope(
                         );
                     }
 
-                    // Extract DOM query from initializer
+                    // Extract Vue API calls, DOM queries, and CSS manipulations from initializer
                     if let Some(ref init) = decl.init {
+                        try_extract_vue_api_call(init, &import_map, &mut vue_api_calls);
                         try_extract_dom_query(init, &mut dom_query_calls);
                         try_extract_css_var_manipulation(init, content, &mut css_var_manipulations);
                     }

@@ -27,13 +27,30 @@ impl LintRule for OneComponentPerFile {
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {
-        // Count defineProps macros (including withDefaults wrapping defineProps)
+        // Count defineProps macros, but don't double-count withDefaults wrapping defineProps.
+        // withDefaults(defineProps<{}>(), {}) produces both DefineProps and WithDefaults macros.
+        // A DefineProps whose span is contained within a WithDefaults span is the inner call.
+        let with_defaults_spans: Vec<_> = script
+            .macros
+            .iter()
+            .filter(|m| m.kind == AnalyzedMacroKind::WithDefaults)
+            .map(|m| m.span)
+            .collect();
+
         let props_count = script
             .macros
             .iter()
             .filter(|m| {
-                m.kind == AnalyzedMacroKind::DefineProps
-                    || m.kind == AnalyzedMacroKind::WithDefaults
+                if m.kind == AnalyzedMacroKind::WithDefaults {
+                    true
+                } else if m.kind == AnalyzedMacroKind::DefineProps {
+                    // Exclude DefineProps nested inside a WithDefaults
+                    !with_defaults_spans
+                        .iter()
+                        .any(|wd| wd.start <= m.span.start && m.span.end <= wd.end)
+                } else {
+                    false
+                }
             })
             .count();
 
@@ -43,8 +60,15 @@ impl LintRule for OneComponentPerFile {
                 .macros
                 .iter()
                 .filter(|m| {
-                    m.kind == AnalyzedMacroKind::DefineProps
-                        || m.kind == AnalyzedMacroKind::WithDefaults
+                    if m.kind == AnalyzedMacroKind::WithDefaults {
+                        true
+                    } else if m.kind == AnalyzedMacroKind::DefineProps {
+                        !with_defaults_spans
+                            .iter()
+                            .any(|wd| wd.start <= m.span.start && m.span.end <= wd.end)
+                    } else {
+                        false
+                    }
                 })
                 .nth(1)
                 .unwrap();
@@ -177,6 +201,24 @@ mod tests {
         assert!(
             diags.is_empty(),
             "defineProps + defineEmits in one file should pass"
+        );
+    }
+
+    #[test]
+    fn with_defaults_wrapping_define_props_passes() {
+        // FP2: withDefaults(defineProps<{...}>(), {...}) produces both DefineProps
+        // and WithDefaults macros, but should count as ONE definition, not two.
+        let script = ScriptAnalysisSnapshot {
+            macros: vec![
+                make_macro(AnalyzedMacroKind::DefineProps, 20, 50),
+                make_macro(AnalyzedMacroKind::WithDefaults, 10, 60),
+            ],
+            ..Default::default()
+        };
+        let diags = run_script(&script);
+        assert!(
+            diags.is_empty(),
+            "withDefaults wrapping defineProps should count as one component, not two"
         );
     }
 

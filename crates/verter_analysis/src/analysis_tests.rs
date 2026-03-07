@@ -1187,3 +1187,52 @@ fn plain_const_stays_none() {
     );
     assert!(!binding.is_reactive, "plain const should not be reactive");
 }
+
+// ── Vue API calls from variable declarations ──
+
+#[test]
+fn use_template_ref_in_var_decl_detected() {
+    let result =
+        analyze("import { useTemplateRef } from 'vue';\nconst el = useTemplateRef('myRef');");
+    assert!(
+        !result.vue_api_calls.is_empty(),
+        "useTemplateRef in variable declaration should be detected"
+    );
+    let call = result
+        .vue_api_calls
+        .iter()
+        .find(|c| c.api == VueApiClassification::UseTemplateRef);
+    assert!(call.is_some(), "should find UseTemplateRef api call");
+    assert_eq!(
+        call.unwrap().arg_value.as_deref(),
+        Some("myRef"),
+        "arg_value should be 'myRef'"
+    );
+}
+
+#[test]
+fn provide_in_var_decl_detected() {
+    let result = analyze("import { provide } from 'vue';\nconst p = provide('myKey', 42);");
+    let call = result
+        .vue_api_calls
+        .iter()
+        .find(|c| c.api == VueApiClassification::Provide);
+    assert!(
+        call.is_some(),
+        "provide in variable declaration should be detected"
+    );
+    assert_eq!(call.unwrap().arg_value.as_deref(), Some("myKey"));
+}
+
+#[test]
+fn computed_in_var_decl_detected() {
+    let result = analyze("import { computed } from 'vue';\nconst x = computed(() => 1);");
+    let call = result
+        .vue_api_calls
+        .iter()
+        .find(|c| c.api == VueApiClassification::Computed);
+    assert!(
+        call.is_some(),
+        "computed in variable declaration should be detected"
+    );
+}

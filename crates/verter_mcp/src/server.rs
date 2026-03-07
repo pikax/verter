@@ -1374,7 +1374,7 @@ impl VerterMcpServer {
                 .sum::<usize>(),
         });
 
-        // Dead code: unused bindings
+        // Dead code: unused bindings (conservative — only report clearly unused bindings)
         let mut unused_bindings = Vec::new();
         if let Some(tpl) = &analysis.template {
             let template_refs: HashSet<&str> = tpl
@@ -1388,12 +1388,43 @@ impl VerterMcpServer {
                 .iter()
                 .filter_map(|h| h.handler_binding.as_deref())
                 .collect();
+            // Template ref names declared via useTemplateRef or ref="name"
+            let template_ref_names: HashSet<&str> =
+                tpl.template_refs.iter().map(|r| r.name.as_str()).collect();
             for binding in &analysis.bindings {
-                if !template_refs.contains(binding.name.as_str())
-                    && !handler_refs.contains(binding.name.as_str())
+                // Skip bindings used in template expressions or event handlers
+                if template_refs.contains(binding.name.as_str())
+                    || handler_refs.contains(binding.name.as_str())
                 {
-                    unused_bindings.push(&binding.name);
+                    continue;
                 }
+                // Skip bindings initialized by Vue API calls (computed, ref, reactive, etc.)
+                // These are almost always consumed by the framework or other bindings
+                if matches!(
+                    &binding.initializer,
+                    Some(verter_analysis::types::BindingInitializer::FunctionCall {
+                        vue_api: Some(_),
+                        ..
+                    })
+                ) {
+                    continue;
+                }
+                // Skip bindings initialized by external composable calls (useSomething())
+                // These often have side effects or are consumed by other composables
+                if let Some(verter_analysis::types::BindingInitializer::FunctionCall {
+                    callee,
+                    ..
+                }) = &binding.initializer
+                {
+                    if callee.starts_with("use") {
+                        continue;
+                    }
+                }
+                // Skip bindings whose name matches a template ref
+                if template_ref_names.contains(binding.name.as_str()) {
+                    continue;
+                }
+                unused_bindings.push(&binding.name);
             }
         }
 
