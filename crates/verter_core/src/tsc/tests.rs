@@ -1688,11 +1688,10 @@ defineEmits<{ (e: 'click', event: MouseEvent): void }>()
 </script><template/>"#,
     );
 
-    // Typed emits from call-signature style produce onClick prop
-    // (params aren't extracted at TSC level — pre-existing limitation)
+    // Type-based emits use __EmitToProps with original type (preserves handler types)
     assert!(
-        r.contains(r#""onClick"?:"#),
-        "should have onClick prop: {r}"
+        r.contains("__EmitToProps<{ (e: 'click', event: MouseEvent): void }>"),
+        "should use __EmitToProps with original type in $props: {r}"
     );
     // The event is at least registered so @click on this component won't error
     assert!(
@@ -1710,12 +1709,12 @@ const model = defineModel<string>()
 </script><template/>"#,
     );
 
-    // Emits produce onEventName props
+    // Type-based emits use __EmitToProps with original type
     assert!(
-        r.contains(r#""onSubmit"?:"#),
-        "should have onSubmit in $props: {r}"
+        r.contains("__EmitToProps<{ (e: 'submit', data: string): void }>"),
+        "should use __EmitToProps for type-based emits in $props: {r}"
     );
-    // Models produce value prop + onUpdate handler (already working)
+    // Models produce value prop + onUpdate handler (separate from __EmitToProps)
     assert!(
         r.contains("modelValue?:"),
         "should have modelValue prop: {r}"
@@ -1728,33 +1727,40 @@ const model = defineModel<string>()
 
 // ── Kebab-case emit → dual $props keys ──────────────────────────────────────
 
+// Type-based defineEmits: handler types should be inferred from the original type
+// via __EmitToProps<OriginalType> rather than manual (...args: unknown[]) => void
 #[test]
-fn tsc_codegen_kebab_emit_produces_both_prop_keys() {
+fn tsc_codegen_kebab_emit_type_based_both_keys_with_correct_handler() {
     let r = gen_tsc(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'my-event', value: string): void }>()
 </script><template/>"#,
     );
 
-    // capitalize-only form (matches Vue runtime)
+    // Should use __EmitToProps with the original type text (preserves handler types)
     assert!(
-        r.contains(r#""onMy-event"?:"#),
-        "should have capitalize-only onMy-event prop: {r}"
+        r.contains("__EmitToProps<{ (e: 'my-event', value: string): void }>"),
+        "should use __EmitToProps with original type in $props: {r}"
     );
-    // camelized form (matches IDE template codegen)
+    // Should NOT have manual handler fields with generic args
     assert!(
-        r.contains(r#""onMyEvent"?:"#),
-        "should have camelized onMyEvent prop: {r}"
+        !r.contains(r#""onMy-event"?:"#),
+        "should NOT have manually generated prop fields — uses __EmitToProps instead: {r}"
     );
-    // both should be separate optional props
-    let count_kebab = r.matches(r#""onMy-event"?:"#).count();
-    let count_camel = r.matches(r#""onMyEvent"?:"#).count();
-    assert_eq!(count_kebab, 1, "exactly one capitalize-only key: {r}");
-    assert_eq!(count_camel, 1, "exactly one camelized key: {r}");
+    // The __EmitToProps and __Cam helper types must be present
+    assert!(
+        r.contains("type __EmitToProps<"),
+        "should define __EmitToProps helper type: {r}"
+    );
+    assert!(
+        r.contains("type __Cam<"),
+        "should define __Cam helper type: {r}"
+    );
 }
 
+// Type-based defineEmits with multi-segment kebab
 #[test]
-fn tsc_codegen_multi_segment_kebab_emit() {
+fn tsc_codegen_multi_segment_kebab_emit_type_based() {
     let r = gen_tsc(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'my-custom-event'): void }>()
@@ -1762,15 +1768,75 @@ defineEmits<{ (e: 'my-custom-event'): void }>()
     );
 
     assert!(
-        r.contains(r#""onMy-custom-event"?:"#),
-        "should have capitalize-only form: {r}"
-    );
-    assert!(
-        r.contains(r#""onMyCustomEvent"?:"#),
-        "should have fully camelized form: {r}"
+        r.contains("__EmitToProps<{ (e: 'my-custom-event'): void }>"),
+        "should use __EmitToProps with original type: {r}"
     );
 }
 
+// Object-syntax defineEmits: handler type inferred from validator params
+#[test]
+fn tsc_codegen_kebab_emit_object_syntax_both_keys() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits({
+  'my-event': (value: string) => true,
+  'click': (id: number) => true,
+})
+</script><template/>"#,
+    );
+
+    // kebab event → both keys
+    assert!(
+        r.contains(r#""onMy-event"?:"#),
+        "should have capitalize-only onMy-event prop: {r}"
+    );
+    assert!(
+        r.contains(r#""onMyEvent"?:"#),
+        "should have camelized onMyEvent prop: {r}"
+    );
+    // non-kebab event → single key only
+    assert!(
+        r.contains(r#""onClick"?:"#),
+        "should have onClick prop: {r}"
+    );
+    let count = r.matches(r#""onClick"?:"#).count();
+    assert_eq!(
+        count, 1,
+        "non-kebab emit should produce exactly one key: {r}"
+    );
+}
+
+// Array-syntax defineEmits
+#[test]
+fn tsc_codegen_kebab_emit_array_syntax_both_keys() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits(['my-event', 'click'])
+</script><template/>"#,
+    );
+
+    // kebab event → both keys
+    assert!(
+        r.contains(r#""onMy-event"?:"#),
+        "should have capitalize-only onMy-event prop: {r}"
+    );
+    assert!(
+        r.contains(r#""onMyEvent"?:"#),
+        "should have camelized onMyEvent prop: {r}"
+    );
+    // non-kebab event → single key only
+    assert!(
+        r.contains(r#""onClick"?:"#),
+        "should have onClick prop: {r}"
+    );
+    let count = r.matches(r#""onClick"?:"#).count();
+    assert_eq!(
+        count, 1,
+        "non-kebab emit should produce exactly one key: {r}"
+    );
+}
+
+// camelCase emit (type-based) → uses __EmitToProps
 #[test]
 fn tsc_codegen_camel_emit_no_duplicate_prop() {
     let r = gen_tsc(
@@ -1780,17 +1846,12 @@ defineEmits<{ (e: 'myEvent'): void }>()
     );
 
     assert!(
-        r.contains(r#""onMyEvent"?:"#),
-        "should have onMyEvent prop: {r}"
-    );
-    // No hyphen → no duplicate key
-    let count = r.matches(r#""onMyEvent"?:"#).count();
-    assert_eq!(
-        count, 1,
-        "camelCase emit should produce exactly one prop key, got {count}: {r}"
+        r.contains("__EmitToProps<{ (e: 'myEvent'): void }>"),
+        "should use __EmitToProps with original type: {r}"
     );
 }
 
+// Simple emit (type-based) → uses __EmitToProps
 #[test]
 fn tsc_codegen_simple_emit_no_duplicate_prop() {
     let r = gen_tsc(
@@ -1800,16 +1861,12 @@ defineEmits<{ (e: 'click'): void }>()
     );
 
     assert!(
-        r.contains(r#""onClick"?:"#),
-        "should have onClick prop: {r}"
-    );
-    let count = r.matches(r#""onClick"?:"#).count();
-    assert_eq!(
-        count, 1,
-        "simple emit should produce exactly one prop key, got {count}: {r}"
+        r.contains("__EmitToProps<{ (e: 'click'): void }>"),
+        "should use __EmitToProps with original type: {r}"
     );
 }
 
+// update: prefix (type-based) → uses __EmitToProps
 #[test]
 fn tsc_codegen_update_prefix_emit_no_camelize() {
     let r = gen_tsc(
@@ -1819,13 +1876,7 @@ defineEmits<{ (e: 'update:modelValue'): void }>()
     );
 
     assert!(
-        r.contains(r#""onUpdate:modelValue"?:"#),
-        "should have onUpdate:modelValue prop: {r}"
-    );
-    // No hyphen in "update:modelValue" → no camelized duplicate
-    let count = r.matches(r#""onUpdate:modelValue"?:"#).count();
-    assert_eq!(
-        count, 1,
-        "update: prefix emit should produce exactly one prop key: {r}"
+        r.contains("__EmitToProps<{ (e: 'update:modelValue'): void }>"),
+        "should use __EmitToProps with original type: {r}"
     );
 }

@@ -109,6 +109,10 @@ struct TscMacroState {
     emits_names: Vec<String>,
     // defineEmits — TypeScript emit entries
     emits_ts: Vec<EmitEntry>,
+    // defineEmits — raw type parameter text (for type-based defineEmits only)
+    // When present, $props uses an inline mapped type that infers handler types
+    // from the original type rather than generating (...args: unknown[]) => void.
+    emits_type_param_text: Option<String>,
 
     // defineModel — each model binding
     models: Vec<ModelEntry>,
@@ -600,6 +604,10 @@ fn process_emits<'a>(
     state: &mut TscMacroState,
 ) {
     if let Some(tp) = type_params {
+        // Store the raw type parameter text for $props inference
+        let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
+        state.emits_type_param_text = Some(type_text.to_string());
+
         for emit in &tp.resolved.emits {
             state.emits_names.push(emit.name.clone());
             state.emits_ts.push(EmitEntry {
@@ -870,6 +878,16 @@ fn generate_code(
     // so there is exactly one `new()` — ours — with the correct $props.
     out.push_str("type __OmitNew<T> = { [K in keyof T]: T[K] }\n");
 
+    // ── Utility type: camelize kebab-case strings ────────────────────
+    // Used by __EmitToProps to produce both kebab and camelized prop keys.
+    out.push_str("type __Cam<T extends string> = T extends `${infer L}-${infer R}` ? R extends `${infer C}${infer Rest}` ? `${L}${Uppercase<C>}${__Cam<Rest>}` : L : T\n");
+
+    // ── Utility type: emit function → event handler props ────────────
+    // Recursively extracts call signatures from an emit function type
+    // and produces optional `onEventName` props with both capitalize-only
+    // and camelized keys.
+    out.push_str("type __EmitToProps<F> = F extends { (e: infer K, ...args: infer A): any } & infer R ? { [P in (K & string) as `on${Capitalize<P>}` | `on${Capitalize<__Cam<P>>}`]?: (...args: A) => void } & __EmitToProps<R> : {}\n");
+
     // ── Type import statements ────────────────────────────────────────
     for stmt in &state.type_import_stmts {
         out.push_str(stmt);
@@ -983,7 +1001,17 @@ fn generate_code(
     } else {
         None
     };
-    let emits_props = build_emits_to_props_type(&state.emits_ts);
+    // For type-based defineEmits, use __EmitToProps<OriginalType> to infer
+    // correct handler types. For object/array syntax, fall back to manual fields.
+    let emits_props = if let Some(ref type_text) = state.emits_type_param_text {
+        if !state.emits_ts.is_empty() {
+            Some(format!("__EmitToProps<{}>", type_text))
+        } else {
+            None
+        }
+    } else {
+        build_emits_to_props_type(&state.emits_ts)
+    };
     let props_base = narrowing_props_type.as_deref().unwrap_or(&props_type);
     let full_props = match &emits_props {
         Some(ep) => format!("{} & {}", props_base, ep),
