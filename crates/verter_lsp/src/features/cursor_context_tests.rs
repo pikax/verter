@@ -533,6 +533,72 @@ fn test_dynamic_prop_expression() {
     }
 }
 
+// Stale analysis: cursor past expression_span.end but still in directive
+// Simulates user typing more into the expression after analysis was computed.
+#[test]
+fn test_expression_stale_analysis_cursor_past_expr_end() {
+    // Current source has a longer expression than what analysis captured
+    //                    1111111111222222222233333333334444
+    //          01234567890123456789012345678901234567890123
+    let source = "<template><div :icon=\"action.icon || x\"></div></template>";
+    let blocks = scan_sfc_blocks(source);
+
+    let mut template = empty_template();
+    // The element span covers the whole <div ...> tag up to </div>
+    let mut el = make_element("div", (10, 45), 39, 39);
+    // Stale analysis: expression_span only covers "action.icon" (21..32)
+    // but user has since typed " || x" making actual content "action.icon || x" (21..37)
+    el.directives.push({
+        let mut d = make_directive_with_expr("bind", ":icon", (15, 38), 20, (21, 32));
+        d.argument = Some("icon".to_string());
+        d
+    });
+    template.elements.push(el);
+
+    let analysis = analysis_with_template(template);
+
+    // Cursor at 35 — on "x" in "|| x", past the stale expression_span.end (32)
+    let ctx = classify_cursor_context(35, source, &blocks, Some(&analysis));
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::Expression { .. }) => {}
+        other => panic!(
+            "expected Expression for cursor past stale expr_span.end, got: {:?}",
+            other
+        ),
+    }
+}
+
+// Cursor exactly at expression_span.end boundary
+#[test]
+fn test_expression_at_expr_span_end_boundary() {
+    //                    1111111111222222222233
+    //          0123456789012345678901234567890123
+    let source = "<template><div :icon=\"action.icon\"></div></template>";
+    let blocks = scan_sfc_blocks(source);
+
+    let mut template = empty_template();
+    let mut el = make_element("div", (10, 40), 34, 34);
+    el.directives.push({
+        let mut d = make_directive_with_expr("bind", ":icon", (15, 33), 20, (21, 32));
+        d.argument = Some("icon".to_string());
+        d
+    });
+    template.elements.push(el);
+
+    let analysis = analysis_with_template(template);
+
+    // Cursor at 32 — exactly at expression_span.end (exclusive boundary)
+    // This is the position right after the last char of "action.icon" but before the closing quote
+    let ctx = classify_cursor_context(32, source, &blocks, Some(&analysis));
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::Expression { .. }) => {}
+        other => panic!(
+            "expected Expression at expr_span.end boundary, got: {:?}",
+            other
+        ),
+    }
+}
+
 // =============================================================================
 // Layer 1: Template Sub-Context — Interpolations
 // =============================================================================

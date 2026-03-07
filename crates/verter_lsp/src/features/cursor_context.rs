@@ -332,10 +332,17 @@ fn classify_in_opening_tag(
 
         // Check expression span
         if let Some(ref expr_span) = dir.expression_span {
-            // Handle both non-empty ranges and empty expressions (cursor between empty quotes)
+            // Normal case: cursor within expression span
             if (offset >= expr_span.start && offset < expr_span.end)
                 || (expr_span.start == expr_span.end && offset == expr_span.start)
             {
+                let kind = directive_to_expression_kind(dir);
+                return CursorContext::Template(TemplateCursorContext::Expression { kind });
+            }
+            // Stale analysis / boundary fallback: cursor is at or past expression_span.end
+            // but still within the directive span. The user likely typed more into the
+            // expression since analysis was last computed (e.g., "action.icon" → "action.icon || x").
+            if offset >= expr_span.end {
                 let kind = directive_to_expression_kind(dir);
                 return CursorContext::Template(TemplateCursorContext::Expression { kind });
             }
@@ -385,6 +392,15 @@ fn classify_in_opening_tag(
                         attr_name: attr.name.clone(),
                     });
                 }
+            }
+            // Stale analysis / boundary fallback: cursor past value_span.end but
+            // within the attribute span. User typed more since last analysis.
+            if offset >= val_span.end && attr.is_dynamic {
+                return CursorContext::Template(TemplateCursorContext::Expression {
+                    kind: ExpressionKind::Prop {
+                        prop_name: attr.name.clone(),
+                    },
+                });
             }
         }
 
