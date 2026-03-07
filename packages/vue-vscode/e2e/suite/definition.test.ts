@@ -499,6 +499,44 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     expect(def.uri.fsPath, "should navigate to a different file").to.not.equal(doc.uri.fsPath);
   });
 
+  test("D4: go-to-definition on barrel-imported component TAG reaches .vue file", async function () {
+    if (FIXTURE_NAME !== "barrel-exports") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    // In App.vue template, CTRL+click on <Overlay — should go to Overlay.vue, NOT index.ts
+    const pos = findPosition(doc, "<Overlay", 1); // on "O"
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const locations = await getDefinitions(doc.uri, pos);
+    console.log(`    Definition on <Overlay TAG: ${locations.length} location(s)`);
+    for (const loc of locations) {
+      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+    }
+
+    expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
+
+    const def = locations[0];
+
+    if (TYPE_PROVIDER === "tsgo" && def.uri.fsPath.includes("index.ts")) {
+      console.log("    TSGO CANARY: barrel component resolved to index.ts (known limitation)");
+      return;
+    }
+
+    // Positive: reaches the actual .vue source
+    expect(def.uri.fsPath, "definition should reach Overlay.vue").to.include("Overlay.vue");
+
+    // Negative: must NOT stop at barrel index.ts
+    expect(def.uri.fsPath, "should NOT stop at barrel index.ts").to.not.include("index.ts");
+
+    // Negative: must NOT be generated .tsx
+    expect(def.uri.fsPath, "should NOT be in generated .tsx").to.not.match(/\.vue\.tsx$/);
+  });
+
   // ── E. Component Props → Child defineProps ──────────────────
 
   test("E1: go-to-definition on prop attribute navigates to child defineProps", async function () {

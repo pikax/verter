@@ -417,6 +417,115 @@ impl VerterHost {
         None
     }
 
+    /// Follow re-exports to find the ultimate definition span.
+    ///
+    /// For a re-export like `export { default as Popup } from './Popup.vue'`,
+    /// this follows the chain to find where `Popup` is actually defined.
+    /// Returns `(canonical_id, start, end)` of the final definition.
+    ///
+    /// `max_depth` limits recursion to prevent infinite loops on circular re-exports.
+    /// For local exports (no re-export), returns the span in the same file.
+    pub fn get_export_span_follow_reexports(
+        &self,
+        canonical_or_alias: &str,
+        binding_name: &str,
+        max_depth: u32,
+    ) -> Option<(String, u32, u32)> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let files = read_lock(&self.files);
+        let alias_map = read_lock(&self.alias_to_canonical);
+
+        self.follow_reexport_chain(&files, &alias_map, &canonical, binding_name, max_depth)
+    }
+
+    /// Internal recursive helper for following re-export chains.
+    fn follow_reexport_chain(
+        &self,
+        files: &std::collections::HashMap<String, crate::FileEntry>,
+        alias_map: &std::collections::HashMap<String, String>,
+        canonical_id: &str,
+        binding_name: &str,
+        remaining_depth: u32,
+    ) -> Option<(String, u32, u32)> {
+        let entry = files.get(canonical_id)?;
+
+        // For Vue SFCs, resolve directly (they don't have re-exports in export_signatures)
+        if entry.file_kind == crate::FileKind::VueSfc {
+            // Check bindings
+            if let Some(binding) = entry
+                .script_analysis
+                .bindings
+                .iter()
+                .find(|b| b.name == binding_name)
+            {
+                if binding.span.start > 0 || binding.span.end > 0 {
+                    return Some((
+                        canonical_id.to_string(),
+                        binding.span.start,
+                        binding.span.end,
+                    ));
+                }
+            }
+            // Check macro bindings
+            for mac in &entry.script_analysis.macros {
+                if mac.binding_name.as_deref() == Some(binding_name)
+                    && (mac.span.start > 0 || mac.span.end > 0)
+                {
+                    return Some((canonical_id.to_string(), mac.span.start, mac.span.end));
+                }
+            }
+            // "default" export → first binding
+            if binding_name == "default" {
+                if let Some(first_binding) = entry.script_analysis.bindings.first() {
+                    if first_binding.span.start > 0 || first_binding.span.end > 0 {
+                        return Some((
+                            canonical_id.to_string(),
+                            first_binding.span.start,
+                            first_binding.span.end,
+                        ));
+                    }
+                }
+            }
+            return None;
+        }
+
+        // For .ts/.js files, look up export_signatures
+        if let Some(sig) = entry
+            .export_signatures
+            .iter()
+            .find(|s| s.name == binding_name)
+        {
+            // If it's a re-export and we have depth budget, follow the chain
+            if let (Some(ref source), Some(ref local_name)) =
+                (&sig.reexport_source, &sig.reexport_local)
+            {
+                if remaining_depth > 0 {
+                    // Resolve the source module to a canonical ID
+                    if let Some(target_canonical) = crate::cross_file::resolve_import_to_canonical(
+                        files, alias_map, entry, source,
+                    ) {
+                        return self.follow_reexport_chain(
+                            files,
+                            alias_map,
+                            &target_canonical,
+                            local_name,
+                            remaining_depth - 1,
+                        );
+                    }
+                }
+                // Can't follow further (no depth or unresolved source)
+                return None;
+            }
+
+            // Local export — return span in this file
+            if sig.span.start > 0 || sig.span.end > 0 {
+                return Some((canonical_id.to_string(), sig.span.start, sig.span.end));
+            }
+        }
+
+        None
+    }
+
     /// Resolve an import specifier to its canonical ID using the host's file map,
     /// alias map, and parent's resolved dependencies.
     ///
@@ -753,5 +862,107 @@ const { x, y, reset } = useMouse()
                 || x_binding.reactivity_kind != verter_analysis::ReactivityKind::MaybeRef,
             "x should NOT remain MaybeRef after enrichment"
         );
+    }
+
+    #[test]
+    fn get_export_span_follows_reexport_to_vue() {
+        let host = make_host();
+
+        // Target: Popup.vue with a binding
+        upsert_vue(
+            &host,
+            "Popup.vue",
+            "<script setup>\nconst message = 'hello'\n</script>\n<template><div>{{ message }}</div></template>",
+        );
+
+        // Barrel: index.ts re-exports Popup.vue as default
+        upsert_ts(
+            &host,
+            "index.ts",
+            "export { default as Popup } from './Popup.vue'",
+        );
+
+        // Follow the re-export: "Popup" in index.ts → default in Popup.vue
+        let result = host.get_export_span_follow_reexports("index.ts", "Popup", 5);
+
+        assert!(result.is_some(), "should follow re-export to Popup.vue");
+        let (canonical_id, start, end) = result.unwrap();
+        assert_eq!(
+            canonical_id, "Popup.vue",
+            "should resolve to Popup.vue canonical ID"
+        );
+        assert!(
+            start < end,
+            "should have a valid span in Popup.vue (start={start}, end={end})"
+        );
+        // Negative: should NOT return index.ts
+        assert_ne!(
+            canonical_id, "index.ts",
+            "must NOT return the barrel file itself"
+        );
+    }
+
+    #[test]
+    fn get_export_span_follows_named_reexport() {
+        let host = make_host();
+
+        // Target: utils.ts with an exported function
+        upsert_ts(&host, "utils.ts", "export function helper() { return 42 }");
+
+        // Barrel: re-exports helper as myHelper
+        upsert_ts(
+            &host,
+            "index.ts",
+            "export { helper as myHelper } from './utils.ts'",
+        );
+
+        let result = host.get_export_span_follow_reexports("index.ts", "myHelper", 5);
+
+        assert!(result.is_some(), "should follow named re-export");
+        let (canonical_id, start, end) = result.unwrap();
+        assert_eq!(canonical_id, "utils.ts", "should resolve to utils.ts");
+        assert!(start < end, "should have a valid span");
+        // Negative: should NOT return barrel
+        assert_ne!(canonical_id, "index.ts");
+    }
+
+    #[test]
+    fn get_export_span_stops_at_max_depth() {
+        let host = make_host();
+
+        upsert_ts(&host, "a.ts", "export { b } from './b.ts'");
+        upsert_ts(&host, "b.ts", "export { c as b } from './c.ts'");
+        upsert_ts(&host, "c.ts", "export const c = 42");
+
+        // max_depth=0 → should return None (can't follow any re-exports)
+        let result = host.get_export_span_follow_reexports("a.ts", "b", 0);
+        assert!(
+            result.is_none(),
+            "max_depth=0 should not follow any re-exports"
+        );
+
+        // max_depth=2 → should follow a→b→c
+        let result = host.get_export_span_follow_reexports("a.ts", "b", 2);
+        assert!(result.is_some(), "max_depth=2 should follow the chain");
+        let (canonical_id, _, _) = result.unwrap();
+        assert_eq!(canonical_id, "c.ts", "should reach c.ts");
+    }
+
+    #[test]
+    fn get_export_span_local_export_unchanged() {
+        let host = make_host();
+
+        upsert_ts(&host, "utils.ts", "export function foo() { return 1 }");
+
+        // Local export — no re-export, returns span in same file
+        let result = host.get_export_span_follow_reexports("utils.ts", "foo", 5);
+
+        assert!(result.is_some(), "should find local export");
+        let (canonical_id, start, end) = result.unwrap();
+        assert_eq!(
+            canonical_id, "utils.ts",
+            "local export should return same file"
+        );
+        assert!(start < end, "should have a valid span");
     }
 }

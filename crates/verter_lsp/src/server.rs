@@ -3740,12 +3740,19 @@ impl LanguageServer for VerterLanguageServer {
             let host = &self.documents.host;
             let resolve_export =
                 |target_canonical_id: &str, binding_name: &str| -> Option<Location> {
-                    let (start, end) = host.get_export_span(target_canonical_id, binding_name)?;
-                    let target_source = host.get_source(target_canonical_id)?;
+                    // Follow re-exports (up to 10 levels deep) to find the actual definition
+                    let (resolved_id, start, end) = host
+                        .get_export_span_follow_reexports(target_canonical_id, binding_name, 10)
+                        .or_else(|| {
+                            // Fallback to non-following version for backwards compat
+                            let (s, e) = host.get_export_span(target_canonical_id, binding_name)?;
+                            Some((target_canonical_id.to_string(), s, e))
+                        })?;
+                    let target_source = host.get_source(&resolved_id)?;
                     let target_li = LineIndex::new(&target_source, encoding.clone());
                     let start_pos = target_li.offset_to_position(start)?;
                     let end_pos = target_li.offset_to_position(end)?;
-                    let normalized = target_canonical_id.replace('\\', "/");
+                    let normalized = resolved_id.replace('\\', "/");
                     let uri_str = if normalized.starts_with('/') {
                         format!("file://{normalized}")
                     } else if normalized.chars().nth(1) == Some(':') {

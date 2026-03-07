@@ -14,6 +14,18 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const logger = info.project.projectService.logger;
     const directory = info.project.getCurrentDirectory();
 
+    // Eagerly test NAPI loading at plugin creation time
+    try {
+      const native: typeof import("@verter/native") = require("@verter/native");
+      const testHost = new native.VerterHost();
+      logger.info(`[Verter] NAPI binary loaded successfully (VerterHost created)`);
+      // Let it be GC'd — getDtsSnapshot creates its own host
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.info(`[Verter] NAPI binary load FAILED: ${msg}`);
+      logger.info(`[Verter] .vue files will use fallback types (DefineComponent<{}, {}>)`);
+    }
+
     // TypeScript plugins have a `cwd` of `/`, which causes issues with import resolution.
     process.chdir(directory);
 
@@ -308,7 +320,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
   const getExternalFiles = (project: tsModule.server.ConfiguredProject) => {
     const files = project.getFileNames(true, true).filter(isVue);
-    project.projectService.logger.info("[Verter] Got files\n" + files.join("\n"));
+    project.projectService.logger.info(
+      `[Verter] getExternalFiles: ${files.length} .vue file(s) → ${files.length} .vue.ts virtual file(s)`,
+    );
+    if (files.length > 0) {
+      project.projectService.logger.info("[Verter] Got files\n" + files.join("\n"));
+    }
     return files.map((f) => f + ".ts");
   };
 

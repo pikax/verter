@@ -772,6 +772,12 @@ pub struct ExportSignature {
     /// or `default` keyword for anonymous default exports.
     /// Script-content-relative; add script content offset for SFC-absolute.
     pub span: Span,
+    /// Source module for re-exports (e.g., `"./Popup.vue"`). None for local exports.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reexport_source: Option<String>,
+    /// Original name in source module (e.g., `"default"`). None for local exports.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reexport_local: Option<String>,
 }
 
 fn serialize_analysis_flags<S: serde::Serializer>(

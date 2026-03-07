@@ -500,6 +500,8 @@ mod tests {
             declaration_hash: [1; 16],
             is_type: true,
             span: Default::default(),
+            reexport_source: None,
+            reexport_local: None,
         }];
         let changed = compute_changed_exports(&old, &new);
         assert!(changed.contains("MyType"));
@@ -520,12 +522,16 @@ mod tests {
             declaration_hash: [1; 16],
             is_type: true,
             span: Default::default(),
+            reexport_source: None,
+            reexport_local: None,
         }];
         let new = vec![verter_analysis::ExportSignature {
             name: "MyType".to_string(),
             declaration_hash: [2; 16],
             is_type: true,
             span: Default::default(),
+            reexport_source: None,
+            reexport_local: None,
         }];
         let changed = compute_changed_exports(&old, &new);
         assert!(changed.contains("MyType"));
@@ -540,18 +546,24 @@ mod tests {
                 declaration_hash: [1; 16],
                 is_type: true,
                 span: Default::default(),
+                reexport_source: None,
+                reexport_local: None,
             },
             verter_analysis::ExportSignature {
                 name: "Changed".to_string(),
                 declaration_hash: [2; 16],
                 is_type: true,
                 span: Default::default(),
+                reexport_source: None,
+                reexport_local: None,
             },
             verter_analysis::ExportSignature {
                 name: "Removed".to_string(),
                 declaration_hash: [3; 16],
                 is_type: true,
                 span: Default::default(),
+                reexport_source: None,
+                reexport_local: None,
             },
         ];
         let new = vec![
@@ -560,18 +572,24 @@ mod tests {
                 declaration_hash: [1; 16],
                 is_type: true,
                 span: Default::default(),
+                reexport_source: None,
+                reexport_local: None,
             },
             verter_analysis::ExportSignature {
                 name: "Changed".to_string(),
                 declaration_hash: [9; 16],
                 is_type: true,
                 span: Default::default(),
+                reexport_source: None,
+                reexport_local: None,
             },
             verter_analysis::ExportSignature {
                 name: "Added".to_string(),
                 declaration_hash: [4; 16],
                 is_type: true,
                 span: Default::default(),
+                reexport_source: None,
+                reexport_local: None,
             },
         ];
         let changed = compute_changed_exports(&old, &new);
@@ -590,6 +608,8 @@ mod tests {
             declaration_hash: [1; 16],
             is_type: true,
             span: Default::default(),
+            reexport_source: None,
+            reexport_local: None,
         }];
         let new = vec![];
         let changed = compute_changed_exports(&old, &new);
@@ -604,12 +624,16 @@ mod tests {
             declaration_hash: [1; 16],
             is_type: true,
             span: Default::default(),
+            reexport_source: None,
+            reexport_local: None,
         }];
         let new = vec![verter_analysis::ExportSignature {
             name: "MyType".to_string(),
             declaration_hash: [1; 16],
             is_type: true,
             span: Default::default(),
+            reexport_source: None,
+            reexport_local: None,
         }];
         let changed = compute_changed_exports(&old, &new);
         assert!(changed.is_empty());

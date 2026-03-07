@@ -5,6 +5,7 @@ export const FALLBACK_STUB = "export default {} as any";
 
 let host: VerterHost | null = null;
 let loadFailed = false;
+let loadError: string | null = null;
 
 function getHost(): VerterHost | null {
   if (host) return host;
@@ -14,8 +15,9 @@ function getHost(): VerterHost | null {
     const native: typeof import("@verter/native") = require("@verter/native");
     host = new native.VerterHost();
     return host;
-  } catch {
+  } catch (e: unknown) {
     loadFailed = true;
+    loadError = e instanceof Error ? e.message : String(e);
     return null;
   }
 }
@@ -29,7 +31,7 @@ export const parseFile = (
 
   const h = getHost();
   if (!h) {
-    logger.info("[Verter] native binary not available, returning stub");
+    logger.info(`[Verter] native binary not available, returning stub${loadError ? ` (error: ${loadError})` : ""}`);
     return FALLBACK_STUB;
   }
 

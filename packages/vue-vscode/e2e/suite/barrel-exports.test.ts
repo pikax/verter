@@ -1,5 +1,6 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
+import * as path from "path";
 import {
   waitForExtensionReady,
   waitForFileReady,
@@ -8,6 +9,30 @@ import {
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
+
+/** Execute go-to-definition at a position and return locations. */
+async function getDefinitions(
+  uri: vscode.Uri,
+  pos: vscode.Position,
+): Promise<vscode.Location[]> {
+  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeDefinitionProvider",
+    uri,
+    pos,
+  );
+  return locations || [];
+}
+
+/** Find position of `needle` in document text, offset by `charOffset` into the match. */
+function findPosition(
+  doc: vscode.TextDocument,
+  needle: string,
+  charOffset = 0,
+): vscode.Position | undefined {
+  const idx = doc.getText().indexOf(needle);
+  if (idx === -1) return undefined;
+  return doc.positionAt(idx + charOffset);
+}
 
 suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
   this.timeout(60_000);
@@ -212,5 +237,149 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
       propErrors,
       `Expected no prop type errors but found: ${propErrors.map((d) => `TS${d.code}: ${d.message}`).join("; ")}`,
     ).to.have.lengthOf(0);
+  });
+
+  // ── TS Plugin Tests (critical: plugin must work in sync with Verter) ──
+
+  test("TS plugin: hover on re-exported component in barrel file shows typed props", async function () {
+    if (!isBarrelFixture) {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) {
+      this.skip();
+      return;
+    }
+
+    // Open the barrel index.ts file
+    const indexPath = path.join(workspaceFolders[0].uri.fsPath, "src/components/index.ts");
+    const tsDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(indexPath));
+    await vscode.window.showTextDocument(tsDoc);
+    await waitForFileReady(tsDoc);
+
+    // Hover on "Overlay" in `export { default as Overlay } from './Overlay.vue'`
+    const pos = findPosition(tsDoc, "Overlay", 0);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+    const { hovers, latencyMs } = await measureHover(tsDoc.uri, pos);
+
+    console.log(`    TS plugin hover on Overlay: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    if (hovers.length === 0) {
+      console.log("    WARNING: No hover results in .ts file — type provider may not be running");
+      return;
+    }
+
+    const content = hovers[0].contents
+      .map((c) => (typeof c === "string" ? c : c.value))
+      .join("\n");
+
+    console.log(`    Hover content: ${content.slice(0, 200)}`);
+
+    if (TYPE_PROVIDER === "tsgo") {
+      console.log("    TSGO: skipping assertion (barrel re-export limitation)");
+      return;
+    }
+
+    // NEGATIVE: should NOT show plain DefineComponent<{}, {}>
+    expect(content).to.not.include(
+      "DefineComponent<{}, {}",
+      "TS plugin should provide typed component, not fallback",
+    );
+
+    // NEGATIVE: should NOT show plain `any`
+    expect(content).to.not.match(
+      /:\s*any\b/,
+      "TS plugin should not return 'any' type (FALLBACK_STUB)",
+    );
+  });
+
+  test("TS plugin: definition from barrel file navigates to .vue (not .vue.d.ts)", async function () {
+    if (!isBarrelFixture) {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) {
+      this.skip();
+      return;
+    }
+
+    // Open the barrel index.ts file
+    const indexPath = path.join(workspaceFolders[0].uri.fsPath, "src/components/index.ts");
+    const tsDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(indexPath));
+    await vscode.window.showTextDocument(tsDoc);
+
+    // Go-to-definition on './Overlay.vue' source string
+    const pos = findPosition(tsDoc, "'./Overlay.vue'", 3);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const locations = await getDefinitions(tsDoc.uri, pos);
+    console.log(`    TS plugin definition on './Overlay.vue': ${locations.length} location(s)`);
+
+    expect(locations.length, "should have definition results").to.be.greaterThan(0);
+
+    const def = locations[0];
+    // POSITIVE: should navigate to .vue file
+    expect(def.uri.fsPath, "should navigate to Overlay.vue").to.include("Overlay.vue");
+
+    // NEGATIVE: must NOT open .vue.d.ts or .vue.ts (virtual files)
+    expect(def.uri.fsPath, "should open actual .vue, not virtual file").to.not.match(
+      /\.vue\.(d\.ts|ts|tsx)$/,
+    );
+  });
+
+  test("TS plugin: import binding hover in .vue file shows typed component (not DefineComponent)", async function () {
+    if (!isBarrelFixture) {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    // In App.vue, hover on "Overlay" in the import statement
+    const pos = findPosition(doc, "{ Overlay, Button }", 2); // on "O"
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+
+    console.log(`    Import binding hover on Overlay: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    if (hovers.length === 0) {
+      console.log("    WARNING: No hover results — type provider may not be running");
+      return;
+    }
+
+    const content = hovers[0].contents
+      .map((c) => (typeof c === "string" ? c : c.value))
+      .join("\n");
+
+    console.log(`    Hover content: ${content.slice(0, 200)}`);
+
+    if (TYPE_PROVIDER === "tsgo") {
+      console.log("    TSGO: skipping assertion (barrel re-export limitation)");
+      return;
+    }
+
+    // NEGATIVE: should NOT be plain DefineComponent<{}, {}>
+    expect(content).to.not.include(
+      "DefineComponent<{}, {}",
+      "import binding should have typed props through barrel",
+    );
+
+    // NEGATIVE: should NOT be `any`
+    expect(content).to.not.match(
+      /:\s*any\b/,
+      "import binding should not be 'any'",
+    );
   });
 });

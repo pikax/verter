@@ -51,12 +51,15 @@ pub(crate) fn extract_export_signatures_from_program(
                 if let Some(ref source) = decl.source {
                     for spec in &decl.specifiers {
                         let name = spec.exported.name().to_string();
+                        let local_name = spec.local.name().to_string();
                         let hash_input = format!("reexport:{}:{}", source.value, name);
                         out.push(ExportSignature {
                             name,
                             declaration_hash: hash_16(hash_input.as_bytes()),
                             is_type: decl.export_kind.is_type(),
                             span: spec.exported.span().into(),
+                            reexport_source: Some(source.value.to_string()),
+                            reexport_local: Some(local_name),
                         });
                     }
                     continue;
@@ -78,6 +81,8 @@ pub(crate) fn extract_export_signatures_from_program(
                             declaration_hash: hash,
                             is_type: decl.export_kind.is_type(),
                             span: spec.exported.span().into(),
+                            reexport_source: None,
+                            reexport_local: None,
                         });
                     }
                     continue;
@@ -110,6 +115,8 @@ pub(crate) fn extract_export_signatures_from_program(
                     declaration_hash: hash_16(text.as_bytes()),
                     is_type: false,
                     span: target_span.into(),
+                    reexport_source: None,
+                    reexport_local: None,
                 });
             }
             Statement::ExportAllDeclaration(decl) => {
@@ -119,6 +126,8 @@ pub(crate) fn extract_export_signatures_from_program(
                     declaration_hash: hash_16(hash_input.as_bytes()),
                     is_type: decl.export_kind.is_type(),
                     span: decl.span.into(),
+                    reexport_source: Some(decl.source.value.to_string()),
+                    reexport_local: Some("*".to_string()),
                 });
             }
             _ => {}
@@ -145,6 +154,8 @@ fn extract_declaration_signatures(
                         declaration_hash: hash_16(text.as_bytes()),
                         is_type: false,
                         span: id_span,
+                        reexport_source: None,
+                        reexport_local: None,
                     });
                 }
             }
@@ -158,6 +169,8 @@ fn extract_declaration_signatures(
                     declaration_hash: hash_16(text.as_bytes()),
                     is_type: false,
                     span: id.span.into(),
+                    reexport_source: None,
+                    reexport_local: None,
                 });
             }
         }
@@ -170,6 +183,8 @@ fn extract_declaration_signatures(
                     declaration_hash: hash_16(text.as_bytes()),
                     is_type: false,
                     span: id.span.into(),
+                    reexport_source: None,
+                    reexport_local: None,
                 });
             }
         }
@@ -181,6 +196,8 @@ fn extract_declaration_signatures(
                 declaration_hash: hash_16(text.as_bytes()),
                 is_type: true,
                 span: iface.id.span.into(),
+                reexport_source: None,
+                reexport_local: None,
             });
         }
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -191,6 +208,8 @@ fn extract_declaration_signatures(
                 declaration_hash: hash_16(text.as_bytes()),
                 is_type: true,
                 span: alias.id.span.into(),
+                reexport_source: None,
+                reexport_local: None,
             });
         }
         Declaration::TSEnumDeclaration(en) => {
@@ -201,6 +220,8 @@ fn extract_declaration_signatures(
                 declaration_hash: hash_16(text.as_bytes()),
                 is_type: false,
                 span: en.id.span.into(),
+                reexport_source: None,
+                reexport_local: None,
             });
         }
         _ => {}
