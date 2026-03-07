@@ -98,6 +98,10 @@ mod no_undef_components;
 mod no_unused_refs;
 mod no_v_text_directive;
 
+mod define_model_type_required;
+mod no_duplicate_model_modifiers;
+mod require_define_slots;
+
 pub use attribute_hyphenation::AttributeHyphenation;
 pub use attribute_order::AttributeOrder;
 pub use block_order::BlockOrder;
@@ -195,3 +199,7 @@ pub use no_empty_component_block::NoEmptyComponentBlock;
 pub use no_undef_components::NoUndefComponents;
 pub use no_unused_refs::NoUnusedRefs;
 pub use no_v_text_directive::NoVTextDirective;
+
+pub use define_model_type_required::DefineModelTypeRequired;
+pub use no_duplicate_model_modifiers::NoDuplicateModelModifiers;
+pub use require_define_slots::RequireDefineSlots;

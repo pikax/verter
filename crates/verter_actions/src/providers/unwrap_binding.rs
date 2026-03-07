@@ -6,7 +6,7 @@
 // @ai-generated
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
 
 pub struct UnwrapBinding;
@@ -82,6 +82,7 @@ impl ActionProvider for UnwrapBinding {
             }],
             is_preferred: true,
             diagnostic_rule: Some(diag.rule.clone()),
+            safety: AutofixSafety::Safe,
         }]
     }
 }
@@ -106,6 +107,9 @@ mod tests {
             span: verter_span::Span::new(this_start, this_end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Directive,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();
@@ -150,6 +154,9 @@ mod tests {
             span: verter_span::Span::new(mustache_start, mustache_end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::ElementOpenTag,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();
@@ -194,6 +201,9 @@ mod tests {
             span: verter_span::Span::new(5, 18),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Directive,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();

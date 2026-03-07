@@ -1,4 +1,24 @@
-//! Core action types: `CodeAction`, `FileEdit`, `ActionKind`.
+//! Core action types: `CodeAction`, `FileEdit`, `ActionKind`, `AutofixSafety`.
+
+/// Safety tier for an autofix action.
+///
+/// Helps AI agents and tooling decide which fixes to apply automatically
+/// vs. which need human review.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum AutofixSafety {
+    /// Correctness fix, no behavior change (e.g., add missing key, remove duplicate attribute).
+    #[default]
+    Safe,
+    /// Pure style/formatting change (e.g., self-close tags, casing normalization).
+    StyleOnly,
+    /// Behavioral but semantically equivalent (e.g., extract composable, convert API style).
+    Caution,
+    /// May change runtime semantics (e.g., semantic refactors).
+    Risky,
+}
 
 /// A code fix or refactoring action.
 #[derive(Debug, Clone)]
@@ -13,6 +33,8 @@ pub struct CodeAction {
     pub is_preferred: bool,
     /// The diagnostic rule this fixes, if any.
     pub diagnostic_rule: Option<String>,
+    /// Safety tier for this fix.
+    pub safety: AutofixSafety,
 }
 
 /// Kind of code action.
@@ -53,6 +75,7 @@ mod tests {
             }],
             is_preferred: true,
             diagnostic_rule: Some("unused-css-selector".to_string()),
+            safety: AutofixSafety::Safe,
         };
 
         assert_eq!(action.kind, ActionKind::QuickFix);
@@ -66,6 +89,8 @@ mod tests {
             action.diagnostic_rule.as_deref(),
             Some("unused-css-selector")
         );
+        // New: safety defaults
+        assert_eq!(action.safety, AutofixSafety::Safe);
     }
 
     #[test]
@@ -80,5 +105,44 @@ mod tests {
             edit.file_id.is_some(),
             "cross-file edit should have file_id"
         );
+    }
+
+    #[test]
+    fn autofix_safety_tiers() {
+        // Safe — correctness fix, no behavior change
+        let safe = AutofixSafety::Safe;
+        assert_eq!(safe, AutofixSafety::Safe);
+
+        // StyleOnly — pure formatting/style change
+        let style = AutofixSafety::StyleOnly;
+        assert_ne!(style, AutofixSafety::Safe);
+
+        // Caution — behavioral but semantically equivalent
+        let caution = AutofixSafety::Caution;
+        assert_ne!(caution, AutofixSafety::Safe);
+
+        // Risky — may change runtime semantics
+        let risky = AutofixSafety::Risky;
+        assert_ne!(risky, AutofixSafety::Safe);
+    }
+
+    #[test]
+    fn autofix_safety_default_is_safe() {
+        assert_eq!(AutofixSafety::default(), AutofixSafety::Safe);
+    }
+
+    #[test]
+    fn autofix_safety_serde_roundtrip() {
+        let values = [
+            AutofixSafety::Safe,
+            AutofixSafety::StyleOnly,
+            AutofixSafety::Caution,
+            AutofixSafety::Risky,
+        ];
+        for v in &values {
+            let json = serde_json::to_string(v).expect("serialize");
+            let parsed: AutofixSafety = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(&parsed, v);
+        }
     }
 }

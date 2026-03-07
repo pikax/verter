@@ -9,7 +9,7 @@ use verter_diagnostics::LintDiagnostic;
 use verter_span::Span;
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 
 pub struct PreferScriptAttrs;
 
@@ -69,6 +69,7 @@ impl ActionProvider for PreferScriptAttrs {
             ],
             is_preferred: true,
             diagnostic_rule: Some("prefer-script-attrs".to_string()),
+            safety: AutofixSafety::Caution,
         }]
     }
 }
@@ -203,6 +204,9 @@ mod tests {
             severity: Severity::Warning,
             span_kind: DiagnosticSpanKind::ScriptCallSite,
             tags: vec![],
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         }
     }
 

@@ -1376,6 +1376,9 @@ mod tests {
             span: verter_span::Span::new(1, 5),
             tags: vec![],
             span_kind: verter_diagnostics::DiagnosticSpanKind::ElementOpenTag,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         }];
 
         let out = lint_diagnostics_to_utf16(input, Some(source));

@@ -7,7 +7,7 @@
 // @ai-generated
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
 
 pub struct SymbolProvide;
@@ -54,6 +54,7 @@ impl ActionProvider for SymbolProvide {
             ],
             is_preferred: true,
             diagnostic_rule: Some(diag.rule.clone()),
+            safety: AutofixSafety::Safe,
         }]
     }
 }
@@ -78,6 +79,9 @@ mod tests {
             span: verter_span::Span::new(key_start, key_end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::ScriptCallSite,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();
@@ -132,6 +136,9 @@ mod tests {
             span: verter_span::Span::new(8, 15),
             tags: vec![],
             span_kind: DiagnosticSpanKind::ScriptCallSite,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
         let set = DiagnosticSet::new();
         let ctx = ActionContext {

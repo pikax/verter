@@ -37,3 +37,6 @@ walkdir = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = "0.8"
+
+[dev-dependencies]
+verter_span = { path = "../verter_span" }

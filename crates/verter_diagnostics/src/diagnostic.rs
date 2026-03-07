@@ -59,6 +59,41 @@ pub enum DiagnosticSpanKind {
     ElementContent,
 }
 
+/// Whether the diagnostic has full information or is based on incomplete analysis.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum Certainty {
+    /// Rule has full information (single-file structural rules).
+    #[default]
+    Definite,
+    /// Rule lacks some context (cross-file, heuristic, partial project scan).
+    Partial,
+}
+
+/// A source snippet providing evidence for why a diagnostic was emitted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceSnippet {
+    /// 1-3 lines of source context around the diagnostic span.
+    pub context: String,
+    /// Byte offset within `context` where the highlighted region starts.
+    pub highlight_start: u32,
+    /// Byte offset within `context` where the highlighted region ends.
+    pub highlight_end: u32,
+}
+
+/// A file related to a diagnostic finding (for cross-file diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelatedFile {
+    /// Path to the related file.
+    pub path: String,
+    /// Why this file is related to the diagnostic.
+    pub reason: String,
+}
+
 /// A single lint diagnostic emitted by a rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LintDiagnostic {
@@ -76,6 +111,12 @@ pub struct LintDiagnostic {
     pub tags: Vec<DiagnosticTag>,
     /// What the diagnostic span refers to.
     pub span_kind: DiagnosticSpanKind,
+    /// Whether the rule had complete information for this finding.
+    pub certainty: Certainty,
+    /// Source evidence snippets (populated on demand, usually empty).
+    pub evidence: Vec<EvidenceSnippet>,
+    /// Related files for cross-file diagnostics.
+    pub related_files: Vec<RelatedFile>,
 }
 
 // Manual serde impls preserve the existing flat JSON field names
@@ -88,7 +129,12 @@ impl serde::Serialize for LintDiagnostic {
         // so property access like `d.message` returns undefined. serialize_struct produces
         // a plain JS object, fixing both Lint and Diagnostics panels in the playground.
         let has_tags = !self.tags.is_empty();
-        let len = if has_tags { 8 } else { 7 };
+        let has_evidence = !self.evidence.is_empty();
+        let has_related = !self.related_files.is_empty();
+        let len = 8
+            + if has_tags { 1 } else { 0 }
+            + if has_evidence { 1 } else { 0 }
+            + if has_related { 1 } else { 0 };
         let mut state = serializer.serialize_struct("LintDiagnostic", len)?;
         state.serialize_field("rule", &self.rule)?;
         state.serialize_field("category", &self.category)?;
@@ -100,6 +146,13 @@ impl serde::Serialize for LintDiagnostic {
             state.serialize_field("tags", &self.tags)?;
         }
         state.serialize_field("spanKind", &self.span_kind)?;
+        state.serialize_field("certainty", &self.certainty)?;
+        if has_evidence {
+            state.serialize_field("evidence", &self.evidence)?;
+        }
+        if has_related {
+            state.serialize_field("relatedFiles", &self.related_files)?;
+        }
         state.end()
     }
 }
@@ -118,6 +171,12 @@ impl<'de> serde::Deserialize<'de> for LintDiagnostic {
             #[serde(default)]
             tags: Vec<DiagnosticTag>,
             span_kind: DiagnosticSpanKind,
+            #[serde(default)]
+            certainty: Certainty,
+            #[serde(default)]
+            evidence: Vec<EvidenceSnippet>,
+            #[serde(default)]
+            related_files: Vec<RelatedFile>,
         }
         let w = Wire::deserialize(deserializer)?;
         Ok(LintDiagnostic {
@@ -128,6 +187,9 @@ impl<'de> serde::Deserialize<'de> for LintDiagnostic {
             span: verter_span::Span::new(w.span_start, w.span_end),
             tags: w.tags,
             span_kind: w.span_kind,
+            certainty: w.certainty,
+            evidence: w.evidence,
+            related_files: w.related_files,
         })
     }
 }
@@ -146,6 +208,9 @@ mod tests {
             span: verter_span::Span::new(10, 40),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Directive,
+            certainty: Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let json = serde_json::to_string(&diag).expect("serialize");
@@ -171,6 +236,9 @@ mod tests {
             span: verter_span::Span::new(5, 20),
             tags: vec![DiagnosticTag::Unnecessary],
             span_kind: DiagnosticSpanKind::CssSelector,
+            certainty: Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let json = serde_json::to_string(&diag).expect("serialize");
@@ -200,6 +268,9 @@ mod tests {
             span: verter_span::Span::new(42, 50),
             tags: vec![DiagnosticTag::Unnecessary],
             span_kind: DiagnosticSpanKind::ScriptCallSite,
+            certainty: Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let json = serde_json::to_string(&diag).expect("serialize");
@@ -240,6 +311,9 @@ mod tests {
             span: verter_span::Span::new(0, 5),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Attribute,
+            certainty: Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let json = serde_json::to_string(&diag).expect("serialize");
@@ -254,6 +328,138 @@ mod tests {
         assert!(obj.get("spanStart").is_some());
         assert!(obj.get("spanEnd").is_some());
         assert!(obj.get("spanKind").is_some());
+    }
+
+    #[test]
+    fn certainty_default_is_definite() {
+        assert_eq!(Certainty::default(), Certainty::Definite);
+    }
+
+    #[test]
+    fn certainty_serde_roundtrip() {
+        let definite_json = serde_json::to_string(&Certainty::Definite).unwrap();
+        assert_eq!(definite_json, "\"definite\"");
+        let roundtrip: Certainty = serde_json::from_str(&definite_json).unwrap();
+        assert_eq!(roundtrip, Certainty::Definite);
+
+        let partial_json = serde_json::to_string(&Certainty::Partial).unwrap();
+        assert_eq!(partial_json, "\"partial\"");
+        let roundtrip: Certainty = serde_json::from_str(&partial_json).unwrap();
+        assert_eq!(roundtrip, Certainty::Partial);
+    }
+
+    #[test]
+    fn evidence_snippet_serde_roundtrip() {
+        let snippet = EvidenceSnippet {
+            context: "const x = ref(0)".to_string(),
+            highlight_start: 6,
+            highlight_end: 7,
+        };
+        let json = serde_json::to_string(&snippet).unwrap();
+        assert!(json.contains("highlightStart"), "should use camelCase keys");
+        assert!(json.contains("highlightEnd"), "should use camelCase keys");
+        let roundtrip: EvidenceSnippet = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, snippet);
+    }
+
+    #[test]
+    fn related_file_serde_roundtrip() {
+        let rf = RelatedFile {
+            path: "src/components/Foo.vue".to_string(),
+            reason: "Defines the prop type used here".to_string(),
+        };
+        let json = serde_json::to_string(&rf).unwrap();
+        let roundtrip: RelatedFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, rf);
+    }
+
+    #[test]
+    fn lint_diagnostic_new_fields_default() {
+        let diag = LintDiagnostic {
+            rule: "test".to_string(),
+            category: "test".to_string(),
+            severity: Severity::Warning,
+            message: "test".to_string(),
+            span: verter_span::Span::new(0, 5),
+            tags: vec![],
+            span_kind: DiagnosticSpanKind::Attribute,
+            certainty: Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        };
+        assert_eq!(diag.certainty, Certainty::Definite);
+        assert!(diag.evidence.is_empty(), "evidence should default to empty");
+        assert!(
+            diag.related_files.is_empty(),
+            "related_files should default to empty"
+        );
+    }
+
+    #[test]
+    fn lint_diagnostic_serde_omits_empty_evidence_and_related() {
+        let diag = LintDiagnostic {
+            rule: "test".to_string(),
+            category: "test".to_string(),
+            severity: Severity::Warning,
+            message: "test".to_string(),
+            span: verter_span::Span::new(0, 5),
+            tags: vec![],
+            span_kind: DiagnosticSpanKind::Attribute,
+            certainty: Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        };
+        let json = serde_json::to_string(&diag).unwrap();
+        assert!(
+            !json.contains("evidence"),
+            "empty evidence should be omitted"
+        );
+        assert!(
+            !json.contains("relatedFiles"),
+            "empty relatedFiles should be omitted"
+        );
+        assert!(
+            json.contains("certainty"),
+            "certainty should always be present"
+        );
+    }
+
+    #[test]
+    fn lint_diagnostic_serde_includes_populated_evidence() {
+        let diag = LintDiagnostic {
+            rule: "test".to_string(),
+            category: "test".to_string(),
+            severity: Severity::Warning,
+            message: "test".to_string(),
+            span: verter_span::Span::new(0, 5),
+            tags: vec![],
+            span_kind: DiagnosticSpanKind::Attribute,
+            certainty: Certainty::Partial,
+            evidence: vec![EvidenceSnippet {
+                context: "let x = 1".to_string(),
+                highlight_start: 4,
+                highlight_end: 5,
+            }],
+            related_files: vec![RelatedFile {
+                path: "Foo.vue".to_string(),
+                reason: "defines type".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&diag).unwrap();
+        assert!(
+            json.contains("evidence"),
+            "populated evidence should appear"
+        );
+        assert!(
+            json.contains("relatedFiles"),
+            "populated relatedFiles should appear"
+        );
+        assert!(
+            json.contains("\"partial\""),
+            "certainty Partial should serialize"
+        );
+        let roundtrip: LintDiagnostic = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, diag);
     }
 
     #[test]

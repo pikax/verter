@@ -5,7 +5,7 @@
 // @ai-generated
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
 
 pub struct RemoveUnsafeUrl;
@@ -49,6 +49,7 @@ impl ActionProvider for RemoveUnsafeUrl {
             }],
             is_preferred: true,
             diagnostic_rule: Some(diag.rule.clone()),
+            safety: AutofixSafety::Safe,
         }]
     }
 }
@@ -73,6 +74,9 @@ mod tests {
             span: verter_span::Span::new(val_start, val_end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Attribute,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();
@@ -116,6 +120,9 @@ mod tests {
             span: verter_span::Span::new(val_start, val_end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Attribute,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();
@@ -147,6 +154,9 @@ mod tests {
             span: verter_span::Span::new(9, 31),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Attribute,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
         let set = DiagnosticSet::new();
         let ctx = ActionContext {

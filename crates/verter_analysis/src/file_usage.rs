@@ -148,6 +148,29 @@ pub struct ComponentUsageOwned {
     pub end: u32,
 }
 
+/// An event declared via `defineEmits` (owned for cross-file indexing).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct EmitDeclarationOwned {
+    /// Event name (e.g., `"update:modelValue"`, `"close"`).
+    pub event_name: String,
+}
+
+/// An event listened on a child component (owned for cross-file indexing).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ListenedEventOwned {
+    /// Event name (e.g., `"click"`, `"update:modelValue"`).
+    pub event_name: String,
+    /// Component name the event is listened on (e.g., `"MyButton"`).
+    pub component_name: Option<String>,
+}
+
+/// A template `id` attribute value (owned for cross-file indexing).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TemplateIdOwned {
+    /// The static `id` value (e.g., `"app"`, `"modal-root"`).
+    pub id: String,
+}
+
 /// Owned style usage information for a single `<style>` block.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct StyleUsageInfoOwned {
@@ -202,6 +225,15 @@ pub struct FileUsageInfoOwned {
     /// CSS variable names manipulated in script (from DOM style APIs)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub script_css_var_names: Vec<String>,
+    /// Events declared via defineEmits (for cross-file event flow tracing)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emit_declarations: Vec<EmitDeclarationOwned>,
+    /// Events listened on child components (for cross-file event flow tracing)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listened_events: Vec<ListenedEventOwned>,
+    /// Static `id` attribute values from template elements (for teleport target lookup)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub template_ids: Vec<TemplateIdOwned>,
 }
 
 impl FileUsageInfoOwned {

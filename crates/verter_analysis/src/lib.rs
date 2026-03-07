@@ -39,8 +39,9 @@ pub use analysis::{
 pub use classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};
 pub use exports::extract_export_signatures;
 pub use file_usage::{
-    ComponentUsageOwned, FileUsageFlags, FileUsageInfoOwned, ImportInfoOwned, InjectUsageOwned,
-    MacroInfoOwned, ProvideUsageOwned, StyleUsageInfoOwned,
+    ComponentUsageOwned, EmitDeclarationOwned, FileUsageFlags, FileUsageInfoOwned, ImportInfoOwned,
+    InjectUsageOwned, ListenedEventOwned, MacroInfoOwned, ProvideUsageOwned, StyleUsageInfoOwned,
+    TemplateIdOwned,
 };
 pub use imports::extract_import_sources;
 pub use macros::collect_type_references;

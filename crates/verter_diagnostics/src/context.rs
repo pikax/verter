@@ -1,7 +1,9 @@
 //! Lint context: scope tracking, diagnostics accumulator, disabled ranges.
 
 use crate::config::LintConfig;
-use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, LintDiagnostic, Severity};
+use crate::diagnostic::{
+    Certainty, DiagnosticSpanKind, DiagnosticTag, LintDiagnostic, RelatedFile, Severity,
+};
 use crate::diagnostic_set::DiagnosticSet;
 
 /// Context passed to lint rules during traversal.
@@ -89,6 +91,9 @@ impl<'a> LintContext<'a> {
             span: verter_span::Span::new(span_start, span_end),
             tags: vec![],
             span_kind,
+            certainty: Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         });
     }
 
@@ -146,6 +151,48 @@ impl<'a> LintContext<'a> {
             span: verter_span::Span::new(span_start, span_end),
             tags,
             span_kind,
+            certainty: Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        });
+    }
+
+    /// Report a diagnostic with `Partial` certainty and related files.
+    #[allow(clippy::too_many_arguments)]
+    pub fn report_partial(
+        &mut self,
+        rule: &str,
+        category: &str,
+        message: String,
+        span_start: u32,
+        span_end: u32,
+        default_severity: Severity,
+        span_kind: DiagnosticSpanKind,
+        related_files: Vec<RelatedFile>,
+    ) {
+        if self.is_disabled(rule, span_start) {
+            return;
+        }
+        let severity = match self.config.effective_severity(rule, default_severity) {
+            Some(s) => s,
+            None => return,
+        };
+        let severity = match self.severity_override(rule, span_start) {
+            Some(Some(s)) => s,
+            Some(None) => return,
+            None => severity,
+        };
+        self.set.add(LintDiagnostic {
+            rule: rule.to_string(),
+            category: category.to_string(),
+            severity,
+            message,
+            span: verter_span::Span::new(span_start, span_end),
+            tags: vec![],
+            span_kind,
+            certainty: Certainty::Partial,
+            evidence: Vec::new(),
+            related_files,
         });
     }
 

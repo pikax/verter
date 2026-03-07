@@ -34,6 +34,7 @@ mod valid_define_props;
 
 mod no_boolean_default;
 mod no_import_compiler_macros;
+mod no_leaked_event_listeners;
 mod prefer_define_options;
 mod prefer_script_attrs;
 mod require_typed_ref;
@@ -72,6 +73,7 @@ pub use valid_define_props::ValidDefineProps;
 
 pub use no_boolean_default::NoBooleanDefault;
 pub use no_import_compiler_macros::NoImportCompilerMacros;
+pub use no_leaked_event_listeners::NoLeakedEventListeners;
 pub use prefer_define_options::PreferDefineOptions;
 pub use prefer_script_attrs::PreferScriptAttrs;
 pub use require_typed_ref::RequireTypedRef;

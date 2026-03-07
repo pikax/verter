@@ -59,6 +59,14 @@ pub struct LintFileParams {
     pub path: String,
     #[schemars(description = "Lint preset: essential|recommended|all|performance|a11y|strict")]
     pub preset: Option<String>,
+    #[schemars(
+        description = "Path to a .verter-baseline.json file. When set, only diagnostics NOT in the baseline are returned."
+    )]
+    pub baseline_path: Option<String>,
+    #[schemars(
+        description = "Include source evidence snippets (3-line context) around each diagnostic span."
+    )]
+    pub include_evidence: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -67,6 +75,14 @@ pub struct LintProjectParams {
     pub preset: Option<String>,
     #[schemars(description = "Only return errors, skip warnings and info")]
     pub errors_only: Option<bool>,
+    #[schemars(
+        description = "Path to a .verter-baseline.json file. When set, only diagnostics NOT in the baseline are returned."
+    )]
+    pub baseline_path: Option<String>,
+    #[schemars(
+        description = "Include source evidence snippets (3-line context) around each diagnostic span."
+    )]
+    pub include_evidence: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -127,6 +143,28 @@ pub struct OptionalPathParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SaveBaselineParams {
+    #[schemars(
+        description = "Output path for the baseline file (default: .verter-baseline.json in project root)"
+    )]
+    pub output_path: Option<String>,
+    #[schemars(description = "Lint preset to use when building the baseline")]
+    pub preset: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TraceEventFlowParams {
+    #[schemars(description = "Event name to trace (e.g., 'submit', 'update:modelValue')")]
+    pub event_name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TestImpactParams {
+    #[schemars(description = "List of changed file paths")]
+    pub changed_files: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CheckPropTypesParams {
     #[schemars(description = "Parent component file path")]
     pub parent: String,
@@ -167,6 +205,32 @@ fn build_script_snapshot(
     }
 }
 
+/// Populate evidence snippets on diagnostics from source text.
+fn populate_evidence(diags: &mut [verter_diagnostics::LintDiagnostic], source: Option<&str>) {
+    let src = match source {
+        Some(s) => s,
+        None => return,
+    };
+    for d in diags.iter_mut() {
+        if d.span.start >= d.span.end || d.span.end as usize > src.len() {
+            continue;
+        }
+        // Find 1 line before and 1 line after the span for context
+        let start = d.span.start as usize;
+        let end = d.span.end as usize;
+        let ctx_start = src[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let ctx_end = src[end..].find('\n').map(|i| end + i).unwrap_or(src.len());
+        let context = &src[ctx_start..ctx_end];
+        let hl_start = (start - ctx_start) as u32;
+        let hl_end = (end - ctx_start) as u32;
+        d.evidence.push(verter_diagnostics::EvidenceSnippet {
+            context: context.to_string(),
+            highlight_start: hl_start,
+            highlight_end: hl_end,
+        });
+    }
+}
+
 // ── Tool implementations ───────────────────────────────────────────
 
 #[tool_router]
@@ -192,7 +256,7 @@ impl VerterMcpServer {
     // ════════════════════════════════════════════════════════════════
 
     #[tool(
-        description = "Scan a directory for Vue files and load them into the analysis host. Returns file count and any parse errors."
+        description = "Scan a directory for Vue files and load them into the analysis host. Auto-discovers .verterrc.json / eslint config for lint rules. Returns file count, config status, and any parse errors."
     )]
     async fn scan_project(
         &self,
@@ -201,7 +265,22 @@ impl VerterMcpServer {
         let root = std::path::Path::new(&params.root);
         let result =
             scanner::scan_directory(root, &self.host, params.include_deps.unwrap_or(false));
-        let json = serde_json::to_string_pretty(&result).map_err(|e| mcp_err(e.to_string()))?;
+
+        // Auto-discover project lint config
+        let resolved = verter_diagnostics::discover_lint_config(root);
+        let config_info = serde_json::json!({
+            "explicitly_configured": resolved.explicitly_configured,
+            "preset": format!("{:?}", resolved.config.preset),
+            "rule_overrides": resolved.config.rules.len(),
+            "ignore_patterns": resolved.config.ignore_patterns,
+        });
+
+        let mut response = serde_json::to_value(&result).map_err(|e| mcp_err(e.to_string()))?;
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("loaded_config".to_string(), config_info);
+        }
+
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
@@ -601,7 +680,31 @@ impl VerterMcpServer {
             source_str,
         );
 
-        let diag_vec = diags.into_diagnostics();
+        let mut diag_vec = diags.into_diagnostics();
+
+        // Populate evidence snippets if requested
+        if params.include_evidence.unwrap_or(false) {
+            populate_evidence(&mut diag_vec, source_str);
+        }
+
+        // Filter against baseline if provided
+        if let Some(baseline_path) = &params.baseline_path {
+            let baseline = crate::baseline::Baseline::load(std::path::Path::new(baseline_path))
+                .map_err(|e| mcp_err(format!("Cannot load baseline: {}", e)))?;
+            let root = self
+                .project_root
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let rel = crate::baseline::make_relative(&canonical, &root);
+            diag_vec.retain(|d| {
+                let span_content = source_str
+                    .and_then(|s| s.get(d.span.start as usize..d.span.end as usize))
+                    .unwrap_or("");
+                !baseline.contains(&rel, &d.rule, span_content)
+            });
+        }
+
         let json = serde_json::to_string_pretty(&diag_vec).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -620,6 +723,21 @@ impl VerterMcpServer {
         } else {
             self.linter.clone()
         };
+
+        let baseline = if let Some(bp) = &params.baseline_path {
+            Some(
+                crate::baseline::Baseline::load(std::path::Path::new(bp))
+                    .map_err(|e| mcp_err(format!("Cannot load baseline: {}", e)))?,
+            )
+        } else {
+            None
+        };
+        let root = self
+            .project_root
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let include_evidence = params.include_evidence.unwrap_or(false);
 
         let mut total_errors = 0usize;
         let mut total_warnings = 0usize;
@@ -647,7 +765,22 @@ impl VerterMcpServer {
             );
 
             let errors_only = params.errors_only.unwrap_or(false);
-            let diag_vec = diags.into_diagnostics();
+            let mut diag_vec = diags.into_diagnostics();
+
+            if include_evidence {
+                populate_evidence(&mut diag_vec, source_str);
+            }
+
+            // Filter against baseline
+            if let Some(ref baseline) = baseline {
+                let rel = crate::baseline::make_relative(id, &root);
+                diag_vec.retain(|d| {
+                    let span_content = source_str
+                        .and_then(|s| s.get(d.span.start as usize..d.span.end as usize))
+                        .unwrap_or("");
+                    !baseline.contains(&rel, &d.rule, span_content)
+                });
+            }
 
             for d in &diag_vec {
                 match d.severity {
@@ -727,6 +860,7 @@ impl VerterMcpServer {
                 serde_json::json!({
                     "title": a.title,
                     "kind": format!("{:?}", a.kind),
+                    "safety": format!("{:?}", a.safety),
                     "is_preferred": a.is_preferred,
                     "diagnostic_rule": a.diagnostic_rule,
                     "edits": a.edits.iter().map(|e| serde_json::json!({
@@ -2079,6 +2213,314 @@ impl VerterMcpServer {
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // BASELINE (1 tool)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Save a baseline of current diagnostics. Future lint calls with baseline_path will only report NEW issues not in the baseline."
+    )]
+    async fn save_baseline(
+        &self,
+        Parameters(params): Parameters<SaveBaselineParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let linter = if let Some(preset) = &params.preset {
+            let config = crate::tools::diagnostics::make_lint_config(preset);
+            Arc::new(Linter::new(config))
+        } else {
+            self.linter.clone()
+        };
+
+        let root = self
+            .project_root
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+
+        let mut baseline = crate::baseline::Baseline::new();
+        baseline.created = chrono_now_iso();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_template_analysis(&self.host, id);
+            let analysis = match self.host.get_analysis(id) {
+                Some(a) => a,
+                None => continue,
+            };
+            let source = self.host.get_source(id);
+            let source_str = source.as_deref();
+
+            let script_snapshot = build_script_snapshot(&analysis);
+            let diags = linter.lint_with_source(
+                Some(&script_snapshot),
+                analysis.template.as_ref(),
+                &analysis.styles,
+                source_str,
+            );
+
+            let diag_vec = diags.into_diagnostics();
+            let rel = crate::baseline::make_relative(id, &root);
+
+            for d in &diag_vec {
+                let span_content = source_str
+                    .and_then(|s| s.get(d.span.start as usize..d.span.end as usize))
+                    .unwrap_or("");
+                baseline.add(&rel, &d.rule, span_content);
+            }
+        }
+
+        let output_path = params
+            .output_path
+            .map(PathBuf::from)
+            .or_else(|| {
+                self.project_root
+                    .as_ref()
+                    .map(|r| r.join(".verter-baseline.json"))
+            })
+            .unwrap_or_else(|| PathBuf::from(".verter-baseline.json"));
+
+        baseline
+            .save(&output_path)
+            .map_err(|e| mcp_err(format!("Cannot save baseline: {}", e)))?;
+
+        let response = serde_json::json!({
+            "path": output_path.display().to_string(),
+            "total_entries": baseline.total_entries(),
+            "files": baseline.entries.len(),
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // EVENT FLOW (1 tool)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Trace an event across the component graph: find which components emit it and which listen to it."
+    )]
+    async fn trace_event_flow(
+        &self,
+        Parameters(params): Parameters<TraceEventFlowParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut emitters: Vec<String> = Vec::new();
+        let mut listeners: Vec<String> = Vec::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_template_analysis(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                if let Some(tpl) = &analysis.template {
+                    // Check if component declares this emit (defineEmits)
+                    for emit in &tpl.emit_definitions {
+                        if emit.event_name == params.event_name {
+                            emitters.push(id.clone());
+                        }
+                    }
+                    // Check template for @event listeners
+                    for evt in &tpl.event_handlers {
+                        if evt.event_name == params.event_name {
+                            listeners.push(id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        emitters.sort();
+        emitters.dedup();
+        listeners.sort();
+        listeners.dedup();
+
+        let response = serde_json::json!({
+            "event_name": params.event_name,
+            "emitters": emitters,
+            "listeners": listeners,
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TEST IMPACT (1 tool)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Given changed files, identify which test files should be re-run based on the component dependency graph."
+    )]
+    async fn get_test_impact(
+        &self,
+        Parameters(params): Parameters<TestImpactParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Build reverse dependency map: file -> set of files that import it
+        let files = self.host.list_files();
+        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_template_analysis(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                // Each import source is a dependency
+                for imp in &analysis.imports {
+                    let source = &imp.source;
+                    // Normalize: resolve relative imports
+                    let resolved = self.resolve(source);
+                    reverse_deps.entry(resolved).or_default().insert(id.clone());
+                }
+                // Component usages from template
+                if let Some(tpl) = &analysis.template {
+                    for comp in &tpl.components {
+                        if let Some(src) = &comp.import_source {
+                            let resolved = self.resolve(src);
+                            reverse_deps.entry(resolved).or_default().insert(id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // BFS from changed files using reverse deps
+        let mut affected: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> = VecDeque::new();
+
+        for f in &params.changed_files {
+            let canonical = self.resolve(f);
+            affected.insert(canonical.clone());
+            queue.push_back(canonical);
+        }
+
+        while let Some(file) = queue.pop_front() {
+            if let Some(dependents) = reverse_deps.get(&file) {
+                for dep in dependents {
+                    if affected.insert(dep.clone()) {
+                        queue.push_back(dep.clone());
+                    }
+                }
+            }
+        }
+
+        // Find co-located test files for affected components
+        let test_patterns = ["spec.ts", "spec.js", "test.ts", "test.js"];
+        let mut test_files: Vec<String> = Vec::new();
+        let mut untested: Vec<String> = Vec::new();
+
+        for file in &affected {
+            let path = std::path::Path::new(file);
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let parent = path.parent();
+            let mut found_test = false;
+
+            if let Some(dir) = parent {
+                // Check sibling test files: Foo.spec.ts, Foo.test.ts
+                for pattern in &test_patterns {
+                    let test_path = dir.join(format!("{}.{}", stem, pattern));
+                    if test_path.exists() {
+                        test_files.push(test_path.display().to_string());
+                        found_test = true;
+                    }
+                }
+                // Check __tests__/ directory
+                let tests_dir = dir.join("__tests__");
+                if tests_dir.is_dir() {
+                    for pattern in &test_patterns {
+                        let test_path = tests_dir.join(format!("{}.{}", stem, pattern));
+                        if test_path.exists() {
+                            test_files.push(test_path.display().to_string());
+                            found_test = true;
+                        }
+                    }
+                }
+            }
+
+            if !found_test && file.ends_with(".vue") {
+                untested.push(file.clone());
+            }
+        }
+
+        test_files.sort();
+        test_files.dedup();
+        untested.sort();
+
+        let response = serde_json::json!({
+            "changed_files": params.changed_files,
+            "affected_components": affected.len(),
+            "test_files": test_files,
+            "untested_components": untested,
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+}
+
+/// Simple ISO 8601 timestamp (no chrono dependency).
+fn chrono_now_iso() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    // Approximate UTC: good enough for a baseline timestamp
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let hours = rem / 3600;
+    let mins = (rem % 3600) / 60;
+    let s = rem % 60;
+    // Simple date calculation (not leap-second accurate, fine for baselines)
+    let mut y = 1970u64;
+    let mut d = days;
+    loop {
+        let year_days = if y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400))
+        {
+            366
+        } else {
+            365
+        };
+        if d < year_days {
+            break;
+        }
+        d -= year_days;
+        y += 1;
+    }
+    let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0usize;
+    for &md in &month_days {
+        if d < md {
+            break;
+        }
+        d -= md;
+        m += 1;
+    }
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y,
+        m + 1,
+        d + 1,
+        hours,
+        mins,
+        s
+    )
 }
 
 // ── ServerHandler trait ────────────────────────────────────────────
@@ -2094,5 +2536,97 @@ impl ServerHandler for VerterMcpServer {
              insights. For detailed analysis, use analyze_file, lint_file, get_component_api, etc."
                 .to_string(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chrono_now_iso_format() {
+        let ts = chrono_now_iso();
+        // Should be valid ISO 8601: YYYY-MM-DDTHH:MM:SSZ
+        assert!(ts.len() == 20, "timestamp should be 20 chars: {}", ts);
+        assert!(ts.ends_with('Z'), "should end with Z: {}", ts);
+        assert_eq!(&ts[4..5], "-", "should have dash after year");
+        assert_eq!(&ts[7..8], "-", "should have dash after month");
+        assert_eq!(&ts[10..11], "T", "should have T separator");
+        assert_eq!(&ts[13..14], ":", "should have colon after hour");
+        assert_eq!(&ts[16..17], ":", "should have colon after minute");
+        // Year should be reasonable (>= 2020)
+        let year: u32 = ts[..4].parse().unwrap();
+        assert!(year >= 2020, "year should be >= 2020: {}", year);
+    }
+
+    #[test]
+    fn populate_evidence_basic() {
+        let mut diags = vec![verter_diagnostics::LintDiagnostic {
+            rule: "test".to_string(),
+            category: "test".to_string(),
+            severity: verter_diagnostics::Severity::Warning,
+            message: "test message".to_string(),
+            span: verter_span::Span::new(15, 25),
+            tags: vec![],
+            span_kind: verter_diagnostics::DiagnosticSpanKind::Attribute,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        }];
+        let source = "line one\nsome bad code here\nnext line";
+        populate_evidence(&mut diags, Some(source));
+        assert_eq!(diags[0].evidence.len(), 1, "should populate one snippet");
+        let snippet = &diags[0].evidence[0];
+        assert!(
+            snippet.context.contains("bad code"),
+            "snippet should contain the line: {}",
+            snippet.context
+        );
+        assert!(
+            snippet.highlight_start < snippet.highlight_end,
+            "highlight range should be valid"
+        );
+    }
+
+    #[test]
+    fn populate_evidence_no_source() {
+        let mut diags = vec![verter_diagnostics::LintDiagnostic {
+            rule: "test".to_string(),
+            category: "test".to_string(),
+            severity: verter_diagnostics::Severity::Warning,
+            message: "test".to_string(),
+            span: verter_span::Span::new(0, 5),
+            tags: vec![],
+            span_kind: verter_diagnostics::DiagnosticSpanKind::Attribute,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        }];
+        populate_evidence(&mut diags, None);
+        assert!(
+            diags[0].evidence.is_empty(),
+            "should not populate without source"
+        );
+    }
+
+    #[test]
+    fn populate_evidence_out_of_range() {
+        let mut diags = vec![verter_diagnostics::LintDiagnostic {
+            rule: "test".to_string(),
+            category: "test".to_string(),
+            severity: verter_diagnostics::Severity::Warning,
+            message: "test".to_string(),
+            span: verter_span::Span::new(100, 200),
+            tags: vec![],
+            span_kind: verter_diagnostics::DiagnosticSpanKind::Attribute,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        }];
+        populate_evidence(&mut diags, Some("short"));
+        assert!(
+            diags[0].evidence.is_empty(),
+            "should skip out-of-range spans"
+        );
     }
 }

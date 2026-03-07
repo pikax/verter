@@ -169,6 +169,9 @@ mod tests {
             span: verter_span::Span::new(0, 10),
             tags: vec![],
             span_kind: crate::diagnostic::DiagnosticSpanKind::ElementOpenTag,
+            certainty: crate::diagnostic::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         });
         assert_eq!(set.len(), 1);
         set.enhance(0, |d| d.message = "enriched".to_string());

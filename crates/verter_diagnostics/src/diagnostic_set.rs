@@ -96,7 +96,7 @@ impl DiagnosticSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
+    use crate::diagnostic::{Certainty, DiagnosticSpanKind, DiagnosticTag, Severity};
 
     fn make_diag(rule: &str, start: u32, end: u32) -> LintDiagnostic {
         LintDiagnostic {
@@ -107,6 +107,9 @@ mod tests {
             span: verter_span::Span::new(start, end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::ElementOpenTag,
+            certainty: Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         }
     }
 

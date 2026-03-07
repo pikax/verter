@@ -5,7 +5,7 @@
 // @ai-generated
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
 
 pub struct RemoveTemplateAttr;
@@ -48,6 +48,7 @@ impl ActionProvider for RemoveTemplateAttr {
             }],
             is_preferred: true,
             diagnostic_rule: Some(diag.rule.clone()),
+            safety: AutofixSafety::Safe,
         }]
     }
 }
@@ -72,6 +73,9 @@ mod tests {
             span: verter_span::Span::new(attr_start, attr_end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Attribute,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();
@@ -108,6 +112,9 @@ mod tests {
             span: verter_span::Span::new(10, 20),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Attribute,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
         let set = DiagnosticSet::new();
         let ctx = ActionContext {

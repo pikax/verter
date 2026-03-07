@@ -6,7 +6,7 @@
 // @ai-generated
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
 
 pub struct ReplaceContent;
@@ -91,6 +91,7 @@ impl ActionProvider for ReplaceContent {
             }],
             is_preferred: true,
             diagnostic_rule: Some(diag.rule.clone()),
+            safety: AutofixSafety::Caution,
         }]
     }
 }
@@ -114,6 +115,9 @@ mod tests {
             span: verter_span::Span::new(start, end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::ScriptCallSite,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
         let set = DiagnosticSet::new();
         let ctx = ActionContext {
@@ -149,6 +153,9 @@ mod tests {
             span: verter_span::Span::new(start, end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Directive,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
         let set = DiagnosticSet::new();
         let ctx = ActionContext {
@@ -175,6 +182,9 @@ mod tests {
             span: verter_span::Span::new(0, 4),
             tags: vec![],
             span_kind: DiagnosticSpanKind::ScriptCallSite,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
         let set = DiagnosticSet::new();
         let ctx = ActionContext {

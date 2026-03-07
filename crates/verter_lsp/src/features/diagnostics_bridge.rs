@@ -323,6 +323,9 @@ mod tests {
             span: verter_span::Span::new(0, 5),
             tags: vec![LintDiagnosticTag::Unnecessary],
             span_kind: DiagnosticSpanKind::CssSelector,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         });
         let li = make_line_index("hello\nworld");
         let result = map_diagnostic_set(&set, &li);
@@ -350,6 +353,9 @@ mod tests {
                 span: verter_span::Span::new(0, 1),
                 tags: vec![],
                 span_kind: DiagnosticSpanKind::ElementOpenTag,
+                certainty: verter_diagnostics::Certainty::Definite,
+                evidence: Vec::new(),
+                related_files: Vec::new(),
             });
             map_diagnostic_set(&set, &li)
         };
@@ -383,6 +389,9 @@ mod tests {
             span: verter_span::Span::new(0, 1),
             tags: vec![],
             span_kind: DiagnosticSpanKind::ElementOpenTag,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         });
         let li = make_line_index("x");
         let result = map_diagnostic_set(&set, &li);
@@ -406,6 +415,9 @@ mod tests {
             span: verter_span::Span::new(foo_start, foo_end),
             tags: vec![LintDiagnosticTag::Unnecessary],
             span_kind: DiagnosticSpanKind::CssSelector,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         });
 
         let result = map_diagnostic_set(&set, &li);

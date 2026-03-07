@@ -30,13 +30,19 @@ pub mod rules;
 mod visitor;
 
 pub use comment_directives::parse_comment_directives;
-pub use config::{LintConfig, LintPreset};
+pub use config::{
+    discover_lint_config, parse_rule_severity, strip_json_comments, strip_trailing_commas,
+    LintConfig, LintPreset, ProjectLintConfig, ResolvedLintConfig, VerterProjectConfig,
+};
 pub use context::LintContext;
 pub use cross_file::{
     build_cross_file_snapshot, find_unknown_models, find_unknown_props, kebab_to_camel,
     ChildComponentInfo, CrossFileSnapshot, UnknownModelEntry, UnknownPropEntry,
 };
-pub use diagnostic::{DiagnosticSpanKind, DiagnosticTag, LintDiagnostic, Severity};
+pub use diagnostic::{
+    Certainty, DiagnosticSpanKind, DiagnosticTag, EvidenceSnippet, LintDiagnostic, RelatedFile,
+    Severity,
+};
 pub use diagnostic_set::DiagnosticSet;
 pub use linter::Linter;
 pub use rules::{FileContext, LintRule};

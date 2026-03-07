@@ -16,7 +16,7 @@ use verter_diagnostics::LintDiagnostic;
 use verter_span::Span;
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 
 pub struct ExtractBareText;
 
@@ -421,6 +421,7 @@ fn build_extract_action(
         edits,
         is_preferred: true,
         diagnostic_rule: Some("no-bare-strings-in-template".to_string()),
+        safety: AutofixSafety::Caution,
     }]
 }
 
@@ -502,6 +503,9 @@ mod tests {
             severity: Severity::Hint,
             span_kind: DiagnosticSpanKind::ElementContent,
             tags: vec![],
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         }
     }
 
@@ -1031,6 +1035,9 @@ mod tests {
             severity: Severity::Warning,
             span_kind: DiagnosticSpanKind::Directive,
             tags: vec![],
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
         let set = DiagnosticSet::new();
         let ctx = ActionContext {

@@ -18,4 +18,4 @@ mod types;
 
 pub use engine::ActionEngine;
 pub use provider::{ActionContext, ActionProvider};
-pub use types::{ActionKind, CodeAction, FileEdit};
+pub use types::{ActionKind, AutofixSafety, CodeAction, FileEdit};

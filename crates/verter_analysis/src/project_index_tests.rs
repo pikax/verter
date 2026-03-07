@@ -1,6 +1,7 @@
 use super::*;
 use crate::file_usage::{
-    ComponentUsageOwned, FileUsageFlags, InjectUsageOwned, ProvideUsageOwned, StyleUsageInfoOwned,
+    ComponentUsageOwned, EmitDeclarationOwned, FileUsageFlags, InjectUsageOwned,
+    ListenedEventOwned, ProvideUsageOwned, StyleUsageInfoOwned, TemplateIdOwned,
 };
 
 fn make_file_info() -> FileUsageInfoOwned {
@@ -841,4 +842,140 @@ fn remove_file_cleans_up_var_indexes() {
             .count(),
         0
     );
+}
+
+// =============================================================================
+// Event Flow Tests
+// =============================================================================
+
+fn make_file_with_emits(events: &[&str]) -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    for event in events {
+        info.emit_declarations.push(EmitDeclarationOwned {
+            event_name: event.to_string(),
+        });
+    }
+    info.flags |= FileUsageFlags::HAS_DEFINE_EMITS.bits();
+    info
+}
+
+fn make_file_with_listeners(events: &[(&str, Option<&str>)]) -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    for (event, comp) in events {
+        info.listened_events.push(ListenedEventOwned {
+            event_name: event.to_string(),
+            component_name: comp.map(|s| s.to_string()),
+        });
+    }
+    info
+}
+
+#[test]
+fn event_flow_emit_and_listen() {
+    let mut index = ProjectIndex::new();
+
+    // ChildButton emits "click" and "close"
+    index.add_file(
+        PathBuf::from("/src/ChildButton.vue"),
+        make_file_with_emits(&["click", "close"]),
+    );
+
+    // Parent listens for "click" on ChildButton
+    index.add_file(
+        PathBuf::from("/src/Parent.vue"),
+        make_file_with_listeners(&[("click", Some("ChildButton"))]),
+    );
+
+    // Trace "click" flow
+    let flow = index.event_flow("click");
+    assert_eq!(flow.event_name, "click");
+    assert_eq!(flow.emitters.len(), 1, "one file emits 'click'");
+    assert_eq!(flow.listeners.len(), 1, "one file listens for 'click'");
+
+    // Trace "close" flow — emitted but not listened
+    let flow = index.event_flow("close");
+    assert_eq!(flow.emitters.len(), 1);
+    assert_eq!(flow.listeners.len(), 0, "no listeners for 'close'");
+
+    // Trace unknown event
+    let flow = index.event_flow("unknown");
+    assert_eq!(flow.emitters.len(), 0);
+    assert_eq!(flow.listeners.len(), 0);
+}
+
+#[test]
+fn event_flow_all_names() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("/src/A.vue"),
+        make_file_with_emits(&["save", "cancel"]),
+    );
+    index.add_file(
+        PathBuf::from("/src/B.vue"),
+        make_file_with_listeners(&[("save", None), ("delete", None)]),
+    );
+
+    let emit_names: Vec<&String> = index.all_emit_names().collect();
+    assert!(emit_names.contains(&&"save".to_string()));
+    assert!(emit_names.contains(&&"cancel".to_string()));
+
+    let listen_names: Vec<&String> = index.all_listened_event_names().collect();
+    assert!(listen_names.contains(&&"save".to_string()));
+    assert!(listen_names.contains(&&"delete".to_string()));
+}
+
+#[test]
+fn event_flow_remove_file_cleans_indexes() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("/src/A.vue"),
+        make_file_with_emits(&["submit"]),
+    );
+
+    assert_eq!(index.files_emitting("submit").count(), 1);
+
+    index.remove_file(Path::new("/src/A.vue"));
+    assert_eq!(index.files_emitting("submit").count(), 0);
+}
+
+// =============================================================================
+// Template ID Tests
+// =============================================================================
+
+fn make_file_with_template_ids(ids: &[&str]) -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    for id in ids {
+        info.template_ids
+            .push(TemplateIdOwned { id: id.to_string() });
+    }
+    info
+}
+
+#[test]
+fn template_id_index_lookup() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("/src/App.vue"),
+        make_file_with_template_ids(&["app", "modal-root"]),
+    );
+
+    assert!(index.has_template_id("app"));
+    assert!(index.has_template_id("modal-root"));
+    assert!(!index.has_template_id("nonexistent"));
+
+    assert_eq!(index.files_with_template_id("app").count(), 1);
+}
+
+#[test]
+fn template_id_remove_file_cleans_index() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("/src/App.vue"),
+        make_file_with_template_ids(&["teleport-target"]),
+    );
+
+    assert!(index.has_template_id("teleport-target"));
+
+    index.remove_file(Path::new("/src/App.vue"));
+    assert!(!index.has_template_id("teleport-target"));
 }

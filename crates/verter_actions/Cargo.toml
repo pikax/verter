@@ -12,5 +12,7 @@ description = "Code actions engine for Verter Vue compiler — quick fixes and r
 verter_span = { path = "../verter_span" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_analysis = { path = "../verter_analysis" }
+serde.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true

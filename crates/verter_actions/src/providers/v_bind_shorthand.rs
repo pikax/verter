@@ -5,7 +5,7 @@
 //! expand actions for Vue 3.4+ same-name shorthand.
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
 
 pub struct VBindShorthand;
@@ -67,6 +67,7 @@ impl ActionProvider for VBindShorthand {
             }],
             is_preferred: true,
             diagnostic_rule: Some(diag.rule.clone()),
+            safety: AutofixSafety::StyleOnly,
         }]
     }
 
@@ -125,6 +126,7 @@ impl ActionProvider for VBindShorthand {
                     }],
                     is_preferred: false,
                     diagnostic_rule: None,
+                    safety: AutofixSafety::StyleOnly,
                 }];
             }
         }
@@ -152,6 +154,9 @@ mod tests {
             span: Span::new(start, end),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Directive,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         }
     }
 
@@ -275,6 +280,9 @@ mod tests {
             span: Span::new(5, 15),
             tags: vec![],
             span_kind: DiagnosticSpanKind::Directive,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
         let ctx = make_ctx(source, None);
         let actions = VBindShorthand.fixes_for_diagnostic(&diag, &ctx);

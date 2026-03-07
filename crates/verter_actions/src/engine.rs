@@ -59,7 +59,7 @@ impl Default for ActionEngine {
 mod tests {
     use super::*;
     use crate::provider::ActionContext;
-    use crate::types::{ActionKind, FileEdit};
+    use crate::types::{ActionKind, AutofixSafety, FileEdit};
     use verter_diagnostics::{DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity};
 
     struct TestProvider;
@@ -84,6 +84,7 @@ mod tests {
                     }],
                     is_preferred: true,
                     diagnostic_rule: Some("test-rule".to_string()),
+                    safety: AutofixSafety::Safe,
                 }]
             } else {
                 vec![]
@@ -100,6 +101,9 @@ mod tests {
             span: verter_span::Span::new(0, 10),
             tags: vec![],
             span_kind: DiagnosticSpanKind::ElementOpenTag,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         }
     }
 

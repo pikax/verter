@@ -60,6 +60,15 @@ pub struct ProjectIndex {
 
     /// CSS variable name → files that manipulate it via script DOM APIs
     script_css_var_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
+
+    /// Event name → files that declare it via defineEmits
+    emit_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
+
+    /// Event name → files that listen for it on child components
+    listener_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
+
+    /// Template `id` attribute value → files that define it
+    template_id_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
 }
 
 /// An edge in the component usage graph
@@ -91,6 +100,20 @@ pub struct CssVarFlow {
     pub template_definitions: Vec<Arc<Path>>,
     /// Files that manipulate this variable via DOM APIs in `<script>`.
     pub script_manipulations: Vec<Arc<Path>>,
+}
+
+/// Cross-file event flow tracing result.
+///
+/// Traces where an event is emitted (via `defineEmits`) and where it's
+/// listened (via `@eventName` on child components) across the project.
+#[derive(Debug, Clone, Default)]
+pub struct EventFlow {
+    /// The event name being traced.
+    pub event_name: String,
+    /// Files that declare this event in `defineEmits`.
+    pub emitters: Vec<Arc<Path>>,
+    /// Files that listen for this event on child components.
+    pub listeners: Vec<Arc<Path>>,
 }
 
 // =============================================================================
@@ -234,6 +257,9 @@ impl ProjectIndex {
             var_reference_index: FxHashMap::default(),
             template_css_var_index: FxHashMap::default(),
             script_css_var_index: FxHashMap::default(),
+            emit_index: FxHashMap::default(),
+            listener_index: FxHashMap::default(),
+            template_id_index: FxHashMap::default(),
         }
     }
 
@@ -339,6 +365,30 @@ impl ProjectIndex {
         for name in &info.script_css_var_names {
             self.script_css_var_index
                 .entry(name.clone())
+                .or_default()
+                .insert(Arc::clone(&path));
+        }
+
+        // Index emit declarations (from defineEmits)
+        for emit in &info.emit_declarations {
+            self.emit_index
+                .entry(emit.event_name.clone())
+                .or_default()
+                .insert(Arc::clone(&path));
+        }
+
+        // Index listened events (from @event on child components)
+        for listened in &info.listened_events {
+            self.listener_index
+                .entry(listened.event_name.clone())
+                .or_default()
+                .insert(Arc::clone(&path));
+        }
+
+        // Index template id attributes (for teleport target lookup)
+        for id in &info.template_ids {
+            self.template_id_index
+                .entry(id.id.clone())
                 .or_default()
                 .insert(Arc::clone(&path));
         }
@@ -450,6 +500,36 @@ impl ProjectIndex {
                 files.remove(&arc_path);
                 if files.is_empty() {
                     self.script_css_var_index.remove(name);
+                }
+            }
+        }
+
+        // Remove from emit index
+        for emit in &info.emit_declarations {
+            if let Some(files) = self.emit_index.get_mut(&emit.event_name) {
+                files.remove(&arc_path);
+                if files.is_empty() {
+                    self.emit_index.remove(&emit.event_name);
+                }
+            }
+        }
+
+        // Remove from listener index
+        for listened in &info.listened_events {
+            if let Some(files) = self.listener_index.get_mut(&listened.event_name) {
+                files.remove(&arc_path);
+                if files.is_empty() {
+                    self.listener_index.remove(&listened.event_name);
+                }
+            }
+        }
+
+        // Remove from template id index
+        for id in &info.template_ids {
+            if let Some(files) = self.template_id_index.get_mut(&id.id) {
+                files.remove(&arc_path);
+                if files.is_empty() {
+                    self.template_id_index.remove(&id.id);
                 }
             }
         }
@@ -616,6 +696,62 @@ impl ProjectIndex {
             .into_iter()
             .flat_map(|s| s.iter())
     }
+
+    // ==================== Event Flow Queries ====================
+
+    /// Get files that declare a given event via defineEmits.
+    pub fn files_emitting(&self, event_name: &str) -> impl Iterator<Item = &Arc<Path>> {
+        self.emit_index
+            .get(event_name)
+            .into_iter()
+            .flat_map(|s| s.iter())
+    }
+
+    /// Get files that listen for a given event on child components.
+    pub fn files_listening(&self, event_name: &str) -> impl Iterator<Item = &Arc<Path>> {
+        self.listener_index
+            .get(event_name)
+            .into_iter()
+            .flat_map(|s| s.iter())
+    }
+
+    /// Trace the cross-file flow of an event.
+    pub fn event_flow(&self, event_name: &str) -> EventFlow {
+        EventFlow {
+            event_name: event_name.to_string(),
+            emitters: self.files_emitting(event_name).cloned().collect(),
+            listeners: self.files_listening(event_name).cloned().collect(),
+        }
+    }
+
+    /// Get all event names declared via defineEmits in the project.
+    pub fn all_emit_names(&self) -> impl Iterator<Item = &String> {
+        self.emit_index.keys()
+    }
+
+    /// Get all event names listened on child components in the project.
+    pub fn all_listened_event_names(&self) -> impl Iterator<Item = &String> {
+        self.listener_index.keys()
+    }
+
+    // ==================== Template ID Queries ====================
+
+    /// Get files that define a given template `id` attribute value.
+    pub fn files_with_template_id(&self, id: &str) -> impl Iterator<Item = &Arc<Path>> {
+        self.template_id_index
+            .get(id)
+            .into_iter()
+            .flat_map(|s| s.iter())
+    }
+
+    /// Check if any file defines a given template `id` attribute value.
+    pub fn has_template_id(&self, id: &str) -> bool {
+        self.template_id_index
+            .get(id)
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    // ==================== CSS Variable Queries ====================
 
     /// Get the cross-component flow for a CSS variable.
     pub fn css_var_flow(&self, name: &str) -> CssVarFlow {
@@ -805,6 +941,9 @@ impl ProjectIndex {
         self.id_index.clear();
         self.v_bind_css_index.clear();
         self.custom_property_index.clear();
+        self.emit_index.clear();
+        self.listener_index.clear();
+        self.template_id_index.clear();
     }
 }
 

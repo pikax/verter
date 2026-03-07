@@ -270,6 +270,9 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(vue::NoEmptyComponentBlock));
     registry.register(Box::new(vue::NoUnusedRefs));
     registry.register(Box::new(vue::NoVTextDirective));
+    registry.register(Box::new(vue::RequireDefineSlots));
+    registry.register(Box::new(vue::NoDuplicateModelModifiers));
+    registry.register(Box::new(vue::DefineModelTypeRequired));
     // Accessibility
     registry.register(Box::new(a11y::AltText));
     registry.register(Box::new(a11y::AnchorHasContent));
@@ -335,6 +338,7 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(script::PreferDefineOptions));
     registry.register(Box::new(script::RequireTypedRef));
     registry.register(Box::new(script::PreferScriptAttrs));
+    registry.register(Box::new(script::NoLeakedEventListeners));
     // Vapor (only active when vapor_mode is enabled in config)
     registry.register(Box::new(vapor::NoSuspense));
     registry.register(Box::new(vapor::NoVueLifecycleEvents));

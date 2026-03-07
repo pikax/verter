@@ -4,7 +4,7 @@
 //! offers to delete the entire CSS rule (selector + declaration block).
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
 
 /// Provider that removes unused CSS selector rules.
@@ -80,6 +80,7 @@ impl ActionProvider for RemoveUnusedCss {
                 }],
                 is_preferred: false,
                 diagnostic_rule: Some("unused-css-selector".to_string()),
+                safety: AutofixSafety::Safe,
             }];
         }
 
@@ -127,6 +128,7 @@ impl ActionProvider for RemoveUnusedCss {
                             }],
                             is_preferred: false,
                             diagnostic_rule: Some("unused-css-selector".to_string()),
+                            safety: AutofixSafety::Safe,
                         }];
                     }
                 }
@@ -158,6 +160,9 @@ mod tests {
             ),
             tags: vec![],
             span_kind: DiagnosticSpanKind::CssSelector,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();
@@ -202,6 +207,9 @@ mod tests {
             ),
             tags: vec![],
             span_kind: DiagnosticSpanKind::CssSelector,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();
@@ -264,6 +272,9 @@ mod tests {
             ),
             tags: vec![],
             span_kind: DiagnosticSpanKind::CssSelector,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();
@@ -305,6 +316,9 @@ mod tests {
             span: verter_span::Span::new(0, 4),
             tags: vec![],
             span_kind: DiagnosticSpanKind::CssSelector,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         };
 
         let set = DiagnosticSet::new();

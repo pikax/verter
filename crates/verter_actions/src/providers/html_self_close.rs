@@ -5,7 +5,7 @@
 // @ai-generated
 
 use crate::provider::{ActionContext, ActionProvider};
-use crate::types::{ActionKind, CodeAction, FileEdit};
+use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
 
 pub struct HtmlSelfClose;
@@ -99,6 +99,7 @@ impl ActionProvider for HtmlSelfClose {
             edits,
             is_preferred: true,
             diagnostic_rule: Some(diag.rule.clone()),
+            safety: AutofixSafety::StyleOnly,
         }]
     }
 }
@@ -118,6 +119,9 @@ mod tests {
             span: verter_span::Span::new(0, source.len() as u32),
             tags: vec![],
             span_kind: DiagnosticSpanKind::FullElement,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
         }
     }
 
