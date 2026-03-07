@@ -48,7 +48,7 @@ pub struct Completion {
     pub data: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompletionKind {
     Function,
     Variable,
@@ -65,6 +65,8 @@ pub enum CompletionKind {
     EnumMember,
     Constant,
     TypeParameter,
+    File,
+    Folder,
 }
 
 /// Result of resolving a completion item (additional text edits, e.g., auto-import).

@@ -657,6 +657,8 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         16 => CompletionKind::Property,
         20 => CompletionKind::EnumMember,
         21 => CompletionKind::Constant,
+        17 => CompletionKind::File,
+        19 => CompletionKind::Folder,
         25 => CompletionKind::TypeParameter,
         _ => CompletionKind::Text,
     });

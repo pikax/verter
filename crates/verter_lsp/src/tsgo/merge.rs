@@ -465,6 +465,8 @@ fn convert_completion_kind(kind: CompletionKind) -> CompletionItemKind {
         CompletionKind::EnumMember => CompletionItemKind::ENUM_MEMBER,
         CompletionKind::Constant => CompletionItemKind::CONSTANT,
         CompletionKind::TypeParameter => CompletionItemKind::TYPE_PARAMETER,
+        CompletionKind::File => CompletionItemKind::FILE,
+        CompletionKind::Folder => CompletionItemKind::FOLDER,
     }
 }
 

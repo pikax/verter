@@ -123,6 +123,16 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     // The scoped variable `item` should be available (via TSGO, since it's in the generated TSX)
     // This test verifies that the v-for codegen creates proper JS scope
     expect(labels, "should include 'item'").to.include("item");
+
+    // v-for iteration variables compile to arrow function params — tsserver
+    // returns kind "parameter" which must map to Variable, not Text
+    const itemCompletion = completions!.items.find((i) => i.label === "item");
+    if (itemCompletion) {
+      expect(
+        itemCompletion.kind,
+        "'item' should be Variable, not Text",
+      ).to.equal(vscode.CompletionItemKind.Variable);
+    }
   });
 
   test("C6: v-for member access shows typed properties", async function () {
@@ -384,5 +394,27 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       labels.filter((l) => l.includes("-")).length,
       "no kebab-case transformations in expression context",
     ).to.equal(0);
+  });
+
+  test("C15: template identifier completions exclude globals", async function () {
+    const pos = findPosition(doc, "{{ count }}", 3);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions).to.exist;
+    const labels = completions!.items.map((i) => i.label);
+    console.log(`    identifier completions: ${labels.length} items`);
+
+    // POSITIVE: script setup bindings are present
+    expect(labels).to.include("count");
+
+    // NEGATIVE: global types should NOT appear in template expressions
+    expect(labels).to.not.include("AbortController");
+    expect(labels).to.not.include("HTMLDivElement");
+    expect(labels).to.not.include("document");
+    expect(labels).to.not.include("window");
+    expect(completions!.items.length).to.be.lessThan(200);
   });
 });

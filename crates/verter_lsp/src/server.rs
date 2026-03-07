@@ -3247,26 +3247,54 @@ impl LanguageServer for VerterLanguageServer {
                         position.character,
                     );
                 }
-                // Detect expression sub-context (Layer 2)
-                // to determine whether verter completions should be suppressed.
-                // In member access, literal, type position, or property key contexts,
-                // only TypeProvider results are relevant.
-                let suppress_verter = in_expression_context
-                    && tsx_offset
-                        .map(|off| {
-                            matches!(
-                                classify_expression_context_with_trigger(
-                                    &ctx.tsx_content,
-                                    off as usize,
-                                    trigger_character,
-                                ),
-                                ExpressionContext::MemberAccess
-                                    | ExpressionContext::Literal
-                                    | ExpressionContext::TypePosition
-                                    | ExpressionContext::PropertyKey
-                            )
-                        })
-                        .unwrap_or(false);
+                // Template completion has two complementary flags based on expression context:
+                //
+                // 1. `suppress_verter`: In MemberAccess/Literal/Type/PropertyKey contexts,
+                //    verter's identifier-level completions are irrelevant — only the TypeProvider
+                //    knows the object's members. So we suppress verter items.
+                //
+                // 2. `skip_type_provider`: In IdentifierExpected context, the TypeProvider
+                //    returns ALL globals in scope (AbortController, HTMLElement, Array, etc.)
+                //    which are NOT accessible in Vue template expressions (templates use a
+                //    render proxy that only exposes script setup bindings). Verter's
+                //    template_completions() already provides exactly the right set.
+                //
+                // | ExpressionContext    | suppress_verter | skip_type_provider |
+                // |----------------------|-----------------|--------------------|
+                // | IdentifierExpected   | false           | true               |
+                // | MemberAccess         | true            | false              |
+                // | Literal/Type/PropKey | true            | false              |
+                // | Unknown              | false           | false (conservative)|
+                let expr_context = if in_expression_context {
+                    tsx_offset.map(|off| {
+                        classify_expression_context_with_trigger(
+                            &ctx.tsx_content,
+                            off as usize,
+                            trigger_character,
+                        )
+                    })
+                } else {
+                    None
+                };
+
+                let suppress_verter = expr_context
+                    .as_ref()
+                    .map(|ec| {
+                        matches!(
+                            ec,
+                            ExpressionContext::MemberAccess
+                                | ExpressionContext::Literal
+                                | ExpressionContext::TypePosition
+                                | ExpressionContext::PropertyKey
+                        )
+                    })
+                    .unwrap_or(false);
+
+                let skip_type_provider = expr_context
+                    .as_ref()
+                    .map(|ec| matches!(ec, ExpressionContext::IdentifierExpected))
+                    .unwrap_or(false);
+
                 if let Some(tsx_offset) = tsx_offset {
                     // Check if a newer completion request has arrived. If so, skip
                     // the expensive type provider call and return verter-only results.
@@ -3282,6 +3310,17 @@ impl LanguageServer for VerterLanguageServer {
                         return Ok(verter_items.map(|items| {
                             CompletionResponse::List(CompletionList {
                                 is_incomplete: true,
+                                items,
+                            })
+                        }));
+                    }
+                    if skip_type_provider {
+                        tracing::debug!(
+                            "completion: skipping type provider for IdentifierExpected context"
+                        );
+                        return Ok(verter_items.map(|items| {
+                            CompletionResponse::List(CompletionList {
+                                is_incomplete: verter_is_incomplete,
                                 items,
                             })
                         }));

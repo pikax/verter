@@ -1449,19 +1449,42 @@ impl TypeProvider for TsserverTypeProvider {
 fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion> {
     let name = item.get("name")?.as_str()?.to_string();
     let kind_str = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    // IMPORTANT: This mapping MUST match VS Code's official TypeScript extension
+    // `MyCompletionItem.convertKind()` in:
+    //   vscode/extensions/typescript-language-features/src/languageFeatures/completions.ts
+    //
+    // tsserver returns completion entry kinds as ScriptElementKind string values
+    // (defined in TypeScript's src/services/types.ts). Any unmapped kind string
+    // silently falls through to the default branch. This was the root cause of
+    // v-for iteration variables showing as Text instead of Variable: tsserver
+    // returns "parameter" for arrow function params (which v-for compiles to),
+    // and "parameter" was not in the match arms.
+    //
+    // If TypeScript adds new ScriptElementKind values in the future, they will
+    // hit the default branch (Property) which matches VS Code's behavior. The
+    // test `test_parse_tsserver_completion_kinds_match_vscode` covers all known
+    // kinds — update it when syncing with a new TS version.
+    //
+    // Reference: https://github.com/microsoft/vscode/blob/main/extensions/typescript-language-features/src/languageFeatures/completions.ts
     let kind = Some(match kind_str {
-        "function" => CompletionKind::Function,
-        "var" | "let" | "const" | "local var" => CompletionKind::Variable,
-        "property" => CompletionKind::Property,
-        "class" => CompletionKind::Class,
-        "interface" => CompletionKind::Interface,
-        "module" | "external module name" => CompletionKind::Module,
-        "keyword" => CompletionKind::Keyword,
-        "method" => CompletionKind::Method,
+        "primitive type" | "keyword" => CompletionKind::Keyword,
+        "const" | "let" | "var" | "local var" | "alias" | "parameter" => {
+            CompletionKind::Variable
+        }
+        "property" | "getter" | "setter" => CompletionKind::Field,
+        "function" | "local function" => CompletionKind::Function,
+        "method" | "construct" | "call" | "index" => CompletionKind::Method,
         "enum" => CompletionKind::Enum,
         "enum member" => CompletionKind::EnumMember,
-        "type" | "type parameter" => CompletionKind::TypeParameter,
-        _ => CompletionKind::Text,
+        "module" | "external module name" => CompletionKind::Module,
+        "class" | "type" => CompletionKind::Class,
+        "interface" => CompletionKind::Interface,
+        "warning" => CompletionKind::Text,
+        "script" => CompletionKind::File,
+        "directory" => CompletionKind::Folder,
+        "string" => CompletionKind::Constant,
+        // VS Code default fallback — any unknown kind becomes Property
+        _ => CompletionKind::Property,
     });
 
     let sort_text = item
@@ -1686,6 +1709,76 @@ mod tests {
         assert_eq!(parsed.label, "myFunction");
         assert!(matches!(parsed.kind, Some(CompletionKind::Function)));
         assert_eq!(parsed.sort_text, Some("11".to_string()));
+    }
+
+    #[test]
+    fn test_parse_tsserver_completion_kinds_match_vscode() {
+        // Every case from VS Code's MyCompletionItem.convertKind()
+        let cases = vec![
+            // Keyword
+            ("primitive type", CompletionKind::Keyword),
+            ("keyword", CompletionKind::Keyword),
+            // Variable
+            ("const", CompletionKind::Variable),
+            ("let", CompletionKind::Variable),
+            ("var", CompletionKind::Variable),
+            ("local var", CompletionKind::Variable),
+            ("alias", CompletionKind::Variable),
+            ("parameter", CompletionKind::Variable),
+            // Field
+            ("property", CompletionKind::Field),
+            ("getter", CompletionKind::Field),
+            ("setter", CompletionKind::Field),
+            // Function
+            ("function", CompletionKind::Function),
+            ("local function", CompletionKind::Function),
+            // Method
+            ("method", CompletionKind::Method),
+            ("construct", CompletionKind::Method),
+            ("call", CompletionKind::Method),
+            ("index", CompletionKind::Method),
+            // Enum
+            ("enum", CompletionKind::Enum),
+            ("enum member", CompletionKind::EnumMember),
+            // Module
+            ("module", CompletionKind::Module),
+            ("external module name", CompletionKind::Module),
+            // Class/Interface
+            ("class", CompletionKind::Class),
+            ("type", CompletionKind::Class),
+            ("interface", CompletionKind::Interface),
+            // Special
+            ("warning", CompletionKind::Text),
+            ("script", CompletionKind::File),
+            ("directory", CompletionKind::Folder),
+            ("string", CompletionKind::Constant),
+            // Default fallback → Property
+            ("local class", CompletionKind::Property),
+            ("constructor", CompletionKind::Property),
+            ("type parameter", CompletionKind::Property),
+            ("JSX attribute", CompletionKind::Property),
+            ("accessor", CompletionKind::Property),
+            ("using", CompletionKind::Property),
+            ("await using", CompletionKind::Property),
+            ("label", CompletionKind::Property),
+            ("", CompletionKind::Property),
+            ("unknown_kind", CompletionKind::Property),
+        ];
+        for (kind_str, expected) in cases {
+            let item = serde_json::json!({
+                "name": "test",
+                "kind": kind_str,
+                "sortText": "0"
+            });
+            let parsed = parse_tsserver_completion(&item).unwrap();
+            assert_eq!(
+                parsed.kind,
+                Some(expected),
+                "tsserver kind '{}' should map to {:?}",
+                kind_str,
+                expected
+            );
+        }
     }
 
     // ── Channel-based transport tests ────────────────────────────────
