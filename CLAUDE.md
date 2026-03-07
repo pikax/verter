@@ -323,6 +323,34 @@ The extracted file contains the module contents directly (no wrapping `mod tests
 
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, E2E best practices, and server cleanup.
 
+### Agent Feedback Capture
+
+During work sessions, agents encounter issues, discover improvement opportunities, and gain insights that may be lost when context is compacted. To preserve these observations, agents MUST continuously log feedback to a per-conversation file.
+
+**Setup** (at session start, when making code changes):
+- Create a feedback file at `.claude/feedback/feedback-{YYYY-MM-DD}-{short-id}.md` where `short-id` is a 6-character identifier (e.g., from the plan name or timestamp)
+- The `.claude/feedback/` directory is gitignored — these files are for human review only
+
+**What to log** — append entries whenever encountering something noteworthy:
+- `[issue]` — bugs, unexpected behavior, workarounds applied
+- `[improvement]` — code quality, performance, architecture ideas
+- `[debt]` — things that work but could be better
+- `[docs]` — missing or outdated documentation discovered
+
+**Format**:
+```markdown
+## {date}
+
+- [{category}] `{file_path}:{line}` — Brief description of the observation
+- [{category}] `{file_path}` — Another observation
+```
+
+**Rules**:
+- Append continuously as you work — do not wait for context compaction
+- When delegating to subagents, pass the feedback file path in the prompt and instruct them to append their observations
+- This is best-effort — do not let feedback capture slow down actual work
+- One feedback file per conversation session
+
 ## Dependencies Policy
 
 - Keep dependencies at their latest versions
