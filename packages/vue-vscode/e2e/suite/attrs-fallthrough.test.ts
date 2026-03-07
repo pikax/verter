@@ -2,9 +2,9 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForFileReady,
   openVueFile,
   getAppVuePath,
-  sleep,
   FIXTURE_NAME,
 } from "../helpers";
 
@@ -20,15 +20,15 @@ import {
  * the attrs fallthrough chain is working.
  */
 suite(`Attrs Fallthrough [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
     doc = await openVueFile(getAppVuePath());
     // Wait for cross-file analysis to complete
-    await sleep(12_000);
+    await waitForFileReady(doc);
   });
 
   /** Get Verter diagnostics for the current App.vue */

@@ -2,6 +2,7 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForFileReady,
   openVueFile,
   getAppVuePath,
   waitForDiagnostics,
@@ -12,10 +13,10 @@ import {
 import { getTimer } from "../timer";
 
 suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
   });
 
   test("extension activates for workspace", async function () {
@@ -28,14 +29,14 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
     expect(doc).to.exist;
     expect(doc.languageId).to.equal("vue");
     // Give it time to process without crashing
-    await sleep(3_000);
+    await waitForFileReady(doc);
   });
 
   test("diagnostics API returns for .vue file", async function () {
     const doc = await openVueFile(getAppVuePath());
 
-    // Give the LSP time to process
-    await sleep(5_000);
+    // Wait for file to be processed
+    await waitForFileReady(doc);
 
     const diags = vscode.languages.getDiagnostics(doc.uri);
     // We don't assert on count — valid files may have zero diagnostics.
@@ -68,7 +69,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
 
   test("diagnostics have valid ranges", async function () {
     const doc = await openVueFile(getAppVuePath());
-    await sleep(5_000);
+    await waitForFileReady(doc);
 
     const diags = vscode.languages.getDiagnostics(doc.uri);
     for (const d of diags) {
@@ -134,7 +135,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
     }
 
     // Wait for diagnostics to settle
-    await sleep(8_000);
+    await waitForFileReady(doc);
 
     const diags = vscode.languages.getDiagnostics(doc.uri);
     const ts7006 = diags.find(
@@ -190,9 +191,6 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
       const newlineEdit = new vscode.WorkspaceEdit();
       newlineEdit.insert(doc.uri, importLineEnd, "\n");
       await vscode.workspace.applyEdit(newlineEdit);
-
-      // Wait for diagnostics to settle after the newline insertion
-      await sleep(3_000);
 
       // TS diagnostics should still be present
       const afterDiags = await waitForDiagnostics(doc.uri, {

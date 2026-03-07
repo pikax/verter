@@ -13,12 +13,12 @@ import {
 } from "../helpers";
 
 suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   let state: DecorationState | undefined;
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     // Enable binding colors
@@ -35,7 +35,7 @@ suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
     while (Date.now() - pollStart < 15_000) {
       // Trigger a no-op edit to force decoration providers to re-request analysis
       await triggerDecorationRefresh();
-      await sleep(1_000);
+      await sleep(300);
       state = await getDecorationState();
       if (state) {
         // Check if any category has ranges (analysis is complete)
@@ -106,12 +106,12 @@ suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
 });
 
 suite(`Vue API Decorations [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   let state: DecorationState | undefined;
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     const config = vscode.workspace.getConfiguration("verter.decorations");
@@ -123,7 +123,7 @@ suite(`Vue API Decorations [${FIXTURE_NAME}]`, function () {
     const pollStart = Date.now();
     while (Date.now() - pollStart < 15_000) {
       await triggerDecorationRefresh();
-      await sleep(1_000);
+      await sleep(300);
       state = await getDecorationState();
       if (state) {
         const totalRanges = Object.values(state.vueApiCalls)
@@ -159,12 +159,12 @@ suite(`Vue API Decorations [${FIXTURE_NAME}]`, function () {
 });
 
 suite(`Prop Constness Decorations [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   let state: DecorationState | undefined;
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     const config = vscode.workspace.getConfiguration("verter.decorations");
@@ -176,7 +176,7 @@ suite(`Prop Constness Decorations [${FIXTURE_NAME}]`, function () {
     const pollStart = Date.now();
     while (Date.now() - pollStart < 15_000) {
       await triggerDecorationRefresh();
-      await sleep(1_000);
+      await sleep(300);
       state = await getDecorationState();
       if (state) {
         const totalRanges = Object.values(state.propConstness)

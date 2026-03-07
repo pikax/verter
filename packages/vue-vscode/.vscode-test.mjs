@@ -117,6 +117,6 @@ export default defineConfig({
   },
   mocha: {
     ui: "tdd",
-    timeout: 120_000,
+    timeout: 90_000,
   },
 });

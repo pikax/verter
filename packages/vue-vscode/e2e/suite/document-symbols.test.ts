@@ -2,22 +2,22 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForFileReady,
   openVueFile,
   getAppVuePath,
   getDocumentSymbols,
-  sleep,
   FIXTURE_NAME,
 } from "../helpers";
 
 suite(`Document Symbols [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
     doc = await openVueFile(getAppVuePath());
-    await sleep(12_000);
+    await waitForFileReady(doc);
   });
 
   test("DS1: has document symbols", async function () {

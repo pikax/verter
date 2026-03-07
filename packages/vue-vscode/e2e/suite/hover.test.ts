@@ -2,26 +2,25 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForFileReady,
   openVueFile,
   getAppVuePath,
   measureHover,
   findPosition,
   findNthPosition,
-  sleep,
   FIXTURE_NAME,
 } from "../helpers";
 import { getTimer } from "../timer";
 
 suite(`Hover [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
     doc = await openVueFile(getAppVuePath());
-    // Wait for LSP to fully process the file
-    await sleep(8_000);
+    await waitForFileReady(doc);
   });
 
   test("hover on ref binding in template", async function () {
@@ -195,7 +194,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     // Hover on <slot name="header" /> in MyComp.vue — should show slot outlet info,
     // NOT the unhelpful `() any` from the type provider's generic Slots interface.
     const myCompDoc = await openVueFile("src/MyComp.vue");
-    await sleep(3_000);
+    await waitForFileReady(myCompDoc);
     const text = myCompDoc.getText();
     const match = text.indexOf('<slot name="header"');
     if (match === -1) {
@@ -222,7 +221,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
 
     // Re-open App.vue for subsequent tests
     doc = await openVueFile(getAppVuePath());
-    await sleep(1_000);
+    await waitForFileReady(doc);
   });
 
   test("hover on template #header slot consumer", async function () {
@@ -255,7 +254,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
   test("hover on slot name attribute value", async function () {
     // Hover on "header" in `name="header"` inside MyComp.vue's <slot> element
     const myCompDoc = await openVueFile("src/MyComp.vue");
-    await sleep(2_000);
+    await waitForFileReady(myCompDoc);
     const text = myCompDoc.getText();
     const match = text.indexOf('name="header"');
     if (match === -1) {
@@ -281,7 +280,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
 
     // Re-open App.vue for the latency test
     doc = await openVueFile(getAppVuePath());
-    await sleep(1_000);
+    await waitForFileReady(doc);
   });
 
   test("hover on v-for iteration variable shows parameter type", async function () {

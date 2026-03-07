@@ -28,7 +28,7 @@ export function isLspReady(): boolean {
  * LSP when a Vue file is first opened), then polls the log file for
  * "Verter ready".
  */
-export async function waitForExtensionReady(timeoutMs = 60_000): Promise<void> {
+export async function waitForExtensionReady(timeoutMs = 45_000): Promise<void> {
   const ext = vscode.extensions.getExtension("pikax.verter-vscode");
   assert.ok(ext, "Verter extension should be installed");
 
@@ -62,7 +62,7 @@ export async function waitForExtensionReady(timeoutMs = 60_000): Promise<void> {
         return;
       }
     }
-    await sleep(500);
+    await sleep(200);
   }
 
   // If we timed out, check if the extension at least activated
@@ -83,6 +83,90 @@ export async function openVueFile(relativePath: string): Promise<vscode.TextDocu
   const doc = await vscode.workspace.openTextDocument(fileUri);
   await vscode.window.showTextDocument(doc);
   return doc;
+}
+
+/**
+ * Wait until the type provider has processed a file by probing completions.
+ * When the type provider hasn't synced yet, completions return Text-kind or
+ * empty results. Once synced, identifiers get proper kinds (Variable, Function).
+ *
+ * Auto-detects a probe position from `{{ identifier }}` patterns in the doc.
+ * Falls back to hover probing on `defineProps`/`defineEmits` if no mustache found.
+ */
+export async function waitForFileReady(
+  doc: vscode.TextDocument,
+  options: {
+    probePosition?: vscode.Position;
+    expectedLabel?: string;
+    timeoutMs?: number;
+    intervalMs?: number;
+  } = {},
+): Promise<void> {
+  const { timeoutMs = 20_000, intervalMs = 150 } = options;
+  let { probePosition, expectedLabel } = options;
+
+  // Auto-detect from mustache expressions if not provided
+  if (!probePosition || !expectedLabel) {
+    const text = doc.getText();
+    const mustacheMatch = text.match(/\{\{\s*(\w+)\s*\}\}/);
+    if (mustacheMatch) {
+      const idx = text.indexOf(mustacheMatch[0]);
+      // Position inside the identifier (after "{{ ")
+      const identStart = idx + mustacheMatch[0].indexOf(mustacheMatch[1]);
+      probePosition = probePosition || doc.positionAt(identStart);
+      expectedLabel = expectedLabel || mustacheMatch[1];
+    }
+  }
+
+  // Fallback: look for defineProps/defineEmits and use hover
+  if (!probePosition || !expectedLabel) {
+    const text = doc.getText();
+    const macroMatch = text.match(/\b(defineProps|defineEmits)\b/);
+    if (macroMatch) {
+      const idx = text.indexOf(macroMatch[0]);
+      const pos = doc.positionAt(idx);
+      // Hover-based probe: wait until hover returns non-empty
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+          "vscode.executeHoverProvider",
+          doc.uri,
+          pos,
+        );
+        if (hovers && hovers.length > 0 && hovers[0].contents.length > 0) {
+          return;
+        }
+        await sleep(intervalMs);
+      }
+      console.log(`    waitForFileReady: timed out (hover probe, ${timeoutMs}ms)`);
+      return;
+    }
+    // No probe target found — just return
+    console.log("    waitForFileReady: no probe target found, skipping");
+    return;
+  }
+
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const completions = await vscode.commands.executeCommand<vscode.CompletionList>(
+      "vscode.executeCompletionItemProvider",
+      doc.uri,
+      probePosition,
+    );
+
+    if (completions?.items) {
+      const match = completions.items.find((item) => item.label === expectedLabel);
+      if (match && match.kind !== undefined && match.kind !== vscode.CompletionItemKind.Text) {
+        return;
+      }
+    }
+    await sleep(intervalMs);
+  }
+
+  console.log(
+    `    waitForFileReady: timed out waiting for "${expectedLabel}" ` +
+    `to get typed completions (${timeoutMs}ms)`,
+  );
 }
 
 /**
@@ -128,33 +212,49 @@ export function getCompVuePath(): string | undefined {
 }
 
 /**
- * Wait for diagnostics to appear on a document URI.
- * Optionally filter by source (e.g., "ts", "Verter").
+ * Wait for diagnostics to appear on a document URI using event-based detection.
+ * Subscribes to `onDidChangeDiagnostics` and resolves within milliseconds
+ * of diagnostic arrival instead of polling every 500ms.
  */
 export async function waitForDiagnostics(
   uri: vscode.Uri,
   options: { source?: string; timeoutMs?: number; minCount?: number } = {},
 ): Promise<vscode.Diagnostic[]> {
   const { source, timeoutMs = 30_000, minCount = 0 } = options;
-  const start = Date.now();
 
-  while (Date.now() - start < timeoutMs) {
+  const getFiltered = () => {
     let diags = vscode.languages.getDiagnostics(uri);
     if (source) {
       diags = diags.filter((d) => d.source === source);
     }
-    if (diags.length > minCount) {
-      return diags;
-    }
-    await sleep(500);
+    return diags;
+  };
+
+  // Check if already satisfied
+  const existing = getFiltered();
+  if (existing.length > minCount) {
+    return existing;
   }
 
-  // Return whatever we have (possibly empty)
-  let diags = vscode.languages.getDiagnostics(uri);
-  if (source) {
-    diags = diags.filter((d) => d.source === source);
-  }
-  return diags;
+  // Subscribe to diagnostic change events
+  return new Promise<vscode.Diagnostic[]>((resolve) => {
+    const timer = setTimeout(() => {
+      sub.dispose();
+      resolve(getFiltered());
+    }, timeoutMs);
+
+    const sub = vscode.languages.onDidChangeDiagnostics((e) => {
+      const matched = e.uris.some((u) => u.toString() === uri.toString());
+      if (!matched) return;
+
+      const diags = getFiltered();
+      if (diags.length > minCount) {
+        clearTimeout(timer);
+        sub.dispose();
+        resolve(diags);
+      }
+    });
+  });
 }
 
 /**

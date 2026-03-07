@@ -2,9 +2,9 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForFileReady,
   openVueFile,
   getAppVuePath,
-  sleep,
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
@@ -56,16 +56,14 @@ function findNthPosition(
 // ── Test Suite ──────────────────────────────────────────────────
 
 suite(`Definition [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
     doc = await openVueFile(getAppVuePath());
-    // Cross-file tests need workspace scanner to compile target files
-    const waitTime = FIXTURE_NAME === "barrel-exports" ? 15_000 : 12_000;
-    await sleep(waitTime);
+    await waitForFileReady(doc);
   });
 
   // ── A. Same-File Declarations ───────────────────────────────

@@ -113,6 +113,72 @@ Each fixture run produces `verter-e2e-timing-<fixture>.json`:
 
 The E2E tests run in the CI workflow (`.github/workflows/ci.yml` → `vscode-e2e` job) on every push/PR when relevant files change. The CI job builds the LSP binary, bundles the extension, compiles tests, and runs against `single-project` with `xvfb-run` for headless display.
 
+## When to Run E2E Tests (MANDATORY)
+
+After ANY change to:
+- `crates/verter_lsp/` (LSP server) — handlers, sync, diagnostics, completions, hover, definition, etc.
+- `packages/vue-vscode/src/` (VS Code extension) — activation, client config, decoration providers, commands
+
+Run the E2E suite to verify no regressions:
+```bash
+pnpm run build:lsp && pnpm --filter verter-vscode build:dev && E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e
+```
+
+This is non-negotiable. LSP changes directly affect user-facing IDE behavior. Manual testing is never sufficient as the sole verification step.
+
+## Waiting Patterns
+
+### `waitForFileReady(doc)` — Wait for type provider readiness
+
+```typescript
+// GOOD: Adaptive — returns in 1-5s when LSP is ready
+suiteSetup(async function () {
+  await waitForExtensionReady();
+  doc = await openVueFile(getAppVuePath());
+  await waitForFileReady(doc);  // probes completions until typed results appear
+});
+
+// BAD: Blind sleep — always waits 12s even if ready in 2s
+suiteSetup(async function () {
+  await waitForExtensionReady();
+  doc = await openVueFile(getAppVuePath());
+  await sleep(12_000);  // DO NOT DO THIS
+});
+```
+
+**When to use:** After opening any `.vue` file before running LSP feature tests (completions, hover, definition, rename, references, etc.).
+
+**How it works:** Repeatedly requests completions at a mustache expression position. When the type provider has synced the file, completions return with proper kinds (Variable, Function) instead of Text. Auto-detects probe position from `{{ identifier }}` patterns in the document.
+
+**Custom probe:** If the file has no mustache expressions, pass `probePosition` and `expectedLabel` explicitly.
+
+### `waitForDiagnostics(uri, options)` — Event-based diagnostic waiting
+
+```typescript
+// GOOD: Event-driven — resolves within ms of diagnostic arrival
+const diags = await waitForDiagnostics(doc.uri, { source: "ts", minCount: 1 });
+
+// Also GOOD: Checking for absence of diagnostics after file is ready
+await waitForFileReady(doc);
+const diags = vscode.languages.getDiagnostics(doc.uri);
+expect(diags.filter(d => d.code === "2307")).to.be.empty;
+```
+
+**When to use:** When a test needs to wait for specific diagnostics to appear (e.g., TS2304 after inserting an error).
+
+**For absence checks:** Use `waitForFileReady()` first (ensures type provider processed the file), then read diagnostics synchronously.
+
+### Never use `sleep()` for LSP readiness
+
+`sleep()` is only acceptable for:
+- Short pauses between undo commands: `await sleep(200)`
+- Letting VS Code process an edit before reading state: `await sleep(100)`
+
+Never use `sleep()` to wait for:
+- Type provider to process a file (use `waitForFileReady`)
+- Diagnostics to appear (use `waitForDiagnostics`)
+- LSP to be ready (use `waitForExtensionReady`)
+
 ## Adding a New Fixture
 
 1. Create `e2e/fixtures/<name>/` with `.vue` files and config
@@ -123,10 +189,11 @@ The E2E tests run in the CI workflow (`.github/workflows/ci.yml` → `vscode-e2e
 
 1. Create `e2e/suite/<name>.test.ts`
 2. Import helpers from `../helpers` and timer from `../timer`
-3. Use `suiteSetup` to call `waitForExtensionReady()` before tests
+3. Use `suiteSetup` to call `waitForExtensionReady()` then `waitForFileReady(doc)` before tests
 4. Use hard `expect(isLspReady()).to.be.true` — never `this.skip()` for infrastructure
 5. For fixture-specific content, `return` early (pass with N/A) instead of `this.skip()`
-6. The Mocha runner auto-discovers `**/*.test.js` files
+6. Never use `sleep()` for LSP readiness — use `waitForFileReady()` or `waitForDiagnostics()`
+7. The Mocha runner auto-discovers `**/*.test.js` files
 
 ## Key Files
 

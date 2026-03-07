@@ -2,15 +2,15 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForFileReady,
   openVueFile,
   getAppVuePath,
-  sleep,
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
 
 suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   // Fixtures that exercise import resolution (path aliases or project references)
   const IMPORT_FIXTURES = [
@@ -23,7 +23,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
   ];
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
   });
 
   test("no 'Cannot find module' diagnostics on App.vue", async function () {
@@ -32,8 +32,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
       return;
     }
     const doc = await openVueFile(getAppVuePath());
-    // Wait for type provider diagnostics to settle
-    await sleep(15_000);
+    await waitForFileReady(doc);
 
     const diags = vscode.languages.getDiagnostics(doc.uri);
     const moduleErrors = diags.filter((d) => {
@@ -69,7 +68,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
       return;
     }
     const doc = await openVueFile(getAppVuePath());
-    await sleep(15_000);
+    await waitForFileReady(doc);
 
     const diags = vscode.languages.getDiagnostics(doc.uri);
     const aliasErrors = diags.filter(
@@ -99,7 +98,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
       return;
     }
     const doc = await openVueFile(getAppVuePath());
-    await sleep(15_000);
+    await waitForFileReady(doc);
 
     const diags = vscode.languages.getDiagnostics(doc.uri);
     const vueTsErrors = diags.filter(

@@ -2,15 +2,15 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForFileReady,
   openVueFile,
   measureHover,
-  sleep,
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
 
 suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   // Only run on the barrel-exports fixture
   const isBarrelFixture = FIXTURE_NAME === "barrel-exports";
@@ -19,10 +19,9 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
   suiteSetup(async function () {
     if (!isBarrelFixture) return;
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
     doc = await openVueFile("src/App.vue");
-    // Wait for LSP + type provider to fully process the file and barrel imports
-    await sleep(15_000);
+    await waitForFileReady(doc);
   });
 
   test("no 'Cannot find module' errors on barrel import", async function () {

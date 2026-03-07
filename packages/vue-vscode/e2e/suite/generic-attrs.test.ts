@@ -2,16 +2,16 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForFileReady,
   openVueFile,
   measureHover,
   getCompletions,
   findPosition,
-  sleep,
   FIXTURE_NAME,
 } from "../helpers";
 
 suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   let doc: vscode.TextDocument;
 
@@ -20,10 +20,9 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
       this.skip();
       return;
     }
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
     doc = await openVueFile("src/GenericAttrsComp.vue");
-    // Wait for LSP to fully process the file (type provider sync)
-    await sleep(12_000);
+    await waitForFileReady(doc);
   });
 
   // ── Return Type Annotation ──────────────────────────────────────

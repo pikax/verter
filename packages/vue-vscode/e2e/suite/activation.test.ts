@@ -10,10 +10,10 @@ import {
 } from "../helpers";
 
 suite(`Activation & LSP Health [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   suiteSetup(async function () {
-    await waitForExtensionReady(60_000);
+    await waitForExtensionReady();
   });
 
   test("extension activates successfully", function () {
