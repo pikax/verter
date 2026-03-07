@@ -401,8 +401,9 @@ pub struct VerterLanguageServer {
     inlay_hints_enabled: std::sync::atomic::AtomicBool,
     /// Cached verter diagnostics per document: URI → (version, diagnostics).
     /// Avoids re-running the linter when both push and pull paths request diagnostics
-    /// for the same document version.
-    cached_verter_diags: DashMap<String, (i32, Vec<Diagnostic>)>,
+    /// for the same document version. Arc-wrapped so the SyncCoordinator can read
+    /// cached verter diagnostics when publishing merged diagnostics after sync.
+    cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
     /// Set of TSX paths (e.g., "C:/project/src/Foo.vue.tsx") that were synced to the
     /// type provider as background files during workspace scan.  When `did_open()` is
     /// called for one of these files, we use `sync_tsx()` (update) instead of
@@ -463,6 +464,7 @@ impl VerterLanguageServer {
         let host = Arc::clone(&config.host);
         let documents = DocumentRegistry::new(config.host);
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
+        let cached_verter_diags = Arc::new(DashMap::new());
 
         // Create SyncCoordinator if a type provider is connected.
         // The coordinator's debounced loop replaces the old spawn-per-keystroke pattern.
@@ -474,6 +476,9 @@ impl VerterLanguageServer {
                     needs_provider_sync: Arc::clone(&needs_provider_sync),
                     tsx_profile: parking_lot::RwLock::new(documents.tsx_profile.read().clone()),
                     client: client.clone(),
+                    type_provider: config.type_provider.clone(),
+                    cached_verter_diags: Arc::clone(&cached_verter_diags),
+                    position_encoding: Arc::clone(&position_encoding),
                 },
             )
         });
@@ -494,7 +499,7 @@ impl VerterLanguageServer {
             init_lint_options: tokio::sync::Mutex::new(None),
             vite_config_enabled: std::sync::atomic::AtomicBool::new(true),
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
-            cached_verter_diags: DashMap::new(),
+            cached_verter_diags,
             background_synced_files: Arc::new(DashMap::new()),
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
@@ -607,19 +612,55 @@ impl VerterLanguageServer {
         diags
     }
 
-    /// Compute and push verter-only diagnostics for a document URI.
-    async fn publish_diagnostics(&self, uri: &Uri) {
+    /// Compute and push **merged** (Verter lint + TypeScript type) diagnostics.
+    ///
+    /// This is the primary diagnostic path. Push diagnostics stay visible during
+    /// typing — VS Code automatically adjusts their positions as the document changes.
+    /// Fresh diagnostics are published after the SyncCoordinator's 300ms debounce fires.
+    async fn publish_full_diagnostics(&self, uri: &Uri) {
         let verter_diags = self.compute_verter_diagnostics(uri);
-        self.publish_diagnostics_with(uri, verter_diags).await;
+
+        let diagnostics = if let Some(tp) = &self.type_provider {
+            match self.ide_context(uri) {
+                Some((tsx_path, tsx_content, mapper)) => {
+                    let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
+                    let vue_li = self.documents.get(uri).map(|d| d.line_index.clone());
+                    match (tp.get_diagnostics(&tsx_path).await, vue_li) {
+                        (Ok(type_diags), Some(vue_li)) => {
+                            tracing::debug!(
+                                "publish_full_diagnostics: type provider returned {} for {}",
+                                type_diags.len(),
+                                uri.as_str()
+                            );
+                            merge::merge_diagnostics(
+                                verter_diags,
+                                type_diags,
+                                &tsx_li,
+                                &mapper,
+                                &vue_li,
+                            )
+                        }
+                        (Err(e), _) => {
+                            tracing::warn!(
+                                "publish_full_diagnostics: type provider error for {}: {e}",
+                                uri.as_str()
+                            );
+                            verter_diags
+                        }
+                        _ => verter_diags,
+                    }
+                }
+                None => verter_diags,
+            }
+        } else {
+            verter_diags
+        };
+
+        self.publish_diagnostics_raw(uri, diagnostics).await;
     }
 
-    /// Publish verter-only diagnostics via the push (`publishDiagnostics`) path.
-    ///
-    /// TSGO type diagnostics are NOT included here — they are served exclusively
-    /// through the pull diagnostics handler (`textDocument/diagnostic`). This
-    /// avoids duplication: VS Code shows diagnostics from both push and pull, so
-    /// including TSGO in both paths would double every TypeScript error.
-    async fn publish_diagnostics_with(&self, uri: &Uri, verter_diags: Vec<Diagnostic>) {
+    /// Low-level: push pre-computed diagnostics to the client.
+    async fn publish_diagnostics_raw(&self, uri: &Uri, diagnostics: Vec<Diagnostic>) {
         let _timer = self
             .statistics
             .timer("diagnostics", Some(uri.as_str().to_string()));
@@ -627,11 +668,11 @@ impl VerterLanguageServer {
         tracing::info!(
             "publish_diagnostics ENTER {} ({} diags)",
             uri.as_str(),
-            verter_diags.len()
+            diagnostics.len()
         );
 
         self.client
-            .publish_diagnostics(uri.clone(), verter_diags, None)
+            .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
 
         tracing::info!("publish_diagnostics EXIT {}", uri.as_str());
@@ -1373,7 +1414,7 @@ impl VerterLanguageServer {
 
         if result {
             // Re-publish diagnostics since analysis has changed
-            self.publish_diagnostics(&parsed_uri).await;
+            self.publish_full_diagnostics(&parsed_uri).await;
         }
 
         Ok(ApplyStyleOverridesResponse { success: result })
@@ -2153,11 +2194,8 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 7a. Request diagnostic refresh — clears stale diagnostics from a previous
-    // session (e.g., TSGO errors that persist after switching to tsserver).
-    if let Err(e) = client.workspace_diagnostic_refresh().await {
-        tracing::debug!("workspace/diagnostic/refresh failed (client may not support it): {e}");
-    }
+    // 7a. Diagnostic refresh is handled by push diagnostics now —
+    // open files will get fresh diagnostics on their next did_change / did_open.
 
     client
         .send_notification::<VerterReady>(VerterReadyParams { gen: my_gen })
@@ -2508,7 +2546,7 @@ impl LanguageServer for VerterLanguageServer {
             self.sync_ide_to_provider(uri),
             self.sync_api_to_provider(uri),
         );
-        self.publish_diagnostics(uri).await;
+        self.publish_full_diagnostics(uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -2594,9 +2632,9 @@ impl LanguageServer for VerterLanguageServer {
         }
 
         tracing::info!("did_change EXIT v{version}");
-        // Skip push diagnostics entirely during rapid typing.
-        // Pull diagnostics (textDocument/diagnostic) serve cached verter results.
-        // The SyncCoordinator handles fresh diagnostics after typing stops (300ms debounce).
+        // No diagnostics published during typing — old push diagnostics stay visible
+        // and VS Code adjusts their positions as the document changes (line insertions etc.).
+        // The SyncCoordinator publishes fresh merged diagnostics after 300ms of silence.
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -2789,79 +2827,6 @@ impl LanguageServer for VerterLanguageServer {
             self.cached_verter_diags.remove(uri.as_str());
             tracing::debug!("did_delete_files: removed {}", file.uri);
         }
-    }
-
-    async fn diagnostic(
-        &self,
-        params: DocumentDiagnosticParams,
-    ) -> Result<DocumentDiagnosticReportResult> {
-        let _hg = HandlerGuard::new("diagnostic");
-        let uri = &params.text_document.uri;
-        tracing::info!("diagnostic ENTER {}", uri.as_str());
-
-        let verter_diags = self.compute_verter_diagnostics(uri);
-
-        // Skip TSGO diagnostics while the user is actively typing.
-        // TSGO processes requests serially — queuing diagnostics during typing blocks
-        // interactive features like completions.  After the debounced sync fires and TSGO
-        // processes the update, VS Code will re-request diagnostics with fresh data.
-        let diagnostics = if self.is_typing_cooldown() {
-            tracing::debug!(
-                "diagnostic (pull): skipping TSGO (typing cooldown) for {}",
-                uri.as_str()
-            );
-            verter_diags
-        } else if let Some(tp) = &self.type_provider {
-            match self.ide_context(uri) {
-                Some((tsx_path, tsx_content, mapper)) => {
-                    let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
-                    let vue_li = self.documents.get(uri).map(|d| d.line_index.clone());
-                    match (tp.get_diagnostics(&tsx_path).await, vue_li) {
-                        (Ok(type_diags), Some(vue_li)) => {
-                            tracing::debug!(
-                                "diagnostic (pull): type provider returned {} for {}",
-                                type_diags.len(),
-                                uri.as_str()
-                            );
-                            merge::merge_diagnostics(
-                                verter_diags,
-                                type_diags,
-                                &tsx_li,
-                                &mapper,
-                                &vue_li,
-                            )
-                        }
-                        (Err(e), _) => {
-                            tracing::warn!(
-                                "diagnostic (pull): type provider error for {}: {e}",
-                                uri.as_str()
-                            );
-                            verter_diags
-                        }
-                        _ => verter_diags,
-                    }
-                }
-                None => verter_diags,
-            }
-        } else {
-            verter_diags
-        };
-
-        tracing::debug!(
-            "diagnostic (pull): returning {} for {}",
-            diagnostics.len(),
-            uri.as_str()
-        );
-
-        Ok(DocumentDiagnosticReportResult::Report(
-            DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
-                related_documents: None,
-                full_document_diagnostic_report: FullDocumentDiagnosticReport {
-                    result_id: None,
-                    items: diagnostics,
-                },
-            }),
-        ))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -4879,5 +4844,16 @@ mod tests {
             "C:/proj/src/Popup",
             "C:/proj/src/PopupMenu.vue"
         ));
+    }
+
+    /// Server capabilities must NOT include `diagnostic_provider` (pull diagnostics).
+    /// We use push diagnostics exclusively to avoid flickering during typing.
+    #[test]
+    fn capabilities_do_not_include_pull_diagnostics() {
+        let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16);
+        assert!(
+            caps.diagnostic_provider.is_none(),
+            "diagnostic_provider must be removed — we use push diagnostics only"
+        );
     }
 }

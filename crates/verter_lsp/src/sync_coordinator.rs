@@ -4,17 +4,26 @@
 //! fast typing), the coordinator receives signals via an mpsc channel and waits
 //! for 300ms of silence before triggering a sync. This guarantees exactly one
 //! sync per file after typing stops, regardless of keystroke timing.
+//!
+//! After syncing, the coordinator computes merged (Verter lint + TypeScript type)
+//! diagnostics and publishes them via push. Push diagnostics stay visible during
+//! typing — VS Code automatically adjusts their positions as the document changes.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::mpsc;
+use tower_lsp_server::ls_types::*;
 use tower_lsp_server::Client;
 use verter_host::VerterHost;
 
+use crate::documents::line_index::LineIndex;
+use crate::documents::position_map::PositionMapper;
+use crate::tsgo::merge;
 use crate::tsgo::project_sync::ProjectSync;
+use crate::tsgo::traits::TypeProvider;
 
 /// Signal sent to the coordinator when a file changes.
 pub struct SyncSignal {
@@ -44,13 +53,20 @@ impl SyncCoordinatorHandle {
     }
 }
 
-/// Shared state the coordinator needs to perform syncs.
+/// Shared state the coordinator needs to perform syncs and publish diagnostics.
 pub struct SyncCoordinatorDeps {
     pub host: Arc<VerterHost>,
     pub project_sync: ProjectSync,
     pub needs_provider_sync: Arc<DashSet<String>>,
     pub tsx_profile: parking_lot::RwLock<verter_host::CompileProfile>,
     pub client: Client,
+    /// Type provider for fetching TS diagnostics after sync.
+    pub type_provider: Option<Arc<dyn TypeProvider>>,
+    /// Cached verter-only diagnostics (URI → (version, diagnostics)).
+    /// Shared with the server so we can read cached verter diags after sync.
+    pub cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
+    /// Negotiated position encoding for building line indexes.
+    pub position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
 }
 
 /// Debounce interval: sync fires after 300ms of silence for a given file.
@@ -102,22 +118,22 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
                     .map(|(id, (_, uri))| (id.clone(), uri.clone()))
                     .collect();
 
-                let mut synced_any = false;
+                let mut synced_files: Vec<(String, String)> = Vec::new();
                 for (canonical_id, uri_str) in ready {
                     pending_files.remove(&canonical_id);
                     // Only sync if the file is still marked dirty
                     if deps.needs_provider_sync.remove(&canonical_id).is_some() {
                         sync_file(&deps, &canonical_id, &uri_str).await;
-                        synced_any = true;
+                        synced_files.push((canonical_id, uri_str));
                     }
                 }
 
-                // After syncing, ask VS Code to re-pull diagnostics so that
-                // type provider errors (TS2304, etc.) appear. Without this,
-                // pull diagnostics requested during typing cooldown return
-                // verter-only results and are never refreshed.
-                if synced_any {
-                    let _ = deps.client.workspace_diagnostic_refresh().await;
+                // After syncing, publish fresh merged diagnostics for each synced file.
+                // Push diagnostics replace the previous squiggles — no flickering because
+                // VS Code adjusts push diagnostic positions during typing, and we only
+                // publish fresh ones after the debounce (typing has stopped).
+                for (canonical_id, uri_str) in &synced_files {
+                    publish_merged_diagnostics(&deps, canonical_id, uri_str).await;
                 }
             }
         }
@@ -125,11 +141,6 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
 }
 
 /// Perform the actual sync: sync TSX/DTS to the type provider.
-///
-/// This function must NOT call `publish_diagnostics` (large payloads can cause
-/// pipe backpressure → blocking thread exhaustion → total freeze). Instead, the
-/// coordinator sends a lightweight `workspace/diagnosticRefresh` notification
-/// after all syncs complete, which asks VS Code to re-pull diagnostics.
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
     // Sync IDE (TSX) output to type provider
@@ -164,6 +175,81 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     }
 
     tracing::info!("sync_coordinator: SYNC_DONE {canonical_id}");
+}
+
+/// Publish merged (Verter lint + TypeScript type) diagnostics for a synced file.
+///
+/// Uses cached verter diagnostics (computed during `did_open` / previous publish)
+/// and fetches fresh TS diagnostics from the type provider. Falls back to cached
+/// verter-only diagnostics if the type provider is unavailable or returns an error.
+async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &str, uri_str: &str) {
+    let uri: Uri = match uri_str.parse() {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+
+    // Read cached verter diagnostics (computed by server during did_open or prior publish)
+    let verter_diags = deps
+        .cached_verter_diags
+        .get(uri_str)
+        .map(|entry| entry.1.clone())
+        .unwrap_or_default();
+
+    let diagnostics = if let Some(tp) = &deps.type_provider {
+        // Build IDE context from the host
+        let profile = deps.tsx_profile.read().clone();
+        let ide = tokio::task::block_in_place(|| deps.host.get_ide(canonical_id, &profile));
+
+        if let Some(ide) = ide {
+            let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
+            let tsx_path = format!("{canonical_id}{ext}");
+            let encoding = deps.position_encoding.read().clone();
+            let tsx_li = LineIndex::new(&ide.code, encoding.clone());
+
+            // Build position mapper from IDE source map
+            let mapper = ide
+                .source_map
+                .as_ref()
+                .and_then(|sm| PositionMapper::from_json(sm).ok());
+
+            // Build Vue source line index
+            let vue_source = deps.host.get_source(canonical_id);
+
+            match (tp.get_diagnostics(&tsx_path).await, mapper, vue_source) {
+                (Ok(type_diags), Some(mapper), Some(vue_src)) => {
+                    let vue_li = LineIndex::new(&vue_src, encoding);
+                    tracing::debug!(
+                        "sync_coordinator: publish {} verter + {} type diags for {}",
+                        verter_diags.len(),
+                        type_diags.len(),
+                        canonical_id
+                    );
+                    merge::merge_diagnostics(verter_diags, type_diags, &tsx_li, &mapper, &vue_li)
+                }
+                (Err(e), _, _) => {
+                    tracing::warn!(
+                        "sync_coordinator: type provider error for {}: {e}",
+                        canonical_id
+                    );
+                    verter_diags
+                }
+                _ => verter_diags,
+            }
+        } else {
+            verter_diags
+        }
+    } else {
+        verter_diags
+    };
+
+    tracing::info!(
+        "sync_coordinator: publishing {} diagnostics for {}",
+        diagnostics.len(),
+        canonical_id
+    );
+    deps.client
+        .publish_diagnostics(uri, diagnostics, None)
+        .await;
 }
 
 #[cfg(test)]

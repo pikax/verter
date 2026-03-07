@@ -34,11 +34,10 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
         })),
-        diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
-            inter_file_dependencies: true,
-            workspace_diagnostics: false,
-            ..Default::default()
-        })),
+        // Pull diagnostics removed — we use push diagnostics exclusively.
+        // Push diagnostics stay visible during typing (VS Code adjusts their positions
+        // as the document changes), eliminating the flickering caused by pull diagnostics
+        // returning stale/incomplete results during typing cooldown.
         document_symbol_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
