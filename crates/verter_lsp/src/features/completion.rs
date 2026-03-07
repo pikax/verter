@@ -157,12 +157,22 @@ pub fn completions_at_position(
                         }
                     }
                     Some(CompletionResult {
-                        items: template_completions(analysis, workspace_components, doc_uri),
+                        items: template_completions(
+                            analysis,
+                            workspace_components,
+                            doc_uri,
+                            Some(offset),
+                        ),
                         is_incomplete: false,
                     })
                 }
                 TemplateCursorContext::Interpolation => Some(CompletionResult {
-                    items: template_completions(analysis, workspace_components, doc_uri),
+                    items: template_completions(
+                        analysis,
+                        workspace_components,
+                        doc_uri,
+                        Some(offset),
+                    ),
                     is_incomplete: false,
                 }),
                 TemplateCursorContext::StaticValue { ref attr_name } => {
@@ -836,6 +846,7 @@ fn template_completions(
     analysis: &FileAnalysisSnapshot,
     workspace_components: Option<&[WorkspaceComponent]>,
     doc_uri: Option<&str>,
+    offset: Option<u32>,
 ) -> Vec<CompletionItem> {
     let mut items = Vec::new();
 
@@ -928,6 +939,32 @@ fn template_completions(
         }
     }
 
+    // V-for scoped variables available at cursor position
+    if let (Some(offset), Some(template)) = (offset, &analysis.template) {
+        for el in &template.elements {
+            if let Some(ref vf) = el.v_for {
+                if offset >= el.span.start && offset < el.span.end {
+                    for name in extract_vfor_variable_names(&vf.variable) {
+                        items.push(CompletionItem {
+                            label: name.to_string(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some("v-for variable".to_string()),
+                            ..Default::default()
+                        });
+                    }
+                    if let Some(ref idx) = vf.index {
+                        items.push(CompletionItem {
+                            label: idx.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some("v-for index".to_string()),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Filter out internal symbols
     items
         .retain(|item| !item.label.starts_with("___VERTER___") && !is_internal_dunder(&item.label));
@@ -937,6 +974,28 @@ fn template_completions(
     items.dedup_by(|a, b| a.label == b.label);
 
     items
+}
+
+/// Extract identifier names from a v-for variable pattern.
+/// Handles simple names (`item`), destructured objects (`{ name, email }`),
+/// and destructured arrays (`[first, second]`).
+fn extract_vfor_variable_names(pattern: &str) -> Vec<&str> {
+    let trimmed = pattern.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        trimmed
+            .trim_matches(|c| c == '{' || c == '}' || c == '[' || c == ']')
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| {
+                !s.is_empty()
+                    && s.chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
+            })
+            .collect()
+    } else {
+        vec![trimmed]
+    }
 }
 
 fn binding_completion_kind(kind: &verter_analysis::AnalyzedBindingKind) -> CompletionItemKind {

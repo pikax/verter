@@ -1949,10 +1949,16 @@ pub(crate) fn compute_verter_diagnostics_for(
                 ),
             );
 
-            // When lint is not explicitly configured, suppress all lint diagnostics.
+            // When lint is not explicitly configured, suppress lint diagnostics but
+            // keep component usage diagnostics (type-level, not lint rules).
             if !lint_explicitly_configured {
                 diags.retain(|d| match &d.code {
-                    Some(NumberOrString::String(code)) => !code.starts_with("verter/"),
+                    Some(NumberOrString::String(code)) => {
+                        if code == "verter/unknown-prop" || code == "verter/unknown-model" {
+                            return true;
+                        }
+                        !code.starts_with("verter/")
+                    }
                     _ => true,
                 });
             }

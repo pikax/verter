@@ -1980,3 +1980,137 @@ fn test_no_member_access_standalone_identifier_not_dot() {
         "should NOT detect member access for standalone identifier 'foobar'"
     );
 }
+
+#[test]
+fn test_template_completions_include_vfor_variables() {
+    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, VForDirective};
+
+    let analysis = FileAnalysisSnapshot {
+        bindings: vec![AnalyzedBinding {
+            name: "items".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: false,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+        }],
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![TemplateElement {
+                tag: "div".to_string(),
+                span: verter_span::Span::new(100, 200),
+                v_for: Some(VForDirective {
+                    variable: "item".to_string(),
+                    index: Some("idx".to_string()),
+                    iterable: "items".to_string(),
+                    has_key: false,
+                    key_expression: None,
+                    key_uses_index: false,
+                    span: verter_span::Span::new(105, 130),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Cursor inside the v-for element (offset 150 is within span 100..200)
+    let items = template_completions(&analysis, None, None, Some(150));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    // Positive: v-for variables are included
+    assert!(
+        labels.contains(&"item"),
+        "v-for variable 'item' should be in completions"
+    );
+    assert!(
+        labels.contains(&"idx"),
+        "v-for index 'idx' should be in completions"
+    );
+    // Also includes script bindings
+    assert!(
+        labels.contains(&"items"),
+        "script binding 'items' should be in completions"
+    );
+}
+
+#[test]
+fn test_template_completions_vfor_not_included_outside_scope() {
+    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, VForDirective};
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![TemplateElement {
+                tag: "div".to_string(),
+                span: verter_span::Span::new(100, 200),
+                v_for: Some(VForDirective {
+                    variable: "item".to_string(),
+                    index: None,
+                    iterable: "items".to_string(),
+                    has_key: false,
+                    key_expression: None,
+                    key_uses_index: false,
+                    span: verter_span::Span::new(105, 130),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Cursor outside the v-for element (offset 50 is before span 100..200)
+    let items = template_completions(&analysis, None, None, Some(50));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    // Negative: v-for variables must NOT be included outside their scope
+    assert!(
+        !labels.contains(&"item"),
+        "v-for variable 'item' must not appear outside scope"
+    );
+}
+
+#[test]
+fn test_template_completions_vfor_destructured_pattern() {
+    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, VForDirective};
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(TemplateAnalysisSnapshot {
+            elements: vec![TemplateElement {
+                tag: "li".to_string(),
+                span: verter_span::Span::new(100, 300),
+                v_for: Some(VForDirective {
+                    variable: "{ name, email }".to_string(),
+                    index: None,
+                    iterable: "users".to_string(),
+                    has_key: false,
+                    key_expression: None,
+                    key_uses_index: false,
+                    span: verter_span::Span::new(105, 140),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let items = template_completions(&analysis, None, None, Some(150));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    // Positive: destructured names should appear individually
+    assert!(
+        labels.contains(&"name"),
+        "destructured 'name' should be in completions"
+    );
+    assert!(
+        labels.contains(&"email"),
+        "destructured 'email' should be in completions"
+    );
+    // Negative: the raw pattern should NOT appear as-is
+    assert!(
+        !labels.contains(&"{ name, email }"),
+        "raw pattern must not appear as completion"
+    );
+}

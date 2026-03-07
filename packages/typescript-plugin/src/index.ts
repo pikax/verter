@@ -77,31 +77,32 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // Handle .vue.ts imports (IDE codegen rewrites .vue → .vue.ts so the
         // type provider resolves to the public API output, not the IDE .vue.tsx)
         if (isRelativeVueTs(moduleName)) {
-          const vuePath = moduleName.slice(0, -3); // strip '.ts' → './Foo.vue'
+          const resolved = path.resolve(path.dirname(containingFile), moduleName);
           logger.info(
             "[Verter] createModuleResolver relative vue.ts - " +
               moduleName +
               " -- " +
-              path.resolve(path.dirname(containingFile), vuePath),
+              resolved,
           );
           return {
-            extension: ts.Extension.Dts,
+            extension: ts.Extension.Ts,
             isExternalLibraryImport: false,
-            resolvedFileName: path.resolve(path.dirname(containingFile), vuePath) + ".d.ts",
+            resolvedFileName: resolved,
           };
         }
 
         if (isRelativeVue(moduleName)) {
+          const resolved = path.resolve(path.dirname(containingFile), moduleName);
           logger.info(
             "[Verter] createModuleResolver relative vue - " +
               moduleName +
               " -- " +
-              path.resolve(path.dirname(containingFile), moduleName),
+              resolved,
           );
           return {
-            extension: ts.Extension.Dts,
+            extension: ts.Extension.Ts,
             isExternalLibraryImport: false,
-            resolvedFileName: path.resolve(path.dirname(containingFile), moduleName) + ".d.ts",
+            resolvedFileName: resolved + ".ts",
           };
         }
         if (!isVue(moduleName)) {
@@ -190,16 +191,21 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // because the standalone LS's internal project lacks a resolutionCache.
     const languageService = info.languageService;
 
-    // Fix go-to-definition: .vue.d.ts → .vue so Ctrl+Click opens the real .vue file
+    /** Strip virtual suffixes (.vue.d.ts → .vue, .vue.ts → .vue) */
+    function fixVuePath(p: string): string {
+      if (p.endsWith(".vue.d.ts")) return p.slice(0, -5);
+      if (p.endsWith(".vue.ts")) return p.slice(0, -3);
+      return p;
+    }
+
+    // Fix go-to-definition: .vue.d.ts/.vue.ts → .vue so Ctrl+Click opens the real .vue file
     const _getDefinitionAndBoundSpan =
       languageService.getDefinitionAndBoundSpan.bind(languageService);
     languageService.getDefinitionAndBoundSpan = (fileName, position) => {
       const result = _getDefinitionAndBoundSpan(fileName, position);
       if (result?.definitions) {
         for (const def of result.definitions) {
-          if (def.fileName.endsWith(".vue.d.ts")) {
-            def.fileName = def.fileName.slice(0, -5); // strip ".d.ts"
-          }
+          def.fileName = fixVuePath(def.fileName);
         }
       }
       return result;
@@ -211,9 +217,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const result = _getDefinitionAtPosition(fileName, position);
       if (result) {
         for (const def of result) {
-          if (def.fileName.endsWith(".vue.d.ts")) {
-            def.fileName = def.fileName.slice(0, -5);
-          }
+          def.fileName = fixVuePath(def.fileName);
         }
       }
       return result;
@@ -225,9 +229,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const result = _getTypeDefinitionAtPosition(fileName, position);
       if (result) {
         for (const def of result) {
-          if (def.fileName.endsWith(".vue.d.ts")) {
-            def.fileName = def.fileName.slice(0, -5);
-          }
+          def.fileName = fixVuePath(def.fileName);
         }
       }
       return result;
@@ -257,11 +259,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (result?.codeActions) {
         for (const action of result.codeActions) {
           // Fix display text (what user sees in tooltip)
-          action.description = action.description.replace(/\.vue\.d\.ts/g, ".vue");
+          action.description = action.description.replace(/\.vue\.(d\.)?ts/g, ".vue");
           for (const change of action.changes) {
             for (const edit of change.textChanges) {
               // Fix actual import statement text
-              edit.newText = edit.newText.replace(/\.vue\.d\.ts(['"])/g, ".vue$1");
+              edit.newText = edit.newText.replace(/\.vue\.(d\.)?ts(['"])/g, ".vue$2");
             }
           }
         }
@@ -270,7 +272,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (result?.sourceDisplay) {
         result.sourceDisplay = result.sourceDisplay.map((part) => ({
           ...part,
-          text: part.text.replace(/\.vue\.d\.ts/g, ".vue"),
+          text: part.text.replace(/\.vue\.(d\.)?ts/g, ".vue"),
         }));
       }
       return result;
@@ -287,12 +289,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           if (entry.sourceDisplay) {
             entry.sourceDisplay = entry.sourceDisplay.map((part) => ({
               ...part,
-              text: part.text.replace(/\.vue\.d\.ts/g, ".vue"),
+              text: part.text.replace(/\.vue\.(d\.)?ts/g, ".vue"),
             }));
           }
           // Fix source property (used for grouping)
           if (entry.source?.endsWith(".vue.d.ts")) {
             entry.source = entry.source.slice(0, -5); // strip .d.ts
+          } else if (entry.source?.endsWith(".vue.ts")) {
+            entry.source = entry.source.slice(0, -3); // strip .ts
           }
         }
       }
@@ -305,7 +309,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   const getExternalFiles = (project: tsModule.server.ConfiguredProject) => {
     const files = project.getFileNames(true, true).filter(isVue);
     project.projectService.logger.info("[Verter] Got files\n" + files.join("\n"));
-    return files.map((f) => f + ".d.ts");
+    return files.map((f) => f + ".ts");
   };
 
   return {

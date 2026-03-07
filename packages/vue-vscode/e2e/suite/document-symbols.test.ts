@@ -30,8 +30,19 @@ suite(`Document Symbols [${FIXTURE_NAME}]`, function () {
   test("DS2: contains expected binding names", async function () {
     const symbols = await getDocumentSymbols(doc.uri);
 
-    // Extract all symbol names (handle both DocumentSymbol and SymbolInformation)
-    const names = symbols.map((s) => s.name);
+    // Flatten hierarchy: top-level symbols may be block containers (script, template)
+    // with binding symbols nested as children.
+    function collectNames(syms: (vscode.DocumentSymbol | vscode.SymbolInformation)[]): string[] {
+      const result: string[] = [];
+      for (const s of syms) {
+        result.push(s.name);
+        if ("children" in s && s.children) {
+          result.push(...collectNames(s.children as vscode.DocumentSymbol[]));
+        }
+      }
+      return result;
+    }
+    const names = collectNames(symbols);
     console.log(`    Symbol names: ${names.slice(0, 10).join(", ")}${names.length > 10 ? "..." : ""}`);
 
     // Script bindings should appear as document symbols

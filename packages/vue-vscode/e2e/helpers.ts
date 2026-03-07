@@ -218,9 +218,9 @@ export function getCompVuePath(): string | undefined {
  */
 export async function waitForDiagnostics(
   uri: vscode.Uri,
-  options: { source?: string; timeoutMs?: number; minCount?: number } = {},
+  options: { source?: string; timeoutMs?: number; minCount?: number; predicate?: (d: vscode.Diagnostic) => boolean } = {},
 ): Promise<vscode.Diagnostic[]> {
-  const { source, timeoutMs = 30_000, minCount = 0 } = options;
+  const { source, timeoutMs = 30_000, minCount = 0, predicate } = options;
 
   const getFiltered = () => {
     let diags = vscode.languages.getDiagnostics(uri);
@@ -230,9 +230,14 @@ export async function waitForDiagnostics(
     return diags;
   };
 
+  const isSatisfied = (diags: vscode.Diagnostic[]) => {
+    if (predicate) return diags.some(predicate);
+    return diags.length > minCount;
+  };
+
   // Check if already satisfied
   const existing = getFiltered();
-  if (existing.length > minCount) {
+  if (isSatisfied(existing)) {
     return existing;
   }
 
@@ -248,7 +253,7 @@ export async function waitForDiagnostics(
       if (!matched) return;
 
       const diags = getFiltered();
-      if (diags.length > minCount) {
+      if (isSatisfied(diags)) {
         clearTimeout(timer);
         sub.dispose();
         resolve(diags);
@@ -256,6 +261,7 @@ export async function waitForDiagnostics(
     });
   });
 }
+
 
 /**
  * Execute the decoration state command (only available in E2E test mode).

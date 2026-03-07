@@ -169,7 +169,15 @@ fn walk_element<'a, 'alloc>(
 
     // v-for wrapping
     if has_v_for {
-        directives::emit_v_for_open(el, oxc_el, ctx.source, ctx.out, ctx.alloc, ctx.resolver);
+        directives::emit_v_for_open(
+            el,
+            oxc_el,
+            ctx.source,
+            ctx.out,
+            ctx.alloc,
+            ctx.resolver,
+            ctx.options.is_jsx,
+        );
     }
 
     // v-if + v-for ternary: emitted after v-for open so the ternary is inside the map body

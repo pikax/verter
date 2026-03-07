@@ -1663,7 +1663,8 @@ fn test_go_to_definition_event_handler_click() {
                 handler_binding: Some("handleClick".into()),
                 is_inline: false,
                 target_tag: "button".into(),
-                span: verter_span::Span::new(click_offset as u32, (click_offset + 22) as u32),
+                // TemplateEventHandler.span is the ELEMENT span (set by extract_event_handlers)
+                span: verter_span::Span::new(11, 60),
             }],
             ..Default::default()
         }),
@@ -1771,7 +1772,8 @@ fn test_go_to_definition_inline_event_no_binding() {
                 handler_binding: None, // inline expression, no binding
                 is_inline: true,
                 target_tag: "button".into(),
-                span: verter_span::Span::new(click_offset as u32, (click_offset + 17) as u32),
+                // TemplateEventHandler.span is the ELEMENT span
+                span: verter_span::Span::new(11, 55),
             }],
             ..Default::default()
         }),

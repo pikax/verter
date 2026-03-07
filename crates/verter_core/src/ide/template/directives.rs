@@ -134,6 +134,7 @@ pub fn emit_v_for_open<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
+    is_jsx: bool,
 ) {
     let v_for_prop = match &el.v_for {
         Some(p) => p,
@@ -173,6 +174,29 @@ pub fn emit_v_for_open<'alloc>(
                 .map(|off| vs + off as u32)
                 .unwrap_or(vs);
             out.prepend_alloc_mapped(target_pos, params_offset, params_trimmed);
+
+            // Add type annotation for v-for parameter to preserve named types in hover.
+            // Only for TSX (not JSX — TS annotations are invalid in plain JS), simple
+            // identifier iterables, and single/destructured params (no comma).
+            let iterable_trimmed = source_expr.trim();
+            let has_comma = params_trimmed.contains(',');
+            let is_simple_ident = !iterable_trimmed.is_empty()
+                && iterable_trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+                && iterable_trimmed
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+            if !is_jsx && !has_comma && is_simple_ident {
+                let annotation = format!(": (typeof {})[number]", iterable_trimmed);
+                out.prepend_alloc_mapped_with_offset(
+                    target_pos,
+                    0,
+                    annotation.len() as u32,
+                    &annotation,
+                );
+            }
 
             // Emit ") => (" — unmapped tail
             let map_close = ") => (";

@@ -133,8 +133,8 @@ pub fn definition_at_position(
                                     if let Some(handler) =
                                         template.event_handlers.iter().find(|h| {
                                             h.event_name == *dir.argument.as_deref().unwrap_or("")
-                                                && h.span.start >= dir.span.start
-                                                && h.span.end <= dir.span.end
+                                                && h.span.start == el.span.start
+                                                && h.span.end == el.span.end
                                         })
                                     {
                                         if let Some(ref binding_name) = handler.handler_binding {

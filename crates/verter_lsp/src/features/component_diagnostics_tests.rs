@@ -614,3 +614,121 @@ fn dynamic_component_vmodel_skipped() {
         "dynamic components should be skipped for v-model checks"
     );
 }
+
+// ── data-*/aria-* fallthrough tests ─────────────────────────────
+
+use verter_analysis::template::TemplateElement;
+
+/// Helper to build a child analysis with props and a given number of root elements.
+fn make_child_with_roots(prop_names: &[&str], root_count: usize) -> FileAnalysisSnapshot {
+    let mut elements: Vec<TemplateElement> = Vec::new();
+    for i in 0..root_count {
+        elements.push(TemplateElement {
+            tag: "div".to_string(),
+            span: verter_span::Span::new((i * 100) as u32, ((i + 1) * 100) as u32),
+            parent_index: None, // root element
+            ..Default::default()
+        });
+    }
+    FileAnalysisSnapshot {
+        template: Some(TemplateAnalysisSnapshot {
+            prop_definitions: prop_names
+                .iter()
+                .map(|name| AnalyzedPropDefinition {
+                    name: name.to_string(),
+                    type_annotation: Some("string".into()),
+                    has_default: false,
+                    is_required: true,
+                    is_boolean: false,
+                    used_in_template: false,
+                    used_in_script: false,
+                    span: verter_span::Span::new(0, 0),
+                })
+                .collect(),
+            elements,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn data_attr_not_flagged_on_non_fragment_component() {
+    let parent = make_parent_analysis(vec![TemplateComponentUsage {
+        name: "SingleRoot".to_string(),
+        import_source: Some("./SingleRoot.vue".to_string()),
+        is_dynamic: false,
+        has_spread: false,
+        props: vec![make_prop("data-test")],
+        slots_used: vec![],
+        static_classes: vec![],
+        has_dynamic_class: false,
+        dynamic_classes: vec![],
+        v_models: vec![],
+        span: verter_span::Span::new(0, 50),
+    }]);
+
+    // Single root element → non-fragment → data-* should fall through
+    let child = make_child_with_roots(&["msg"], 1);
+    let unknowns = find_unknown_props(&parent, &|_| Some(child.clone()));
+
+    assert!(
+        unknowns.is_empty(),
+        "data-test should NOT be flagged on non-fragment component (fallthrough)"
+    );
+}
+
+#[test]
+fn data_attr_flagged_on_fragment_component() {
+    let parent = make_parent_analysis(vec![TemplateComponentUsage {
+        name: "FragmentComp".to_string(),
+        import_source: Some("./FragmentComp.vue".to_string()),
+        is_dynamic: false,
+        has_spread: false,
+        props: vec![make_prop("msg"), make_prop("data-test")],
+        slots_used: vec![],
+        static_classes: vec![],
+        has_dynamic_class: false,
+        dynamic_classes: vec![],
+        v_models: vec![],
+        span: verter_span::Span::new(0, 50),
+    }]);
+
+    // Two root elements → fragment → data-* cannot fall through
+    let child = make_child_with_roots(&["msg"], 2);
+    let unknowns = find_unknown_props(&parent, &|_| Some(child.clone()));
+
+    // Positive: data-test IS flagged on fragment
+    assert_eq!(unknowns.len(), 1, "only data-test should be flagged");
+    assert_eq!(unknowns[0].prop_name, "data-test");
+    // Negative: msg is a declared prop and should NOT be flagged
+    assert!(
+        unknowns.iter().all(|u| u.prop_name != "msg"),
+        "declared prop 'msg' must not be flagged"
+    );
+}
+
+#[test]
+fn aria_attr_not_flagged_on_non_fragment_component() {
+    let parent = make_parent_analysis(vec![TemplateComponentUsage {
+        name: "SingleRoot".to_string(),
+        import_source: Some("./SingleRoot.vue".to_string()),
+        is_dynamic: false,
+        has_spread: false,
+        props: vec![make_prop("aria-label")],
+        slots_used: vec![],
+        static_classes: vec![],
+        has_dynamic_class: false,
+        dynamic_classes: vec![],
+        v_models: vec![],
+        span: verter_span::Span::new(0, 50),
+    }]);
+
+    let child = make_child_with_roots(&["msg"], 1);
+    let unknowns = find_unknown_props(&parent, &|_| Some(child.clone()));
+
+    assert!(
+        unknowns.is_empty(),
+        "aria-label should NOT be flagged on non-fragment component"
+    );
+}

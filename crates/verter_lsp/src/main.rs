@@ -60,9 +60,7 @@ async fn main() {
                 let mcp_host = Arc::clone(&host);
                 let mcp_lint_preset = args.mcp_lint_preset.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        serve_mcp_http(mcp_host, listener, &mcp_lint_preset).await
-                    {
+                    if let Err(e) = serve_mcp_http(mcp_host, listener, &mcp_lint_preset).await {
                         tracing::warn!("MCP HTTP server failed: {e}");
                     }
                 });
@@ -92,7 +90,6 @@ async fn main() {
         type_provider_kind: provider_kind,
         suggest_tsgo,
         mcp_port: mcp_actual_port,
-
     };
 
     let client_cell_for_build = Arc::clone(&client_cell);

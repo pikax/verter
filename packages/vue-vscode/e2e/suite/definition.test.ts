@@ -814,8 +814,8 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     }
 
     const text = doc.getText();
-    // Find @custom="handleCustom" and position on "handleCustom"
-    const match = text.indexOf('@custom="handleCustom"');
+    // Find @custom="handleCustom($event)" and position on "handleCustom"
+    const match = text.indexOf('@custom="handleCustom($event)"');
     if (match === -1) {
       this.skip();
       return;

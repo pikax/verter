@@ -604,7 +604,9 @@ pub fn merge_definitions(
         let is_cross_file = matches!(vd, GotoDefinitionResponse::Scalar(loc)
             if loc.uri != *document_uri
             && loc.uri.as_str() != crate::features::definition::SAME_FILE_URI);
-        if type_defs.is_empty() || is_cross_file {
+        let is_same_file =
+            matches!(vd, GotoDefinitionResponse::Scalar(loc) if loc.uri == *document_uri);
+        if type_defs.is_empty() || is_cross_file || is_same_file {
             return verter_def;
         }
     }
@@ -2055,6 +2057,67 @@ mod tests {
             GotoDefinitionResponse::Scalar(loc) => {
                 assert_eq!(loc.range.start.line, 5);
                 assert_eq!(loc.range.start.character, 6);
+            }
+            _ => panic!("Expected scalar definition"),
+        }
+    }
+
+    /// When verter provides a same-file definition (URI == document_uri) and
+    /// the type provider also returns results for the same .vue.tsx file,
+    /// verter should be preferred — its analysis spans are precise, while
+    /// the type provider's .vue.tsx byte offsets may fail position mapping.
+    #[test]
+    fn merge_definitions_prefers_verter_same_file_over_type_provider() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+
+        // Verter resolved to line 5 in the same file (sentinel already replaced)
+        let verter_def = Some(GotoDefinitionResponse::Scalar(Location {
+            uri: test_doc_uri(),
+            range: Range {
+                start: Position {
+                    line: 5,
+                    character: 6,
+                },
+                end: Position {
+                    line: 5,
+                    character: 12,
+                },
+            },
+        }));
+
+        // Type provider also returns a result for the same file's .vue.tsx
+        // (position mapping will fail → would produce (0,0))
+        let type_defs = vec![TypeLocation {
+            path: "/test.vue.tsx".to_string(),
+            start: 999,
+            end: 1010,
+        }];
+
+        let result = merge_definitions(
+            verter_def,
+            type_defs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+        );
+        assert!(
+            result.is_some(),
+            "should return verter's same-file definition"
+        );
+
+        match result.unwrap() {
+            GotoDefinitionResponse::Scalar(loc) => {
+                // Positive: verter's precise position is preserved
+                assert_eq!(loc.uri, test_doc_uri());
+                assert_eq!(loc.range.start.line, 5);
+                assert_eq!(loc.range.start.character, 6);
+                // Negative: must NOT be (0,0) from failed type provider mapping
+                assert_ne!(
+                    loc.range.start.line, 0,
+                    "must not be (0,0) from failed type provider mapping"
+                );
             }
             _ => panic!("Expected scalar definition"),
         }

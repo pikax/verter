@@ -8827,8 +8827,7 @@ fn tsx_v_for_item_in_items_emits_map_expression() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("items.map((item) => (")
-            || tsx.code.contains("_ctx.items.map((item) => ("),
+        tsx.code.contains("items.map((item") || tsx.code.contains("_ctx.items.map((item"),
         "v-for item in items should compile to .map expression, got:\n{}",
         tsx.code
     );
@@ -8841,8 +8840,7 @@ fn tsx_v_for_item_of_items_emits_map_expression() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("items.map((item) => (")
-            || tsx.code.contains("_ctx.items.map((item) => ("),
+        tsx.code.contains("items.map((item") || tsx.code.contains("_ctx.items.map((item"),
         "v-for item of items should compile to .map expression, got:\n{}",
         tsx.code
     );
@@ -8898,7 +8896,7 @@ fn tsx_v_for_on_template_tag_uses_fragment_children() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains(".map((item) => ("),
+        tsx.code.contains(".map((item") && tsx.code.contains("=> ("),
         "template v-for should compile to map over item, got:\n{}",
         tsx.code
     );
@@ -8922,7 +8920,7 @@ fn tsx_v_for_with_v_if_combination_contains_condition_and_map() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains(".map((item) => ("),
+        tsx.code.contains(".map((item") && tsx.code.contains("=> ("),
         "v-for branch should still emit map expression when combined with v-if, got:\n{}",
         tsx.code
     );
@@ -8950,7 +8948,7 @@ const items = [1]
         tsx.code
     );
     assert!(
-        tsx.code.contains(".map((item) => ("),
+        tsx.code.contains(".map((item") && tsx.code.contains("=> ("),
         "Child v-for under parent v-if should still emit map expression, got:\n{}",
         tsx.code
     );
@@ -9077,7 +9075,7 @@ const items = [1]
         tsx.code
     );
     assert!(
-        tsx.code.contains(".map((item) => (<Comp") || tsx.code.contains(".map((item) => (<Comp "),
+        tsx.code.contains(".map((item") && tsx.code.contains("=> (<Comp"),
         "Component with v-for should keep Comp tag inside map branch, got:\n{}",
         tsx.code
     );

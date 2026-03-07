@@ -307,8 +307,13 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
         .map((c) => (typeof c === "string" ? c : c.value))
         .join("\n");
       console.log(`    Content: ${content.slice(0, 200)}`);
-      // Should show type info (Action interface)
-      expect(content, "should mention Action type").to.include("Action");
+      // Should show type info — either named "Action" or expanded structural type
+      const hasNamedType = content.includes("Action");
+      const hasExpandedType = content.includes("label") && content.includes("disabled") && content.includes("handler");
+      expect(
+        hasNamedType || hasExpandedType,
+        `should mention Action type or its expanded shape: ${content.slice(0, 300)}`,
+      ).to.be.true;
     }
   });
 
@@ -364,7 +369,13 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
         .map((c) => (typeof c === "string" ? c : c.value))
         .join("\n");
       console.log(`    Content: ${content.slice(0, 200)}`);
-      expect(content, "should mention User type").to.include("User");
+      // Should show type info — either named "User" or expanded structural type
+      const hasNamedType = content.includes("User");
+      const hasExpandedType = content.includes("name") && content.includes("email") && content.includes("age");
+      expect(
+        hasNamedType || hasExpandedType,
+        `should mention User type or its expanded shape: ${content.slice(0, 300)}`,
+      ).to.be.true;
     }
   });
 

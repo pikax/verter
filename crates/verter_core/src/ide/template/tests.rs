@@ -544,6 +544,62 @@ fn v_for_of_variant() {
         "v-for 'of' separator must not appear in output, got: {}",
         result
     );
+    // Simple identifier iterable should get type annotation
+    assert!(
+        result.contains(": (typeof items)[number]"),
+        "single param with simple iterable should get type annotation, got: {}",
+        result
+    );
+}
+
+#[test]
+fn v_for_simple_param_has_type_annotation() {
+    let result =
+        gen_tsx_template(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    assert!(
+        result.contains(": (typeof items)[number]"),
+        "single param with simple iterable should get type annotation, got: {}",
+        result
+    );
+}
+
+#[test]
+fn v_for_destructured_param_has_type_annotation() {
+    let result = gen_tsx_template(
+        r#"<template><div v-for="{ name, email } in users">{{ name }}</div></template>"#,
+    );
+    // Destructured pattern without comma in the params (commas are inside braces but
+    // the top-level params string is "{ name, email }" which contains commas)
+    // This should NOT get annotation because the params contain a comma
+    assert!(
+        !result.contains("(typeof users)[number]"),
+        "destructured params with commas should not get type annotation, got: {}",
+        result
+    );
+}
+
+#[test]
+fn v_for_multi_param_no_annotation() {
+    let result = gen_tsx_template(
+        r#"<template><li v-for="(item, index) in items" :key="index">{{ item }}</li></template>"#,
+    );
+    assert!(
+        !result.contains("(typeof items)[number]"),
+        "multi-param v-for should not get type annotation, got: {}",
+        result
+    );
+}
+
+#[test]
+fn v_for_complex_iterable_no_annotation() {
+    let result = gen_tsx_template(
+        r#"<template><span v-for="item in getItems()">{{ item }}</span></template>"#,
+    );
+    assert!(
+        !result.contains("(typeof"),
+        "complex iterable (function call) should not get type annotation, got: {}",
+        result
+    );
 }
 
 #[test]
@@ -1794,8 +1850,8 @@ fn v_for_param_is_source_mapped() {
     let (output, tokens) = gen_tsx_template_with_map(source, &[]);
 
     assert!(
-        output.contains(".map((item)"),
-        "v-for should produce .map((item) => ...): {output}"
+        output.contains(".map((item"),
+        "v-for should produce .map((item...) => ...): {output}"
     );
 
     // "item" starts right after the opening quote of v-for="
@@ -2962,8 +3018,8 @@ fn v_for_body_member_access_no_instance_prefix() {
 
     // Positive: .map() wrapper present
     assert!(
-        result.contains(".map((action)"),
-        "should have .map((action) wrapper, got: {}",
+        result.contains(".map((action"),
+        "should have .map((action...) wrapper, got: {}",
         result
     );
 
@@ -3061,8 +3117,8 @@ fn nested_v_for_body_no_instance_prefix() {
 
     // Positive: both .map() wrappers
     assert!(
-        result.contains(".map((user)"),
-        "outer .map((user) expected, got: {}",
+        result.contains(".map((user"),
+        "outer .map((user...) expected, got: {}",
         result
     );
 

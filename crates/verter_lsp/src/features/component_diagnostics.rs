@@ -69,12 +69,25 @@ fn child_suppresses_prop_checks(child: &FileAnalysisSnapshot) -> bool {
 }
 
 /// Get the set of defined prop names from a child's analysis (camelCase).
+///
+/// Sources (in priority order):
+/// 1. `template.prop_definitions` — fully resolved prop definitions
+/// 2. `macros[DefineProps].prop_fields` — extracted from defineProps type literal / runtime object
 fn child_prop_names(child: &FileAnalysisSnapshot) -> HashSet<String> {
+    // Try template.prop_definitions first
+    if let Some(t) = &child.template {
+        if !t.prop_definitions.is_empty() {
+            return t.prop_definitions.iter().map(|p| p.name.clone()).collect();
+        }
+    }
+
+    // Fall back to macro prop_fields
     child
-        .template
-        .as_ref()
-        .map(|t| t.prop_definitions.iter().map(|p| p.name.clone()).collect())
-        .unwrap_or_default()
+        .macros
+        .iter()
+        .filter(|m| m.kind == AnalyzedMacroKind::DefineProps)
+        .flat_map(|m| m.prop_fields.iter().map(|f| f.name.clone()))
+        .collect()
 }
 
 /// Find unknown props across all component usages.
@@ -125,10 +138,11 @@ fn check_component_props(
     }
 
     let defined_props = child_prop_names(&child);
+    let is_fragment = child_is_fragment(&child);
     let mut unknowns = Vec::new();
 
     for prop in &comp.props {
-        if is_unknown_prop(prop, &defined_props) {
+        if is_unknown_prop(prop, &defined_props, is_fragment) {
             unknowns.push(UnknownPropInfo {
                 component_name: comp.name.clone(),
                 prop_name: prop.name.clone(),
@@ -141,15 +155,40 @@ fn check_component_props(
     Some(unknowns)
 }
 
+/// Check if an attribute can fall through to a child's root element.
+fn is_fallthrough_attr(name: &str) -> bool {
+    BUILTIN_ATTRS.contains(&name) || name.starts_with("data-") || name.starts_with("aria-")
+}
+
+/// Check if a child component is a fragment (multiple root elements).
+fn child_is_fragment(child: &FileAnalysisSnapshot) -> bool {
+    child.template.as_ref().is_some_and(|t| {
+        t.elements
+            .iter()
+            .filter(|e| e.parent_index.is_none())
+            .count()
+            > 1
+    })
+}
+
 /// Check if a single prop is unknown (not defined by the child).
-fn is_unknown_prop(prop: &TemplatePropUsage, defined_props: &HashSet<String>) -> bool {
+fn is_unknown_prop(
+    prop: &TemplatePropUsage,
+    defined_props: &HashSet<String>,
+    is_fragment: bool,
+) -> bool {
     // Skip spread entries
     if prop.from_spread {
         return false;
     }
 
-    // Skip builtin attributes
+    // Builtin attrs (class, style) always accepted
     if BUILTIN_ATTRS.contains(&prop.name.as_str()) {
+        return false;
+    }
+
+    // On non-fragment components, data-*/aria-* fall through to the root element
+    if !is_fragment && is_fallthrough_attr(&prop.name) {
         return false;
     }
 
