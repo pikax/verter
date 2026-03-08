@@ -801,8 +801,7 @@ pub(crate) fn build_props_object_into(
                             directive_name.strip_prefix("v-").unwrap_or(directive_name);
                         let directive_ref =
                             format!("_resolveDirective(\"{}\")", directive_name_stripped);
-                        let value = if let (Some(vs), Some(ve)) =
-                            (prop.value_start, prop.value_end)
+                        let value = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end)
                         {
                             let raw = &source[vs as usize..ve as usize];
                             let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
@@ -1187,8 +1186,7 @@ pub(crate) fn build_props_object_into(
                             format!("_resolveDirective(\"{}\")", name)
                         };
 
-                        let value = if let (Some(vs), Some(ve)) =
-                            (prop.value_start, prop.value_end)
+                        let value = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end)
                         {
                             let raw = &source[vs as usize..ve as usize];
                             let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
@@ -1618,7 +1616,7 @@ pub fn process_element_leave<'alloc>(
     is_block_root: bool,
     mut hoisted_constants: Option<&mut Vec<String>>,
     cache_index: Option<usize>,
-    mut resolved_components: Option<&mut Vec<(String, String)>>,
+    resolved_components: Option<&mut Vec<(String, String)>>,
 ) -> ChildRecord {
     let tag_open = &element.tag_open;
     debug_assert!((tag_open.start as usize + 1) <= source.len());
@@ -1720,7 +1718,13 @@ pub fn process_element_leave<'alloc>(
             buf.push_str(resolved_tag);
         } else {
             // Static component: resolve through bindings or _resolveComponent
-            let resolved = resolve_component_tag(tag_name, resolver, out, &options.self_name, resolved_components);
+            let resolved = resolve_component_tag(
+                tag_name,
+                resolver,
+                out,
+                &options.self_name,
+                resolved_components,
+            );
             buf.push_str(&resolved);
         }
     } else {
@@ -1806,7 +1810,11 @@ pub fn process_element_leave<'alloc>(
         if props_result.uses_to_handlers {
             out.add_vdom_import(VdomHelper::ToHandlers);
         }
-        (props_result.dynamic_props, props_result.native_vmodel, props_result.directive_entries)
+        (
+            props_result.dynamic_props,
+            props_result.native_vmodel,
+            props_result.directive_entries,
+        )
     } else {
         if has_children || patch_flag != 0 {
             // Need null placeholder for props when there are children or patch flags
@@ -1818,7 +1826,15 @@ pub fn process_element_leave<'alloc>(
     // shouldUpdateComponent can check listed dynamic props.
     // For plain elements, compute_patch_flags already handles PATCH_PROPS
     // based on PropFlags::HasDynamicBinding / HasEventListener.
-    if !dynamic_props.is_empty() {
+    if element.tag_type.is_component() {
+        // For components, literal bind suppression may have emptied dynamic_props
+        // after compute_patch_flags set PATCH_PROPS. Clear it when no dynamic props remain.
+        if dynamic_props.is_empty() {
+            patch_flag &= !helpers::PATCH_PROPS;
+        } else {
+            patch_flag |= helpers::PATCH_PROPS;
+        }
+    } else if !dynamic_props.is_empty() {
         patch_flag |= helpers::PATCH_PROPS;
     }
 

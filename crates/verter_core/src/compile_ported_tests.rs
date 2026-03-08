@@ -695,7 +695,9 @@ fn test_hoist_static_props() {
     let template = result.template.as_ref().expect("should have template");
     // Static props should be hoisted
     assert!(
-        template.code.contains(r#"const _hoisted_1 = { class: "app" }"#),
+        template
+            .code
+            .contains(r#"const _hoisted_1 = { class: "app" }"#),
         "Static props should be hoisted, got:\n{}",
         template.code
     );

@@ -105,6 +105,11 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// Cache index counter for `_cache[N]` static element wrapping.
     /// Incremented each time a fully-static element is cached.
     cache_index: usize,
+    /// Whether we are currently inside a slot function body.
+    /// When true, `leave_element` skips individual `_cache[N]` wrapping
+    /// because slot-level cache grouping handles it instead.
+    /// Stored as a stack to handle nested slot contexts.
+    in_slot_context_stack: Vec<bool>,
     /// Hoisted _resolveComponent() calls: Vec of (tag_name, variable_name).
     /// Emitted as `const _component_x = _resolveComponent("x")` at the top
     /// of the render function body. Insertion-ordered.
@@ -128,6 +133,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             single_root: false,
             hoisted_constants: Vec::new(),
             cache_index: 0,
+            in_slot_context_stack: Vec::new(),
             resolved_components: Vec::new(),
         }
     }
@@ -391,12 +397,10 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             let mut s = String::with_capacity(self.resolved_components.len() * 60);
             for (tag, var) in &self.resolved_components {
                 // Check if this is a self-reference
-                let is_self_ref =
-                    !self.options.self_name.is_empty() && {
-                        let pascal =
-                            component::to_pascal_case(tag);
-                        pascal == self.options.self_name
-                    };
+                let is_self_ref = !self.options.self_name.is_empty() && {
+                    let pascal = component::to_pascal_case(tag);
+                    pascal == self.options.self_name
+                };
                 s.push_str("const ");
                 s.push_str(var);
                 s.push_str(" = _resolveComponent(\"");
@@ -659,6 +663,14 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             self.scope_closes.push(None);
             self.v_for_prefixes.push(None);
         }
+
+        // Track slot context: components and <template v-slot> create slot
+        // contexts where children should use grouped caching instead of
+        // individual _cache[N] wrapping.
+        let is_slot_parent = element.tag_type.is_component()
+            || (element.tag_type == TagType::Template && element.v_slot.is_some());
+        self.in_slot_context_stack.push(is_slot_parent);
+
         super::WalkAction::Continue
     }
 
@@ -670,6 +682,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
     ) {
+        // Pop the slot context stack (pushed in enter_element).
+        self.in_slot_context_stack.pop();
+
         helpers::debug_assert_element_bounds(
             source,
             el.tag_open.start,
@@ -759,16 +774,50 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         let mut buf = std::mem::take(&mut self.buf);
         let v_for_prefix = self.v_for_prefixes.pop().flatten();
 
-        // Determine if this static element should be cached via _cache[N]
+        // Determine if this static element should be cached via _cache[N].
+        // Skip caching children whose parent is also fully static — the parent's
+        // cache encompasses them, so individual caching is redundant.
+        // Also skip individual caching when inside a slot context — slot-level
+        // cache grouping handles it instead.
         let cache_idx = if self.options.hoist_static
             && el.is_fully_static
             && !is_block_root
             && el.v_condition.is_none()
             && el.v_for.is_none()
+            && !self.in_slot_context_stack.last().copied().unwrap_or(false)
         {
-            let idx = self.cache_index;
-            self.cache_index += 1;
-            Some(idx)
+            let parent_is_cached = self.ast.nodes[_id.0]
+                .parent
+                .and_then(|pid| {
+                    let pnode = &self.ast.nodes[pid.0];
+                    if let AstNodeKind::Element(ref pel) = pnode.kind {
+                        // Parent must be fully static AND itself eligible for caching:
+                        // - not a block root (block roots aren't cached)
+                        // - no structural directives
+                        // - not a component (components use slot-level caching)
+                        let parent_is_root = pnode.parent.is_none();
+                        let parent_is_block_root = pel.v_condition.is_some()
+                            || pel.v_for.is_some()
+                            || (parent_is_root && self.single_root);
+                        Some(
+                            pel.is_fully_static
+                                && !parent_is_block_root
+                                && pel.v_condition.is_none()
+                                && pel.v_for.is_none()
+                                && !pel.tag_type.is_component(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false);
+            if parent_is_cached {
+                None
+            } else {
+                let idx = self.cache_index;
+                self.cache_index += 1;
+                Some(idx)
+            }
         } else {
             None
         };
@@ -1694,9 +1743,7 @@ mod tests {
 
     #[test]
     fn custom_directive_resolve() {
-        let code = gen_vdom_template(
-            "<template><div v-focus>content</div></template>",
-        );
+        let code = gen_vdom_template("<template><div v-focus>content</div></template>");
         assert!(
             code.contains("_withDirectives("),
             "Custom directive should use _withDirectives, got:\n{code}"
@@ -1838,9 +1885,7 @@ mod tests {
     #[test]
     fn resolve_component_hoisted() {
         // Component used via _resolveComponent should be hoisted to const at top
-        let code = gen_vdom_template(
-            "<template><el-button>click</el-button></template>",
-        );
+        let code = gen_vdom_template("<template><el-button>click</el-button></template>");
         assert!(
             code.contains("const _component_el_button = _resolveComponent(\"el-button\")"),
             "resolveComponent should be hoisted as const, got:\n{code}"
@@ -1868,9 +1913,7 @@ mod tests {
     #[test]
     fn resolve_component_naming() {
         // el-button → _component_el_button
-        let code = gen_vdom_template(
-            "<template><my-header>x</my-header></template>",
-        );
+        let code = gen_vdom_template("<template><my-header>x</my-header></template>");
         assert!(
             code.contains("_component_my_header"),
             "Kebab-case component should use underscore-separated variable name, got:\n{code}"
@@ -1922,6 +1965,188 @@ mod tests {
         assert!(
             !code.contains("_hoisted_2"),
             "Identical static attrs should share hoisted constant, got:\n{code}"
+        );
+    }
+
+    // ==================== PROPS flag on components with literal binds ====================
+
+    #[test]
+    fn childless_component_literal_bind_no_props_flag() {
+        // A component with only literal bind (:color="'info'") should NOT get PROPS flag
+        // because the binding is suppressed as non-dynamic after literal detection.
+        let code = gen_vdom_template(
+            r#"<template><CButton :color="'info'" /></template>
+<script setup>
+import CButton from './CButton.vue'
+</script>"#,
+        );
+        assert!(
+            !code.contains("PROPS"),
+            "Literal bind component should NOT have PROPS flag, got:\n{code}"
+        );
+        assert!(
+            !code.contains("8 /*"),
+            "Literal bind component should NOT have patch flag 8, got:\n{code}"
+        );
+        assert!(
+            code.contains(r#"color: "info""#) || code.contains(r#"color: 'info'"#),
+            "Should have the color prop value, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn childless_component_reactive_bind_has_props_flag() {
+        // A component with a reactive bind should still get PROPS flag
+        let code = gen_vdom_template(
+            r#"<template><CButton :color="color" /></template>
+<script setup>
+import { ref } from 'vue'
+import CButton from './CButton.vue'
+const color = ref('info')
+</script>"#,
+        );
+        assert!(
+            code.contains("PROPS"),
+            "Reactive bind component should have PROPS flag, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn plain_element_props_unchanged_after_literal_fix() {
+        // Regression guard: plain element with dynamic binding should still get PROPS
+        let code = gen_vdom_template(
+            r#"<template><div :id="x">text</div></template>
+<script setup>
+import { ref } from 'vue'
+const x = ref('foo')
+</script>"#,
+        );
+        assert!(
+            code.contains("PROPS"),
+            "Plain element with dynamic bind should have PROPS flag, got:\n{code}"
+        );
+    }
+
+    // ==================== Redundant child caching ====================
+
+    #[test]
+    fn parent_cached_children_not_individually_cached() {
+        // When a parent element is fully static and cached, children should NOT get
+        // individual _cache[N] wrappers — the parent's cache encompasses them.
+        // Vue only caches the outermost static ancestor.
+        let code = gen_vdom_template(
+            r#"<template><div><div class="clearfix"><h1>404</h1><h4>Oops!</h4></div><span :class="cls">dynamic</span></div></template>
+<script setup>
+import { ref } from 'vue'
+const cls = ref('foo')
+</script>"#,
+        );
+        // The outer static div.clearfix should be cached
+        assert!(
+            code.contains("_cache[0]"),
+            "Parent static div should be cached, got:\n{code}"
+        );
+        // But h1 and h4 inside it should NOT be individually cached
+        assert!(
+            !code.contains("_cache[1]"),
+            "Children of cached parent should NOT have individual cache slots, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_cache[2]"),
+            "Children of cached parent should NOT have individual cache slots, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn non_static_parent_children_still_cached() {
+        // When parent is NOT fully static, individual static children should still be cached
+        let code = gen_vdom_template(
+            r#"<template><div><p>static</p><span :class="cls">dynamic</span></div></template>
+<script setup>
+import { ref } from 'vue'
+const cls = ref('foo')
+</script>"#,
+        );
+        // The <p> is static inside a dynamic parent → should be cached
+        assert!(
+            code.contains("_cache[0]"),
+            "Static child in dynamic parent should be cached, got:\n{code}"
+        );
+    }
+
+    // ==================== Slot static content caching ====================
+
+    #[test]
+    fn slot_single_static_text_cached() {
+        // Static text inside a slot should be cached with _cache[N]
+        let code = gen_vdom_template(
+            r#"<template><CList>Cras justo odio</CList></template>
+<script setup>
+import CList from './CList.vue'
+</script>"#,
+        );
+        assert!(
+            code.contains("_cache["),
+            "Static text in slot should be cached, got:\n{code}"
+        );
+        assert!(
+            code.contains("-1 /* CACHED */") || code.contains(", -1"),
+            "Cached slot content should have CACHED flag, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn slot_multiple_static_children_spread() {
+        // Multiple consecutive static children in a slot should use spread cache pattern
+        let code = gen_vdom_template(
+            r#"<template><CCard><strong>Title</strong><p>body</p></CCard></template>
+<script setup>
+import CCard from './CCard.vue'
+</script>"#,
+        );
+        assert!(
+            code.contains("...(_cache["),
+            "Multiple static slot children should use spread cache, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn slot_mixed_static_dynamic_split() {
+        // Static runs around a dynamic child should be cached separately
+        let code = gen_vdom_template(
+            r#"<template><CCard><p>a</p><span>{{ msg }}</span><p>b</p></CCard></template>
+<script setup>
+import { ref } from 'vue'
+import CCard from './CCard.vue'
+const msg = ref('hi')
+</script>"#,
+        );
+        // Dynamic interpolation should NOT be cached
+        assert!(
+            code.contains("_toDisplayString"),
+            "Dynamic content should use _toDisplayString, got:\n{code}"
+        );
+        // Static children around it should be cached
+        assert!(
+            code.contains("_cache["),
+            "Static children in mixed slot should be cached, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn slot_dynamic_child_not_cached() {
+        // A component slot with only dynamic content should NOT use cache
+        let code = gen_vdom_template(
+            r#"<template><CCard><div :class="cls">x</div></CCard></template>
+<script setup>
+import { ref } from 'vue'
+import CCard from './CCard.vue'
+const cls = ref('foo')
+</script>"#,
+        );
+        assert!(
+            !code.contains("_cache["),
+            "Dynamic-only slot should NOT use cache, got:\n{code}"
         );
     }
 }

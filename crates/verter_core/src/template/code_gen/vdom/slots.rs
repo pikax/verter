@@ -246,6 +246,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 el_children,
             );
 
+            // Wrap static children in slot cache groups
+            self.emit_slot_cache_wrapping(&children, out, el_children);
+
             // Close: `])`
             buf.clear();
             buf.push_str("])");
@@ -314,7 +317,13 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             resolved_tag.clone()
         } else {
             let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
-            component::resolve_component_tag(tag_name, &self.resolver, out, &self.options.self_name, Some(&mut self.resolved_components))
+            component::resolve_component_tag(
+                tag_name,
+                &self.resolver,
+                out,
+                &self.options.self_name,
+                Some(&mut self.resolved_components),
+            )
         };
         let comp_helper = if is_block_root {
             VdomHelper::CreateBlock
@@ -367,20 +376,13 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     let start = child_el.tag_open.start;
                     slot_names.insert(start, name);
                     if let Some(ref v_slot) = child_el.v_slot {
-                        slot_is_dynamic_name
-                            .insert(start, v_slot.is_dynamic == Some(true));
+                        slot_is_dynamic_name.insert(start, v_slot.is_dynamic == Some(true));
                     }
                     if let Some(ref v_for) = child_el.v_for {
-                        let full_expr =
-                            helpers::extract_directive_value(v_for, source);
-                        let (params, iterable) =
-                            helpers::parse_v_for_expression(full_expr);
-                        let resolved_iterable =
-                            self.resolver.resolve_simple_expr(iterable);
-                        slot_vfor_info.insert(
-                            start,
-                            (params.to_string(), resolved_iterable),
-                        );
+                        let full_expr = helpers::extract_directive_value(v_for, source);
+                        let (params, iterable) = helpers::parse_v_for_expression(full_expr);
+                        let resolved_iterable = self.resolver.resolve_simple_expr(iterable);
+                        slot_vfor_info.insert(start, (params.to_string(), resolved_iterable));
                     }
                 }
             }
@@ -533,11 +535,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             if !dynamic_props.is_empty() {
                 flag |= helpers::PATCH_PROPS;
             }
-            let flag_str = helpers::format_patch_flag(
-                flag,
-                self.options.is_production,
-                |s| out.alloc_str(s),
-            );
+            let flag_str =
+                helpers::format_patch_flag(flag, self.options.is_production, |s| out.alloc_str(s));
             buf.push_str(flag_str);
             if !dynamic_props.is_empty() {
                 buf.push_str(", ");
@@ -640,7 +639,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// Emit static slot format: `name: _withCtx(...)` for named slots,
     /// `default: _withCtx(() => [...])` for default slot groups.
     fn emit_static_slot_wrappers(
-        &self,
+        &mut self,
         entries: &[SlotEntry],
         children: &[ChildRecord],
         slot_names: &FxHashMap<u32, &str>,
@@ -681,7 +680,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         self.ast,
                         el_children,
                     );
-                    // 3. Outer wrapper close LAST (appears after inner closings)
+                    // 3. Slot cache wrapping for static children
+                    self.emit_slot_cache_wrapping(group, out, el_children);
+                    // 4. Outer wrapper close LAST (appears after inner closings)
                     out.prepend_static(group.last().unwrap().end, "])");
                 }
             }
@@ -693,7 +694,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// Dynamic slot names use `name: resolvedExpr` instead of `name: "staticName"`.
     /// v-for slots use `_renderList(iterable, (params) => ({ name: expr, fn: ... }))`.
     fn emit_dynamic_slot_wrappers(
-        &self,
+        &mut self,
         entries: &[SlotEntry],
         children: &[ChildRecord],
         slot_names: &FxHashMap<u32, &str>,
@@ -737,9 +738,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     let has_vfor = slot_vfor_info.contains_key(&child.start);
                     if has_vfor {
                         let (params, iterable) = slot_vfor_info.get(&child.start).unwrap();
-                        let vfor_open = format!(
-                            "_renderList({iterable}, ({params}) => {{return "
-                        );
+                        let vfor_open = format!("_renderList({iterable}, ({params}) => {{return ");
                         out.prepend_alloc(child.start, &vfor_open);
                         out.add_vdom_import(VdomHelper::RenderList);
                     }
@@ -808,7 +807,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         self.ast,
                         el_children,
                     );
-                    // 3. Outer wrapper close LAST
+                    // 3. Slot cache wrapping for static children
+                    self.emit_slot_cache_wrapping(group, out, el_children);
+                    // 4. Outer wrapper close LAST
                     out.prepend_static(group.last().unwrap().end, "]) }");
                 }
             }
@@ -841,7 +842,13 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             resolved_tag.clone()
         } else {
             let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
-            component::resolve_component_tag(tag_name, &self.resolver, out, &self.options.self_name, Some(&mut self.resolved_components))
+            component::resolve_component_tag(
+                tag_name,
+                &self.resolver,
+                out,
+                &self.options.self_name,
+                Some(&mut self.resolved_components),
+            )
         };
         let comp_helper = if is_block_root {
             VdomHelper::CreateBlock
@@ -1001,6 +1008,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             el_children,
         );
 
+        // Wrap static children in slot cache groups
+        self.emit_slot_cache_wrapping(&children, out, el_children);
+
         buf.clear();
         buf.push_str("]), _: 1 /* STABLE */}");
         // Add PatchFlags for components with dynamic props
@@ -1049,5 +1059,107 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
         }
         false
+    }
+
+    /// Check if a child record represents a static item for slot caching purposes.
+    fn is_slot_child_static(&self, record: &ChildRecord, el_children: &[NodeId]) -> bool {
+        match record.kind {
+            ChildKind::Text => true,
+            ChildKind::Interpolation => false,
+            ChildKind::Element => {
+                // Find the AST element node by position
+                el_children.iter().any(|&nid| {
+                    if let AstNodeKind::Element(ref el) = self.ast.nodes[nid.0].kind {
+                        el.tag_open.start == record.start && el.is_fully_static
+                    } else {
+                        false
+                    }
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// Emit cache wrapping for static children inside a slot function body.
+    ///
+    /// Groups consecutive static children into cache slots:
+    /// - Single static child: `_cache[N] || (_cache[N] = <child_with_cached_flag>)`
+    /// - Multiple consecutive static children: `...(_cache[N] || (_cache[N] = [children_with_cached_flags]))`
+    ///
+    /// Each static child (element or text) gets `-1 /* CACHED */` appended.
+    /// Dynamic children are left unchanged.
+    pub(super) fn emit_slot_cache_wrapping(
+        &mut self,
+        children: &[ChildRecord],
+        out: &mut CodeGenOutput<'alloc>,
+        el_children: &[NodeId],
+    ) {
+        if !self.options.hoist_static || children.is_empty() {
+            return;
+        }
+
+        // Classify each child as static or dynamic
+        let static_flags: Vec<bool> = children
+            .iter()
+            .map(|c| self.is_slot_child_static(c, el_children))
+            .collect();
+
+        // Find runs of consecutive static children
+        let mut i = 0;
+        while i < children.len() {
+            if !static_flags[i] {
+                i += 1;
+                continue;
+            }
+
+            // Found start of a static run
+            let run_start = i;
+            while i < children.len() && static_flags[i] {
+                i += 1;
+            }
+            let run_end = i;
+            let run_len = run_end - run_start;
+
+            let cache_idx = self.cache_index;
+            self.cache_index += 1;
+
+            let cached_suffix = if self.options.is_production {
+                ", -1"
+            } else {
+                ", -1 /* CACHED */"
+            };
+
+            if run_len == 1 {
+                // Single static child: _cache[N] || (_cache[N] = <child>)
+                let child = &children[run_start];
+                let prefix = format!("_cache[{cache_idx}] || (_cache[{cache_idx}] = ");
+                out.prepend_alloc(child.start, &prefix);
+
+                // Add -1 CACHED flag to the child
+                // For text nodes wrapped in _createTextVNode(...), the flag goes before the closing )
+                // For elements, the flag is already part of the _createElementVNode call (via patch_suffix)
+                // We append after the child's end position
+                let suffix = format!("{cached_suffix})");
+                out.prepend_alloc(child.end, &suffix);
+            } else {
+                // Multiple static children: ...(_cache[N] || (_cache[N] = [children]))
+                let first = &children[run_start];
+                let last = &children[run_end - 1];
+
+                // Spread prefix at the start of the first child.
+                // This needs to be BEFORE any existing comma separator.
+                // We use prepend at the first child's start (stacks before element content).
+                let prefix = format!("...(_cache[{cache_idx}] || (_cache[{cache_idx}] = [");
+                out.prepend_alloc(first.start, &prefix);
+
+                // Add -1 CACHED flag to each child in the run
+                for j in run_start..run_end {
+                    out.prepend_alloc(children[j].end, cached_suffix);
+                }
+
+                // Close the spread: ]))
+                out.prepend_static(last.end, "]))");
+            }
+        }
     }
 }
