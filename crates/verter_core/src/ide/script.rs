@@ -2888,6 +2888,17 @@ fn process_standard_macro(
             .prepend_alloc(call_abs_start, &format!("const {}=", auto_var_name));
     }
 
+    // Handle destructured declarators: `const { foo } = defineProps(...)` →
+    // `const ___VERTER___props = defineProps(...)`. Overwrite the destructuring
+    // pattern with the auto var name so `__props = ___VERTER___props` resolves.
+    if let Some(d) = declarator {
+        if d.name.is_none() && !is_no_return {
+            let binding_start = ctx.content_start + d.binding_span.start;
+            let binding_end = ctx.content_start + d.binding_span.end;
+            ctx.out.overwrite(binding_start, binding_end, &auto_var_name);
+        }
+    }
+
     // Determine the effective variable name
     let effective_var_name = if is_no_return && declarator.is_none() {
         None

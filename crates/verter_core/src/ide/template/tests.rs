@@ -3991,3 +3991,84 @@ const tag = 'div';
     let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
     assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
 }
+
+#[test]
+fn nexus_notification_produces_valid_tsx() {
+    let source = match std::fs::read_to_string("d:/dev/accioresearch/WLS/nexus/nexus-ui/packages/ui/src/components/Notifications/components/Notification.vue") {
+        Ok(s) => s,
+        Err(_) => { eprintln!("SKIP: file not found"); return; }
+    };
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("Notification.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    // ___VERTER___props must be declared (not just referenced)
+    assert!(
+        tsx.code.contains("const ___VERTER___props"),
+        "Destructured defineProps should declare ___VERTER___props. Got:\n{}",
+        tsx.code
+    );
+
+    // Parse with OXC to verify valid TSX
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "Got {} errors",
+        parsed.errors.len(),
+    );
+}
+
+/// Destructured defineProps (`const { foo } = defineProps<{...}>()`) should
+/// declare ___VERTER___props so that `const __props = ___VERTER___props` resolves.
+#[test]
+fn destructured_define_props_declares_verter_props() {
+    let source = r#"<script setup lang="ts">
+const { msg, count } = defineProps<{
+  msg: string
+  count: number
+}>()
+</script>
+<template>
+  <div>{{ msg }} {{ count }}</div>
+</template>"#;
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+
+    // ___VERTER___props must be declared, not just referenced
+    assert!(
+        tsx.code.contains("const ___VERTER___props"),
+        "Should declare ___VERTER___props for destructured defineProps. Got:\n{}",
+        tsx.code
+    );
+
+    // Original destructured pattern should NOT remain
+    assert!(
+        !tsx.code.contains("const { msg, count }"),
+        "Destructuring pattern should be rewritten. Got:\n{}",
+        tsx.code
+    );
+
+    // Parse to ensure valid TSX
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+}
