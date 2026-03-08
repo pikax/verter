@@ -286,20 +286,35 @@ fn walk_element<'a, 'alloc>(
             // Named slot: preserve slot name at original position for intellisense.
             // <template #header> → <>{"header"}
             // <template v-slot:header> → <>{"header"}
+            let is_self_closing = el.tag_close.is_none();
+            // Self-closing templates need <></> since there's no closing tag to rewrite
+            let frag_suffix = if is_self_closing { "</>" } else { "" };
             if let Some(ref v_slot) = el.v_slot {
                 if let (Some(arg_start), Some(arg_end)) = (v_slot.arg_start, v_slot.arg_end) {
                     // Overwrite everything before slot name → <>{"
                     ctx.out.overwrite(el.tag_open.start, arg_start, "<>{\"");
                     // Slot name stays at [arg_start, arg_end) — sourcemap preserves position
                     // Overwrite everything after slot name through close of open tag → "}
-                    ctx.out.overwrite(arg_end, el.tag_open.end, "\"}");
+                    ctx.out.overwrite(
+                        arg_end,
+                        el.tag_open.end,
+                        &format!("\"}}{frag_suffix}"),
+                    );
                 } else {
                     // Default slot (no name): <template v-slot> → <>
-                    ctx.out.overwrite(el.tag_open.start, el.tag_open.end, "<>");
+                    ctx.out.overwrite(
+                        el.tag_open.start,
+                        el.tag_open.end,
+                        &format!("<>{frag_suffix}"),
+                    );
                 }
             } else {
                 // Plain <template> wrapper → <>
-                ctx.out.overwrite(el.tag_open.start, el.tag_open.end, "<>");
+                ctx.out.overwrite(
+                    el.tag_open.start,
+                    el.tag_open.end,
+                    &format!("<>{frag_suffix}"),
+                );
             }
         }
         TagType::SlotOutlet => {

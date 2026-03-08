@@ -1710,6 +1710,30 @@ fn duplicate_keydown_handlers_use_spread_for_second() {
 }
 
 #[test]
+fn self_closing_template_v_if_produces_valid_jsx() {
+    // <template v-if="..." /> is self-closing with no children.
+    // The IIFE wrapping must produce valid JSX (empty fragment or null).
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><template v-if="noFooter" /><template v-else><div>footer</div></template></template>"#,
+        &[("noFooter", BindingType::SetupConst)],
+    );
+    // Positive: should have the v-if condition
+    assert!(
+        result.contains("noFooter"),
+        "v-if condition should be present. Got: {}",
+        result
+    );
+    // Negative: no unclosed fragments — count <> and </> should match
+    let open_frags = result.matches("<>").count();
+    let close_frags = result.matches("</>").count();
+    assert_eq!(
+        open_frags, close_frags,
+        "fragment open/close count should match. Got {} opens and {} closes in: {}",
+        open_frags, close_frags, result
+    );
+}
+
+#[test]
 fn multiline_static_style_merged_with_dynamic_no_unterminated_string() {
     // When static style has newlines and is merged with :style, the static value
     // must not produce an unterminated JS string literal inside normalizeStyle.
