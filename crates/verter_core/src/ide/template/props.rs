@@ -37,6 +37,31 @@ pub fn process_element_props<'alloc>(
 ) {
     let v_if_guard = condition_guard;
 
+    // Pre-scan: does this element have v-show? If so, :style will be handled
+    // by emit_v_show and must be skipped here to avoid orphaned binding prepends.
+    let has_v_show = el
+        .props
+        .iter()
+        .any(|p| p.is_directive && &source[p.start as usize..p.name_end as usize] == "v-show");
+
+    // Pre-scan: track which JSX event names appear more than once.
+    // When the same event (e.g., @keydown.space + @keydown.enter → both onKeyDown)
+    // appears twice, subsequent occurrences must use spread syntax to avoid TS17001.
+    let mut event_name_counts: rustc_hash::FxHashMap<String, u8> = Default::default();
+    for prop in &el.props {
+        if prop.is_directive {
+            let dn = get_directive_name(prop, source);
+            if (dn == "on" || dn == "@") && prop.is_dynamic != Some(true) {
+                if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+                    let event = &source[as_ as usize..ae as usize];
+                    let jsx = event_to_jsx_name(event);
+                    *event_name_counts.entry(jsx).or_default() += 1;
+                }
+            }
+        }
+    }
+    let mut event_seen: rustc_hash::FxHashSet<String> = Default::default();
+
     // Pre-scan for class/style merge: when both static and dynamic exist,
     // we merge them into a single normalizeClass/normalizeStyle call.
     let merge_class = el.needs_class_merge();
@@ -79,9 +104,24 @@ pub fn process_element_props<'alloc>(
             continue;
         }
 
-        // Skip v-show — handled separately
+        // Skip v-show — handled separately by emit_v_show
         if is_builtin_directive(prop, source, "show") {
             continue;
+        }
+
+        // Skip :style binding when v-show is present on the same element.
+        // emit_v_show merges the :style expression into its style output,
+        // so processing :style here would produce orphaned binding prepends
+        // that leak as stray text after the overwritten style attribute.
+        if has_v_show && prop.is_directive {
+            let dn = get_directive_name(prop, source);
+            if (dn == "bind" || dn == ":") && prop.is_dynamic != Some(true) {
+                if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+                    if &source[as_ as usize..ae as usize] == "style" {
+                        continue;
+                    }
+                }
+            }
         }
 
         // v-model expansion: convert to modelValue/onUpdate:modelValue prop pair
@@ -163,7 +203,23 @@ pub fn process_element_props<'alloc>(
 
         match dir_name {
             "bind" => process_v_bind(prop, oxc_prop, source, out, alloc, resolver, v_if_guard),
-            "on" => process_v_on(prop, oxc_prop, source, out, alloc, resolver, v_if_guard),
+            "on" => {
+                // Check if this event name has been seen before (duplicate handler)
+                let use_spread = if prop.is_dynamic != Some(true) {
+                    if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+                        let event = &source[as_ as usize..ae as usize];
+                        let jsx = event_to_jsx_name(event);
+                        let is_dup = event_name_counts.get(&jsx).copied().unwrap_or(0) > 1;
+                        let first_time = event_seen.insert(jsx);
+                        is_dup && !first_time
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                process_v_on(prop, oxc_prop, source, out, alloc, resolver, v_if_guard, use_spread);
+            }
             "html" => process_v_html(prop, oxc_prop, source, out, resolver),
             "text" => process_v_text(prop, oxc_prop, source, out, resolver),
             _ => {
@@ -390,6 +446,7 @@ fn process_v_on<'alloc>(
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
     v_if_guard: Option<&str>,
+    use_spread: bool,
 ) {
     let has_arg = prop.arg_start.is_some();
 
@@ -441,6 +498,42 @@ fn process_v_on<'alloc>(
 
     // Convert event name to JSX: click → onClick, update:modelValue → onUpdate:modelValue
     let jsx_event_name = event_to_jsx_name(event_name);
+
+    // When this event name was already emitted as a JSX attribute on this element
+    // (e.g., @keydown.space + @keydown.enter → duplicate onKeyDown), use spread
+    // syntax to avoid TS17001 "cannot have multiple attributes with same name".
+    if use_spread {
+        let prop_end = get_prop_end(prop);
+        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+            let value_expr = &source[vs as usize..ve as usize];
+            let resolved_expr = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+            let resolved_expr = resolved_expr.trim();
+            let is_simple = crate::template::code_gen::binding::is_simple_ident(resolved_expr)
+                || (resolved_expr.contains('.') && !resolved_expr.contains('('))
+                || resolved_expr.starts_with("(")
+                || resolved_expr.starts_with("function")
+                || resolved_expr.contains("=>");
+            if is_simple {
+                out.overwrite(
+                    prop.start,
+                    prop_end,
+                    &format!("{{...{{\"{}\": {}}}}}", jsx_event_name, resolved_expr),
+                );
+            } else {
+                out.overwrite(
+                    prop.start,
+                    prop_end,
+                    &format!(
+                        "{{...{{\"{}\": () => {{{}}}}}}}",
+                        jsx_event_name, resolved_expr
+                    ),
+                );
+            }
+        } else {
+            out.overwrite(prop.start, prop_end, "");
+        }
+        return;
+    }
 
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
         let value_expr = &source[vs as usize..ve as usize];
@@ -654,10 +747,68 @@ fn process_v_model<'alloc>(
         // Native element: use DOM property + native event handler
         let tag = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
         let (dom_prop, event_name) = native_vmodel_prop_and_event(el, source, tag);
-        format!(
-            "{}={{{}}} {}={{({}) => (({}) = $event)}}",
-            dom_prop, resolved, event_name, event_param, resolved
-        )
+
+        // Check if the element already has an explicit handler for the same event
+        // (e.g., @change on a checkbox with v-model). If so, skip v-model's handler
+        // to avoid duplicate JSX attributes (TS17001).
+        let vue_event = event_name
+            .strip_prefix("on")
+            .map(|s| {
+                let mut c = s.chars();
+                match c.next() {
+                    Some(ch) => {
+                        let lower = ch.to_lowercase().to_string();
+                        format!("{}{}", lower, c.as_str())
+                    }
+                    None => String::new(),
+                }
+            })
+            .unwrap_or_default();
+        let has_explicit_handler = el.props.iter().any(|p| {
+            p.is_directive && {
+                let dn = get_directive_name(p, source);
+                (dn == "on" || dn == "@")
+                    && p.arg_start
+                        .zip(p.arg_end)
+                        .map(|(a, b)| &source[a as usize..b as usize] == vue_event)
+                        .unwrap_or(false)
+            }
+        });
+
+        // Check if the element already has an explicit binding for the DOM prop
+        // (e.g., :checked on a radio with v-model). If so, skip v-model's prop.
+        let has_explicit_prop = el.props.iter().any(|p| {
+            if p.is_directive {
+                let dn = get_directive_name(p, source);
+                (dn == "bind" || dn == ":")
+                    && p.arg_start
+                        .zip(p.arg_end)
+                        .map(|(a, b)| &source[a as usize..b as usize] == dom_prop)
+                        .unwrap_or(false)
+            } else {
+                let name = &source[p.start as usize..p.name_end as usize];
+                name == dom_prop
+            }
+        });
+
+        if has_explicit_prop && has_explicit_handler {
+            // Both prop and handler already exist — v-model is redundant
+            String::new()
+        } else if has_explicit_prop {
+            // Only emit the event handler
+            format!(
+                "{}={{({}) => (({}) = $event)}}",
+                event_name, event_param, resolved
+            )
+        } else if has_explicit_handler {
+            // Only emit the DOM property, skip the event handler
+            format!("{}={{{}}}", dom_prop, resolved)
+        } else {
+            format!(
+                "{}={{{}}} {}={{({}) => (({}) = $event)}}",
+                dom_prop, resolved, event_name, event_param, resolved
+            )
+        }
     } else {
         // Component: modelValue + spread for event handler
         format!(

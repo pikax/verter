@@ -1610,6 +1610,105 @@ fn v_model_on_native_element() {
     );
 }
 
+#[test]
+fn v_model_with_explicit_change_handler_no_duplicate() {
+    // v-model on <input type="checkbox"> + explicit @change should not produce
+    // duplicate onChange attributes (TS17001).
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><input v-model="model" type="checkbox" @change="handleChange" /></template>"#,
+        &[
+            ("model", BindingType::SetupRef),
+            ("handleChange", BindingType::SetupConst),
+        ],
+    );
+    let on_change_count = result.matches("onChange=").count()
+        + result.matches("onChange:").count()
+        + result.matches("\"onChange\"").count();
+    assert_eq!(
+        on_change_count, 1,
+        "v-model + @change on native input should produce exactly one onChange. Got {} in: {}",
+        on_change_count, result
+    );
+    assert!(
+        !result.contains("v-model"),
+        "v-model attribute must be removed. Got: {}",
+        result
+    );
+}
+
+#[test]
+fn v_model_with_explicit_input_handler_no_duplicate() {
+    // v-model on text <input> + explicit @input should not produce
+    // duplicate onInput attributes.
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><input v-model="text" @input="onInput" /></template>"#,
+        &[
+            ("text", BindingType::SetupRef),
+            ("onInput", BindingType::SetupConst),
+        ],
+    );
+    let on_input_count = result.matches("onInput=").count();
+    assert_eq!(
+        on_input_count, 1,
+        "v-model + @input on text input should produce exactly one onInput. Got {} in: {}",
+        on_input_count, result
+    );
+    // v-model should still produce the value prop
+    assert!(
+        result.contains("value={text}"),
+        "v-model should still produce value prop. Got: {}",
+        result
+    );
+}
+
+#[test]
+fn v_model_with_explicit_checked_prop_no_duplicate() {
+    // v-model on <input type="radio"> + explicit :checked + @change should not
+    // produce duplicate checked or onChange attributes.
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><input v-model="modelValue" type="radio" :checked="modelValue === val" @change="handleChange" /></template>"#,
+        &[
+            ("modelValue", BindingType::SetupRef),
+            ("val", BindingType::SetupConst),
+            ("handleChange", BindingType::SetupConst),
+        ],
+    );
+    let checked_count = result.matches("checked=").count();
+    let on_change_count = result.matches("onChange=").count();
+    assert_eq!(
+        checked_count, 1,
+        "v-model + :checked on radio should produce one checked attr. Got {} in: {}",
+        checked_count, result
+    );
+    assert_eq!(
+        on_change_count, 1,
+        "v-model + @change on radio should produce one onChange. Got {} in: {}",
+        on_change_count, result
+    );
+}
+
+#[test]
+fn duplicate_keydown_handlers_use_spread_for_second() {
+    // @keydown.space + @keydown.enter both map to onKeyDown —
+    // the second must use spread syntax to avoid TS17001.
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><td @keydown.space.prevent.stop="handleClick" @keydown.enter.prevent.stop="handleClick" /></template>"#,
+        &[("handleClick", BindingType::SetupConst)],
+    );
+    let on_keydown_attr = result.matches("onKeyDown={").count();
+    assert!(
+        on_keydown_attr <= 1,
+        "should have at most one onKeyDown= attribute (rest as spread). Got {} in: {}",
+        on_keydown_attr, result
+    );
+    // Should still reference both handlers somehow
+    assert!(
+        result.contains("handleClick"),
+        "handler reference should be present. Got: {}",
+        result
+    );
+}
+
 // ── Slot outlets in TSX ────────────────────────────────────────
 
 #[test]
