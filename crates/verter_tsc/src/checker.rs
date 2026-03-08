@@ -715,9 +715,17 @@ fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
     let import_path = &after[path_start..path_end];
 
     let result = if import_path.starts_with("./") || import_path.starts_with("../") {
-        let resolved = vue_dir.join(import_path);
-        let abs_path = resolved.to_string_lossy().replace('\\', "/");
-        format!("{quote}{abs_path}{quote}")
+        // Check if the path after "./" is already an absolute path (e.g., "./D:/...")
+        // This happens when the IDE codegen embeds a full filename in import('./filename.vue.ts').
+        let after_dot = import_path.strip_prefix("./").unwrap_or(import_path);
+        if after_dot.contains(':') || after_dot.starts_with('/') {
+            // Already absolute — just strip the "./" prefix
+            format!("{quote}{after_dot}{quote}")
+        } else {
+            let resolved = vue_dir.join(import_path);
+            let abs_path = resolved.to_string_lossy().replace('\\', "/");
+            format!("{quote}{abs_path}{quote}")
+        }
     } else {
         format!("{quote}{import_path}{quote}")
     };
@@ -1180,6 +1188,24 @@ mod tests {
         assert!(
             result.contains("\"vue\""),
             "bare module import should be preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_relative_imports_preserves_pseudo_relative_absolute_path() {
+        // The instance declaration generates import('./D:/full/path/file.vue.ts')
+        // which starts with "./" but is actually already absolute after the prefix.
+        let code = r#"import('./D:/project/src/file.vue.ts')['default']"#;
+        let result = rewrite_relative_imports(code, Path::new("D:/project/src"));
+        // Positive: should contain the absolute path, not doubled
+        assert!(
+            result.contains("'D:/project/src/file.vue.ts'"),
+            "pseudo-relative absolute path should be resolved correctly: {result}"
+        );
+        // Negative: should NOT have doubled path
+        assert!(
+            !result.contains("D:/project/src/./D:/"),
+            "should not double the path: {result}"
         );
     }
 

@@ -3440,3 +3440,122 @@ fn slot_props_kebab_case_quoted() {
         );
     }
 }
+
+/// Regression: v-show + :style on the same element must not leak binding prefixes.
+///
+/// When `v-show="message"` and `:style="!!title ? undefined : { margin: 0 }"` are
+/// both on the same element, the v-show handler merges both into a single `style` attribute.
+/// But `process_v_bind` also processes `:style` and calls `collect_binding_patches` which
+/// adds prepends at source positions of identifiers. These prepends survive the v-show
+/// overwrite and leak as stray text (e.g., `___VERTER___instance.` after the style attribute).
+#[test]
+fn v_show_with_style_binding_no_leaked_prefix() {
+    let source = r#"<template><div v-show="message" :style="!!title ? undefined : { margin: 0 }">hi</div></template>"#;
+    let result = gen_tsx_template(source);
+    eprintln!("TSX output:\n{}", result);
+
+    // Positive: merged style should include both the v-show display logic and the existing style
+    assert!(
+        result.contains("display:"),
+        "merged style should include v-show display logic. Got: {}",
+        result
+    );
+    assert!(
+        result.contains("title"),
+        "merged style should include :style expression. Got: {}",
+        result
+    );
+
+    // Negative: no stray binding prefixes leaked outside the style attribute
+    let style_end = result.find("}}").expect("should have closing }} for style object");
+    let after_style = &result[style_end + 2..];
+    assert!(
+        !after_style.contains("___VERTER___instance."),
+        "binding prefix must not leak after style attribute. After '}}': {:?}",
+        after_style
+    );
+
+    // Parse the result with OXC to check for syntax errors
+    let alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::tsx();
+    let wrapped = format!("import {{}} from 'vue';\n{}", result);
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "Generated TSX should have no parse errors. Got {} errors. Output:\n{}",
+        parsed.errors.len(),
+        result
+    );
+}
+
+/// Regression: complex template (notification-like) with transition, v-show, component :is,
+/// v-text, and v-html must produce valid TSX without syntax errors.
+#[test]
+fn notification_template_complex_no_syntax_errors() {
+    let source = r#"<template>
+  <transition
+    :name="ns.b('fade')"
+    @before-leave="onClose"
+    @after-leave="$emit('destroy')"
+  >
+    <div
+      v-show="visible"
+      :id="id"
+      :class="[ns.b(), customClass, horizontalClass]"
+      :style="positionStyle"
+      role="alert"
+      @mouseenter="clearTimer"
+      @mouseleave="startTimer"
+      @click="onClick"
+    >
+      <el-icon v-if="iconComponent" :class="[ns.e('icon'), typeClass]">
+        <component :is="iconComponent" />
+      </el-icon>
+      <div :class="ns.e('group')">
+        <h2 :class="ns.e('title')" v-text="title" />
+        <div
+          v-show="message"
+          :class="ns.e('content')"
+          :style="!!title ? undefined : { margin: 0 }"
+        >
+          <slot>
+            <p v-if="!dangerouslyUseHTMLString">{{ message }}</p>
+            <!-- Caution here, message could've been compromised, never use user's input as message -->
+            <p v-else v-html="message" />
+          </slot>
+        </div>
+        <el-icon v-if="showClose" :class="ns.e('closeBtn')" @click.stop="close">
+          <component :is="closeIcon" />
+        </el-icon>
+      </div>
+    </div>
+  </transition>
+</template>"#;
+    let result = gen_tsx_template(source);
+    eprintln!("=== NOTIFICATION TEMPLATE TSX ===\n{}\n=== END ===", result);
+
+    // Negative: no stray leaked binding prefixes
+    assert!(
+        !result.contains("}}___VERTER___instance."),
+        "binding prefix must not leak after style closing braces. Got:\n{}",
+        result
+    );
+
+    // Parse the result with OXC to check for syntax errors
+    let alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::tsx();
+    let wrapped = format!("import {{}} from 'vue';\n{}", result);
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "Generated TSX should have no parse errors. Got {} errors. Output:\n{}",
+        parsed.errors.len(),
+        result
+    );
+}
