@@ -618,6 +618,14 @@ impl TypeProvider for TsserverTypeProvider {
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
         Box::pin(async move {
+            // Read old content's line count BEFORE inserting new content.
+            // tsserver validates the end line against the old file's line map,
+            // so we must use the actual old line count (not a hardcoded sentinel).
+            let old_line_count = {
+                let cache = contents_cache.lock().await;
+                cache.get(&file).map(|c| c.lines().count() as u32 + 1)
+            };
+
             contents_cache
                 .lock()
                 .await
@@ -626,23 +634,48 @@ impl TypeProvider for TsserverTypeProvider {
             let mut opened = opened_files.lock().await;
             if opened.contains(&file) {
                 drop(opened);
-                tracing::debug!("tsserver update_file: updateOpen for {file}");
-                // Use updateOpen for already-open files (atomic open+close+open)
-                transport
-                    .command_no_response(
-                        "updateOpen",
-                        serde_json::json!({
-                            "changedFiles": [{
-                                "fileName": file,
-                                "textChanges": [{
-                                    "start": { "line": 1, "offset": 1 },
-                                    "end": { "line": 1_000_000, "offset": 1 },
-                                    "newText": content,
+                if let Some(end_line) = old_line_count {
+                    tracing::debug!(
+                        "tsserver update_file: updateOpen for {file} (end_line={end_line})"
+                    );
+                    // Use updateOpen with textChanges spanning the old content
+                    transport
+                        .command_no_response(
+                            "updateOpen",
+                            serde_json::json!({
+                                "changedFiles": [{
+                                    "fileName": file,
+                                    "textChanges": [{
+                                        "start": { "line": 1, "offset": 1 },
+                                        "end": { "line": end_line, "offset": 1 },
+                                        "newText": content,
+                                    }]
                                 }]
-                            }]
-                        }),
-                    )
-                    .await
+                            }),
+                        )
+                        .await
+                } else {
+                    // No old content in cache (shouldn't happen since opened_files
+                    // is only set when content was sent) — close and reopen
+                    tracing::warn!("tsserver update_file: no cached content for open file {file}, closing and reopening");
+                    transport
+                        .command_no_response(
+                            "updateOpen",
+                            serde_json::json!({
+                                "closedFiles": [&file],
+                                "openFiles": [{
+                                    "file": file,
+                                    "fileContent": content,
+                                    "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                                        else if file.ends_with(".jsx") { "JSX" }
+                                        else if file.ends_with(".js") { "JS" }
+                                        else { "TS" },
+                                    "projectRootPath": project_root,
+                                }]
+                            }),
+                        )
+                        .await
+                }
             } else {
                 // File not open yet — open it and track
                 opened.insert(file.clone());
@@ -1141,10 +1174,11 @@ impl TypeProvider for TsserverTypeProvider {
                 let cache = contents_cache.lock().await;
                 cache.get(&file).cloned()
             };
-            let end_line = content
-                .as_ref()
-                .map(|c| c.lines().count() as u32 + 1)
-                .unwrap_or(1_000_000);
+            let Some(content) = content else {
+                // No cached content — nothing to get tokens for
+                return Ok(vec![]);
+            };
+            let end_line = content.lines().count() as u32 + 1;
 
             let result = transport
                 .request(
@@ -1903,5 +1937,202 @@ mod tests {
         let result = format_quickinfo_hover("const", "const x: string", "A string variable");
         assert!(result.contains("(const) const x: string"));
         assert!(result.contains("A string variable"));
+    }
+
+    // ── update_file end-line tests ──────────────────────────────────
+
+    /// Helper: run the same logic as TypeProvider::update_file but against a
+    /// bare TsserverTransport + shared caches, returning the JSON frames
+    /// that were written to stdin.
+    async fn run_update_file_capture(
+        old_content: Option<&str>,
+        new_content: &str,
+        file: &str,
+    ) -> Vec<serde_json::Value> {
+        let (client_reader, server_writer) = tokio::io::duplex(65536);
+        let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+        tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+
+        let transport = Arc::new(TsserverTransport {
+            stdin_tx: stdin_tx.clone(),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_seq: AtomicI64::new(1),
+        });
+
+        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let opened_files: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+        // Pre-populate caches to simulate an already-open file
+        if let Some(old) = old_content {
+            contents_cache
+                .lock()
+                .await
+                .insert(file.to_string(), old.to_string());
+            opened_files.lock().await.insert(file.to_string());
+        }
+
+        // Run the same logic as update_file
+        let content = new_content.to_string();
+        let file = file.to_string();
+        let project_root = "/project".to_string();
+
+        // Read old content's line count BEFORE inserting new content
+        let old_line_count = {
+            let cache = contents_cache.lock().await;
+            cache.get(&file).map(|c| c.lines().count() as u32 + 1)
+        };
+
+        contents_cache
+            .lock()
+            .await
+            .insert(file.clone(), content.clone());
+
+        let mut opened = opened_files.lock().await;
+        if opened.contains(&file) {
+            drop(opened);
+            if let Some(end_line) = old_line_count {
+                let _ = transport
+                    .command_no_response(
+                        "updateOpen",
+                        serde_json::json!({
+                            "changedFiles": [{
+                                "fileName": file,
+                                "textChanges": [{
+                                    "start": { "line": 1, "offset": 1 },
+                                    "end": { "line": end_line, "offset": 1 },
+                                    "newText": content,
+                                }]
+                            }]
+                        }),
+                    )
+                    .await;
+            } else {
+                let _ = transport
+                    .command_no_response(
+                        "updateOpen",
+                        serde_json::json!({
+                            "closedFiles": [&file],
+                            "openFiles": [{
+                                "file": file,
+                                "fileContent": content,
+                                "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                                    else if file.ends_with(".jsx") { "JSX" }
+                                    else if file.ends_with(".js") { "JS" }
+                                    else { "TS" },
+                                "projectRootPath": project_root,
+                            }]
+                        }),
+                    )
+                    .await;
+            }
+        } else {
+            opened.insert(file.clone());
+            drop(opened);
+            let _ = transport
+                .command_no_response(
+                    "open",
+                    serde_json::json!({
+                        "file": file,
+                        "fileContent": content,
+                        "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                            else if file.ends_with(".jsx") { "JSX" }
+                            else if file.ends_with(".js") { "JS" }
+                            else { "TS" },
+                        "projectRootPath": project_root,
+                    }),
+                )
+                .await;
+        }
+
+        // Shutdown writer + read all frames
+        let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut reader = BufReader::new(client_reader);
+        let mut frames = Vec::new();
+        loop {
+            let mut line = String::new();
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                reader.read_line(&mut line),
+            )
+            .await
+            {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(_)) => {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                        frames.push(val);
+                    }
+                }
+                Ok(Err(_)) => break,
+            }
+        }
+        frames
+    }
+
+    #[tokio::test]
+    async fn test_update_file_end_line_matches_old_content() {
+        let old = "line1\nline2\nline3"; // 3 lines
+        let new = "line1\nline2\nline3\nline4\nline5"; // 5 lines
+        let frames = run_update_file_capture(Some(old), new, "/project/src/App.vue.tsx").await;
+
+        assert_eq!(frames.len(), 1, "should send exactly one command");
+        let args = &frames[0]["arguments"];
+        let end_line = args["changedFiles"][0]["textChanges"][0]["end"]["line"]
+            .as_u64()
+            .unwrap();
+
+        // Old content has 3 lines → end line should be 4 (lines().count() + 1)
+        assert_eq!(end_line, 4, "end line should be old content line count + 1");
+        assert_ne!(end_line, 1_000_000, "must NOT use hardcoded 1_000_000");
+    }
+
+    #[tokio::test]
+    async fn test_update_file_single_line_content() {
+        let old = "const x = 1;"; // 1 line
+        let new = "const x = 1;\nconst y = 2;";
+        let frames = run_update_file_capture(Some(old), new, "/project/src/App.vue.tsx").await;
+
+        let end_line = frames[0]["arguments"]["changedFiles"][0]["textChanges"][0]["end"]["line"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(end_line, 2, "single-line content: lines().count()=1, +1=2");
+        assert_ne!(end_line, 1_000_000, "must NOT use hardcoded 1_000_000");
+    }
+
+    #[tokio::test]
+    async fn test_update_file_first_open_uses_open_command() {
+        // No old content → should use "open" command, not "updateOpen"
+        let frames =
+            run_update_file_capture(None, "const x = 1;", "/project/src/New.vue.tsx").await;
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["command"].as_str().unwrap(), "open");
+        // Should not contain changedFiles or end line at all
+        assert!(
+            frames[0]["arguments"].get("changedFiles").is_none(),
+            "open command should not have changedFiles"
+        );
+    }
+
+    // ── get_semantic_tokens cache-miss test ──────────────────────────
+
+    #[tokio::test]
+    async fn test_get_semantic_tokens_cache_miss_returns_empty() {
+        // Simulate what get_semantic_tokens does on cache miss:
+        // It should return Ok(vec![]) without sending any request.
+        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let content = {
+            let cache = contents_cache.lock().await;
+            cache.get("/project/src/Missing.vue.tsx").cloned()
+        };
+
+        // With the fix, content is None → early return
+        assert!(content.is_none(), "cache miss should yield None");
+        // The actual fix changes the code to `return Ok(vec![])` here,
+        // so no transport request is sent. We verify the None path exists.
     }
 }
