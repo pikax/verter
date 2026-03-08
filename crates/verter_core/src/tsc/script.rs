@@ -944,7 +944,6 @@ fn generate_code(
     // DefineComponent, then provides a single `new()` that returns the
     // intersection of ComponentPublicInstance and the typed instance shape.
     // This ensures barrel re-exports preserve the correct $props/$emit types.
-    let emits_type = build_emits_type(&state.emits_ts, &state.models);
     let props_type = build_props_type(&state.props_ts, &state.models);
 
     out.push_str(&format!(
@@ -952,9 +951,6 @@ fn generate_code(
         name = component_name,
     ));
     let emit_fn_type = build_emit_fn_type(&state.emits_ts, &state.models);
-    // Omit instance members we provide explicitly, so CPI defaults don't conflict.
-    const CPI_OMIT: &str =
-        "\"$props\" | \"$emit\" | \"$slots\" | \"$data\" | \"$attrs\" | \"$refs\"";
 
     // Build generic params for new(), appending narrowing generics if present
     let full_gp = if let Some(nr) = narrowing {
@@ -984,17 +980,6 @@ fn generate_code(
         generic_params.map(|s| s.to_string())
     };
 
-    match &full_gp {
-        Some(gp) => out.push_str(&format!(
-            "  new<{gp}>(): Omit<import(\"vue\").ComponentPublicInstance<{{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {emits}>, {CPI_OMIT}> & {{\n",
-            emits = emits_type,
-        )),
-        None => out.push_str(&format!(
-            "  new(): Omit<import(\"vue\").ComponentPublicInstance<{{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, {emits}>, {CPI_OMIT}> & {{\n",
-            emits = emits_type,
-        )),
-    }
-
     // $props — substitute generic types for narrowing props
     let narrowing_props_type = if let Some(nr) = narrowing {
         build_narrowing_props_type(&state.props_ts, &state.models, &nr.narrowing)
@@ -1017,6 +1002,19 @@ fn generate_code(
         Some(ep) => format!("{} & {}", props_base, ep),
         None => props_base.to_string(),
     };
+
+    // Generate simplified constructor: `new(props?: PublicProps & Props): CPI & { ... }`
+    // This avoids `Omit<ComponentPublicInstance<8 params>, keys>` which causes
+    // "Type instantiation is excessively deep" with self-referential prop types.
+    match &full_gp {
+        Some(gp) => out.push_str(&format!(
+            "  new<{gp}>(props?: import(\"vue\").PublicProps & {full_props}): import(\"vue\").ComponentPublicInstance & {{\n",
+        )),
+        None => out.push_str(&format!(
+            "  new(props?: import(\"vue\").PublicProps & {full_props}): import(\"vue\").ComponentPublicInstance & {{\n",
+        )),
+    }
+
     out.push_str(&format!(
         "    $props: import(\"vue\").PublicProps & {},\n",
         full_props
@@ -1097,27 +1095,6 @@ fn generate_code(
 }
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
-
-fn build_emits_type(emits: &[EmitEntry], models: &[ModelEntry]) -> String {
-    if emits.is_empty() && models.is_empty() {
-        return "{}".to_string();
-    }
-    let mut parts: Vec<String> = emits
-        .iter()
-        .map(|e| {
-            let key = ts_property_key(&e.name);
-            if e.params_ts.is_empty() {
-                format!("{}: []", key)
-            } else {
-                format!("{}: [{}]", key, e.params_ts)
-            }
-        })
-        .collect();
-    for model in models {
-        parts.push(format!("'update:{}': [v: {}]", model.name, model.ts_type));
-    }
-    format!("{{ {} }}", parts.join("; "))
-}
 
 /// Build an inline emit function type (overloaded function signatures).
 ///
@@ -1402,26 +1379,6 @@ fn find_leading_jsdoc(
         }
     }
     None
-}
-
-fn ts_property_key(name: &str) -> String {
-    if is_valid_identifier(name) {
-        name.to_string()
-    } else {
-        format!("'{}'", name)
-    }
-}
-
-fn is_valid_identifier(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let mut chars = s.chars();
-    let first = chars.next().unwrap();
-    if !first.is_alphabetic() && first != '_' && first != '$' {
-        return false;
-    }
-    chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }
 
 fn minimal_source_map() -> String {

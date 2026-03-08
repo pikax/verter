@@ -89,8 +89,8 @@ const title = defineModel<string>('title')
         "model onUpdate prop in declare"
     );
     assert!(
-        r.contains("'update:title': [v: string]"),
-        "model emit type inline"
+        r.contains("event: 'update:title', v: string"),
+        "model emit type in $emit overload"
     );
     assert!(!r.contains("defineModel"), "macro removed");
     assert!(!r.contains("__verter_"), "no intermediate aliases");
@@ -114,7 +114,10 @@ defineEmits(['change', 'update:model'])
         r.contains("'update:model'"),
         "runtime emits has update:model"
     );
-    assert!(r.contains("'update:model': []"), "typed emits in declare");
+    assert!(
+        r.contains("event: 'update:model'"),
+        "typed emits in $emit overload"
+    );
     assert!(!r.contains("setup("), "no setup() in __comp");
 }
 
@@ -515,8 +518,8 @@ const user = defineModel<User>()
 
     assert!(r.contains("modelValue?: User"), "TS User type");
     assert!(
-        r.contains("'update:modelValue': [v: User]"),
-        "emit type with User"
+        r.contains("event: 'update:modelValue', v: User"),
+        "emit type with User in $emit overload"
     );
 }
 
@@ -1149,10 +1152,10 @@ defineProps<{ items: T[] }>()
 </script><template/>"#,
     );
 
-    // Positive: generic on new()
+    // Positive: generic on new() with props param
     assert!(
-        r.contains("new<T>()"),
-        "should emit generic on new(): got {}",
+        r.contains("new<T>(props?"),
+        "should emit generic on new(props?): got {}",
         r
     );
     assert!(
@@ -1177,8 +1180,8 @@ defineProps<{ value: T }>()
     );
 
     assert!(
-        r.contains("new<T extends string>()"),
-        "should emit generic with constraint: got {}",
+        r.contains("new<T extends string>(props?"),
+        "should emit generic with constraint and props: got {}",
         r
     );
 }
@@ -1192,8 +1195,8 @@ defineProps<{ key: K; value: V }>()
     );
 
     assert!(
-        r.contains("new<K extends string, V>()"),
-        "should emit multiple generic params: got {}",
+        r.contains("new<K extends string, V>(props?"),
+        "should emit multiple generic params with props: got {}",
         r
     );
 }
@@ -1206,15 +1209,48 @@ defineProps<{ title: string }>()
 </script><template/>"#,
     );
 
-    // Without generic, should have plain new() (followed by Omit<CPI, ...>)
+    // Without generic, should have plain new(props?: ...) constructor
     assert!(
-        r.contains("new(): Omit<"),
-        "should have plain new() without generic: got {}",
+        r.contains("new(props?: import(\"vue\").PublicProps &"),
+        "should have new(props?) with PublicProps: got {}",
         r
     );
     assert!(
         !r.contains("new<"),
         "should not have angle brackets without generic: got {}",
+        r
+    );
+    // Negative: no more Omit<CPI<...>> wrapper
+    assert!(
+        !r.contains("Omit<import(\"vue\").ComponentPublicInstance<"),
+        "should not use Omit<CPI<...>> pattern: got {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_recursive_prop_types_no_excessive_depth() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+export interface Action { label: string; callback?: (a: Action) => void }
+defineProps<{ actions: Action[] }>()
+</script><template/>"#,
+    );
+    // Positive: constructor accepts props param
+    assert!(
+        r.contains("new(props?:"),
+        "constructor accepts props param: got {}",
+        r
+    );
+    assert!(
+        r.contains("import(\"vue\").ComponentPublicInstance &"),
+        "plain CPI intersection in return type: got {}",
+        r
+    );
+    // Negative: no Omit<CPI<...>> wrapping that causes excessive depth
+    assert!(
+        !r.contains("Omit<import(\"vue\").ComponentPublicInstance<"),
+        "no Omit<CPI<...>> pattern: got {}",
         r
     );
 }
@@ -1506,16 +1542,16 @@ defineProps<{
         "should NOT use raw typeof __comp in intersection: got:\n{}",
         r
     );
-    // Positive: CPI is inside new() with Omit wrapping
+    // Positive: CPI is used as plain intersection in constructor return type
     assert!(
-        r.contains("new(): Omit<import(\"vue\").ComponentPublicInstance<"),
-        "CPI should be inside new() with Omit<>: got:\n{}",
+        r.contains("new(props?: import(\"vue\").PublicProps &"),
+        "constructor should accept props with PublicProps: got:\n{}",
         r
     );
-    // Positive: Omit excludes instance members we provide explicitly
+    // Negative: no more Omit<CPI<...>> wrapping
     assert!(
-        r.contains("\"$props\" | \"$emit\" | \"$slots\" | \"$data\" | \"$attrs\" | \"$refs\">"),
-        "Omit should exclude $props/$emit/$slots/$data/$attrs/$refs: got:\n{}",
+        !r.contains("Omit<import(\"vue\").ComponentPublicInstance<"),
+        "should NOT use Omit<CPI<...>> pattern: got:\n{}",
         r
     );
     // Positive: $props includes PublicProps for class/style/key
@@ -1545,10 +1581,16 @@ defineProps<{ items: T[] }>()
 </script><template/>"#,
     );
 
-    // Positive: generic on new() with CPI inside
+    // Positive: generic on new() with props param
     assert!(
-        r.contains("new<T>(): Omit<import(\"vue\").ComponentPublicInstance<"),
-        "generic new() should have CPI with Omit: got:\n{}",
+        r.contains("new<T>(props?: import(\"vue\").PublicProps &"),
+        "generic new() should accept props with PublicProps: got:\n{}",
+        r
+    );
+    // Negative: no more Omit<CPI<...>> wrapping
+    assert!(
+        !r.contains("Omit<import(\"vue\").ComponentPublicInstance<"),
+        "should NOT use Omit<CPI<...>> pattern: got:\n{}",
         r
     );
     assert!(
@@ -1794,15 +1836,15 @@ defineEmits({
         r.contains(r#""onMyEvent"?:"#),
         "should have camelized onMyEvent prop: {r}"
     );
-    // non-kebab event → single key only
+    // non-kebab event → single key per props block (appears in both new() param and $props)
     assert!(
         r.contains(r#""onClick"?:"#),
         "should have onClick prop: {r}"
     );
     let count = r.matches(r#""onClick"?:"#).count();
     assert_eq!(
-        count, 1,
-        "non-kebab emit should produce exactly one key: {r}"
+        count, 2,
+        "non-kebab emit should produce exactly one key per props block (2 total: new() + $props): {r}"
     );
 }
 
@@ -1824,15 +1866,15 @@ defineEmits(['my-event', 'click'])
         r.contains(r#""onMyEvent"?:"#),
         "should have camelized onMyEvent prop: {r}"
     );
-    // non-kebab event → single key only
+    // non-kebab event → single key per props block (appears in both new() param and $props)
     assert!(
         r.contains(r#""onClick"?:"#),
         "should have onClick prop: {r}"
     );
     let count = r.matches(r#""onClick"?:"#).count();
     assert_eq!(
-        count, 1,
-        "non-kebab emit should produce exactly one key: {r}"
+        count, 2,
+        "non-kebab emit should produce exactly one key per props block (2 total: new() + $props): {r}"
     );
 }
 

@@ -2681,6 +2681,37 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
+        // Ensure imported .vue files are compiled + synced before this file's
+        // IDE output reaches the type provider. Prevents fallback stubs for
+        // components that the workspace scanner hasn't processed yet.
+        if let Some(analysis) = self.documents.get_analysis(uri) {
+            let vue_imports: Vec<String> = analysis
+                .imports
+                .iter()
+                .filter_map(|imp| {
+                    let cid = imp.resolved_canonical_id.as_ref()?;
+                    if cid.ends_with(".vue") {
+                        Some(cid.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for import_id in &vue_imports {
+                // Signal scanner to prioritize this import
+                if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
+                    scanner.signal_priority(import_id.clone());
+                }
+                // If not already background-synced, compile + sync now
+                let base = import_id.strip_suffix(".vue").unwrap_or(import_id);
+                let dts_path = format!("{base}.vue.ts");
+                if !self.background_synced_files.contains_key(&dts_path) {
+                    self.resync_background_vue_file(import_id).await;
+                }
+            }
+        }
+
         tokio::join!(
             self.sync_ide_to_provider(uri),
             self.sync_api_to_provider(uri),
