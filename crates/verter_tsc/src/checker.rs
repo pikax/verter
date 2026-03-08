@@ -531,7 +531,7 @@ fn remap_diagnostics(
     tsx_to_vue: &HashMap<String, (PathBuf, String)>,
 ) -> Vec<Diagnostic> {
     raw.into_iter()
-        .filter(|d| !is_vue_jsx_children_error(d))
+        .filter(|d| !is_vue_jsx_type_gap_error(d))
         .filter(|d| !is_temp_tsconfig_error(d))
         .map(|d| {
             // Try to find a matching vue entry using a suffix match on the file path.
@@ -591,14 +591,24 @@ fn remap_diagnostics(
         .collect()
 }
 
-/// Check if a diagnostic is a TS2322 or TS2559 "children not assignable to HTMLAttributes"
-/// false positive. Vue's `@vue/runtime-dom` `HTMLAttributes` interface lacks a `children`
-/// property, so every JSX element with children triggers this error. A module augmentation
-/// in `html-attrs-augment.d.ts` fixes this for tsc, but tsgo (preview) doesn't support
-/// module augmentation yet. Filter these known false positives.
-fn is_vue_jsx_children_error(d: &TscDiagnostic) -> bool {
-    matches!(d.ts_code, 2322 | 2559)
-        && d.message.contains("children")
+/// Check if a diagnostic is a TS2322 or TS2559 false positive caused by missing
+/// properties in Vue's JSX type definitions. Known gaps:
+/// - `children` — Vue's HTMLAttributes/SVGAttributes lack `children?: any`, but JSX
+///   always passes children as props. A module augmentation in `html-attrs-augment.d.ts`
+///   fixes this for tsc, but tsgo (preview) doesn't support cross-file augmentation.
+/// - `textContent` — Generated from `v-text="expr"` directive. Valid DOM property but
+///   not in Vue's JSX types.
+/// - `innerHTML` — Generated from `v-html="expr"` directive. Same issue.
+fn is_vue_jsx_type_gap_error(d: &TscDiagnostic) -> bool {
+    if !matches!(d.ts_code, 2322 | 2559) {
+        return false;
+    }
+    let has_gap_prop = d.message.contains("children")
+        || d.message.contains("textContent")
+        || d.message.contains("innerHTML");
+    // Match any Vue intrinsic element attribute type (HTMLAttributes, SVGAttributes,
+    // InputHTMLAttributes, LabelHTMLAttributes, etc.) or ReservedProps.
+    has_gap_prop
         && (d.message.contains("HTMLAttributes")
             || d.message.contains("SVGAttributes")
             || d.message.contains("ReservedProps"))
@@ -1536,93 +1546,61 @@ mod tests {
     }
 
     #[test]
-    fn is_vue_jsx_children_error_filters_correctly() {
+    fn is_vue_jsx_type_gap_error_filters_correctly() {
         use crate::reporter::{Severity, TscDiagnostic};
 
-        // TS2322 with children + HTMLAttributes → filter out
-        let d = TscDiagnostic {
+        let make = |ts_code: u32, msg: &str| TscDiagnostic {
             file: "test.tsx".into(),
             line: 1,
             col: 1,
             severity: Severity::Error,
-            ts_code: 2322,
-            message: "Type '{ class: string; children: Element[]; }' is not assignable to type 'HTMLAttributes & ReservedProps'.".into(),
+            ts_code,
+            message: msg.into(),
         };
-        assert!(
-            is_vue_jsx_children_error(&d),
-            "should filter TS2322 with children+HTMLAttributes"
-        );
 
-        // TS2559 with children + HTMLAttributes → filter out
-        let d2 = TscDiagnostic {
-            file: "test.tsx".into(),
-            line: 1,
-            col: 1,
-            severity: Severity::Error,
-            ts_code: 2559,
-            message: "Type '{ children: string; }' has no properties in common with type 'HTMLAttributes'.".into(),
-        };
-        assert!(
-            is_vue_jsx_children_error(&d2),
-            "should filter TS2559 with children+HTMLAttributes"
-        );
+        // children + HTMLAttributes → filter
+        assert!(is_vue_jsx_type_gap_error(&make(2322,
+            "Type '{ class: string; children: Element[]; }' is not assignable to type 'HTMLAttributes & ReservedProps'.")));
 
-        // TS2322 with children + SVGAttributes → filter out
-        let d3 = TscDiagnostic {
-            file: "test.tsx".into(),
-            line: 1,
-            col: 1,
-            severity: Severity::Error,
-            ts_code: 2322,
-            message: "Type '{ children: Element; }' is not assignable to type 'SVGAttributes & ReservedProps'.".into(),
-        };
-        assert!(
-            is_vue_jsx_children_error(&d3),
-            "should filter TS2322 with children+SVGAttributes"
-        );
+        // children + SVGAttributes → filter
+        assert!(is_vue_jsx_type_gap_error(&make(2322,
+            "Type '{ children: Element; }' is not assignable to type 'SVGAttributes & ReservedProps'.")));
 
-        // TS2322 WITHOUT children → keep
-        let d4 = TscDiagnostic {
-            file: "test.tsx".into(),
-            line: 1,
-            col: 1,
-            severity: Severity::Error,
-            ts_code: 2322,
-            message: "Type '{ class: string; }' is not assignable to type 'HTMLAttributes'.".into(),
-        };
-        assert!(
-            !is_vue_jsx_children_error(&d4),
-            "should not filter TS2322 without children"
-        );
+        // TS2559 with children → filter
+        assert!(is_vue_jsx_type_gap_error(&make(
+            2559,
+            "Type '{ children: string; }' has no properties in common with type 'HTMLAttributes'."
+        )));
 
-        // TS2304 (different code) → keep even with children in message
-        let d5 = TscDiagnostic {
-            file: "test.tsx".into(),
-            line: 1,
-            col: 1,
-            severity: Severity::Error,
-            ts_code: 2304,
-            message: "Cannot find name 'children'.".into(),
-        };
-        assert!(
-            !is_vue_jsx_children_error(&d5),
-            "should not filter non-2322/2559 errors"
-        );
+        // textContent + HTMLAttributes → filter
+        assert!(is_vue_jsx_type_gap_error(&make(2322,
+            "Type '{ textContent: any; }' is not assignable to type 'HTMLAttributes & ReservedProps'.")));
 
-        // TS2322 with children but NOT HTMLAttributes/SVGAttributes → keep
-        let d6 = TscDiagnostic {
-            file: "test.tsx".into(),
-            line: 1,
-            col: 1,
-            severity: Severity::Error,
-            ts_code: 2322,
-            message: "Type '{ children: string; }' is not assignable to type 'MyComponentProps'."
-                .into(),
-        };
-        assert!(
-            !is_vue_jsx_children_error(&d6),
-            "should not filter TS2322 on custom component props"
-        );
+        // textContent + LabelHTMLAttributes → filter
+        assert!(is_vue_jsx_type_gap_error(&make(2322,
+            "Type '{ for: any; textContent: any; }' is not assignable to type 'IntrinsicAttributes & LabelHTMLAttributes & ReservedProps'.")));
+
+        // innerHTML + HTMLAttributes → filter
+        assert!(is_vue_jsx_type_gap_error(&make(2322,
+            "Type '{ innerHTML: string; }' is not assignable to type 'HTMLAttributes & ReservedProps'.")));
+
+        // TS2322 WITHOUT gap prop → keep
+        assert!(!is_vue_jsx_type_gap_error(&make(
+            2322,
+            "Type '{ class: string; }' is not assignable to type 'HTMLAttributes'."
+        )));
+
+        // TS2304 (different code) → keep
+        assert!(!is_vue_jsx_type_gap_error(&make(
+            2304,
+            "Cannot find name 'children'."
+        )));
+
+        // children on custom component → keep
+        assert!(!is_vue_jsx_type_gap_error(&make(
+            2322,
+            "Type '{ children: string; }' is not assignable to type 'MyComponentProps'."
+        )));
     }
 
     #[test]
