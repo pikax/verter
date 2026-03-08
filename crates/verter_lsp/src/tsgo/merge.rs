@@ -504,7 +504,7 @@ pub fn merge_diagnostics(
         } else {
             dropped += 1;
             tracing::debug!(
-                "merge_diagnostics: dropped TSGO diagnostic (unmapped range) — {:?} at offsets {}..{}",
+                "merge_diagnostics: dropped type provider diagnostic (unmapped range) — {:?} at offsets {}..{}",
                 diag.message,
                 diag.start,
                 diag.end,
@@ -514,7 +514,7 @@ pub fn merge_diagnostics(
 
     if dropped > 0 {
         tracing::debug!(
-            "merge_diagnostics: {dropped}/{} TSGO diagnostics dropped (unmapped ranges)",
+            "merge_diagnostics: {dropped}/{} type provider diagnostics dropped (unmapped ranges)",
             type_diags.len()
         );
     }

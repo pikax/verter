@@ -2532,9 +2532,12 @@ impl LanguageServer for VerterLanguageServer {
                         kind: kind.clone(),
                     })
                     .await;
-                self.client
-                    .send_notification::<TsgoStarted>(TsgoStartedParams { pid })
-                    .await;
+                // Legacy TsgoStarted notification — only send when TSGO is actually active
+                if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                    self.client
+                        .send_notification::<TsgoStarted>(TsgoStartedParams { pid })
+                        .await;
+                }
             }
         }
 

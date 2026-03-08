@@ -86,7 +86,7 @@ export async function activate(context: ExtensionContext) {
 
   log.info("Verter extension activating");
 
-  const server = activateVueLanguageServer(context, log);
+  const server = await activateVueLanguageServer(context, log);
   getClient = server.getClient;
   stopHeartbeat = server.stopHeartbeatTimer;
 
@@ -164,7 +164,7 @@ function findLspBinary(extensionPath: string, log: LogOutputChannel): string {
   return `verter-lsp${ext}`;
 }
 
-export function activateVueLanguageServer(context: ExtensionContext, log: LogOutputChannel) {
+export async function activateVueLanguageServer(context: ExtensionContext, log: LogOutputChannel) {
   const { workspaceFolders } = workspace;
   const rootPath = Array.isArray(workspaceFolders) ? workspaceFolders[0].uri.fsPath : undefined;
 
@@ -378,12 +378,11 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
         log.info(`Type provider (${params.kind}) started with PID ${params.pid}`);
       },
     );
-    // Legacy notification for backward compat
+    // Legacy notification — only sent when TSGO is actually active
     lc.onNotification(
       NotificationType.TsgoStarted,
       (params: { pid: number }) => {
         typeProviderPid = params.pid;
-        log.info(`TSGO started with PID ${params.pid}`);
       },
     );
   }
@@ -639,6 +638,10 @@ export function activateVueLanguageServer(context: ExtensionContext, log: LogOut
       setupMcpForClaudeCode(context, log)
     )
   );
+
+  // Start the language server — must be after all notification handlers and
+  // listeners are registered so they're ready when the server responds.
+  await client.start();
 
   return {
     getClient,
