@@ -399,6 +399,12 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             if props_result.uses_with_keys {
                 out.add_vdom_import(VdomHelper::WithKeys);
             }
+            if props_result.uses_normalize_props {
+                out.add_vdom_import(VdomHelper::NormalizeProps);
+            }
+            if props_result.uses_guard_reactive_props {
+                out.add_vdom_import(VdomHelper::GuardReactiveProps);
+            }
             props_result.dynamic_props
         } else {
             if has_children {
@@ -805,6 +811,12 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
             if props_result.uses_with_keys {
                 out.add_vdom_import(VdomHelper::WithKeys);
+            }
+            if props_result.uses_normalize_props {
+                out.add_vdom_import(VdomHelper::NormalizeProps);
+            }
+            if props_result.uses_guard_reactive_props {
+                out.add_vdom_import(VdomHelper::GuardReactiveProps);
             }
             props_result.dynamic_props
         } else {

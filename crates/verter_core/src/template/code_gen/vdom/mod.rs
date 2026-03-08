@@ -1389,4 +1389,75 @@ mod tests {
             "Inner element should NOT use _createElementBlock, got:\n{code}"
         );
     }
+
+    // ==================== normalizeProps / guardReactiveProps ====================
+
+    #[test]
+    fn normalize_props_vbind_spread_alone() {
+        // v-bind="attrs" alone → _normalizeProps(_guardReactiveProps(attrs))
+        let code = gen_vdom_template(
+            "<template><div v-bind=\"attrs\">hi</div></template>\n<script setup>\nconst attrs = {}\n</script>",
+        );
+        assert!(
+            code.contains("_normalizeProps(_guardReactiveProps("),
+            "v-bind spread alone should use _normalizeProps(_guardReactiveProps(...)), got:\n{code}"
+        );
+        assert!(
+            !code.contains("_mergeProps("),
+            "v-bind spread alone should NOT use _mergeProps, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn normalize_props_vbind_spread_on_component() {
+        // Component with v-bind="props" alone → _normalizeProps(_guardReactiveProps(props))
+        let code = gen_vdom_template(
+            "<template><MyComp v-bind=\"compProps\" /></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst compProps = {}\n</script>",
+        );
+        assert!(
+            code.contains("_normalizeProps(_guardReactiveProps("),
+            "Component v-bind spread should use _normalizeProps(_guardReactiveProps(...)), got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn normalize_props_vbind_spread_with_regular_props_uses_merge_only() {
+        // v-bind="attrs" + class="foo" → _mergeProps({...}, attrs) — NO normalizeProps
+        let code = gen_vdom_template(
+            "<template><div class=\"foo\" v-bind=\"attrs\">hi</div></template>\n<script setup>\nconst attrs = {}\n</script>",
+        );
+        assert!(
+            code.contains("_mergeProps("),
+            "v-bind spread + regular props should use _mergeProps, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_normalizeProps("),
+            "v-bind spread + regular props should NOT use _normalizeProps, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_guardReactiveProps("),
+            "v-bind spread + regular props should NOT use _guardReactiveProps, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn normalize_props_dynamic_attr_name() {
+        // :[attrName]="value" → _normalizeProps({ [attrName || ""]: value })
+        let code = gen_vdom_template(
+            "<template><div :[attrName]=\"value\">content</div></template>\n<script setup>\nconst attrName = 'id'\nconst value = '1'\n</script>",
+        );
+        assert!(
+            code.contains("_normalizeProps("),
+            "Dynamic attr name should use _normalizeProps, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_guardReactiveProps("),
+            "Dynamic attr name should NOT use _guardReactiveProps, got:\n{code}"
+        );
+        // The dynamic key should use computed property syntax with || ""
+        assert!(
+            code.contains("|| \"\""),
+            "Dynamic attr key should have || \"\" fallback, got:\n{code}"
+        );
+    }
 }

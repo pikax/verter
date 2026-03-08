@@ -34,6 +34,8 @@ pub const V_MODEL_SELECT: &str = "_vModelSelect";
 pub const V_MODEL_DYNAMIC: &str = "_vModelDynamic";
 pub const V_SHOW: &str = "_vShow";
 pub const CREATE_STATIC_VNODE: &str = "_createStaticVNode";
+pub const NORMALIZE_PROPS: &str = "_normalizeProps";
+pub const GUARD_REACTIVE_PROPS: &str = "_guardReactiveProps";
 
 // ======================== Vue built-in components ========================
 // These are imported directly from "vue" (e.g., `Suspense as _Suspense`)
@@ -134,6 +136,8 @@ pub enum VdomHelper {
     NormalizeStyle = 1 << 27,
     ResolveDynamicComponent = 1 << 28,
     CreateStaticVNode = 1 << 29,
+    NormalizeProps = 1 << 30,
+    GuardReactiveProps = 1 << 31,
 }
 
 impl VdomHelper {
@@ -171,12 +175,14 @@ impl VdomHelper {
             Self::NormalizeStyle => NORMALIZE_STYLE,
             Self::ResolveDynamicComponent => RESOLVE_DYNAMIC_COMPONENT,
             Self::CreateStaticVNode => CREATE_STATIC_VNODE,
+            Self::NormalizeProps => NORMALIZE_PROPS,
+            Self::GuardReactiveProps => GUARD_REACTIVE_PROPS,
         }
     }
 }
 
 /// Ordered lookup table for `VdomHelperFlags::to_imports()`.
-const ALL_VDOM: [VdomHelper; 30] = [
+const ALL_VDOM: [VdomHelper; 32] = [
     VdomHelper::CreateElementVNode,
     VdomHelper::CreateElementBlock,
     VdomHelper::CreateVNode,
@@ -207,6 +213,8 @@ const ALL_VDOM: [VdomHelper; 30] = [
     VdomHelper::NormalizeStyle,
     VdomHelper::ResolveDynamicComponent,
     VdomHelper::CreateStaticVNode,
+    VdomHelper::NormalizeProps,
+    VdomHelper::GuardReactiveProps,
 ];
 
 /// Bitflag set of VDOM runtime helpers. Wraps a `u32` with O(1) add/has.

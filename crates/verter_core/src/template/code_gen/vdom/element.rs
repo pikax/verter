@@ -350,6 +350,8 @@ pub struct PropsResult {
     pub uses_normalize_style: bool,
     pub uses_with_modifiers: bool,
     pub uses_with_keys: bool,
+    pub uses_normalize_props: bool,
+    pub uses_guard_reactive_props: bool,
     /// v-model on a native element (input/textarea/select) that needs
     /// `_withDirectives()` wrapping after the element VNode is created.
     pub native_vmodel: Option<NativeVModel>,
@@ -614,6 +616,7 @@ pub(crate) fn build_props_object_into(
     // These need _mergeProps() wrapping when mixed with regular props.
     let mut spreads: Vec<String> = Vec::with_capacity(2);
     let mut has_regular_props = false;
+    let mut has_dynamic_key = false;
     let mut uses_normalize_class = false;
     let mut uses_normalize_style = false;
     let mut uses_with_modifiers = false;
@@ -646,6 +649,9 @@ pub(crate) fn build_props_object_into(
 
             if prop.arg_start.is_some() {
                 has_regular_props = true;
+                if prop.is_dynamic == Some(true) {
+                    has_dynamic_key = true;
+                }
             }
             // v-model on components or native elements expands to props
             if directive_name == "v-model" {
@@ -678,8 +684,14 @@ pub(crate) fn build_props_object_into(
         buf.push_str("_mergeProps(");
     }
 
+    // Dynamic key names (:[expr]) need _normalizeProps wrapping when not using _mergeProps
+    let wrap_normalize_for_dynamic_key = has_dynamic_key && !use_merge;
+
     // Emit regular props object
     if has_regular_props || spreads.is_empty() {
+        if wrap_normalize_for_dynamic_key {
+            buf.push_str("_normalizeProps(");
+        }
         buf.push_str("{ ");
         let mut first = true;
 
@@ -886,6 +898,20 @@ pub(crate) fn build_props_object_into(
                         // Store modifier info for use during value emission
                         event_runtime_modifiers = runtime_modifiers;
                         event_key_modifiers = key_modifiers;
+                    } else if prop.is_dynamic == Some(true) && is_bind {
+                        // Dynamic bind key: :[attrName]="value"
+                        // Emit as computed property key: [resolvedExpr || ""]
+                        // Strip brackets from arg_name
+                        let inner = if arg_name.starts_with('[') && arg_name.ends_with(']') {
+                            &arg_name[1..arg_name.len() - 1]
+                        } else {
+                            arg_name
+                        };
+                        let resolved = resolver.resolve_simple_expr(inner);
+                        buf.push('[');
+                        buf.push_str(&resolved);
+                        buf.push_str(" || \"\"");
+                        buf.push(']');
                     } else {
                         // Track :class and :style for _normalizeClass/_normalizeStyle wrapping
                         if is_bind && arg_name == "class" {
@@ -1268,27 +1294,31 @@ pub(crate) fn build_props_object_into(
             }
         }
         buf.push_str(" }");
-    }
-
-    // Emit spread expressions
-    for spread in &spreads {
-        if has_regular_props || use_merge {
-            buf.push_str(", ");
+        if wrap_normalize_for_dynamic_key {
+            buf.push(')');
         }
-        buf.push_str(spread);
     }
+    let mut uses_normalize_props = wrap_normalize_for_dynamic_key;
+    let mut uses_guard_reactive_props = false;
 
     if use_merge {
+        // Spreads mixed with regular props → _mergeProps({...}, spread1, spread2)
+        // No normalizeProps/guardReactiveProps needed — _mergeProps handles normalization
+        for spread in &spreads {
+            buf.push_str(", ");
+            buf.push_str(spread);
+        }
         buf.push(')');
     } else if !spreads.is_empty() && !has_regular_props {
-        // Only spreads, no regular props — just emit the first spread
-        // (if multiple, use _mergeProps)
-        if spreads.len() > 1 {
-            // Rewrite: wrap all spreads in _mergeProps
-            // This case is unlikely but handle it properly
-            let content =
-                buf.split_off(buf.len() - spreads.iter().map(|s| s.len() + 2).sum::<usize>() + 2);
-            let _ = content;
+        if spreads.len() == 1 {
+            // Single spread, no regular props → _normalizeProps(_guardReactiveProps(expr))
+            buf.push_str("_normalizeProps(_guardReactiveProps(");
+            buf.push_str(&spreads[0]);
+            buf.push_str("))");
+            uses_normalize_props = true;
+            uses_guard_reactive_props = true;
+        } else {
+            // Multiple spreads, no regular props → _mergeProps(expr1, expr2)
             buf.push_str("_mergeProps(");
             for (i, spread) in spreads.iter().enumerate() {
                 if i > 0 {
@@ -1307,6 +1337,8 @@ pub(crate) fn build_props_object_into(
         uses_normalize_style,
         uses_with_modifiers,
         uses_with_keys,
+        uses_normalize_props,
+        uses_guard_reactive_props,
         native_vmodel,
     }
 }
@@ -1446,6 +1478,12 @@ pub fn process_element_leave<'alloc>(
         }
         if props_result.uses_with_keys {
             out.add_vdom_import(VdomHelper::WithKeys);
+        }
+        if props_result.uses_normalize_props {
+            out.add_vdom_import(VdomHelper::NormalizeProps);
+        }
+        if props_result.uses_guard_reactive_props {
+            out.add_vdom_import(VdomHelper::GuardReactiveProps);
         }
         (props_result.dynamic_props, props_result.native_vmodel)
     } else {
