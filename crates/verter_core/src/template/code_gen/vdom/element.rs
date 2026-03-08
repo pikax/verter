@@ -1376,6 +1376,39 @@ pub(crate) fn build_props_object_into(
     }
 }
 
+/// Format a dynamic props array as a string (e.g., `["id", "title"]`).
+///
+/// If `hoisted_constants` is provided, the array is registered as a hoisted
+/// constant and the `_hoisted_N` reference is returned instead.
+pub(super) fn format_dynamic_props_ref(
+    dynamic_props: &[String],
+    hoisted_constants: Option<&mut Vec<String>>,
+) -> String {
+    let mut arr = String::with_capacity(dynamic_props.len() * 10);
+    arr.push('[');
+    for (i, key) in dynamic_props.iter().enumerate() {
+        if i > 0 {
+            arr.push_str(", ");
+        }
+        arr.push('"');
+        helpers::escape_js_string_into(&mut arr, key);
+        arr.push('"');
+    }
+    arr.push(']');
+
+    // Try to hoist the array as a module-level constant
+    if let Some(hoisted) = hoisted_constants {
+        // Deduplicate: check if an identical array already exists
+        if let Some(idx) = hoisted.iter().position(|c| c == &arr) {
+            return format!("_hoisted_{}", idx + 1);
+        }
+        hoisted.push(arr);
+        return format!("_hoisted_{}", hoisted.len());
+    }
+
+    arr
+}
+
 /// Process the leave phase of a VDOM element node.
 ///
 /// 1. Resolves whitespace in children
@@ -1399,6 +1432,8 @@ pub fn process_element_leave<'alloc>(
     v_for_prefix: Option<&str>,
     ast: &TemplateAst,
     is_block_root: bool,
+    hoisted_constants: Option<&mut Vec<String>>,
+    cache_index: Option<usize>,
 ) -> ChildRecord {
     let tag_open = &element.tag_open;
     debug_assert!((tag_open.start as usize + 1) <= source.len());
@@ -1422,6 +1457,9 @@ pub fn process_element_leave<'alloc>(
     let mut patch_flag =
         props::compute_patch_flags(element.prop_flag, expr_flag, element.children_mode);
 
+    // Cached static elements use -1 (CACHED) patch flag, bypassing all diffing
+    let is_cached = cache_index.is_some();
+
     // Pre-scan: detect v-model on native elements for _withDirectives() wrapping.
     // We need to know this before building the open tag so we can prepend the wrapper.
     let has_native_vmodel = !element.tag_type.is_component()
@@ -1434,6 +1472,16 @@ pub fn process_element_leave<'alloc>(
 
     // Step 3: Build open tag overwrite (reusing caller's buffer)
     buf.clear();
+
+    // Cache wrapper prefix for static elements: `_cache[N] || (_cache[N] = `
+    if let Some(idx) = cache_index {
+        buf.push_str("_cache[");
+        buf.push_str(&idx.to_string());
+        buf.push_str("] || (_cache[");
+        buf.push_str(&idx.to_string());
+        buf.push_str("] = ");
+    }
+
     // Include v-for prefix (e.g., `(_openBlock(true), _createElementBlock(_Fragment, null,
     // _renderList(items, (item) => {return `) at the start of the overwrite. This ensures
     // it appears AFTER any sibling text node closing markers that are prepended at the
@@ -1559,7 +1607,14 @@ pub fn process_element_leave<'alloc>(
 
     // Pre-build patch flag suffix (flag + dynamic props array) once, reuse in both
     // self-closing and close-tag paths.
-    let patch_suffix: &str = if patch_flag != 0 {
+    let patch_suffix: &str = if is_cached {
+        // Cached elements always use -1 /* CACHED */ regardless of actual flags
+        if options.is_production {
+            ", -1"
+        } else {
+            ", -1 /* CACHED */"
+        }
+    } else if patch_flag != 0 {
         let saved = buf.len();
         buf.push_str(", ");
         let flag_str =
@@ -1569,16 +1624,9 @@ pub fn process_element_leave<'alloc>(
         // Vue's runtime reads `n2.dynamicProps` to know which props changed;
         // omitting this causes `Cannot read properties of null (reading 'length')`.
         if (patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
-            buf.push_str(", [");
-            for (i, key) in dynamic_props.iter().enumerate() {
-                if i > 0 {
-                    buf.push_str(", ");
-                }
-                buf.push('"');
-                helpers::escape_js_string_into(buf, key);
-                buf.push('"');
-            }
-            buf.push(']');
+            buf.push_str(", ");
+            let props_ref = format_dynamic_props_ref(&dynamic_props, hoisted_constants);
+            buf.push_str(&props_ref);
         }
         let suffix = out.alloc_str(&buf[saved..]);
         buf.truncate(saved);
@@ -1590,7 +1638,7 @@ pub fn process_element_leave<'alloc>(
     // Self-closing or no close tag: single overwrite for entire tag
     if element.is_self_closing || element.tag_close.is_none() {
         // Emit PatchFlags for self-closing elements (before closing paren)
-        if patch_flag != 0 {
+        if is_cached || patch_flag != 0 {
             // Need null children placeholder before patch flags
             if !has_children {
                 buf.push_str(", null");
@@ -1600,6 +1648,10 @@ pub fn process_element_leave<'alloc>(
         buf.push(')');
         // Close the outer (_openBlock(), ...) wrapper for block root elements
         if needs_block_wrapper {
+            buf.push(')');
+        }
+        // Close cache wrapper: `_cache[N] = ...)`
+        if is_cached {
             buf.push(')');
         }
         // Close _withDirectives() wrapper for native v-model
@@ -1691,14 +1743,18 @@ pub fn process_element_leave<'alloc>(
         }
     }
 
-    // Patch flag (only if non-zero) — reuse pre-built suffix
-    if patch_flag != 0 {
+    // Patch flag (only if non-zero or cached) — reuse pre-built suffix
+    if is_cached || patch_flag != 0 {
         buf.push_str(patch_suffix);
     }
 
     buf.push(')');
     // Close the outer (_openBlock(), ...) wrapper for block root elements
     if needs_block_wrapper {
+        buf.push(')');
+    }
+    // Close cache wrapper: `_cache[N] = ...)`
+    if is_cached {
         buf.push(')');
     }
     // Close _withDirectives() wrapper for native v-model

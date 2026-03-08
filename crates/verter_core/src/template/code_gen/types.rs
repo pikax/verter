@@ -359,9 +359,8 @@ pub enum ChildKind {
     WhitespaceNewline,
     /// All-whitespace without a newline (deferred to parent for context-dependent resolution).
     WhitespaceSpace,
-    /// Fully-static element(s) emitted as `_createStaticVNode()`.
-    /// After consolidation, a single `StaticVNode` record may span multiple
-    /// consecutive static siblings, emitting them as one HTML string.
+    /// Fully-static element(s) — retained for potential future SSR use.
+    #[allow(dead_code)]
     StaticVNode {
         /// Number of root-level elements in this static group.
         count: u32,

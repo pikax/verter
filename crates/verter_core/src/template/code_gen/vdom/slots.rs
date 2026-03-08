@@ -501,16 +501,12 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     |s| out.alloc_str(s),
                 );
                 buf.push_str(flag_str);
-                buf.push_str(", [");
-                for (i, key) in dynamic_props.iter().enumerate() {
-                    if i > 0 {
-                        buf.push_str(", ");
-                    }
-                    buf.push('"');
-                    helpers::escape_js_string_into(&mut buf, key);
-                    buf.push('"');
-                }
-                buf.push(']');
+                buf.push_str(", ");
+                let props_ref = element::format_dynamic_props_ref(
+                    &dynamic_props,
+                    Some(&mut self.hoisted_constants),
+                );
+                buf.push_str(&props_ref);
             }
             buf.push(')');
         } else {
@@ -916,16 +912,12 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     out.alloc_str(s)
                 });
             buf.push_str(flag_str);
-            buf.push_str(", [");
-            for (i, key) in dynamic_props.iter().enumerate() {
-                if i > 0 {
-                    buf.push_str(", ");
-                }
-                buf.push('"');
-                helpers::escape_js_string_into(&mut buf, key);
-                buf.push('"');
-            }
-            buf.push(']');
+            buf.push_str(", ");
+            let props_ref = element::format_dynamic_props_ref(
+                &dynamic_props,
+                Some(&mut self.hoisted_constants),
+            );
+            buf.push_str(&props_ref);
         }
         buf.push(')');
         // Close the outer (_openBlock(), ...) wrapper for block root components

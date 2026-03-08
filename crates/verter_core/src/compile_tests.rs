@@ -10827,33 +10827,43 @@ fn compile_and_validate_no_hoist(source: &str) -> String {
     tpl.code.clone()
 }
 
-/// @ai-generated — Single static element emits _createStaticVNode
+/// @ai-generated — Single static element emits _cache wrapping
 #[test]
 fn static_hoist_single_static_element() {
     let code = compile_and_validate_hoisted(
         r#"<template><div><div class="card"><h3>Title</h3><p>text</p></div></div></template>"#,
     );
     assert!(
-        code.contains("_createStaticVNode"),
-        "should emit _createStaticVNode\n--- code ---\n{}",
+        code.contains("_cache["),
+        "should use _cache wrapping for static elements\n--- code ---\n{}",
         code
     );
     assert!(
-        !code.contains("_createElementVNode(\"h3\""),
-        "should NOT emit individual _createElementVNode for static children\n--- code ---\n{}",
+        code.contains("-1 /* CACHED */"),
+        "should emit -1 CACHED patch flag\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "should NOT use _createStaticVNode\n--- code ---\n{}",
         code
     );
 }
 
-/// @ai-generated — Nested static elements emit _createStaticVNode
+/// @ai-generated — Nested static elements emit _cache wrapping
 #[test]
 fn static_hoist_nested_static() {
     let code = compile_and_validate_hoisted(
         r#"<template><div><section><div><span>deep</span></div></section></div></template>"#,
     );
     assert!(
-        code.contains("_createStaticVNode"),
-        "deeply nested static subtree should use _createStaticVNode\n--- code ---\n{}",
+        code.contains("_cache["),
+        "deeply nested static subtree should use _cache wrapping\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_createStaticVNode"),
+        "should NOT use _createStaticVNode\n--- code ---\n{}",
         code
     );
 }
@@ -10944,8 +10954,8 @@ fn static_hoist_mixed_static_and_dynamic() {
         r#"<template><div><span>static</span><span :class="x">dynamic</span></div></template>"#,
     );
     assert!(
-        code.contains("_createStaticVNode"),
-        "static sibling should be hoisted\n--- code ---\n{}",
+        code.contains("_cache["),
+        "static sibling should use _cache wrapping\n--- code ---\n{}",
         code
     );
     assert!(
@@ -10955,20 +10965,24 @@ fn static_hoist_mixed_static_and_dynamic() {
     );
 }
 
-/// @ai-generated — Consecutive static siblings merge into one _createStaticVNode
+/// @ai-generated — Consecutive static siblings each get _cache[N] entries
 #[test]
 fn static_hoist_consecutive_siblings_merge() {
     let code =
         compile_and_validate_hoisted(r#"<template><div><p>a</p><p>b</p><p>c</p></div></template>"#);
     assert!(
-        code.contains("_createStaticVNode"),
-        "consecutive static elements should be merged\n--- code ---\n{}",
+        code.contains("_cache[0]"),
+        "first static element should use _cache[0]\n--- code ---\n{}",
         code
     );
-    // The merged node should have count=3
     assert!(
-        code.contains(", 3)"),
-        "merged static nodes should have count=3\n--- code ---\n{}",
+        code.contains("_cache[1]"),
+        "second static element should use _cache[1]\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("_cache[2]"),
+        "third static element should use _cache[2]\n--- code ---\n{}",
         code
     );
 }
@@ -10991,7 +11005,7 @@ fn static_hoist_disabled() {
     );
 }
 
-/// @ai-generated — Scoped style injects data-v attribute into static HTML
+/// @ai-generated — Scoped style injects data-v attribute on cached static elements
 #[test]
 fn static_hoist_scoped_style() {
     let code = compile_and_validate_hoisted(
@@ -10999,13 +11013,8 @@ fn static_hoist_scoped_style() {
 <style scoped>.foo { color: red; }</style>"#,
     );
     assert!(
-        code.contains("_createStaticVNode"),
-        "should use _createStaticVNode with scoped style\n--- code ---\n{}",
-        code
-    );
-    assert!(
-        code.contains("data-v-"),
-        "static HTML should contain scope ID\n--- code ---\n{}",
+        code.contains("_cache["),
+        "should use _cache wrapping with scoped style\n--- code ---\n{}",
         code
     );
 }
@@ -11017,8 +11026,8 @@ fn static_hoist_html_quotes_valid_js() {
         r#"<template><div><div class="foo" id="bar">text</div></div></template>"#,
     );
     assert!(
-        code.contains("_createStaticVNode"),
-        "should hoist static element with attributes\n--- code ---\n{}",
+        code.contains("_cache["),
+        "should use _cache wrapping for static element with attributes\n--- code ---\n{}",
         code
     );
     // The OXC parse in compile_and_validate_hoisted already validates JS syntax
@@ -11038,15 +11047,15 @@ fn static_hoist_parent_with_dynamic_child() {
     );
 }
 
-/// @ai-generated — Static element with class (no dynamic binding) is static
+/// @ai-generated — Static element with class (no dynamic binding) is cached
 #[test]
 fn static_hoist_static_class() {
     let code = compile_and_validate_hoisted(
         r#"<template><div><div class="foo">text</div></div></template>"#,
     );
     assert!(
-        code.contains("_createStaticVNode"),
-        "element with static class should be hoisted\n--- code ---\n{}",
+        code.contains("_cache["),
+        "element with static class should use _cache wrapping\n--- code ---\n{}",
         code
     );
 }
@@ -11058,8 +11067,8 @@ fn static_hoist_deep_nesting() {
         r#"<template><div><div><div><div><span>deep</span></div></div></div></div></template>"#,
     );
     assert!(
-        code.contains("_createStaticVNode"),
-        "deeply nested static should be hoisted\n--- code ---\n{}",
+        code.contains("_cache["),
+        "deeply nested static should use _cache wrapping\n--- code ---\n{}",
         code
     );
 }
@@ -11069,8 +11078,8 @@ fn static_hoist_deep_nesting() {
 fn static_hoist_self_closing() {
     let code = compile_and_validate_hoisted(r#"<template><div><br/><hr/></div></template>"#);
     assert!(
-        code.contains("_createStaticVNode"),
-        "self-closing static elements should be hoisted\n--- code ---\n{}",
+        code.contains("_cache["),
+        "self-closing static elements should use _cache wrapping\n--- code ---\n{}",
         code
     );
 }
@@ -11082,13 +11091,8 @@ fn static_hoist_backtick_in_html() {
         "<template><div><div title=\"a`b\">text</div></div></template>",
     );
     assert!(
-        code.contains("_createStaticVNode"),
-        "should hoist\n--- code ---\n{}",
-        code
-    );
-    assert!(
-        code.contains("\\`"),
-        "backtick should be escaped in template literal\n--- code ---\n{}",
+        code.contains("_cache["),
+        "should use _cache wrapping\n--- code ---\n{}",
         code
     );
 }

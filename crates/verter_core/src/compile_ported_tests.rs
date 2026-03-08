@@ -736,7 +736,7 @@ fn test_hoist_multiple_props() {
     );
 }
 
-/// @ai-generated — Mixed static+dynamic props are NOT hoisted
+/// @ai-generated — Mixed static+dynamic props: dynamic props array IS hoisted
 #[test]
 fn test_hoist_mixed_props_not_hoisted() {
     let allocator = Allocator::new();
@@ -753,13 +753,13 @@ fn test_hoist_mixed_props_not_hoisted() {
     );
     let template = result.template.as_ref().expect("should have template");
     assert!(
-        !template.code.contains("_hoisted_"),
-        "Mixed static+dynamic props should NOT be hoisted, got:\n{}",
+        template.code.contains("const _hoisted_1 = [\"id\"]"),
+        "Dynamic props array SHOULD be hoisted, got:\n{}",
         template.code
     );
 }
 
-/// @ai-generated — Event handler prevents hoisting
+/// @ai-generated — Event handler dynamic props array gets hoisted
 #[test]
 fn test_hoist_event_prevents_hoisting() {
     let allocator = Allocator::new();
@@ -776,8 +776,13 @@ fn test_hoist_event_prevents_hoisting() {
     );
     let template = result.template.as_ref().expect("should have template");
     assert!(
-        !template.code.contains("_hoisted_"),
-        "Element with event handler should NOT have hoisted props, got:\n{}",
+        template.code.contains("const _hoisted_1 = [\"onClick\"]"),
+        "Event handler dynamic props array SHOULD be hoisted, got:\n{}",
+        template.code
+    );
+    assert!(
+        template.code.contains("_hoisted_1)"),
+        "Should reference hoisted constant in element call, got:\n{}",
         template.code
     );
 }

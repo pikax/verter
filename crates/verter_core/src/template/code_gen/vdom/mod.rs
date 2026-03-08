@@ -98,6 +98,13 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// Set in `enter_template`, used by `leave_element` to determine if a root
     /// element should be a block root (`_createElementBlock` / `_createBlock`).
     single_root: bool,
+    /// Hoisted constant strings (e.g., `["id"]`) collected during codegen.
+    /// Emitted as `const _hoisted_N = ...` before the render function.
+    /// Deduplicated: identical arrays share the same `_hoisted_N` reference.
+    hoisted_constants: Vec<String>,
+    /// Cache index counter for `_cache[N]` static element wrapping.
+    /// Incremented each time a fully-static element is cached.
+    cache_index: usize,
 }
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
@@ -115,6 +122,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             v_for_prefixes: Vec::new(),
             resolved_condition_prefixes: FxHashMap::default(),
             single_root: false,
+            hoisted_constants: Vec::new(),
+            cache_index: 0,
         }
     }
 
@@ -163,21 +172,6 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         .as_ref()
                         .map(|tc| tc.end)
                         .unwrap_or(el.tag_open.end);
-
-                    // Static subtree hoisting: classify fully-static elements
-                    // (without structural directives) as StaticVNode.
-                    if self.options.hoist_static && el.is_fully_static && el.v_condition.is_none() {
-                        records.push(ChildRecord {
-                            start: el.tag_open.start,
-                            end,
-                            kind: ChildKind::StaticVNode { count: 1 },
-                            condition: None,
-                            condition_prefix: None,
-                            condition_expr_start: None,
-                            condition_binding_prefix_len: 0,
-                        });
-                        continue;
-                    }
 
                     let (condition, condition_prefix, condition_expr_start, cond_prefix_len) =
                         match el.v_condition.as_ref() {
@@ -253,63 +247,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
         }
 
-        // Consolidate consecutive StaticVNode records into a single record.
-        // This merges e.g. 3 consecutive static <p> elements into one
-        // `_createStaticVNode("<p>a</p><p>b</p><p>c</p>", 3)`.
-        if self.options.hoist_static {
-            consolidate_static_vnodes(&mut records);
-        }
-
         records
     }
-}
-
-/// Merge consecutive `StaticVNode` records into a single record.
-///
-/// Scans the records vec and when it finds a run of consecutive StaticVNode
-/// entries, replaces them with a single StaticVNode spanning [first.start, last.end]
-/// with the sum of their counts.
-fn consolidate_static_vnodes(records: &mut Vec<ChildRecord>) {
-    if records.len() < 2 {
-        return;
-    }
-    let mut write = 0;
-    let mut read = 0;
-    while read < records.len() {
-        if let ChildKind::StaticVNode { count } = records[read].kind {
-            // Start of a potential run
-            let mut total_count = count;
-            let start = records[read].start;
-            let mut end = records[read].end;
-            read += 1;
-            while read < records.len() {
-                if let ChildKind::StaticVNode { count: c } = records[read].kind {
-                    total_count += c;
-                    end = records[read].end;
-                    read += 1;
-                } else {
-                    break;
-                }
-            }
-            records[write] = ChildRecord {
-                start,
-                end,
-                kind: ChildKind::StaticVNode { count: total_count },
-                condition: None,
-                condition_prefix: None,
-                condition_expr_start: None,
-                condition_binding_prefix_len: 0,
-            };
-            write += 1;
-        } else {
-            if write != read {
-                records.swap(write, read);
-            }
-            write += 1;
-            read += 1;
-        }
-    }
-    records.truncate(write);
 }
 
 impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
@@ -416,11 +355,36 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         // Strip comments/text between v-if chain members (at root level too)
         element::strip_interstitial_condition_nodes(&mut children, out, true);
 
+        // Build hoisted constant preamble (e.g., `const _hoisted_1 = ["id"]\n`)
+        let hoisted_preamble = if self.hoisted_constants.is_empty() {
+            String::new()
+        } else {
+            let mut preamble = String::with_capacity(self.hoisted_constants.len() * 30);
+            for (i, constant) in self.hoisted_constants.iter().enumerate() {
+                preamble.push_str("const _hoisted_");
+                preamble.push_str(&(i + 1).to_string());
+                preamble.push_str(" = ");
+                preamble.push_str(constant);
+                preamble.push('\n');
+            }
+            preamble.push('\n');
+            preamble
+        };
+
         // Function signature prefix
         let fn_sig = if self.options.is_inline {
             "return (_ctx,_cache) => {\n"
         } else {
             "function render(_ctx, _cache, $props, $setup, $data, $options) {\n"
+        };
+
+        // Combined preamble: hoisted constants + function signature
+        let full_prefix = if hoisted_preamble.is_empty() {
+            fn_sig.to_string()
+        } else {
+            let mut s = hoisted_preamble;
+            s.push_str(fn_sig);
+            s
         };
 
         // Determine close tag region
@@ -447,8 +411,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         match effective_count {
             0 => {
                 // Empty template — overwrite everything
-                let mut buf = String::with_capacity(fn_sig.len() + 16);
-                buf.push_str(fn_sig);
+                let mut buf = String::with_capacity(full_prefix.len() + 16);
+                buf.push_str(&full_prefix);
                 buf.push_str("return null\n}");
                 out.overwrite(tag_open.start, close_end, &buf);
             }
@@ -460,8 +424,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     // Root-level v-if chain — overwrite up to child.start with
                     // the function signature + "return ", then emit the condition
                     // prefix as a separate source-mapped prepend.
-                    let mut prefix = String::with_capacity(fn_sig.len() + 32);
-                    prefix.push_str(fn_sig);
+                    let mut prefix = String::with_capacity(full_prefix.len() + 32);
+                    prefix.push_str(&full_prefix);
                     prefix.push_str("return ");
                     out.overwrite(tag_open.start, child.start, &prefix);
 
@@ -502,8 +466,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 } else {
                     // Single root — block root with _openBlock + _createElementBlock
                     out.add_vdom_import(VdomHelper::OpenBlock);
-                    let mut prefix = String::with_capacity(fn_sig.len() + 24);
-                    prefix.push_str(fn_sig);
+                    let mut prefix = String::with_capacity(full_prefix.len() + 24);
+                    prefix.push_str(&full_prefix);
                     prefix.push_str("return (_openBlock(), ");
                     out.overwrite(tag_open.start, child.start, &prefix);
                     out.overwrite(close_start, close_end, ")\n}");
@@ -516,8 +480,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 out.add_vdom_import(VdomHelper::Fragment);
 
                 // Prefix: function sig + return + openBlock + Fragment + array open.
-                let mut prefix = String::with_capacity(fn_sig.len() + 80);
-                prefix.push_str(fn_sig);
+                let mut prefix = String::with_capacity(full_prefix.len() + 80);
+                prefix.push_str(&full_prefix);
                 prefix.push_str("return (_openBlock(), _createElementBlock(_Fragment, null, [");
                 out.overwrite(tag_open.start, children[0].start, &prefix);
 
@@ -565,17 +529,6 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             element.tag_open.end,
             element.tag_open.name_end,
         );
-
-        // Static subtree hoisting: skip children for fully-static elements.
-        // The actual _createStaticVNode emission is handled by the parent's
-        // build_child_records consolidation in leave_element/leave_template.
-        // Note: root elements (scope_closes is empty) are never hoisted —
-        // they must remain as block roots (_createElementBlock).
-        if self.options.hoist_static && element.is_fully_static && !self.scope_closes.is_empty() {
-            self.scope_closes.push(None);
-            self.v_for_prefixes.push(None);
-            return super::WalkAction::SkipChildren;
-        }
 
         // Process structural directives: v-if/v-else-if/v-else, v-for
         if let Some(condition) = &element.v_condition {
@@ -685,22 +638,6 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             el.tag_open.name_end,
         );
 
-        // Static subtree hoisting: the actual _createStaticVNode emission
-        // is handled by the parent's build_child_records consolidation.
-        // Just pop the placeholder scope entries pushed in enter_element.
-        // Note: scope_closes.len() > 1 ensures root elements are not skipped —
-        // they must remain as block roots (_createElementBlock).
-        if self.options.hoist_static
-            && el.is_fully_static
-            && el.v_condition.is_none()
-            && el.v_for.is_none()
-            && self.scope_closes.len() > 1
-        {
-            self.scope_closes.pop();
-            self.v_for_prefixes.pop();
-            return;
-        }
-
         // Handle <slot> outlet: generates _renderSlot(_ctx.$slots, "name")
         if el.tag_type.is_slot_outlet() {
             let record = self.process_slot_outlet(el, source, out);
@@ -782,6 +719,21 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         // Take the reusable buffer, use it, then put it back (std::mem::take pattern)
         let mut buf = std::mem::take(&mut self.buf);
         let v_for_prefix = self.v_for_prefixes.pop().flatten();
+
+        // Determine if this static element should be cached via _cache[N]
+        let cache_idx = if self.options.hoist_static
+            && el.is_fully_static
+            && !is_block_root
+            && el.v_condition.is_none()
+            && el.v_for.is_none()
+        {
+            let idx = self.cache_index;
+            self.cache_index += 1;
+            Some(idx)
+        } else {
+            None
+        };
+
         let record = element::process_element_leave(
             el,
             oxc,
@@ -794,6 +746,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             v_for_prefix.as_ref().map(|(s, _)| s.as_str()),
             self.ast,
             is_block_root,
+            Some(&mut self.hoisted_constants),
+            cache_idx,
         );
         buf.clear();
         self.buf = buf;
@@ -1558,6 +1512,103 @@ mod tests {
         assert!(
             code.contains("8 /* PROPS */") || code.contains("PROPS"),
             "Dynamic bind values should add PROPS flag, got:\n{code}"
+        );
+    }
+
+    // ==================== Static hoisting (_hoisted_N) ====================
+
+    #[test]
+    fn hoisted_dynamic_props_array() {
+        // :id="x" should produce _hoisted_1 = ["id"] before render function
+        let code = gen_vdom_template(
+            "<template><div><span :id=\"x\">hello</span></div></template>\n<script setup>\nimport { ref } from 'vue'\nconst x = ref(1)\n</script>",
+        );
+        assert!(
+            code.contains("const _hoisted_1 = [\"id\"]"),
+            "Dynamic props array should be hoisted as _hoisted_1, got:\n{code}"
+        );
+        assert!(
+            code.contains("_hoisted_1)"),
+            "Element should reference _hoisted_1 instead of inline array, got:\n{code}"
+        );
+        assert!(
+            !code.contains(", [\"id\"])"),
+            "Dynamic props array should NOT be inlined, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn hoisted_multiple_dynamic_props_arrays() {
+        // Multiple elements with different dynamic props get separate hoisted constants
+        let code = gen_vdom_template(
+            "<template><div><span :id=\"x\">a</span><span :title=\"y\">b</span></div></template>\n<script setup>\nimport { ref } from 'vue'\nconst x = ref(1)\nconst y = ref(2)\n</script>",
+        );
+        assert!(
+            code.contains("const _hoisted_1 = [\"id\"]"),
+            "First dynamic props array should be hoisted as _hoisted_1, got:\n{code}"
+        );
+        assert!(
+            code.contains("const _hoisted_2 = [\"title\"]"),
+            "Second dynamic props array should be hoisted as _hoisted_2, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn hoisted_dynamic_props_array_deduplication() {
+        // Two elements with the same dynamic props array should share the hoisted constant
+        let code = gen_vdom_template(
+            "<template><div><span :id=\"x\">a</span><span :id=\"y\">b</span></div></template>\n<script setup>\nimport { ref } from 'vue'\nconst x = ref(1)\nconst y = ref(2)\n</script>",
+        );
+        assert!(
+            code.contains("const _hoisted_1 = [\"id\"]"),
+            "Dynamic props array should be hoisted, got:\n{code}"
+        );
+        // Should not have _hoisted_2 since ["id"] is the same
+        assert!(
+            !code.contains("const _hoisted_2"),
+            "Duplicate dynamic props arrays should be deduplicated, got:\n{code}"
+        );
+    }
+
+    // ==================== Cache wrapping (_cache[N]) ====================
+
+    #[test]
+    fn cache_wraps_static_element() {
+        // Static <p> child of a dynamic parent should use _cache[N] wrapping
+        let code = gen_vdom_template(
+            "<template><div><p id=\"static\">hello</p><span :class=\"cls\">world</span></div></template>\n<script setup>\nimport { ref } from 'vue'\nconst cls = ref('foo')\n</script>",
+        );
+        assert!(
+            code.contains("_cache[0] || (_cache[0] = _createElementVNode(\"p\""),
+            "Static element should be wrapped with _cache[0], got:\n{code}"
+        );
+        assert!(
+            code.contains("-1 /* CACHED */"),
+            "Cached element should have -1 CACHED patch flag, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_createStaticVNode"),
+            "Should NOT use createStaticVNode, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn cache_wraps_multiple_static_elements() {
+        // Multiple static children each get their own _cache[N]
+        let code = gen_vdom_template(
+            "<template><div><p>a</p><p>b</p><span :class=\"cls\">c</span></div></template>\n<script setup>\nimport { ref } from 'vue'\nconst cls = ref('foo')\n</script>",
+        );
+        assert!(
+            code.contains("_cache[0]"),
+            "First static child should use _cache[0], got:\n{code}"
+        );
+        assert!(
+            code.contains("_cache[1]"),
+            "Second static child should use _cache[1], got:\n{code}"
+        );
+        assert!(
+            !code.contains("_createStaticVNode"),
+            "Should NOT use createStaticVNode, got:\n{code}"
         );
     }
 }

@@ -74,12 +74,12 @@ pub struct TemplateCodeGenOptions {
     /// to element tags and component render calls.
     #[allow(dead_code)]
     pub has_scoped_style: bool,
-    /// Whether to hoist fully-static subtrees into `_createStaticVNode()` calls.
+    /// Whether to enable static optimizations:
+    /// - `_cache[N]` wrapping for fully-static elements (`-1 /* CACHED */`)
+    /// - `_hoisted_N` constants for static dynamic-props arrays
     /// Resolved from `CodegenOptions.hoist_static` (defaults to `true`).
     pub hoist_static: bool,
     /// Scope ID for scoped styles (e.g., `"data-v-a1b2c3d4"`).
-    /// Empty string if no scoped style. Used to inject scope attributes
-    /// into static HTML strings for `_createStaticVNode()`.
     pub scope_id: String,
 }
 
@@ -102,15 +102,11 @@ impl Default for TemplateCodeGenOptions {
 
 /// Action returned by `enter_element` to control child traversal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // SkipChildren is part of the walker API, used by SSR codegen
 pub enum WalkAction {
     /// Continue visiting children, then call `leave_element`.
     Continue,
     /// Skip children but still call `leave_element` (stack balance).
-    ///
-    /// Used by VDOM codegen for fully-static subtrees: the enter phase
-    /// detects `is_fully_static` and returns `SkipChildren`, deferring
-    /// the actual `_createStaticVNode()` emission to the parent's
-    /// `build_child_records` consolidation.
     SkipChildren,
 }
 
