@@ -286,22 +286,18 @@ pub(crate) fn event_to_jsx_name(event_name: &str) -> String {
         return format!("onUpdate:{}", rest);
     }
 
+    // Prepend "on" and capitalize first letter, preserving the rest as-is.
+    // Hyphens are NOT removed — kebab-case events stay kebab-case.
+    // Names with hyphens (e.g. "onCustom-event") are not valid JSX identifiers
+    // and will be emitted using spread syntax by the caller.
     let mut result = String::with_capacity(event_name.len() + 2);
     result.push_str("on");
-    let mut capitalize_next = true;
-    for ch in event_name.chars() {
-        if ch == '-' {
-            capitalize_next = true;
-            continue;
+    let mut chars = event_name.chars();
+    if let Some(first) = chars.next() {
+        for upper in first.to_uppercase() {
+            result.push(upper);
         }
-        if capitalize_next {
-            for upper in ch.to_uppercase() {
-                result.push(upper);
-            }
-            capitalize_next = false;
-        } else {
-            result.push(ch);
-        }
+        result.extend(chars);
     }
     result
 }

@@ -4220,3 +4220,79 @@ fn closing_tag_case_mismatch_component() {
         result
     );
 }
+
+// ── Kebab-case event handling in spread syntax ─────────────────────────────
+
+#[test]
+fn kebab_event_with_dollar_event_wraps_with_event_param() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div @click-overlay="emit('clickOverlay', $event)" /></template>"#,
+        &[("emit", BindingType::SetupConst)],
+    );
+    // Kebab event → spread syntax with ($event) callback
+    assert!(
+        result.contains(r#"($event) =>"#),
+        "should wrap with ($event) => callback: {result}"
+    );
+    assert!(
+        result.contains(r#""onClick-overlay""#),
+        "should preserve kebab-case event name: {result}"
+    );
+    // Negative: should NOT have bare () => (no $event)
+    let spread_part = result
+        .split(r#""onClick-overlay""#)
+        .nth(1)
+        .unwrap_or("");
+    assert!(
+        !spread_part.starts_with(": () =>"),
+        "should NOT use () => (without $event) when $event is used: {result}"
+    );
+}
+
+#[test]
+fn kebab_event_arrow_function_is_raw() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div @click-overlay="($event) => doSomething($event)" /></template>"#,
+        &[("doSomething", BindingType::SetupConst)],
+    );
+    // Arrow function should be passed raw in spread — no extra wrapping
+    assert!(
+        result.contains(r#""onClick-overlay": ($event) => doSomething($event)"#),
+        "arrow function should be raw in spread: {result}"
+    );
+    // Negative: should NOT double-wrap
+    assert!(
+        !result.contains("($event) => {($event)"),
+        "should NOT double-wrap arrow function: {result}"
+    );
+}
+
+#[test]
+fn kebab_event_function_expr_is_raw() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div @click-overlay="function($event) { doSomething($event) }" /></template>"#,
+        &[("doSomething", BindingType::SetupConst)],
+    );
+    // Function expression should be passed raw in spread
+    assert!(
+        result.contains(r#""onClick-overlay": function($event)"#),
+        "function expression should be raw in spread: {result}"
+    );
+}
+
+#[test]
+fn kebab_event_inline_expr_no_dollar_event_wraps_with_no_param() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div @click-overlay="count++" /></template>"#,
+        &[("count", BindingType::SetupRef)],
+    );
+    // Inline expression without $event → () => { ... }
+    assert!(
+        result.contains("() => {"),
+        "should wrap with () => for inline expr without $event: {result}"
+    );
+    assert!(
+        result.contains(r#""onClick-overlay""#),
+        "should preserve kebab-case event name: {result}"
+    );
+}

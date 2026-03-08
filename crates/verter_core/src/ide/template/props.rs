@@ -514,27 +514,43 @@ fn process_v_on<'alloc>(
     // Convert event name to JSX: click → onClick, update:modelValue → onUpdate:modelValue
     let jsx_event_name = event_to_jsx_name(event_name);
 
-    // When this event name was already emitted as a JSX attribute on this element
-    // (e.g., @keydown.space + @keydown.enter → duplicate onKeyDown), use spread
-    // syntax to avoid TS17001 "cannot have multiple attributes with same name".
-    if use_spread {
+    // Use spread syntax when:
+    // 1. Duplicate event name on same element (TS17001: cannot have multiple same-name attrs)
+    // 2. JSX name contains a hyphen (not a valid JSX identifier, e.g. "onCustom-event")
+    let needs_spread = use_spread || jsx_event_name.contains('-');
+    if needs_spread {
         let prop_end = get_prop_end(prop);
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value_expr = &source[vs as usize..ve as usize];
             let resolved_expr = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
             let resolved_expr = resolved_expr.trim();
-            let is_simple = crate::template::code_gen::binding::is_simple_ident(resolved_expr)
-                || (resolved_expr.contains('.') && !resolved_expr.contains('('))
-                || resolved_expr.starts_with("(")
+            let is_simple_ident =
+                crate::template::code_gen::binding::is_simple_ident(resolved_expr);
+            let is_member_expr = resolved_expr.contains('.') && !resolved_expr.contains('(');
+            let is_fn_expr = resolved_expr.starts_with("(")
                 || resolved_expr.starts_with("function")
                 || resolved_expr.contains("=>");
-            if is_simple {
+            let has_event_param = resolved_expr.contains("$event");
+
+            if is_simple_ident || is_member_expr || is_fn_expr {
+                // Simple ident, member expression, or fn/arrow expression → pass raw
                 out.overwrite(
                     prop.start,
                     prop_end,
                     &format!("{{...{{\"{}\": {}}}}}", jsx_event_name, resolved_expr),
                 );
+            } else if has_event_param {
+                // Inline expression with $event → wrap with ($event) => { ... }
+                out.overwrite(
+                    prop.start,
+                    prop_end,
+                    &format!(
+                        "{{...{{\"{}\": ($event) => {{{}}}}}}}",
+                        jsx_event_name, resolved_expr
+                    ),
+                );
             } else {
+                // Inline expression without $event → wrap with () => { ... }
                 out.overwrite(
                     prop.start,
                     prop_end,
@@ -1205,7 +1221,8 @@ mod tests {
 
     #[test]
     fn event_to_jsx_kebab() {
-        assert_eq!(event_to_jsx_name("custom-event"), "onCustomEvent");
+        // Kebab-case events should preserve hyphens (not camelize)
+        assert_eq!(event_to_jsx_name("custom-event"), "onCustom-event");
     }
 
     #[test]
@@ -1217,7 +1234,24 @@ mod tests {
 
     #[test]
     fn event_to_jsx_multi_segment_kebab() {
-        assert_eq!(event_to_jsx_name("my-custom-event"), "onMyCustomEvent");
+        // Multi-segment kebab should also preserve hyphens
+        assert_eq!(event_to_jsx_name("my-custom-event"), "onMy-custom-event");
+    }
+
+    #[test]
+    fn event_to_jsx_camel_case_preserved() {
+        assert_eq!(event_to_jsx_name("myEvent"), "onMyEvent");
+        assert_eq!(event_to_jsx_name("customHandler"), "onCustomHandler");
+    }
+
+    #[test]
+    fn event_to_jsx_pascal_case_preserved() {
+        assert_eq!(event_to_jsx_name("MyEvent"), "onMyEvent");
+    }
+
+    #[test]
+    fn event_to_jsx_snake_case_preserved() {
+        assert_eq!(event_to_jsx_name("my_event"), "onMy_event");
     }
 
     #[test]

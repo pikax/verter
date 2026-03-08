@@ -693,6 +693,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// in an array, with ternary wrapping for conditional slots.
     /// Dynamic slot names use `name: resolvedExpr` instead of `name: "staticName"`.
     /// v-for slots use `_renderList(iterable, (params) => ({ name: expr, fn: ... }))`.
+    #[allow(clippy::too_many_arguments)]
     fn emit_dynamic_slot_wrappers(
         &mut self,
         entries: &[SlotEntry],
@@ -1153,8 +1154,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 out.prepend_alloc(first.start, &prefix);
 
                 // Add -1 CACHED flag to each child in the run
-                for j in run_start..run_end {
-                    out.prepend_alloc(children[j].end, cached_suffix);
+                for child in &children[run_start..run_end] {
+                    out.prepend_alloc(child.end, cached_suffix);
                 }
 
                 // Close the spread: ]))

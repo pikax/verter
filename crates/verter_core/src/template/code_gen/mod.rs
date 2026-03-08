@@ -77,6 +77,7 @@ pub struct TemplateCodeGenOptions {
     /// Whether to enable static optimizations:
     /// - `_cache[N]` wrapping for fully-static elements (`-1 /* CACHED */`)
     /// - `_hoisted_N` constants for static dynamic-props arrays
+    ///
     /// Resolved from `CodegenOptions.hoist_static` (defaults to `true`).
     pub hoist_static: bool,
     /// Scope ID for scoped styles (e.g., `"data-v-a1b2c3d4"`).

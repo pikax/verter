@@ -4518,7 +4518,7 @@ fn serialize_element_props(
                 // We use a placeholder function since only the key matters for
                 // getRootComponentPassedProps (used in Omit for $attrs typing).
                 let arg_name = &source[arg_start as usize..arg_end as usize];
-                let on_name = camelize_event(arg_name);
+                let on_name = event_to_jsx_name(arg_name);
                 entries.push(format!("\"{}\": () => {{}}", on_name));
             }
             // Other directives (v-show, v-model, etc.) are not included in props
@@ -4576,24 +4576,7 @@ fn resolve_all_prop_refs_in_expr(expr: &str, prop_names: &rustc_hash::FxHashSet<
     result
 }
 
-/// Convert an event name to `onXxx` format.
-/// e.g., "click" → "onClick", "my-event" → "onMyEvent"
-fn camelize_event(name: &str) -> String {
-    let mut result = String::with_capacity(name.len() + 2);
-    result.push_str("on");
-    let mut capitalize_next = true;
-    for ch in name.chars() {
-        if ch == '-' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.extend(ch.to_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(ch);
-        }
-    }
-    result
-}
+// camelize_event removed — use event_to_jsx_name from super instead
 
 /// Emit a single Comp{offset} function for an element, with optional condition guards.
 ///
@@ -5900,23 +5883,16 @@ const x = ''
 </script>
 <template><div @my-event="() => {}">hello</div></template>"#,
         );
-        // Positive: event handler is camelized to onMyEvent
+        // Kebab events now preserve hyphens: onMy-event (not camelized onMyEvent)
         assert!(
-            code.contains(r#""onMyEvent""#),
-            "event handler should be camelized to onMyEvent: {}",
+            code.contains(r#""onMy-event""#),
+            "event handler should preserve hyphens as onMy-event: {}",
             code
         );
-        // Negative: raw event name should NOT appear
-        let passed_section = code
-            .split("getRootComponentPassedProps")
-            .nth(1)
-            .unwrap_or("")
-            .split("getRootComponent")
-            .next()
-            .unwrap_or("");
+        // Negative: camelized form should NOT appear
         assert!(
-            !passed_section.contains(r#""my-event""#),
-            "raw event name should NOT appear in passed props: {}",
+            !code.contains(r#""onMyEvent""#),
+            "camelized event name should NOT appear: {}",
             code
         );
     }

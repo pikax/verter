@@ -7907,8 +7907,8 @@ const test = () => {}
 const test = () => {}
 </script>
 <template><div @test-camel-case="test" /></template>"#,
-            &[r#"<div onTestCamelCase={test} />"#],
-            &[r#"onTest-camel-case"#, "_ctx."],
+            &[r#""onTest-camel-case": test"#],
+            &[r#"onTestCamelCase"#, "_ctx."],
         ),
         (
             r#"<template><div aria-label="test" data-test="value" /></template>"#,
@@ -8469,16 +8469,17 @@ const test = () => {}
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
+    // Kebab-case events preserve hyphens and use spread syntax since
+    // "onTest-camel-case" is not a valid JSX identifier.
     assert!(
-        tsx.code.contains("onTestCamelCase={test}")
-            || tsx.code.contains("onTestCamelCase={_ctx.test}"),
-        "Kebab event name should be PascalCased for JSX, got:\n{}",
+        tsx.code.contains(r#""onTest-camel-case""#),
+        "Kebab event should preserve hyphens in spread syntax, got:\n{}",
         tsx.code
     );
-    // Negative: hyphenated form should NOT appear
+    // Should NOT be camelized
     assert!(
-        !tsx.code.contains("onTest-camel-case"),
-        "Hyphenated event name should not appear in JSX output, got:\n{}",
+        !tsx.code.contains("onTestCamelCase"),
+        "Kebab event should NOT be camelized, got:\n{}",
         tsx.code
     );
 }

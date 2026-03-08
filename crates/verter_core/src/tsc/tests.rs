@@ -1828,24 +1828,25 @@ defineEmits({
 </script><template/>"#,
     );
 
-    // kebab event → both keys
+    // Object-arg emits now use __EmitToProps<raw_obj> — prop resolution
+    // (both kebab + camelized keys) happens at the TypeScript type level.
     assert!(
-        r.contains(r#""onMy-event"?:"#),
-        "should have capitalize-only onMy-event prop: {r}"
+        r.contains("__EmitToProps<"),
+        "should use __EmitToProps for object-arg emits: {r}"
+    );
+    // Raw object text should be embedded
+    assert!(
+        r.contains("'my-event'"),
+        "should preserve raw object with my-event: {r}"
     );
     assert!(
-        r.contains(r#""onMyEvent"?:"#),
-        "should have camelized onMyEvent prop: {r}"
+        r.contains("'click'"),
+        "should preserve raw object with click: {r}"
     );
-    // non-kebab event → single key per props block (appears in both new() param and $props)
+    // Should NOT have manually-built prop fields
     assert!(
-        r.contains(r#""onClick"?:"#),
-        "should have onClick prop: {r}"
-    );
-    let count = r.matches(r#""onClick"?:"#).count();
-    assert_eq!(
-        count, 2,
-        "non-kebab emit should produce exactly one key per props block (2 total: new() + $props): {r}"
+        !r.contains(r#""onMy-event"?:"#),
+        "should NOT have manually-built onMy-event prop (delegated to __EmitToProps): {r}"
     );
 }
 
@@ -1921,5 +1922,94 @@ defineEmits<{ (e: 'update:modelValue'): void }>()
     assert!(
         r.contains("__EmitToProps<{ (e: 'update:modelValue'): void }>"),
         "should use __EmitToProps with original type: {r}"
+    );
+}
+
+// ── Shorthand type-based defineEmits: $emit + $props typing ──────────────────
+
+#[test]
+fn tsc_codegen_shorthand_emits_emit_type_uses_emit_fn() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{
+  change: [value: string];
+  update: [id: number, data: { name: string }];
+}>()
+</script><template/>"#,
+    );
+
+    // $emit should use __EmitFn with original type — NOT (event: '...', ...args: unknown[])
+    assert!(
+        r.contains("__EmitFn<"),
+        "should use __EmitFn for $emit: {r}"
+    );
+    // The $emit line itself should NOT have manually-built unknown[] overloads
+    let emit_line = r.lines().find(|l| l.contains("$emit:")).unwrap();
+    assert!(
+        !emit_line.contains("unknown[]"),
+        "should NOT have unknown[] args in $emit line for typed emits: {emit_line}"
+    );
+}
+
+#[test]
+fn tsc_codegen_shorthand_emits_props_uses_emit_to_props() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{
+  change: [value: string];
+}>()
+</script><template/>"#,
+    );
+
+    // $props should use __EmitToProps with original type
+    assert!(
+        r.contains("__EmitToProps<"),
+        "should use __EmitToProps in $props: {r}"
+    );
+}
+
+// Function-form type-based: $emit should also use __EmitFn
+#[test]
+fn tsc_codegen_function_form_emits_emit_type_uses_emit_fn() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits<{ (e: 'click', event: MouseEvent): void }>()
+</script><template/>"#,
+    );
+
+    // $emit should use __EmitFn for function-form too
+    assert!(
+        r.contains("__EmitFn<"),
+        "should use __EmitFn for $emit with function-form: {r}"
+    );
+    let emit_line = r.lines().find(|l| l.contains("$emit:")).unwrap();
+    assert!(
+        !emit_line.contains("unknown[]"),
+        "should NOT have unknown[] args in $emit line for function-form typed emits: {emit_line}"
+    );
+}
+
+// ── Object-arg defineEmits: $emit + $props typing ────────────────────────────
+
+#[test]
+fn tsc_codegen_object_arg_emits_uses_type_helpers() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineEmits({
+  change: (value: string) => true,
+  submit: null,
+})
+</script><template/>"#,
+    );
+
+    // Object-arg emits should use __EmitToProps with raw object for $props
+    assert!(
+        r.contains("__EmitToProps<"),
+        "should use __EmitToProps for object-arg emits $props: {r}"
+    );
+    // $emit should use __EmitFn with the raw object
+    assert!(
+        r.contains("__EmitFn<"),
+        "should use __EmitFn for object-arg emits $emit: {r}"
     );
 }

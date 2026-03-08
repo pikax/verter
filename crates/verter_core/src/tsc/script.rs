@@ -113,6 +113,9 @@ struct TscMacroState {
     // When present, $props uses an inline mapped type that infers handler types
     // from the original type rather than generating (...args: unknown[]) => void.
     emits_type_param_text: Option<String>,
+    // defineEmits — raw object argument text (for object-arg defineEmits only)
+    // e.g. `{ change: (v: string) => true, submit: null }`
+    emits_object_text: Option<String>,
 
     // defineModel — each model binding
     models: Vec<ModelEntry>,
@@ -628,6 +631,10 @@ fn process_emits<'a>(
             });
         }
     } else if let Some(obj) = object_arg {
+        // Store raw object text for __EmitToProps/__EmitFn type inference
+        let obj_text = content_str[obj.span.start as usize..obj.span.end as usize].trim();
+        state.emits_object_text = Some(obj_text.to_string());
+
         for prop in &obj.properties {
             let name = prop
                 .name
@@ -885,8 +892,13 @@ fn generate_code(
     // ── Utility type: emit function → event handler props ────────────
     // Recursively extracts call signatures from an emit function type
     // and produces optional `onEventName` props with both capitalize-only
-    // and camelized keys.
-    out.push_str("type __EmitToProps<F> = F extends { (e: infer K, ...args: infer A): any } & infer R ? { [P in (K & string) as `on${Capitalize<P>}` | `on${Capitalize<__Cam<P>>}`]?: (...args: A) => void } & __EmitToProps<R> : {}\n");
+    // and camelized keys. Falls back to object/shorthand form handling.
+    out.push_str("type __EmitToProps<F> = F extends { (e: infer K, ...args: infer A): any } & infer R ? { [P in (K & string) as `on${Capitalize<P>}` | `on${Capitalize<__Cam<P>>}`]?: (...args: A) => void } & __EmitToProps<R> : { [K in string & keyof F as `on${Capitalize<K>}` | `on${Capitalize<__Cam<K>>}`]?: F[K] extends any[] ? (...args: F[K]) => void : F[K] extends (...args: infer A) => any ? (...args: A) => void : (...args: unknown[]) => void }\n");
+
+    // ── Utility type: emit function type for $emit ─────────────────
+    // For function-form types, recursively extracts call signatures.
+    // For object/shorthand forms, delegates to Vue's EmitFn + ShortEmitsToObject.
+    out.push_str("type __EmitFn<T> = T extends { (e: infer K, ...args: infer A): any } & infer R ? ((event: K, ...args: A) => void) & __EmitFn<R> : import(\"vue\").EmitFn<import(\"vue\").ShortEmitsToObject<T>>\n");
 
     // ── Type import statements ────────────────────────────────────────
     for stmt in &state.type_import_stmts {
@@ -950,7 +962,29 @@ fn generate_code(
         "declare const {name}: __OmitNew<typeof __comp> & {{\n",
         name = component_name,
     ));
-    let emit_fn_type = build_emit_fn_type(&state.emits_ts, &state.models);
+    // For type-based or object-arg emits, use __EmitFn<RawType> to preserve
+    // argument types. For array-only or no-emit cases, fall back to manual overloads.
+    let emit_fn_type = if let Some(ref type_text) = state.emits_type_param_text {
+        // Type-based defineEmits: __EmitFn extracts from the raw type
+        let base = format!("__EmitFn<{}>", type_text);
+        let model_overloads = build_model_emit_overloads(&state.models);
+        if model_overloads.is_empty() {
+            base
+        } else {
+            format!("{} & {}", base, model_overloads)
+        }
+    } else if let Some(ref obj_text) = state.emits_object_text {
+        // Object-arg defineEmits: __EmitFn extracts from the raw object
+        let base = format!("__EmitFn<{}>", obj_text);
+        let model_overloads = build_model_emit_overloads(&state.models);
+        if model_overloads.is_empty() {
+            base
+        } else {
+            format!("{} & {}", base, model_overloads)
+        }
+    } else {
+        build_emit_fn_type(&state.emits_ts, &state.models)
+    };
 
     // Build generic params for new(), appending narrowing generics if present
     let full_gp = if let Some(nr) = narrowing {
@@ -986,14 +1020,16 @@ fn generate_code(
     } else {
         None
     };
-    // For type-based defineEmits, use __EmitToProps<OriginalType> to infer
-    // correct handler types. For object/array syntax, fall back to manual fields.
+    // For type-based or object-arg defineEmits, use __EmitToProps<RawType> to
+    // infer correct handler types. For array-only syntax, fall back to manual fields.
     let emits_props = if let Some(ref type_text) = state.emits_type_param_text {
         if !state.emits_ts.is_empty() {
             Some(format!("__EmitToProps<{}>", type_text))
         } else {
             None
         }
+    } else if let Some(ref obj_text) = state.emits_object_text {
+        Some(format!("__EmitToProps<{}>", obj_text))
     } else {
         build_emits_to_props_type(&state.emits_ts)
     };
@@ -1125,6 +1161,15 @@ fn build_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> String {
             model.name, model.ts_type
         ));
     }
+    overloads.join(" & ")
+}
+
+/// Build model-only emit overloads (for combining with __EmitFn).
+fn build_model_emit_overloads(models: &[ModelEntry]) -> String {
+    let overloads: Vec<String> = models
+        .iter()
+        .map(|m| format!("((event: 'update:{}', v: {}) => void)", m.name, m.ts_type))
+        .collect();
     overloads.join(" & ")
 }
 
