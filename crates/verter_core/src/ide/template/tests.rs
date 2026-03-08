@@ -4072,3 +4072,27 @@ const { msg, count } = defineProps<{
     }
     assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
 }
+
+#[test]
+fn nexus_bloc_produces_valid_tsx() {
+    let source = match std::fs::read_to_string("d:/dev/accioresearch/WLS/nexus/nexus-ui/packages/ui/src/components/atom/Bloc/Bloc.vue") {
+        Ok(s) => s,
+        Err(_) => { eprintln!("SKIP: file not found"); return; }
+    };
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("Bloc.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    eprintln!("=== BLOC TSX ===\n{}\n=== END ===", tsx.code);
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+}

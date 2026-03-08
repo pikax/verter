@@ -4571,10 +4571,25 @@ fn emit_comp_function_for_element(
 
     let raw_tag = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
 
-    // Skip <component :is="..."> — the component type is dynamic and resolved
-    // via extractRenderComponent in the template IIFE. Emitting
-    // `instantiateComponent(component, {})` would reference an undeclared `component` var.
+    // <component :is="..."> — the component type is dynamic, so we can't
+    // reference a `component` variable. Emit a function that returns `unknown`
+    // so that getRootComponent/void chains still resolve.
     if raw_tag == "component" {
+        use std::fmt::Write;
+        let guard = super::condition::generate_condition_text(condition_scopes)
+            .map(|text| format!("\n  if(!({})) return null;", text))
+            .unwrap_or_default();
+        write!(
+            buf,
+            "\nfunction {P}Comp{offset}{gs}() {{{guard}\
+             \n  return {{}} as unknown;\
+             \n}}",
+            P = PREFIX,
+            offset = offset,
+            gs = gs,
+            guard = guard,
+        )
+        .expect("write to String is infallible");
         return;
     }
 
