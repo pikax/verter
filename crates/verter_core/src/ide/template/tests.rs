@@ -3910,3 +3910,84 @@ fn ant_design_switch_basic_produces_valid_tsx() {
         parsed.errors.len(),
     );
 }
+
+#[test]
+fn activist_card_topic_selection_produces_valid_tsx() {
+    let source = match std::fs::read_to_string("d:/dev/github/verter-test-repos/activist-org-activist/frontend/app/components/card/CardTopicSelection.vue") {
+        Ok(s) => s,
+        Err(_) => { eprintln!("SKIP: file not found"); return; }
+    };
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("CardTopicSelection.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    eprintln!("=== ACTIVIST TSX ===\n{}\n=== END ===", tsx.code);
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+}
+
+#[test]
+fn activist_machine_steps_produces_valid_tsx() {
+    let source = match std::fs::read_to_string("d:/dev/github/verter-test-repos/activist-org-activist/frontend/app/components/MachineStepsCreateEventTime.vue") {
+        Ok(s) => s,
+        Err(_) => { eprintln!("SKIP: file not found"); return; }
+    };
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("MachineStepsCreateEventTime.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    eprintln!("=== MACHINE STEPS TSX ===\n{}\n=== END ===", tsx.code);
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+}
+
+/// <component :is="..."> should not generate a ___VERTER___Comp function with
+/// `instantiateComponent(component, {})` — `component` is not a valid variable.
+#[test]
+fn component_is_dynamic_no_comp_function() {
+    let source = r#"<template>
+  <component :is="tag" />
+</template>
+<script setup lang="ts">
+const tag = 'div';
+</script>"#;
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+
+    // Must NOT contain instantiateComponent(component, ...)
+    assert!(
+        !tsx.code.contains("instantiateComponent(component"),
+        "Should not emit Comp function for <component :is>. Got:\n{}",
+        tsx.code
+    );
+
+    // Parse to ensure valid TSX
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+}

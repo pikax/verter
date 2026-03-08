@@ -4559,6 +4559,14 @@ fn emit_comp_function_for_element(
     use std::fmt::Write;
 
     let raw_tag = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+
+    // Skip <component :is="..."> — the component type is dynamic and resolved
+    // via extractRenderComponent in the template IIFE. Emitting
+    // `instantiateComponent(component, {})` would reference an undeclared `component` var.
+    if raw_tag == "component" {
+        return;
+    }
+
     // Kebab-case component names (e.g., `a-switch`) are referenced via their
     // PascalCase const declaration (e.g., `const ASwitch = ...`). Using the raw
     // kebab name would produce invalid JS (`instantiateComponent(a-switch, {})`).
