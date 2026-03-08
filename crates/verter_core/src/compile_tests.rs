@@ -13228,3 +13228,41 @@ fn tsx_global_component_fallbacks_before_block_scope() {
         tsx.code
     );
 }
+
+#[test]
+fn tsx_slot_outlet_inside_v_for_no_object_literal_ambiguity() {
+    // <slot v-for> must not produce `=> ({...})` which is parsed as object literal
+    let source = r#"<script setup>
+import { computed } from 'vue'
+const props = defineProps({ list: { type: Array, default() { return [] } } })
+const leftList = computed(() => props.list.filter((v, index) => index % 2 === 0))
+</script>
+<template>
+  <div class="waterfall">
+    <slot :item="item" v-for="item in leftList"></slot>
+  </div>
+</template>"#;
+    let result = compile_tsx(source);
+    let tsx = result.tsx.expect("should have tsx output");
+
+    // Should have slot access inside map
+    assert!(
+        tsx.code.contains("$slots.default"),
+        "should have $slots.default: {}",
+        tsx.code
+    );
+
+    // Must NOT have `=> ({` pattern (parenthesized object literal ambiguity)
+    assert!(
+        !tsx.code.contains("=> ({"),
+        "must not produce `=> ({{` pattern (object literal ambiguity): {}",
+        tsx.code
+    );
+
+    // Should have clean map body without JSX expression wrapping
+    assert!(
+        tsx.code.contains("=> (___VERTER___instance.$slots"),
+        "slot inside v-for should not have JSX {{...}} wrapping: {}",
+        tsx.code
+    );
+}

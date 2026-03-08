@@ -319,25 +319,31 @@ fn walk_element<'a, 'alloc>(
             let slot_props = collect_slot_props(el, oxc_el, ctx.source, ctx.resolver);
 
             // Build the call suffix: `?.()` or `?.({ props })`, with `}` or `?? <>`
+            // Inside v-for, omit the closing `}` since we don't emit the opening `{`
+            // (to avoid `=> ({...})` being parsed as parenthesized object literal).
+            let jsx_close = if has_v_for { "" } else { "}" };
             let call_suffix = if slot_props.is_empty() {
                 if has_children {
                     "?.() ?? <>".to_string()
                 } else {
-                    "?.()}".to_string()
+                    format!("?.(){jsx_close}")
                 }
             } else if has_children {
                 format!("?.({{ {} }}) ?? <>", slot_props)
             } else {
-                format!("?.({{ {} }})}}", slot_props)
+                format!("?.({{ {} }}){jsx_close}", slot_props)
             };
 
             // Fine-grained overwrites for source map accuracy:
-            // 1. `<` → `{___VERTER___instance.`
-            ctx.out.overwrite(
-                el.tag_open.start,
-                el.tag_open.start + 1,
-                "{___VERTER___instance.",
-            );
+            // 1. `<` → `{___VERTER___instance.` (or no `{` inside v-for to avoid
+            //    `=> ({...})` being parsed as parenthesized object literal)
+            let slot_prefix = if has_v_for {
+                "___VERTER___instance."
+            } else {
+                "{___VERTER___instance."
+            };
+            ctx.out
+                .overwrite(el.tag_open.start, el.tag_open.start + 1, slot_prefix);
             // 2. `slot` → `$slots`
             ctx.out
                 .overwrite(el.tag_open.start + 1, el.tag_open.name_end, "$slots");
@@ -379,7 +385,9 @@ fn walk_element<'a, 'alloc>(
             // Close tag
             if let Some(tag_close) = &el.tag_close {
                 if has_children {
-                    ctx.out.overwrite(tag_close.start, tag_close.end, "</>}");
+                    let close_suffix = if has_v_for { "</>" } else { "</>}" };
+                    ctx.out
+                        .overwrite(tag_close.start, tag_close.end, close_suffix);
                 } else {
                     ctx.out.overwrite(tag_close.start, tag_close.end, "");
                 }
