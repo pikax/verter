@@ -938,12 +938,15 @@ pub(crate) fn build_props_object_into(
                         let is_class_or_style =
                             is_bind && (arg_name == "class" || arg_name == "style");
                         if !is_class_or_style || element.tag_type.is_component() {
-                            // Cross-file optimization: skip adding to dynamic_props
-                            // when all bindings are const props (proven constant across
-                            // all parent call sites). Only active with const_props data.
+                            // Skip adding to dynamic_props when the expression is:
+                            // - A pure literal (no bindings at all, e.g., :value="200")
+                            // - All const props (proven constant across call sites)
                             let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
                             let expr_bindings = oxc_exp.and_then(|e| e.bindings.as_ref());
-                            if !resolver.all_bindings_const_props(expr_bindings) {
+                            let is_pure_literal = expr_bindings
+                                .is_some_and(|b| b.non_ignored_binding_names().is_empty());
+                            if !is_pure_literal && !resolver.all_bindings_const_props(expr_bindings)
+                            {
                                 dynamic_props.push(key.to_string());
                             }
                         }

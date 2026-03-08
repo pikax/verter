@@ -1530,4 +1530,34 @@ mod tests {
             "v-bind spread should NOT use _toHandlers, got:\n{code}"
         );
     }
+
+    // ==================== Literal prop optimization ====================
+
+    #[test]
+    fn literal_bind_value_not_in_dynamic_props() {
+        // :value="200" :max="99" are pure literals — should NOT generate PROPS flag
+        let code = gen_vdom_template(
+            "<template><MyComp :value=\"200\" :max=\"99\" class=\"item\"><template #default>content</template></MyComp></template>\n<script setup>\nimport MyComp from './MyComp.vue'\n</script>",
+        );
+        assert!(
+            !code.contains("8 /* PROPS */"),
+            "Literal bind values should NOT add PROPS flag, got:\n{code}"
+        );
+        assert!(
+            !code.contains("[\"value\""),
+            "Literal bind values should NOT appear in dynamic props, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn dynamic_bind_value_in_dynamic_props() {
+        // :value="count" uses a reactive variable — SHOULD generate PROPS flag
+        let code = gen_vdom_template(
+            "<template><MyComp :value=\"count\" class=\"item\"><template #default>content</template></MyComp></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nimport { ref } from 'vue'\nconst count = ref(0)\n</script>",
+        );
+        assert!(
+            code.contains("8 /* PROPS */") || code.contains("PROPS"),
+            "Dynamic bind values should add PROPS flag, got:\n{code}"
+        );
+    }
 }
