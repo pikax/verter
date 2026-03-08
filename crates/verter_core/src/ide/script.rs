@@ -1149,6 +1149,21 @@ fn process_tsx_script_setup<'alloc>(
                     P = PREFIX,
                 ));
             }
+            // Suppress TS6133 for generated variables that may not be referenced in template
+            if macro_state
+                .macro_bindings
+                .iter()
+                .any(|e| e.macro_name == "defineProps" && e.var_name.is_some())
+            {
+                tail.push_str("\nvoid __props;");
+            }
+            for entry in &macro_state.macro_bindings {
+                if let Some(ref var) = entry.var_name {
+                    if var.starts_with(PREFIX) {
+                        tail.push_str(&format!("\nvoid {};", var));
+                    }
+                }
+            }
             for offset in &all_comp_offsets {
                 tail.push_str(&format!(
                     "\nvoid {P}Comp{offset};",
@@ -9491,5 +9506,55 @@ export default {
         );
         // Should produce valid output (not panic)
         assert!(!code.is_empty(), "should produce non-empty output");
+    }
+
+    #[test]
+    fn void_reference_suppresses_unused_emits() {
+        // When defineEmits is called without assignment, Verter generates
+        // `const ___VERTER___emits = defineEmits(...)`. This auto-var should
+        // have a `void` reference to suppress TS6133.
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+defineEmits<{ click: [e: MouseEvent] }>()
+</script>
+<template><div>content</div></template>"#,
+        );
+        // Positive: auto-generated emits var exists
+        assert!(
+            code.contains("___VERTER___emits"),
+            "should declare ___VERTER___emits: {}",
+            code
+        );
+        // Positive: void reference suppresses unused warning
+        assert!(
+            code.contains("void ___VERTER___emits"),
+            "should have void ___VERTER___emits to suppress unused warning: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn void_reference_suppresses_unused_props() {
+        // When defineProps generates `const __props = ...`, it should also emit
+        // `void __props;` to suppress TS6133 "declared but never read" when the
+        // template doesn't reference any props directly.
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+const props = defineProps<{ msg: string }>()
+</script>
+<template><div>static content</div></template>"#,
+        );
+        // Positive: __props is declared
+        assert!(
+            code.contains("const __props = "),
+            "should declare __props: {}",
+            code
+        );
+        // Positive: void __props suppresses unused warning
+        assert!(
+            code.contains("void __props"),
+            "should have void __props to suppress unused warning: {}",
+            code
+        );
     }
 }
