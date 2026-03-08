@@ -1477,6 +1477,36 @@ fn v_show_compound_expr_resolves_all_bindings() {
     );
 }
 
+#[test]
+fn v_show_with_existing_style_no_duplicate_attributes() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div v-show="ready" :style="itemStyle">hi</div></template>"#,
+        &[
+            ("ready", BindingType::SetupRef),
+            ("itemStyle", BindingType::SetupConst),
+        ],
+    );
+    // Should NOT produce duplicate `style` attributes
+    let style_count = result.matches("style=").count();
+    assert_eq!(
+        style_count, 1,
+        "v-show + :style should merge into one style attribute, not produce {} style= occurrences. Got: {}",
+        style_count, result
+    );
+    // Should include both the v-show display logic and the existing style
+    assert!(
+        result.contains("display:"),
+        "merged style should include v-show display logic. Got: {}",
+        result
+    );
+    // Should NOT have v-show attribute
+    assert!(
+        !result.contains("v-show"),
+        "v-show attribute must be removed. Got: {}",
+        result
+    );
+}
+
 // ── v-model in TSX ────────────────────────────────────────────
 
 #[test]

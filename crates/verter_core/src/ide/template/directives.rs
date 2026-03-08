@@ -424,15 +424,66 @@ pub fn emit_v_show<'alloc>(
             resolver.resolve_simple_expr(expr)
         };
 
-        // Replace v-show directive with style attribute using resolved expression
-        out.overwrite(
-            show.start,
-            prop_end,
-            &format!(
-                "style={{{{display: {} ? undefined : 'none'}}}}",
-                resolved_expr
-            ),
-        );
+        // Check if the element already has a :style binding. If so, merge the
+        // v-show display condition into it to avoid duplicate `style` attributes.
+        // The parser stores `:style` as directive name `:` (or `v-bind`) with
+        // argument `style` in arg_start..arg_end.
+        let existing_style = el.props.iter().enumerate().find(|(i, p)| {
+            *i != show_idx
+                && p.is_directive
+                && {
+                    let dir_name = &source[p.start as usize..p.name_end as usize];
+                    (dir_name == ":" || dir_name == "v-bind")
+                        && p.arg_start
+                            .zip(p.arg_end)
+                            .map(|(a, b)| &source[a as usize..b as usize] == "style")
+                            .unwrap_or(false)
+                }
+        });
+
+        if let Some((style_idx, style_prop)) = existing_style {
+            // Merge: remove v-show, transform :style to include display condition.
+            // :style="itemStyle" → style={{...itemStyle, display: expr ? undefined : 'none'}}
+            out.overwrite(show.start, prop_end, "");
+
+            if let (Some(svs), Some(sve)) = (style_prop.value_start, style_prop.value_end) {
+                let style_expr = &source[svs as usize..sve as usize];
+                let resolved_style = if let Some(oxc_el) = oxc_el {
+                    if let Some(oxc_prop) =
+                        oxc_el.props.iter().find(|p| p.prop_index == style_idx)
+                    {
+                        if let Some(ref exp) = oxc_prop.exp {
+                            build_prefixed_expr(style_expr, svs, exp, resolver, &[])
+                        } else {
+                            resolver.resolve_simple_expr(style_expr)
+                        }
+                    } else {
+                        resolver.resolve_simple_expr(style_expr)
+                    }
+                } else {
+                    resolver.resolve_simple_expr(style_expr)
+                };
+
+                let style_end = super::props::get_prop_end(style_prop);
+                out.overwrite(
+                    style_prop.start,
+                    style_end,
+                    &format!(
+                        "style={{{{...({resolved_style}), display: {resolved_expr} ? undefined : 'none'}}}}",
+                    ),
+                );
+            }
+        } else {
+            // No existing :style — replace v-show with style attribute directly.
+            out.overwrite(
+                show.start,
+                prop_end,
+                &format!(
+                    "style={{{{display: {} ? undefined : 'none'}}}}",
+                    resolved_expr
+                ),
+            );
+        }
     }
 }
 
