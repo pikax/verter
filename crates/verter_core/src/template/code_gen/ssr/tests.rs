@@ -8214,3 +8214,107 @@ const chartConfig = { desktop: 1, mobile: 2 }
         code
     );
 }
+
+// ─── merge_duplicate_event_handlers regression ──────────────────────────────
+
+#[test]
+fn test_merge_duplicate_event_handlers_multiple_keys() {
+    // Regression: when multiple duplicate key groups exist, removing entries
+    // for the first group shifts indices for subsequent groups, causing
+    // index-out-of-bounds panic.
+    use super::merge_duplicate_event_handlers;
+
+    let mut parts = vec![
+        r#""onUpdate:a": $event => (a = $event)"#.to_string(),
+        r#"b: val_b"#.to_string(),
+        r#""onUpdate:a": $event => (a2 = $event)"#.to_string(),
+        r#"c: val_c"#.to_string(),
+        r#""onUpdate:d": $event => (d = $event)"#.to_string(),
+        r#"e: val_e"#.to_string(),
+        r#"f: val_f"#.to_string(),
+        r#"g: val_g"#.to_string(),
+        r#"h: val_h"#.to_string(),
+        r#""onUpdate:d": $event => (d2 = $event)"#.to_string(),
+    ];
+
+    // Should not panic
+    merge_duplicate_event_handlers(&mut parts);
+
+    // Positive: merged entries should have array values
+    let result = parts.join(", ");
+    assert!(
+        result.contains("["),
+        "should have merged array form, got: {}",
+        result
+    );
+
+    // Negative: no duplicate keys remain
+    let key_count_a = parts
+        .iter()
+        .filter(|p| p.starts_with("\"onUpdate:a\""))
+        .count();
+    assert_eq!(
+        key_count_a, 1,
+        "should have exactly one onUpdate:a entry after merge, got {}",
+        key_count_a
+    );
+    let key_count_d = parts
+        .iter()
+        .filter(|p| p.starts_with("\"onUpdate:d\""))
+        .count();
+    assert_eq!(
+        key_count_d, 1,
+        "should have exactly one onUpdate:d entry after merge, got {}",
+        key_count_d
+    );
+}
+
+#[test]
+fn test_ssr_component_with_many_v_models_no_panic() {
+    // Regression: DatePicker.vue with multiple same-named event handlers
+    // caused index-out-of-bounds in merge_duplicate_event_handlers.
+    let code = gen_ssr_template(
+        r#"<template>
+  <MyComp
+    :a="x" @update:a="x = $event"
+    :b="y" @update:b="y = $event"
+    :c="z" @update:c="z = $event"
+    :d="w" @update:d="w = $event"
+    :e="v" @update:e="v = $event"
+    :f="u" @update:f="u = $event"
+    :g="t" @update:g="t = $event"
+    :h="s" @update:h="s = $event"
+    :i="r" @update:i="r = $event"
+    :j="q" @update:j="q = $event"
+    @click="onClick"
+    @click="onClick2"
+  />
+</template>
+<script setup>
+const x = ref(1)
+const y = ref(2)
+const z = ref(3)
+const w = ref(4)
+const v = ref(5)
+const u = ref(6)
+const t = ref(7)
+const s = ref(8)
+const r = ref(9)
+const q = ref(10)
+function onClick() {}
+function onClick2() {}
+</script>"#,
+    );
+    // Positive: should have ssrRenderComponent call
+    assert!(
+        code.contains("_ssrRenderComponent"),
+        "should render component, got:\n{}",
+        code
+    );
+    // Negative: should not have raw @update: in output
+    assert!(
+        !code.contains("@update:"),
+        "should not have raw Vue event syntax in output, got:\n{}",
+        code
+    );
+}

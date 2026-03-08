@@ -6349,26 +6349,43 @@ fn merge_duplicate_event_handlers(parts: &mut Vec<String>) {
         }
     }
 
-    // Process duplicates in reverse order so removal indices stay valid
-    for (key, indices) in &seen {
+    // Collect all merge operations first, then apply all at once.
+    // We must not modify `parts` during the collection phase because removing
+    // entries for one key group would shift indices for subsequent groups.
+    let mut merges: Vec<(usize, String)> = Vec::new(); // (first_index, merged_entry)
+    let mut removals: Vec<usize> = Vec::new(); // indices to remove
+
+    for (_key, indices) in &seen {
         if indices.len() < 2 {
             continue;
         }
-        // Collect all values
+        // Collect all values from original (unmodified) parts
         let values: Vec<String> = indices
             .iter()
             .filter_map(|&i| extract_key_value(&parts[i]).map(|(_, v)| v.to_string()))
             .collect();
 
         // Build merged entry: "key": [value1, value2]
-        let merged = format!("{}: [{}]", key, values.join(", "));
+        let key_str = extract_key_value(&parts[indices[0]])
+            .map(|(k, _)| k.to_string())
+            .unwrap_or_default();
+        let merged = format!("{}: [{}]", key_str, values.join(", "));
 
-        // Remove duplicates in reverse order (skip the first occurrence)
-        for &i in indices[1..].iter().rev() {
-            parts.remove(i);
-        }
-        // Replace first occurrence with merged entry
-        parts[indices[0]] = merged;
+        merges.push((indices[0], merged));
+        // Mark all but first for removal
+        removals.extend_from_slice(&indices[1..]);
+    }
+
+    // Apply merges (replacements) first — indices are still valid
+    for (idx, merged) in &merges {
+        parts[*idx] = merged.clone();
+    }
+
+    // Sort removals in descending order, then remove from the end
+    removals.sort_unstable();
+    removals.dedup();
+    for &i in removals.iter().rev() {
+        parts.remove(i);
     }
 }
 
