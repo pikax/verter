@@ -640,12 +640,26 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
 
         walk_node(child_id, ctx, parent_condition_scopes);
 
-        // After walking a v-if element, inject repositioned comments inside the IIFE
+        // After walking a v-if element, inject repositioned comments inside the IIFE.
+        // Skip when the element also has a dynamic `<component :is>` — that generates
+        // a nested IIFE with `return`, and a JSX comment between `return` and the element
+        // would be parsed as `return {}` (object literal), breaking the syntax.
         if let AstNodeKind::Element(child_el) = &ctx.ast.nodes[child_id.0].kind {
+            let has_dynamic_is = child_el.tag_type == TagType::Component
+                && &ctx.source[child_el.tag_open.start as usize + 1..child_el.tag_open.name_end as usize] == "component"
+                && child_el.props.iter().any(|p| {
+                    p.is_directive
+                        && directive_name(p, ctx.source) == "bind"
+                        && p.arg_start
+                            .zip(p.arg_end)
+                            .map(|(a, b)| &ctx.source[a as usize..b as usize] == "is")
+                            .unwrap_or(false)
+                });
             if matches!(
                 child_el.v_condition.as_ref().map(|c| &c.kind),
                 Some(ElementNodeConditionKind::If)
             ) && !comment_reposition_set.is_empty()
+                && !has_dynamic_is
             {
                 inject_repositioned_comments(
                     idx,

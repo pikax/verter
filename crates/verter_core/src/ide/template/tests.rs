@@ -3712,3 +3712,121 @@ fn notification_template_complex_no_syntax_errors() {
         result
     );
 }
+
+/// Regression: `<component :is="tag" v-if="cond" v-text="expr" />` must produce
+/// valid TSX — the combination of dynamic :is IIFE + v-if + v-text was causing
+/// syntax errors (TS1005: ';' expected).
+#[test]
+fn component_is_with_v_if_and_v_text_produces_valid_jsx() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><component :is="titleTag" v-if="!!title" v-text="title" /></template>"#,
+        &[
+            ("titleTag", BindingType::SetupConst),
+            ("title", BindingType::SetupConst),
+        ],
+    );
+    eprintln!("=== COMPONENT :IS + V-IF + V-TEXT ===\n{}\n=== END ===", result);
+
+    // Must contain v-text → textContent conversion
+    assert!(
+        result.contains("textContent"),
+        "v-text should generate textContent prop"
+    );
+
+    // Must not have raw v-text in output
+    assert!(
+        !result.contains("v-text"),
+        "v-text directive must be removed from JSX"
+    );
+
+    // Parse with OXC to verify valid TSX
+    let alloc = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &result, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "Generated TSX should have no parse errors. Got {} errors. Output:\n{}",
+        parsed.errors.len(),
+        result
+    );
+}
+
+#[test]
+fn component_is_v_text_options_api_full_sfc() {
+    let source = r#"<template>
+  <div>
+    <component :is="titleTag" v-if="!!title" v-text="title" />
+  </div>
+</template>
+
+<script lang="ts">
+export default defineComponent({
+  props: {
+    title: { type: String, default: '' },
+    titleTag: { type: String, default: 'h4' },
+  },
+  setup(props) {
+    return {};
+  },
+});
+</script>"#;
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("BalCard.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    eprintln!("=== FULL SFC TSX ===\n{}\n=== END ===", tsx.code);
+
+    // Parse with OXC to verify valid TSX
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "Full SFC TSX should have no parse errors. Got {} errors. Output:\n{}",
+        parsed.errors.len(),
+        tsx.code
+    );
+}
+
+#[test]
+fn balcard_vue_full_sfc_produces_valid_tsx() {
+    let source = match std::fs::read_to_string("d:/dev/github/verter-test-repos/balancer-frontend-v2/src/components/_global/BalCard/BalCard.vue") {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("SKIP: BalCard.vue not found (test repo not available)");
+            return;
+        }
+    };
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("BalCard.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions {
+        source_map: true,
+        ..Default::default()
+    };
+    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    eprintln!("=== BALCARD FULL TSX ===\n{}\n=== END ===", tsx.code);
+
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "BalCard TSX should have no parse errors. Got {} errors",
+        parsed.errors.len(),
+    );
+}
