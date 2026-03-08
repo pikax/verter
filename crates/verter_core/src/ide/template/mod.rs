@@ -465,6 +465,18 @@ fn walk_element<'a, 'alloc>(
         walk_children_with_iife_tracking(&content.children, ctx, &full_scopes);
     }
 
+    // Fix closing tag case mismatch: Vue is case-insensitive for closing tags
+    // (e.g., <Button>...</button>) but JSX requires exact case match. Rewrite the
+    // closing tag name to match the opening tag when they differ.
+    if let Some(tag_close) = &el.tag_close {
+        let open_name = &ctx.source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+        let close_name = &ctx.source[tag_close.start as usize + 2..tag_close.name_end as usize];
+        if open_name != close_name && open_name.eq_ignore_ascii_case(close_name) {
+            ctx.out
+                .overwrite(tag_close.start + 2, tag_close.name_end, open_name);
+        }
+    }
+
     // Handle close tag for <template> → </>
     if el.tag_type == TagType::Template {
         if let Some(tag_close) = &el.tag_close {

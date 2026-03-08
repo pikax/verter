@@ -4189,3 +4189,34 @@ defineProps({
         tsx.code
     );
 }
+
+#[test]
+fn closing_tag_case_mismatch_component() {
+    // Vue is case-insensitive for closing tags: <Button>...</button> is valid.
+    // JSX is case-sensitive: the closing tag must match the opening tag.
+    // Verter must rewrite the closing tag to match the opening tag.
+    let result = gen_tsx_template_with_bindings(
+        r#"<template>
+  <Button class="btn">Click</Button>
+  <Button class="btn2">Click2</button>
+</template>"#,
+        &[("Button", BindingType::SetupConst)],
+    );
+    eprintln!("=== CASE MISMATCH ===\n{}\n=== END ===", result);
+
+    // Positive: both buttons should have matching closing tags
+    let close_count = result.matches("</Button>").count();
+    assert!(
+        close_count == 2,
+        "should have 2 </Button> closing tags (case-corrected), got {} in:\n{}",
+        close_count,
+        result
+    );
+
+    // Negative: lowercase </button> should not appear
+    assert!(
+        !result.contains("</button>"),
+        "lowercase </button> should be rewritten to </Button>, got:\n{}",
+        result
+    );
+}
