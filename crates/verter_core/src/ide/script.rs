@@ -269,6 +269,10 @@ pub struct IdeScriptGenResult<'alloc> {
     /// When `template_end` is `Some(...)`, this contains the return+close string
     /// to be applied to the CT AFTER template codegen (to avoid interleaving).
     pub return_close: Option<String>,
+    /// Position at which `return_close` should be inserted.
+    /// For script-first SFCs this equals `template_end`; for template-first SFCs
+    /// this equals `script_close.end` (whichever block ends last in the source).
+    pub return_close_pos: Option<u32>,
     /// Structured metadata for the destructured block, if present.
     pub destructured_block: Option<DestructuredBlockMeta>,
 }
@@ -345,10 +349,30 @@ pub fn generate_ide_script<'alloc>(
     // Apply accumulated operations
     out.apply_to(ct);
 
+    // Compute the correct insertion position for return_close.
+    // Must be after BOTH the template and all script blocks in the source.
+    let return_close_pos = if return_close.is_some() {
+        let mut pos = template_end.unwrap_or(0);
+        if let Some(setup) = script_setup {
+            if let Some(tc) = &setup.tag_close {
+                pos = pos.max(tc.end);
+            }
+        }
+        if let Some(normal) = script {
+            if let Some(tc) = &normal.tag_close {
+                pos = pos.max(tc.end);
+            }
+        }
+        Some(pos)
+    } else {
+        None
+    };
+
     IdeScriptGenResult {
         bindings,
         type_constructs,
         return_close,
+        return_close_pos,
         destructured_block,
     }
 }
@@ -385,6 +409,7 @@ fn process_tsx_script_setup<'alloc>(
     let mut destructured_block_meta: Option<DestructuredBlockMeta> = None;
     let content_start = content_span.start;
     let content_str = &source[content_span.start as usize..content_span.end as usize];
+
     // Hoist position: earliest of companion/setup tag starts so imports appear at top.
     let hoist_pos = normal_script
         .map(|ns| ns.tag_open.start.min(setup.tag_open.start))
@@ -921,6 +946,18 @@ fn process_tsx_script_setup<'alloc>(
             .map(|(name, bt)| (*name, *bt))
             .collect();
 
+        // Emit global component fallback consts BEFORE the block scope.
+        // These provide types for globally registered components (e.g. RouterLink,
+        // RouterView) that aren't imported. They must be declared before the block
+        // scope so the template JSX inside can reference them without TDZ errors.
+        emit_global_component_fallbacks(
+            &mut wrapper_end,
+            template_ast,
+            source,
+            bindings,
+            options.is_jsx,
+        );
+
         if !setup_bindings.is_empty() {
             let entries: String = setup_bindings
                 .iter()
@@ -1116,15 +1153,6 @@ fn process_tsx_script_setup<'alloc>(
                     offset = offset,
                 ));
             }
-
-            // Emit global component fallback consts
-            emit_global_component_fallbacks(
-                &mut tail,
-                template_ast,
-                source,
-                bindings,
-                options.is_jsx,
-            );
 
             // Emit instance completion probe line (LSP uses this for autocomplete)
             tail.push_str(&instance_probe_line());
@@ -4709,8 +4737,8 @@ mod tests {
         );
 
         // Apply deferred return+close after template (same as compile.rs)
-        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
-            ct.prepend_left(tpl_end, return_close);
+        if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
+            ct.prepend_left(pos, return_close);
         }
 
         // Remove template/style blocks from output
@@ -4801,8 +4829,8 @@ mod tests {
             template_end,
         );
 
-        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
-            ct.prepend_left(tpl_end, return_close);
+        if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
+            ct.prepend_left(pos, return_close);
         }
 
         if let Some(tpl) = syntax.template_ast() {
@@ -6810,8 +6838,8 @@ const el2 = ref<HTMLSpanElement>()
         );
 
         // Apply deferred return+close after template (same as compile.rs)
-        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
-            ct.prepend_left(tpl_end, return_close);
+        if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
+            ct.prepend_left(pos, return_close);
         }
 
         if let Some(tpl) = syntax.template_ast() {
@@ -8503,8 +8531,8 @@ count.
             template_end,
         );
 
-        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
-            ct.prepend_left(tpl_end, return_close);
+        if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
+            ct.prepend_left(pos, return_close);
         }
 
         if let Some(tpl) = syntax.template_ast() {
@@ -8963,8 +8991,8 @@ const props = defineProps<{ msg: string }>()
             template_end,
         );
 
-        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
-            ct.prepend_left(tpl_end, return_close);
+        if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
+            ct.prepend_left(pos, return_close);
         }
 
         // Generate the sourcemap
@@ -9059,8 +9087,8 @@ function handleClick(event) {}
             template_end,
         );
 
-        if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
-            ct.prepend_left(tpl_end, return_close);
+        if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
+            ct.prepend_left(pos, return_close);
         }
 
         let map =
@@ -9251,6 +9279,63 @@ const myRef = useTemplateRef('myRef')
         assert!(
             comp_fn_count >= 2,
             "should emit Comp function for both parent (MyComp) and child (Comp from v-slot), found {comp_fn_count}: {code}"
+        );
+    }
+
+    #[test]
+    fn template_first_empty_script_setup_generates_valid_tsx() {
+        let (code, _bindings, _) = gen_tsx_script_full(
+            r#"<template>
+	<section class="page">
+		<h1>Chat</h1>
+	</section>
+</template>
+<script setup lang="ts">
+</script>"#,
+        );
+        // The function wrapper must open BEFORE the template return and close AFTER it.
+        // Template-first + empty script setup should still produce valid TSX.
+        let fn_open_pos = code
+            .find("function ___VERTER___TemplateBindingFN")
+            .expect(&format!("should have TemplateBindingFN: {code}"));
+        let close_fn_pos = code
+            .find("} // close templateBindingFN")
+            .expect(&format!("should have close marker: {code}"));
+        assert!(
+            fn_open_pos < close_fn_pos,
+            "function opening must come before closing. open={fn_open_pos}, close={close_fn_pos}: {code}"
+        );
+        // Must not have return_close before function opening
+        assert!(
+            !code[..fn_open_pos].contains("close block scope"),
+            "return_close must not appear before function opening: {code}"
+        );
+    }
+
+    #[test]
+    fn template_first_nonempty_script_setup_generates_valid_tsx() {
+        let (code, _bindings, _) = gen_tsx_script_full(
+            r#"<template>
+  <div>{{ msg }}</div>
+</template>
+<script setup lang="ts">
+const msg = 'hello'
+</script>"#,
+        );
+
+        let fn_open_pos = code
+            .find("function ___VERTER___TemplateBindingFN")
+            .expect(&format!("should have TemplateBindingFN: {code}"));
+        let close_fn_pos = code
+            .find("} // close templateBindingFN")
+            .expect(&format!("should have close marker: {code}"));
+        assert!(
+            fn_open_pos < close_fn_pos,
+            "function opening must come before closing: {code}"
+        );
+        assert!(
+            code.contains("const msg"),
+            "should preserve script content: {code}"
         );
     }
 }

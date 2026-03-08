@@ -13094,3 +13094,137 @@ const msg = ref('hello')
         tsx.code
     );
 }
+
+#[test]
+fn tsx_template_first_empty_script_setup() {
+    let result = compile_tsx(
+        r#"<template>
+	<section class="page">
+		<h1>Chat</h1>
+	</section>
+</template>
+<script setup lang="ts">
+</script>"#,
+    );
+    let tsx = result.tsx.expect("should produce TSX");
+
+    let fn_open = tsx.code.find("function ___VERTER___TemplateBindingFN");
+    let fn_close = tsx.code.find("} // close templateBindingFN");
+    assert!(fn_open.is_some(), "should have function: {}", tsx.code);
+    assert!(fn_close.is_some(), "should have close: {}", tsx.code);
+    assert!(
+        fn_open.unwrap() < fn_close.unwrap(),
+        "function open must come before close: {}",
+        tsx.code
+    );
+    // JSX must be inside the function
+    let jsx_pos = tsx.code.find("<section").expect("should have JSX");
+    assert!(
+        fn_open.unwrap() < jsx_pos && jsx_pos < fn_close.unwrap(),
+        "template JSX must be inside the function: {}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_first_with_bindings() {
+    let result = compile_tsx(
+        r#"<template>
+  <div>{{ msg }}</div>
+</template>
+<script setup lang="ts">
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>"#,
+    );
+    let tsx = result.tsx.expect("should produce TSX");
+
+    let fn_open = tsx
+        .code
+        .find("function ___VERTER___TemplateBindingFN")
+        .expect(&format!("should have function: {}", tsx.code));
+    let fn_close = tsx
+        .code
+        .find("} // close templateBindingFN")
+        .expect(&format!("should have close: {}", tsx.code));
+    assert!(
+        fn_open < fn_close,
+        "function open must come before close: {}",
+        tsx.code
+    );
+    // Script content (const msg) should be inside the function
+    let msg_pos = tsx
+        .code
+        .find("const msg = ref('hello')")
+        .expect(&format!("should have script content: {}", tsx.code));
+    assert!(
+        fn_open < msg_pos && msg_pos < fn_close,
+        "script content must be inside function: {}",
+        tsx.code
+    );
+    // Template JSX should be inside the function
+    let jsx_pos = tsx
+        .code
+        .find("{ msg }")
+        .expect(&format!("should have template binding: {}", tsx.code));
+    assert!(
+        fn_open < jsx_pos && jsx_pos < fn_close,
+        "template JSX must be inside function: {}",
+        tsx.code
+    );
+    // Script content should come BEFORE template JSX (declarations must be in scope)
+    assert!(
+        msg_pos < jsx_pos,
+        "script declarations must precede template JSX: {}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_global_component_fallbacks_before_block_scope() {
+    // Global components (not imported) should be declared BEFORE the block scope
+    // so template JSX inside the block scope can reference them without TDZ errors.
+    let result = compile_tsx(
+        r#"<script setup lang="ts"></script>
+<template>
+  <RouterLink to="/home">Home</RouterLink>
+  <RouterView />
+</template>"#,
+    );
+    let tsx = result.tsx.expect("should produce TSX");
+
+    // RouterLink and RouterView fallback consts must appear before block scope
+    let block_scope_pos = tsx
+        .code
+        .find("/* verter-destructured-start */")
+        .or_else(|| tsx.code.find("\n{\n"))
+        .expect(&format!("should have block scope: {}", tsx.code));
+    let router_link_pos = tsx
+        .code
+        .find("const RouterLink =")
+        .expect(&format!("should have RouterLink fallback: {}", tsx.code));
+    let router_view_pos = tsx
+        .code
+        .find("const RouterView =")
+        .expect(&format!("should have RouterView fallback: {}", tsx.code));
+    assert!(
+        router_link_pos < block_scope_pos,
+        "RouterLink fallback must be before block scope (TDZ): {}",
+        tsx.code
+    );
+    assert!(
+        router_view_pos < block_scope_pos,
+        "RouterView fallback must be before block scope (TDZ): {}",
+        tsx.code
+    );
+    // Must NOT be after the block scope close
+    let close_block = tsx
+        .code
+        .find("} // close block scope")
+        .expect("should have close block scope");
+    assert!(
+        router_link_pos < close_block,
+        "RouterLink fallback must not be after block scope: {}",
+        tsx.code
+    );
+}

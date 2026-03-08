@@ -859,10 +859,35 @@ fn compile_inner(
         }
 
         // Apply deferred return+close AFTER template codegen to avoid interleaving.
-        // This places the return statement and function close after the template JSX.
-        if let (Some(return_close), Some(tpl_end)) = (&tsx_script_result.return_close, template_end)
-        {
-            tsx_ct.prepend_left(tpl_end, return_close);
+        //
+        // Template-first SFCs: the template appears before <script setup> in the source.
+        // The function wrapper opens at the script tag, so the template JSX (which stays
+        // at its original position) would end up outside the function. Fix: move the
+        // transformed template content to after </script>, using return_close as the suffix
+        // so it appears right after the relocated template.
+        let template_start = template_ast_opt.map(|tpl| tpl.root.tag_open.start);
+        let script_setup_start = parsed.script_setup().map(|s| s.tag_open.start);
+        let template_before_script = template_start
+            .is_some_and(|ts| script_setup_start.is_some_and(|ss| ts < ss))
+            || template_start
+                .is_some_and(|ts| parsed.script().is_some_and(|s| ts < s.tag_open.start));
+
+        if template_before_script {
+            if let (Some(ts), Some(te), Some(return_close), Some(pos)) = (
+                template_start,
+                template_end,
+                &tsx_script_result.return_close,
+                tsx_script_result.return_close_pos,
+            ) {
+                // Move the template (now transformed to JSX) to after the script close tag.
+                // return_close becomes the suffix so it appears right after the template.
+                tsx_ct.move_with_suffix(ts, te, pos, return_close);
+            }
+        } else if let (Some(return_close), Some(pos)) = (
+            &tsx_script_result.return_close,
+            tsx_script_result.return_close_pos,
+        ) {
+            tsx_ct.prepend_left(pos, return_close);
         }
 
         // Append type constructs via CT outro — they have no sourcemap mapping
