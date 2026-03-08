@@ -426,6 +426,20 @@ fn walk_element<'a, 'alloc>(
     // Process v-show
     directives::emit_v_show(el, oxc_el, ctx.source, ctx.out, ctx.alloc, ctx.resolver);
 
+    // Void HTML elements (<br>, <input>, <img>, <hr>, etc.) need self-closing in JSX.
+    // The parser sets is_self_closing for void tags, but the source may lack the `/`.
+    // Check if the source `>` at tag_open.end-1 is preceded by `/` — if not, add it.
+    if el.tag_close.is_none() && el.content.is_none() {
+        let end_byte = el.tag_open.end as usize;
+        if end_byte >= 2
+            && ctx.source.as_bytes().get(end_byte - 1) == Some(&b'>')
+            && ctx.source.as_bytes().get(end_byte - 2) != Some(&b'/')
+        {
+            ctx.out
+                .overwrite(el.tag_open.end - 1, el.tag_open.end, " />");
+        }
+    }
+
     // Walk children — children inherit the condition scopes from this element
     if let Some(content) = &el.content {
         walk_children_with_iife_tracking(&content.children, ctx, &full_scopes);
@@ -1170,11 +1184,19 @@ fn visit_text(text: &TextNode, source: &str, out: &mut CodeGenOutput<'_>) {
     let content_start = text.start + rel_start as u32;
     let content_end = content_start + trimmed.len() as u32;
 
-    // Escape quotes inside the string literal body.
+    // Escape characters that are invalid inside a `"..."` JS string literal:
+    // - double quotes → \"
+    // - newlines → \n (multi-line strings are illegal in JS)
+    // - carriage returns → \r
+    // - backslashes → \\ (must escape first to avoid double-escaping)
     for (i, b) in trimmed.as_bytes().iter().enumerate() {
-        if *b == b'"' {
-            let pos = content_start + i as u32;
-            out.overwrite(pos, pos + 1, "\\\"");
+        let pos = content_start + i as u32;
+        match *b {
+            b'\\' => out.overwrite(pos, pos + 1, "\\\\"),
+            b'"' => out.overwrite(pos, pos + 1, "\\\""),
+            b'\n' => out.overwrite(pos, pos + 1, "\\n"),
+            b'\r' => out.overwrite(pos, pos + 1, "\\r"),
+            _ => {}
         }
     }
 

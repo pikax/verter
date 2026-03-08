@@ -2616,12 +2616,13 @@ fn process_tsx_script_only<'alloc>(
     }
 
     // Extract bindings from Options API
-    // Same mixed-coordinate issue as script setup — see comment there.
+    // Unlike script setup, Options API binding spans are ALL content-relative
+    // (extract_options_bindings doesn't add content_offset). Use content_str for all.
+    // Bounds-checked: partial ASTs may produce garbage spans, skip invalid ones.
     for (span, bt) in &parse_result.bindings {
-        let name = if *bt == BindingType::Props || *bt == BindingType::PropsAliased {
-            &source[span.start as usize..span.end as usize]
-        } else {
-            &content_str[span.start as usize..span.end as usize]
+        let name = match content_str.get(span.start as usize..span.end as usize) {
+            Some(s) if !s.is_empty() => s,
+            _ => continue,
         };
         let alloc_name = out.alloc_str(name);
         bindings.insert(alloc_name, *bt);
@@ -9337,5 +9338,40 @@ const msg = 'hello'
             code.contains("const msg"),
             "should preserve script content: {code}"
         );
+    }
+
+    #[test]
+    fn options_api_with_multibyte_utf8_does_not_panic() {
+        // Chinese characters in comments cause multi-byte UTF-8 boundaries.
+        // Props binding extraction must not panic when slicing into source.
+        let (code, bindings) = gen_tsx_script(
+            r#"<template><div>{{ title }}</div></template>
+<script>
+// 设定数据
+export default {
+  props: ['title', 'count'],
+  data() {
+    return { msg: '你好' }
+  }
+}
+</script>"#,
+        );
+
+        // Props should be extracted correctly despite multi-byte chars
+        assert!(
+            bindings.contains_key("title"),
+            "should extract 'title' prop: {bindings:?}"
+        );
+        assert!(
+            bindings.contains_key("count"),
+            "should extract 'count' prop: {bindings:?}"
+        );
+        // Data binding
+        assert!(
+            bindings.contains_key("msg"),
+            "should extract 'msg' data binding: {bindings:?}"
+        );
+        // Should produce valid output (not panic)
+        assert!(!code.is_empty(), "should produce non-empty output");
     }
 }

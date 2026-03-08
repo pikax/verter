@@ -873,15 +873,26 @@ fn compile_inner(
                 .is_some_and(|ts| parsed.script().is_some_and(|s| ts < s.tag_open.start));
 
         if template_before_script {
-            if let (Some(ts), Some(te), Some(return_close), Some(pos)) = (
-                template_start,
-                template_end,
-                &tsx_script_result.return_close,
-                tsx_script_result.return_close_pos,
-            ) {
-                // Move the template (now transformed to JSX) to after the script close tag.
-                // return_close becomes the suffix so it appears right after the template.
-                tsx_ct.move_with_suffix(ts, te, pos, return_close);
+            if let (Some(ts), Some(te)) = (template_start, template_end) {
+                // Compute move target: after the last script closing tag
+                let move_target = tsx_script_result.return_close_pos.unwrap_or_else(|| {
+                    // Options API: no return_close_pos, use script close tag end
+                    let mut pos = te; // fallback to template end
+                    if let Some(s) = parsed.script() {
+                        if let Some(tc) = &s.tag_close {
+                            pos = pos.max(tc.end);
+                        }
+                    }
+                    if let Some(s) = parsed.script_setup() {
+                        if let Some(tc) = &s.tag_close {
+                            pos = pos.max(tc.end);
+                        }
+                    }
+                    pos
+                });
+
+                let suffix = tsx_script_result.return_close.as_deref().unwrap_or("");
+                tsx_ct.move_with_suffix(ts, te, move_target, suffix);
             }
         } else if let (Some(return_close), Some(pos)) = (
             &tsx_script_result.return_close,
