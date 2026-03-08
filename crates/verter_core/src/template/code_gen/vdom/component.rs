@@ -13,9 +13,21 @@ use super::super::types::CodeGenOutput;
 use super::element::resolve_expr;
 
 /// Determine the helper for creating this element.
-pub(super) fn vnode_helper(element: &ElementNode) -> VdomHelper {
+///
+/// When `is_block_root` is true, the element is at a block-tree root position
+/// (template root, v-if/v-else-if/v-else branch root, or v-for item root).
+/// Block roots use `_createElementBlock` / `_createBlock` instead of
+/// `_createElementVNode` / `_createVNode` so the Vue runtime can optimize
+/// patch diffing via the block tree.
+pub(super) fn vnode_helper(element: &ElementNode, is_block_root: bool) -> VdomHelper {
     if element.tag_type.is_component() {
-        VdomHelper::CreateVNode
+        if is_block_root {
+            VdomHelper::CreateBlock
+        } else {
+            VdomHelper::CreateVNode
+        }
+    } else if is_block_root {
+        VdomHelper::CreateElementBlock
     } else {
         VdomHelper::CreateElementVNode
     }

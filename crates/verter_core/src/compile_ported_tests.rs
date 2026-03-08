@@ -142,8 +142,8 @@ fn test_element_simple_div_text() {
     assert!(
         template
             .code
-            .contains(r#"_createElementVNode("div", null, "hello")"#),
-        "Root should emit _createElementVNode(\"div\", null, \"hello\"), got:\n{}",
+            .contains(r#"_createElementBlock("div", null, "hello")"#),
+        "Root should emit _createElementBlock(\"div\", null, \"hello\"), got:\n{}",
         template.code
     );
     assert!(
@@ -170,8 +170,8 @@ fn test_element_self_closing_br() {
     );
     let template = result.template.as_ref().expect("should have template");
     assert!(
-        template.code.contains(r#"_createElementVNode("br")"#),
-        "Root br should use _createElementVNode, got:\n{}",
+        template.code.contains(r#"_createElementBlock("br")"#),
+        "Root br should use _createElementBlock, got:\n{}",
         template.code
     );
 }
@@ -193,8 +193,8 @@ fn test_element_void_input() {
     );
     let template = result.template.as_ref().expect("should have template");
     assert!(
-        template.code.contains(r#"_createElementVNode("input")"#),
-        "Root void input should use _createElementVNode, got:\n{}",
+        template.code.contains(r#"_createElementBlock("input")"#),
+        "Root void input should use _createElementBlock, got:\n{}",
         template.code
     );
 }
@@ -216,8 +216,8 @@ fn test_element_empty_div() {
     );
     let template = result.template.as_ref().expect("should have template");
     assert!(
-        template.code.contains(r#"_createElementVNode("div")"#),
-        "Empty root div should use _createElementVNode, got:\n{}",
+        template.code.contains(r#"_createElementBlock("div")"#),
+        "Empty root div should use _createElementBlock, got:\n{}",
         template.code
     );
 }
@@ -240,8 +240,8 @@ fn test_element_nested() {
     );
     let template = result.template.as_ref().expect("should have template");
     assert!(
-        template.code.contains(r#"_createElementVNode("div""#),
-        "Root div should be _createElementVNode, got:\n{}",
+        template.code.contains(r#"_createElementBlock("div""#),
+        "Root div should be _createElementBlock, got:\n{}",
         template.code
     );
     assert!(
@@ -281,11 +281,11 @@ fn test_element_deeply_nested() {
 
 // =========================================================================
 // Elements — block root treatment
-// New pipeline uses _openBlock() + _createElementVNode for root elements
+// New pipeline uses _openBlock() + _createElementBlock for root elements
 // =========================================================================
 // ported from syntax/plugins/code_gen/template/tests.rs
 
-/// @ai-generated — Root element should use _openBlock + _createElementVNode
+/// @ai-generated — Root element should use _openBlock + _createElementBlock
 #[test]
 fn test_block_root_simple() {
     let allocator = Allocator::new();
@@ -307,8 +307,8 @@ fn test_block_root_simple() {
         template.code
     );
     assert!(
-        template.code.contains("_createElementVNode("),
-        "Root should use _createElementVNode, got:\n{}",
+        template.code.contains("_createElementBlock("),
+        "Root should use _createElementBlock, got:\n{}",
         template.code
     );
 }
@@ -1978,10 +1978,10 @@ fn test_v_if_block_treatment() {
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
-    // New pipeline uses plain _createElementVNode without block wrapping
+    // v-if branches use block helpers (block root)
     assert!(
-        template.code.contains("_createElementVNode("),
-        "v-if branch should use _createElementVNode, got:\n{}",
+        template.code.contains("_createElementBlock("),
+        "v-if branch should use _createElementBlock, got:\n{}",
         template.code
     );
 }
@@ -2011,8 +2011,8 @@ fn test_v_if_key_injection() {
     assert!(
         template
             .code
-            .contains(r#"_createElementVNode("div", null, "yes")"#),
-        "v-if branch should produce element, got:\n{}",
+            .contains(r#"_createElementBlock("div", null, "yes")"#),
+        "v-if branch should produce block element, got:\n{}",
         template.code
     );
 }
@@ -2256,10 +2256,10 @@ fn test_v_once_cache_pattern() {
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
-    // v-once not yet implemented — element renders normally
+    // v-once not yet implemented — element renders normally as block root
     assert!(
-        template.code.contains("_createElementVNode("),
-        "v-once should still produce _createElementVNode, got:\n{}",
+        template.code.contains("_createElementBlock("),
+        "v-once should still produce _createElementBlock (block root), got:\n{}",
         template.code
     );
     assert!(
@@ -2314,9 +2314,9 @@ fn test_v_once_cache_index() {
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
-    // v-once not yet implemented — just verify element renders
+    // v-once not yet implemented — just verify element renders as block root
     assert!(
-        template.code.contains(r#"_createElementVNode("div""#),
+        template.code.contains(r#"_createElementBlock("div""#),
         "v-once should still produce element, got:\n{}",
         template.code
     );
@@ -2338,9 +2338,9 @@ fn test_v_once_self_closing() {
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
-    // v-once not yet implemented — just verify element renders
+    // v-once not yet implemented — just verify element renders as block root
     assert!(
-        template.code.contains(r#"_createElementVNode("br")"#),
+        template.code.contains(r#"_createElementBlock("br")"#),
         "v-once self-closing should still produce element, got:\n{}",
         template.code
     );

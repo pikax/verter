@@ -1317,6 +1317,10 @@ pub(crate) fn build_props_object_into(
 /// 2. Constructs VNode call via overwrites
 /// 3. Handles props, children, patch flags
 /// 4. Returns a ChildRecord for the parent's children list
+///
+/// `is_block_root` indicates this element is at a block-tree root position
+/// (template single root, v-if branch, or v-for item). Block roots use
+/// `_createElementBlock`/`_createBlock` and get `(_openBlock(), ...)` wrapping.
 #[allow(clippy::too_many_arguments)]
 pub fn process_element_leave<'alloc>(
     element: &ElementNode,
@@ -1329,12 +1333,13 @@ pub fn process_element_leave<'alloc>(
     buf: &mut String,
     v_for_prefix: Option<&str>,
     ast: &TemplateAst,
+    is_block_root: bool,
 ) -> ChildRecord {
     let tag_open = &element.tag_open;
     debug_assert!((tag_open.start as usize + 1) <= source.len());
     debug_assert!((tag_open.name_end as usize) <= source.len());
     let tag_name = &source[tag_open.start as usize + 1..tag_open.name_end as usize];
-    let helper = vnode_helper(element);
+    let helper = vnode_helper(element, is_block_root);
 
     // Step 1: Resolve whitespace and strip interstitial condition nodes
     // Pass false: tag extension + gap-filling below cover all removed regions,
@@ -1375,17 +1380,17 @@ pub fn process_element_leave<'alloc>(
     if has_native_vmodel {
         buf.push_str("_withDirectives(");
     }
-    // v-for direct children need their own block scope so that dynamic
-    // component children are tracked in dynamicChildren and patched correctly.
-    let is_vfor_child = element.v_for.is_some() && !element.tag_type.is_component();
-    if is_vfor_child {
+    // Block root elements (v-for items, v-if branches) need their own block scope
+    // so that dynamic children are tracked in dynamicChildren and patched correctly.
+    // Template root: wrapping is handled by leave_template, not here.
+    let needs_block_wrapper =
+        is_block_root && (element.v_for.is_some() || element.v_condition.is_some());
+    if needs_block_wrapper {
         buf.push_str("(_openBlock(), ");
         out.add_vdom_import(VdomHelper::OpenBlock);
-        buf.push_str(VdomHelper::CreateElementBlock.name());
-        out.add_vdom_import(VdomHelper::CreateElementBlock);
-    } else {
-        buf.push_str(helper.name());
     }
+    buf.push_str(helper.name());
+    out.add_vdom_import(helper);
     // Check for <component :is="expr"> dynamic component (childless path)
     let dynamic_is =
         resolve_dynamic_component(element, source, oxc, resolver, out, options.force_js);
@@ -1407,9 +1412,6 @@ pub fn process_element_leave<'alloc>(
         helpers::escape_js_string_into(buf, tag_name);
         buf.push('"');
     }
-
-    // Add import for the helper
-    out.add_vdom_import(helper);
 
     // Adjust has_props to account for the skipped :is prop
     let has_props = if skip_is_prop.is_some() {
@@ -1522,8 +1524,8 @@ pub fn process_element_leave<'alloc>(
             buf.push_str(patch_suffix);
         }
         buf.push(')');
-        // Close the outer (_openBlock(), ...) wrapper for v-for children
-        if is_vfor_child {
+        // Close the outer (_openBlock(), ...) wrapper for block root elements
+        if needs_block_wrapper {
             buf.push(')');
         }
         // Close _withDirectives() wrapper for native v-model
@@ -1621,8 +1623,8 @@ pub fn process_element_leave<'alloc>(
     }
 
     buf.push(')');
-    // Close the outer (_openBlock(), ...) wrapper for v-for children
-    if is_vfor_child {
+    // Close the outer (_openBlock(), ...) wrapper for block root elements
+    if needs_block_wrapper {
         buf.push(')');
     }
     // Close _withDirectives() wrapper for native v-model

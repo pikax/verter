@@ -94,6 +94,10 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// consumed by `build_child_records` (which only sees AST data).
     /// Keyed by AST node index.
     resolved_condition_prefixes: FxHashMap<usize, String>,
+    /// Whether the template has a single effective root element (not multi-root).
+    /// Set in `enter_template`, used by `leave_element` to determine if a root
+    /// element should be a block root (`_createElementBlock` / `_createBlock`).
+    single_root: bool,
 }
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
@@ -110,6 +114,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             scope_closes: Vec::new(),
             v_for_prefixes: Vec::new(),
             resolved_condition_prefixes: FxHashMap::default(),
+            single_root: false,
         }
     }
 
@@ -310,10 +315,46 @@ fn consolidate_static_vnodes(records: &mut Vec<ChildRecord>) {
 impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
     fn enter_template(
         &mut self,
-        _root: &RootNodeTemplate,
-        _source: &'alloc str,
+        root: &RootNodeTemplate,
+        source: &'alloc str,
         _out: &mut CodeGenOutput<'alloc>,
     ) {
+        // Pre-compute whether the template has a single effective root.
+        // This determines whether root-level elements use block helpers
+        // (_createElementBlock / _createBlock) vs regular helpers.
+        let root_children = root
+            .content
+            .as_ref()
+            .map(|c| c.children.as_slice())
+            .unwrap_or(&[]);
+        let mut effective = 0usize;
+        for &child_id in root_children {
+            let node = &self.ast.nodes[child_id.0];
+            match &node.kind {
+                AstNodeKind::Element(el) => {
+                    // v-else-if / v-else continuations don't count as separate roots
+                    if el.v_condition.as_ref().is_some_and(|c| {
+                        matches!(
+                            c.kind,
+                            ElementNodeConditionKind::ElseIf | ElementNodeConditionKind::Else
+                        )
+                    }) {
+                        continue;
+                    }
+                    effective += 1;
+                }
+                AstNodeKind::Text(text) => {
+                    // Whitespace-only text nodes will be removed by leave_template
+                    let content = &source[text.start as usize..text.end as usize];
+                    if !content.trim().is_empty() {
+                        effective += 1;
+                    }
+                }
+                AstNodeKind::Interpolation(_) => effective += 1,
+                AstNodeKind::Comment(_) => {} // Comments don't count as roots
+            }
+        }
+        self.single_root = effective == 1;
         // Open tag overwrite is deferred to leave_template where we have
         // full context (children count, v-if status) to emit the correct
         // combined prefix (function signature + return + openBlock).
@@ -711,15 +752,29 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             .map(|c| c.children.as_slice())
             .unwrap_or(&[]);
 
+        // Determine if this element is at a block-tree root position.
+        // Block roots use _createElementBlock/_createBlock (with _openBlock())
+        // instead of _createElementVNode/_createVNode.
+        let is_root_child = self.ast.nodes[_id.0].parent.is_none();
+        let is_block_root =
+            el.v_condition.is_some() || el.v_for.is_some() || (is_root_child && self.single_root);
+
         // Handle component with slot children: wrap in slot object instead of array
         if el.tag_type.is_component() && self.has_slot_children(el_children) {
-            self.leave_component_with_slots(el, oxc, el_children, source, out);
+            self.leave_component_with_slots(el, oxc, el_children, source, out, is_block_root);
             return;
         }
 
         // Handle component with implicit default slot (non-slot children)
         if el.tag_type.is_component() && !el_children.is_empty() {
-            self.leave_component_with_default_slot(el, oxc, el_children, source, out);
+            self.leave_component_with_default_slot(
+                el,
+                oxc,
+                el_children,
+                source,
+                out,
+                is_block_root,
+            );
             return;
         }
 
@@ -738,6 +793,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             &mut buf,
             v_for_prefix.as_ref().map(|(s, _)| s.as_str()),
             self.ast,
+            is_block_root,
         );
         buf.clear();
         self.buf = buf;
@@ -1172,5 +1228,165 @@ mod tests {
         // Production: no comment after 64
         assert!(result.contains("\n], 64)"));
         assert!(!result.contains("/*"));
+    }
+
+    // ==================== Block-tree optimization (full pipeline) ====================
+
+    /// Helper: compile a Vue SFC source and return the template code (VDOM mode).
+    fn gen_vdom_template(source: &str) -> String {
+        use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+        let alloc = oxc_allocator::Allocator::new();
+        let options = CodegenOptions {
+            filename: Some("App.vue".to_string()),
+            ..Default::default()
+        };
+        let verter_opts = VerterCompileOptions {
+            force_js: true,
+            ..Default::default()
+        };
+        let result = compile(source, &options, &verter_opts, &alloc);
+        assert!(
+            result.errors.is_empty(),
+            "compile errors: {:?}",
+            result.errors
+        );
+        let tpl = result
+            .template
+            .as_ref()
+            .expect("should have template block");
+        tpl.code.clone()
+    }
+
+    #[test]
+    fn block_tree_single_root_element_uses_create_element_block() {
+        let code = gen_vdom_template("<template><div>hello</div></template>");
+        assert!(
+            code.contains("_createElementBlock(\"div\""),
+            "Single root element should use _createElementBlock, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_createElementVNode(\"div\""),
+            "Single root element should NOT use _createElementVNode, got:\n{code}"
+        );
+        assert!(
+            code.contains("_openBlock()"),
+            "Single root should have _openBlock(), got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn block_tree_single_root_component_uses_create_block() {
+        let code = gen_vdom_template(
+            "<template><MyComp/></template>\n<script setup>\nimport MyComp from './MyComp.vue'\n</script>",
+        );
+        assert!(
+            code.contains("_createBlock("),
+            "Single root component should use _createBlock, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_createVNode("),
+            "Single root component should NOT use _createVNode, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn block_tree_vif_element_uses_block() {
+        let code = gen_vdom_template(
+            "<template><div v-if=\"show\">A</div><span v-else>B</span></template>",
+        );
+        // Each v-if branch should have its own (_openBlock(), _createElementBlock(...))
+        assert!(
+            code.contains("(_openBlock(), _createElementBlock(\"div\""),
+            "v-if element branch should use (_openBlock(), _createElementBlock(...)), got:\n{code}"
+        );
+        assert!(
+            code.contains("(_openBlock(), _createElementBlock(\"span\""),
+            "v-else element branch should use (_openBlock(), _createElementBlock(...)), got:\n{code}"
+        );
+        // Should NOT use regular _createElementVNode for v-if branches
+        assert!(
+            !code.contains("_createElementVNode(\"div\""),
+            "v-if branch should NOT use _createElementVNode, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn block_tree_vif_component_uses_block() {
+        let code = gen_vdom_template(
+            "<template><MyComp v-if=\"show\"/><OtherComp v-else/></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nimport OtherComp from './Other.vue'\n</script>",
+        );
+        assert!(
+            code.contains("(_openBlock(), _createBlock("),
+            "v-if component branch should use (_openBlock(), _createBlock(...)), got:\n{code}"
+        );
+        assert!(
+            !code.contains("_createVNode("),
+            "v-if component should NOT use _createVNode, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn block_tree_vfor_component_uses_block() {
+        let code = gen_vdom_template(
+            "<template><div><MyComp v-for=\"item in items\" :key=\"item.id\"/></div></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst items = []\n</script>",
+        );
+        assert!(
+            code.contains("(_openBlock(), _createBlock("),
+            "v-for component should use (_openBlock(), _createBlock(...)), got:\n{code}"
+        );
+        assert!(
+            !code.contains("_createVNode("),
+            "v-for component should NOT use _createVNode, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn block_tree_multi_root_children_use_regular_helpers() {
+        // Use interpolations to ensure children are dynamic (not hoisted)
+        let code = gen_vdom_template(
+            "<template><div>{{ a }}</div><p>{{ b }}</p></template>\n<script setup>\nconst a = 1, b = 2\n</script>",
+        );
+        // Multi-root: individual children should use _createElementVNode, not block variant
+        assert!(
+            code.contains("_createElementVNode(\"div\""),
+            "Multi-root children should use _createElementVNode for div, got:\n{code}"
+        );
+        assert!(
+            code.contains("_createElementVNode(\"p\""),
+            "Multi-root children should use _createElementVNode for p, got:\n{code}"
+        );
+        // The Fragment wrapper itself should use _createElementBlock
+        assert!(
+            code.contains("_createElementBlock(_Fragment"),
+            "Multi-root should wrap in _createElementBlock(_Fragment, ...), got:\n{code}"
+        );
+        // Children should NOT use block variants
+        assert!(
+            !code.contains("_createElementBlock(\"div\""),
+            "Multi-root children should NOT use _createElementBlock, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn block_tree_inner_elements_use_regular_helpers() {
+        // Use a dynamic inner element (with :class binding) to prevent static hoisting
+        let code = gen_vdom_template(
+            "<template><div><span :class=\"cls\">inner</span></div></template>\n<script setup>\nconst cls = 'x'\n</script>",
+        );
+        // Root div should use block variant
+        assert!(
+            code.contains("_createElementBlock(\"div\""),
+            "Root element should use _createElementBlock, got:\n{code}"
+        );
+        // Inner span should use regular variant
+        assert!(
+            code.contains("_createElementVNode(\"span\""),
+            "Inner element should use _createElementVNode, got:\n{code}"
+        );
+        // Inner span should NOT use block variant
+        assert!(
+            !code.contains("_createElementBlock(\"span\""),
+            "Inner element should NOT use _createElementBlock, got:\n{code}"
+        );
     }
 }

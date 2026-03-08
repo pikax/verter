@@ -297,6 +297,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         el_children: &[NodeId],
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
+        is_block_root: bool,
     ) {
         // Check for <component :is="expr"> -> _resolveDynamicComponent
         let dynamic_is = component::resolve_dynamic_component(
@@ -315,7 +316,12 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
             component::resolve_component_tag(tag_name, &self.resolver, out, &self.options.self_name)
         };
-        out.add_vdom_import(VdomHelper::CreateVNode);
+        let comp_helper = if is_block_root {
+            VdomHelper::CreateBlock
+        } else {
+            VdomHelper::CreateVNode
+        };
+        out.add_vdom_import(comp_helper);
 
         // Build child records for separator logic
         let mut children = self.build_child_records(el_children, source);
@@ -355,7 +361,15 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             buf.push_str(prefix);
         }
 
-        buf.push_str("_createVNode(");
+        // Block root wrapping for v-for/v-if
+        let needs_block_wrapper = is_block_root && (el.v_for.is_some() || el.v_condition.is_some());
+        if needs_block_wrapper {
+            buf.push_str("(_openBlock(), ");
+            out.add_vdom_import(VdomHelper::OpenBlock);
+        }
+
+        buf.push_str(comp_helper.name());
+        buf.push('(');
         buf.push_str(&resolved);
 
         // Props
@@ -460,7 +474,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
 
         buf.clear();
         if has_children && any_dynamic {
-            // Dynamic: close the _createSlots array and _createVNode
+            // Dynamic: close the _createSlots array and component call
             buf.push_str("]))");
         } else if has_children {
             // Static: close the slot object
@@ -491,6 +505,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
             buf.push(')');
         } else {
+            buf.push(')');
+        }
+        // Close the outer (_openBlock(), ...) wrapper for block root components
+        if needs_block_wrapper {
             buf.push(')');
         }
 
@@ -702,6 +720,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         el_children: &[NodeId],
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
+        is_block_root: bool,
     ) {
         // Check for <component :is="expr"> -> _resolveDynamicComponent
         let dynamic_is = component::resolve_dynamic_component(
@@ -720,7 +739,12 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
             component::resolve_component_tag(tag_name, &self.resolver, out, &self.options.self_name)
         };
-        out.add_vdom_import(VdomHelper::CreateVNode);
+        let comp_helper = if is_block_root {
+            VdomHelper::CreateBlock
+        } else {
+            VdomHelper::CreateVNode
+        };
+        out.add_vdom_import(comp_helper);
         out.add_vdom_import(VdomHelper::WithCtx);
 
         let mut children = self.build_child_records(el_children, source);
@@ -745,7 +769,15 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             buf.push_str(prefix);
         }
 
-        buf.push_str("_createVNode(");
+        // Block root wrapping for v-for/v-if
+        let needs_block_wrapper = is_block_root && (el.v_for.is_some() || el.v_condition.is_some());
+        if needs_block_wrapper {
+            buf.push_str("(_openBlock(), ");
+            out.add_vdom_import(VdomHelper::OpenBlock);
+        }
+
+        buf.push_str(comp_helper.name());
+        buf.push('(');
         buf.push_str(&resolved);
 
         let dynamic_props = if has_props {
@@ -793,6 +825,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             // Overwrite the entire element [open_start, close_end) with the
             // component call (avoids leaving raw `</Component>` in output).
             buf.push(')');
+            if needs_block_wrapper {
+                buf.push(')');
+            }
             out.overwrite(el.tag_open.start, tag_end, &buf);
             buf.clear();
             self.buf = buf;
@@ -875,6 +910,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             buf.push(']');
         }
         buf.push(')');
+        // Close the outer (_openBlock(), ...) wrapper for block root components
+        if needs_block_wrapper {
+            buf.push(')');
+        }
 
         let close_start = children.last().unwrap().end;
         out.overwrite(close_start, tag_end, &buf);

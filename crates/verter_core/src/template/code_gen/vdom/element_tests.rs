@@ -428,6 +428,7 @@ fn self_closing_no_props() {
         &mut buf,
         None,
         &make_ast(),
+        false, // not block root (inner element test)
     );
 
     assert_eq!(record.kind, ChildKind::Element);
@@ -469,6 +470,7 @@ fn empty_element_no_props() {
         &mut buf,
         None,
         &make_ast(),
+        false, // not block root (inner element test)
     );
 
     assert_eq!(record.kind, ChildKind::Element);
@@ -516,6 +518,7 @@ fn element_with_static_text() {
         &mut buf,
         None,
         &make_ast(),
+        false, // not block root (inner element test)
     );
 
     let result = apply_output(source, out, &alloc);
@@ -566,6 +569,7 @@ fn element_with_static_class() {
         &mut buf,
         None,
         &make_ast(),
+        false, // not block root (inner element test)
     );
 
     let result = apply_output(source, out, &alloc);
@@ -624,6 +628,7 @@ fn element_with_multiple_static_props() {
         &mut buf,
         None,
         &make_ast(),
+        false, // not block root (inner element test)
     );
 
     let result = apply_output(source, out, &alloc);
@@ -684,6 +689,7 @@ fn element_with_props_and_text_child() {
         &mut buf,
         None,
         &make_ast(),
+        false, // not block root (inner element test)
     );
 
     let result = apply_output(source, out, &alloc);
@@ -728,6 +734,7 @@ fn element_with_boolean_attr() {
         &mut buf,
         None,
         &make_ast(),
+        false, // not block root (inner element test)
     );
 
     let result = apply_output(source, out, &alloc);
@@ -778,6 +785,7 @@ fn element_with_click_handler() {
         &mut buf,
         None,
         &make_ast(),
+        false, // not block root (inner element test)
     );
 
     let result = apply_output(source, out, &alloc);
@@ -850,6 +858,7 @@ fn element_with_leading_trailing_whitespace_removed() {
         &mut buf,
         None,
         &make_ast(),
+        false, // not block root (inner element test)
     );
 
     let result = apply_output(source, out, &alloc);
