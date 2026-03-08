@@ -218,6 +218,25 @@ pub fn run(
          export default component\n}\n",
     );
 
+    // Augment Vue's HTMLAttributes with `children` so JSX children on intrinsic
+    // elements don't cause TS2322/TS2559 errors. This must be in a separate file
+    // because a top-level `import` would turn vue-shims.d.ts into a module,
+    // breaking the ambient `declare module '*.vue'` declaration.
+    let html_attrs_path = temp_dir.path().join("html-attrs-augment.d.ts");
+    let _ = fs::write(
+        &html_attrs_path,
+        "import '@vue/runtime-dom'\n\
+         declare module '@vue/runtime-dom' {\n  \
+           interface HTMLAttributes {\n    \
+             children?: any\n  \
+           }\n  \
+           interface SVGAttributes {\n    \
+             children?: any\n  \
+           }\n\
+         }\n\
+         export {}\n",
+    );
+
     // Write a single shared @verter/types declaration file. Individual TSX files
     // import from "@verter/types" but don't embed the ambient module block
     // (embed_ambient_types=false), avoiding duplicate declarations across files.
@@ -226,7 +245,7 @@ pub fn run(
 
     // Build validation file list (Phase A TSX files).
     let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
-    let mut validation_paths: Vec<PathBuf> = vec![shims_path.clone(), types_path];
+    let mut validation_paths: Vec<PathBuf> = vec![shims_path.clone(), html_attrs_path, types_path];
 
     for (vue_path, tsx_code, tsx_path) in &validation_generated {
         let canon = strip_unc_prefix(&tsx_path.canonicalize().unwrap_or_else(|_| tsx_path.clone()));
@@ -512,6 +531,8 @@ fn remap_diagnostics(
     tsx_to_vue: &HashMap<String, (PathBuf, String)>,
 ) -> Vec<Diagnostic> {
     raw.into_iter()
+        .filter(|d| !is_vue_jsx_children_error(d))
+        .filter(|d| !is_temp_tsconfig_error(d))
         .map(|d| {
             // Try to find a matching vue entry using a suffix match on the file path.
             let file_canon = strip_unc_prefix(
@@ -568,6 +589,27 @@ fn remap_diagnostics(
             d.into_diagnostic(remapped_file, remapped_line, remapped_col)
         })
         .collect()
+}
+
+/// Check if a diagnostic is a TS2322 or TS2559 "children not assignable to HTMLAttributes"
+/// false positive. Vue's `@vue/runtime-dom` `HTMLAttributes` interface lacks a `children`
+/// property, so every JSX element with children triggers this error. A module augmentation
+/// in `html-attrs-augment.d.ts` fixes this for tsc, but tsgo (preview) doesn't support
+/// module augmentation yet. Filter these known false positives.
+fn is_vue_jsx_children_error(d: &TscDiagnostic) -> bool {
+    matches!(d.ts_code, 2322 | 2559)
+        && d.message.contains("children")
+        && (d.message.contains("HTMLAttributes")
+            || d.message.contains("SVGAttributes")
+            || d.message.contains("ReservedProps"))
+}
+
+/// Filter out diagnostics from the generated temporary tsconfig file itself.
+/// These are config-level warnings (e.g. TS5102 "baseUrl removed", TS5090 "non-relative paths")
+/// that come from settings inherited from the user's tsconfig. They're not actionable for
+/// the user because they originate from verter-tsc's internal temp config.
+fn is_temp_tsconfig_error(d: &TscDiagnostic) -> bool {
+    d.file.contains("verter-tsc-") && d.file.ends_with(".tsconfig.json")
 }
 
 /// Collect all `.d.ts` files under a directory.
@@ -1490,6 +1532,143 @@ mod tests {
         assert!(
             !root_dir_val.contains('\\'),
             "rootDir should use forward slashes: {root_dir_val}"
+        );
+    }
+
+    #[test]
+    fn is_vue_jsx_children_error_filters_correctly() {
+        use crate::reporter::{Severity, TscDiagnostic};
+
+        // TS2322 with children + HTMLAttributes → filter out
+        let d = TscDiagnostic {
+            file: "test.tsx".into(),
+            line: 1,
+            col: 1,
+            severity: Severity::Error,
+            ts_code: 2322,
+            message: "Type '{ class: string; children: Element[]; }' is not assignable to type 'HTMLAttributes & ReservedProps'.".into(),
+        };
+        assert!(
+            is_vue_jsx_children_error(&d),
+            "should filter TS2322 with children+HTMLAttributes"
+        );
+
+        // TS2559 with children + HTMLAttributes → filter out
+        let d2 = TscDiagnostic {
+            file: "test.tsx".into(),
+            line: 1,
+            col: 1,
+            severity: Severity::Error,
+            ts_code: 2559,
+            message: "Type '{ children: string; }' has no properties in common with type 'HTMLAttributes'.".into(),
+        };
+        assert!(
+            is_vue_jsx_children_error(&d2),
+            "should filter TS2559 with children+HTMLAttributes"
+        );
+
+        // TS2322 with children + SVGAttributes → filter out
+        let d3 = TscDiagnostic {
+            file: "test.tsx".into(),
+            line: 1,
+            col: 1,
+            severity: Severity::Error,
+            ts_code: 2322,
+            message: "Type '{ children: Element; }' is not assignable to type 'SVGAttributes & ReservedProps'.".into(),
+        };
+        assert!(
+            is_vue_jsx_children_error(&d3),
+            "should filter TS2322 with children+SVGAttributes"
+        );
+
+        // TS2322 WITHOUT children → keep
+        let d4 = TscDiagnostic {
+            file: "test.tsx".into(),
+            line: 1,
+            col: 1,
+            severity: Severity::Error,
+            ts_code: 2322,
+            message: "Type '{ class: string; }' is not assignable to type 'HTMLAttributes'.".into(),
+        };
+        assert!(
+            !is_vue_jsx_children_error(&d4),
+            "should not filter TS2322 without children"
+        );
+
+        // TS2304 (different code) → keep even with children in message
+        let d5 = TscDiagnostic {
+            file: "test.tsx".into(),
+            line: 1,
+            col: 1,
+            severity: Severity::Error,
+            ts_code: 2304,
+            message: "Cannot find name 'children'.".into(),
+        };
+        assert!(
+            !is_vue_jsx_children_error(&d5),
+            "should not filter non-2322/2559 errors"
+        );
+
+        // TS2322 with children but NOT HTMLAttributes/SVGAttributes → keep
+        let d6 = TscDiagnostic {
+            file: "test.tsx".into(),
+            line: 1,
+            col: 1,
+            severity: Severity::Error,
+            ts_code: 2322,
+            message: "Type '{ children: string; }' is not assignable to type 'MyComponentProps'."
+                .into(),
+        };
+        assert!(
+            !is_vue_jsx_children_error(&d6),
+            "should not filter TS2322 on custom component props"
+        );
+    }
+
+    #[test]
+    fn is_temp_tsconfig_error_filters_correctly() {
+        use crate::reporter::{Severity, TscDiagnostic};
+
+        // Error from temp tsconfig → filter out
+        let d = TscDiagnostic {
+            file: "/project/.tmpABC/verter-tsc-check.tsconfig.json".into(),
+            line: 2,
+            col: 3,
+            severity: Severity::Error,
+            ts_code: 5102,
+            message: "Option 'baseUrl' has been removed.".into(),
+        };
+        assert!(
+            is_temp_tsconfig_error(&d),
+            "should filter temp tsconfig errors"
+        );
+
+        // Error from user's tsconfig → keep
+        let d2 = TscDiagnostic {
+            file: "/project/tsconfig.json".into(),
+            line: 1,
+            col: 1,
+            severity: Severity::Error,
+            ts_code: 5102,
+            message: "Option 'baseUrl' has been removed.".into(),
+        };
+        assert!(
+            !is_temp_tsconfig_error(&d2),
+            "should not filter user tsconfig errors"
+        );
+
+        // Error from source file → keep
+        let d3 = TscDiagnostic {
+            file: "/project/src/App.vue".into(),
+            line: 1,
+            col: 1,
+            severity: Severity::Error,
+            ts_code: 2322,
+            message: "Type error".into(),
+        };
+        assert!(
+            !is_temp_tsconfig_error(&d3),
+            "should not filter source file errors"
         );
     }
 }
