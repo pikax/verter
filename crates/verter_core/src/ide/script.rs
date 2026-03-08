@@ -1052,6 +1052,11 @@ fn process_tsx_script_setup<'alloc>(
                     .map(|g| g.names_bracket())
                     .unwrap_or_default()
             };
+            let prop_names: rustc_hash::FxHashSet<&str> = bindings
+                .iter()
+                .filter(|(_, bt)| bt.is_props())
+                .map(|(name, _)| *name)
+                .collect();
             let (root_comp_entries, all_comp_offsets) = emit_comp_functions_to_string(
                 &mut tail,
                 &gs,
@@ -1059,6 +1064,7 @@ fn process_tsx_script_setup<'alloc>(
                 template_ast,
                 source,
                 options.is_jsx,
+                &prop_names,
             );
             // Analyze root conditions for narrowing (when enabled and multiple branches)
             let narrowing_result = if options.conditional_root_narrowing
@@ -3490,7 +3496,7 @@ fn build_binding_source_info<'a>(
 ///
 /// See also [`VERTER_TYPES_STANDALONE_DTS`] for the unwrapped version (used by
 /// the LSP to materialise `node_modules/@verter/types/index.d.ts` on disk).
-const VERTER_TYPES_AMBIENT_MODULE: &str = r#"
+pub const VERTER_TYPES_AMBIENT_MODULE: &str = r#"
 declare module "@verter/types" {
   export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
   export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
@@ -3766,6 +3772,7 @@ fn emit_comp_functions_to_string(
     template_ast: Option<&TemplateAst>,
     source: &str,
     is_jsx: bool,
+    prop_names: &rustc_hash::FxHashSet<&str>,
 ) -> (Vec<(u32, String, Option<String>)>, Vec<u32>) {
     let ast = match template_ast {
         Some(a) => a,
@@ -3820,6 +3827,7 @@ fn emit_comp_functions_to_string(
         &mut all_comp_offsets,
         emit_root_comps,
         is_jsx,
+        prop_names,
     );
 
     (root_comp_entries, all_comp_offsets)
@@ -4110,6 +4118,7 @@ fn walk_children_for_comp(
     all_comp_offsets: &mut Vec<u32>,
     emit_root_comps: bool,
     is_jsx: bool,
+    prop_names: &rustc_hash::FxHashSet<&str>,
 ) {
     for &child_id in children {
         let node = &ast.nodes[child_id.0];
@@ -4196,7 +4205,7 @@ fn walk_children_for_comp(
                 is_eligible && (el.v_ref.is_some() || emit_root_comps || has_vslot_children);
             if needs_comp {
                 let offset = el.tag_open.start;
-                let props_lit = serialize_element_props(el, source);
+                let props_lit = serialize_element_props(el, source, prop_names);
                 emit_comp_function_for_element(
                     buf,
                     gs,
@@ -4295,6 +4304,7 @@ fn walk_children_for_comp(
                     all_comp_offsets,
                     false,
                     is_jsx,
+                    prop_names,
                 );
             }
         }
@@ -4385,7 +4395,11 @@ fn collect_sibling_negations_raw(
 /// Iterates `el.props` to produce `{"id": "app", "onClick": handler}`.
 /// Skips `class` and `style` (Vue handles these specially).
 /// Structural directives (v-if, v-for, etc.) are already taken out of `el.props`.
-fn serialize_element_props(el: &ElementNode, source: &str) -> String {
+fn serialize_element_props(
+    el: &ElementNode,
+    source: &str,
+    prop_names: &rustc_hash::FxHashSet<&str>,
+) -> String {
     let mut entries: Vec<String> = Vec::new();
 
     for prop in &el.props {
@@ -4423,7 +4437,11 @@ fn serialize_element_props(el: &ElementNode, source: &str) -> String {
                 }
                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                     let expr = &source[vs as usize..ve as usize];
-                    entries.push(format!("\"{}\": {}", arg_name, expr));
+                    // If the expression is a bare identifier matching a prop name,
+                    // prefix with `__props.` since props aren't destructured at
+                    // script scope (where Comp functions live).
+                    let resolved = resolve_prop_refs_in_expr(expr, prop_names);
+                    entries.push(format!("\"{}\": {}", arg_name, resolved));
                 }
             } else if name == "@" || name == "v-on" {
                 // Event handler: @name="expr" → "onName": () => {}
@@ -4441,6 +4459,34 @@ fn serialize_element_props(el: &ElementNode, source: &str) -> String {
         "{}".to_string()
     } else {
         format!("{{{}}}", entries.join(", "))
+    }
+}
+
+/// Resolve prop references in a template expression for use in Comp functions.
+///
+/// Props are available as `__props.name` at script scope (not destructured),
+/// so bare identifiers matching prop names need `__props.` prefix.
+///
+/// For simple identifiers (e.g., `tag` → `__props.tag`) this is straightforward.
+/// For member expressions (e.g., `tag.value` where `tag` is a prop), prefix the
+/// root identifier. For complex expressions, scan for leading identifier tokens.
+fn resolve_prop_refs_in_expr(expr: &str, prop_names: &rustc_hash::FxHashSet<&str>) -> String {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return expr.to_string();
+    }
+
+    // Extract the leading identifier from the expression.
+    // e.g., "tag" → "tag", "tag.value" → "tag", "items[0]" → "items"
+    let ident_end = trimmed
+        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
+        .unwrap_or(trimmed.len());
+    let leading_ident = &trimmed[..ident_end];
+
+    if !leading_ident.is_empty() && prop_names.contains(leading_ident) {
+        format!("__props.{}", trimmed)
+    } else {
+        expr.to_string()
     }
 }
 
@@ -5765,6 +5811,46 @@ import MyComp from './MyComp.vue'
         assert!(
             !code.contains("new MyComp("),
             "should NOT use new for component instantiation: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn root_attrs_dynamic_component_prop_binding_prefixed() {
+        // When a prop is used in `:is="propName"`, the generated Comp function
+        // and getRootComponentPassedProps must emit `__props.propName` (not bare
+        // `propName`) because props are not destructured at script scope.
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+defineProps<{ tag?: string }>()
+</script>
+<template><component :is="tag"><slot /></component></template>"#,
+        );
+        // Positive: props literal should reference __props.tag, not bare tag
+        let passed_section = code
+            .split("getRootComponentPassedProps")
+            .nth(1)
+            .unwrap_or("")
+            .split('}')
+            .nth(1) // skip the first } which closes the return object
+            .unwrap_or("");
+        assert!(
+            code.contains(r#""is": __props.tag"#),
+            "prop reference in :is should be prefixed with __props.: {}",
+            code
+        );
+        // Negative: bare `tag` (without __props.) should NOT appear in props literal
+        // (except as a key name in quotes)
+        let passed_body = code
+            .split("getRootComponentPassedProps")
+            .nth(1)
+            .unwrap_or("")
+            .split('}')
+            .next()
+            .unwrap_or("");
+        assert!(
+            !passed_body.contains(": tag}") && !passed_body.contains(": tag,"),
+            "bare prop name should NOT appear as value in passed props: {}",
             code
         );
     }

@@ -268,12 +268,18 @@ fn walk_element<'a, 'alloc>(
     // Handle the element tag itself
     let tag_name = &ctx.source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
 
+    // Track whether dynamic <component :is> needs IIFE closing after element
+    let mut needs_component_is_iife_close = false;
+
     // Convert tag for components
     match el.tag_type {
         TagType::Component => {
             // Handle `<component is="...">` / `<component :is="...">`.
-            if tag_name == "component" {
-                rewrite_component_is(el, oxc_el, ctx.source, ctx.out, ctx.resolver);
+            // Dynamic `:is` wraps the element in an IIFE — needs closing after element end.
+            if tag_name == "component"
+                && rewrite_component_is(el, oxc_el, ctx.source, ctx.out, ctx.resolver)
+            {
+                needs_component_is_iife_close = true;
             }
         }
         TagType::Template => {
@@ -432,6 +438,18 @@ fn walk_element<'a, 'alloc>(
         }
     }
 
+    // Close dynamic <component :is> IIFE wrapper — must be before v-if/v-for close
+    // so the IIFE is innermost: `{(() => { ...; return <comp/>; })()}`
+    if needs_component_is_iife_close {
+        let el_end = el
+            .tag_close
+            .as_ref()
+            .map(|tc| tc.end)
+            .unwrap_or(el.tag_open.end);
+        let iife_close = if has_v_for { "; })()" } else { "; })()}" };
+        ctx.out.prepend_alloc(el_end, iife_close);
+    }
+
     // Close v-if IIFE (skip for <template v-if v-slot>)
     if emit_iife {
         directives::emit_v_if_close(el, ctx.source, ctx.out);
@@ -533,7 +551,11 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                     .v_condition
                     .as_ref()
                     .is_some_and(|c| c.kind == ElementNodeConditionKind::If);
-            if !uses_ternary {
+            // <template v-if v-slot> — v-if is handled by slot codegen, not IIFE
+            let is_slot_template = child_el.tag_type == TagType::Template
+                && child_el.v_condition.is_some()
+                && child_el.v_slot.is_some();
+            if !uses_ternary && !is_slot_template {
                 if let Some(ref cond) = child_el.v_condition {
                     match cond.kind {
                         ElementNodeConditionKind::If => {
@@ -553,7 +575,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                     }
                 }
             } else {
-                // v-if + v-for uses ternary — flush pending
+                // v-if + v-for uses ternary OR slot template — flush pending
                 if let Some(pos) = pending_iife_close_pos.take() {
                     ctx.out.prepend_alloc(pos, "}}");
                 }
@@ -561,11 +583,20 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
         } else {
             // Text/comment/interpolation — flush pending, unless the next
             // non-whitespace sibling continues the v-if chain (v-else-if/v-else)
-            if pending_iife_close_pos.is_some()
-                && !next_sibling_continues_v_if_chain(children, idx, ctx.ast, ctx.source)
-            {
+            let chain_continues = pending_iife_close_pos.is_some()
+                && next_sibling_continues_v_if_chain(children, idx, ctx.ast, ctx.source);
+            if pending_iife_close_pos.is_some() && !chain_continues {
                 if let Some(pos) = pending_iife_close_pos.take() {
                     ctx.out.prepend_alloc(pos, "}}");
+                }
+            }
+
+            // Suppress comments between v-if/v-else-if/v-else siblings.
+            // JSX comments ({/* */}) between `}` and `else{` break the JS control flow.
+            if chain_continues {
+                if let AstNodeKind::Comment(c) = &child_node.kind {
+                    ctx.out.overwrite(c.start, c.end, "");
+                    continue;
                 }
             }
         }
@@ -593,14 +624,19 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
         }
 
         // After walking, track IIFE close position for v-if/v-else-if.
-        // Skip for v-if + v-for elements which use ternary instead of IIFE.
+        // Skip for elements that don't emit IIFE wrapping:
+        // - v-if + v-for: uses ternary instead of IIFE
+        // - <template v-if v-slot>: v-if handled by slot codegen, no IIFE
         if let AstNodeKind::Element(child_el) = &ctx.ast.nodes[child_id.0].kind {
             let uses_ternary = child_el.v_for.is_some()
                 && child_el
                     .v_condition
                     .as_ref()
                     .is_some_and(|c| c.kind == ElementNodeConditionKind::If);
-            if !uses_ternary {
+            let is_slot_template = child_el.tag_type == TagType::Template
+                && child_el.v_condition.is_some()
+                && child_el.v_slot.is_some();
+            if !uses_ternary && !is_slot_template {
                 if let Some(ref cond) = child_el.v_condition {
                     let el_end = child_el
                         .tag_close
@@ -821,13 +857,15 @@ fn collect_sibling_negations<'alloc>(
     negations
 }
 
+/// Rewrite `<component :is="expr">` to use `extractRenderComponent`.
+/// Returns `true` if the dynamic `:is` pattern was used (requires IIFE close after element).
 fn rewrite_component_is<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
-) {
+) -> bool {
     let static_is_prop = el.props.iter().find(|prop| {
         if prop.is_directive {
             return false;
@@ -838,15 +876,15 @@ fn rewrite_component_is<'alloc>(
     // 1) Static `is="div"`
     if let Some(is_prop) = static_is_prop {
         let (Some(value_start), Some(value_end)) = (is_prop.value_start, is_prop.value_end) else {
-            return;
+            return false;
         };
         if value_end <= value_start {
-            return;
+            return false;
         }
 
         let target_tag = source[value_start as usize..value_end as usize].trim();
         if target_tag.is_empty() {
-            return;
+            return false;
         }
 
         rewrite_component_tag_name(el, target_tag, out);
@@ -854,7 +892,7 @@ fn rewrite_component_is<'alloc>(
         // Remove `is="..."`
         let is_prop_end = props::get_prop_end(is_prop);
         out.overwrite(is_prop.start, is_prop_end, "");
-        return;
+        return false;
     }
 
     // 2) Dynamic `:is="expr"` / `v-bind:is="expr"`
@@ -872,20 +910,20 @@ fn rewrite_component_is<'alloc>(
     });
 
     let Some((bind_is_index, bind_is_prop)) = bind_is_result else {
-        return;
+        return false;
     };
 
     let (Some(value_start), Some(value_end)) = (bind_is_prop.value_start, bind_is_prop.value_end)
     else {
-        return;
+        return false;
     };
     if value_end <= value_start {
-        return;
+        return false;
     }
 
     let value_expr = source[value_start as usize..value_end as usize].trim();
     if value_expr.is_empty() {
-        return;
+        return false;
     }
 
     // All dynamic :is expressions use extractRenderComponent wrapper.
@@ -902,15 +940,31 @@ fn rewrite_component_is<'alloc>(
         resolver.resolve_simple_expr(value_expr)
     };
 
+    // Wrap in IIFE so the `const` declaration is valid in any context.
+    // In JSX children: {(() => { const comp = ...; return <comp/>; })()}
+    // In v-for body:    (() => { const comp = ...; return <comp/>; })()
+    // The outer {} is JSX expression syntax — needed in JSX but causes
+    // a parse error in v-for's `=> (...)` expression context (parsed as object literal).
     let temp_name = "___VERTER___component_render";
-    let prefix = format!("const {}=___VERTER___extractRenderComponent(", temp_name);
-    let content = format!("{}{});\n", prefix, resolved_expr);
+    let in_v_for = el.v_for.is_some();
+    let iife_prefix = if in_v_for {
+        format!(
+            "(() => {{ const {}=___VERTER___extractRenderComponent(",
+            temp_name
+        )
+    } else {
+        format!(
+            "{{(() => {{ const {}=___VERTER___extractRenderComponent(",
+            temp_name
+        )
+    };
+    let content = format!("{}{}); return ", iife_prefix, resolved_expr);
     // Use mapped emission so the expression gets a source map token.
     // This allows TSGO to map hover positions back to the Vue template.
     out.prepend_alloc_mapped_with_offset(
         el.tag_open.start,
         value_start,
-        prefix.len() as u32,
+        iife_prefix.len() as u32,
         &content,
     );
     rewrite_component_tag_name(el, temp_name, out);
@@ -918,15 +972,19 @@ fn rewrite_component_is<'alloc>(
     // Remove `:is="..."`
     let prop_end = props::get_prop_end(bind_is_prop);
     out.overwrite(bind_is_prop.start, prop_end, "");
+    true
 }
 
 fn rewrite_component_tag_name(el: &ElementNode, target_tag: &str, out: &mut CodeGenOutput<'_>) {
     // Rewrite opening `<component` to `<targetTag`.
     out.overwrite(el.tag_open.start + 1, el.tag_open.name_end, target_tag);
 
-    // Rewrite closing `</component>` if present.
+    // Rewrite closing `</component>` (or `</component :is="as">`) if present.
+    // Use `end - 1` instead of `name_end` to strip any trailing attributes on
+    // the closing tag (e.g., `</component :is="as">` is technically valid HTML
+    // but produces invalid JSX if the attributes are preserved).
     if let Some(tag_close) = &el.tag_close {
-        out.overwrite(tag_close.start + 2, tag_close.name_end, target_tag);
+        out.overwrite(tag_close.start + 2, tag_close.end - 1, target_tag);
     }
 }
 
@@ -1034,12 +1092,13 @@ fn collect_slot_props(
             if attr_name == "name" {
                 continue; // Skip name attribute
             }
+            let key = quote_prop_key_if_needed(attr_name);
             // Static attribute: name="value"
             if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                 let value = &source[vs as usize..ve as usize];
-                parts.push(format!("{}: \"{}\"", attr_name, value));
+                parts.push(format!("{}: \"{}\"", key, value));
             } else {
-                parts.push(format!("{}: true", attr_name));
+                parts.push(format!("{}: true", key));
             }
         } else {
             let dir_name = directive_name(prop, source);
@@ -1050,6 +1109,7 @@ fn collect_slot_props(
                         if arg == "name" {
                             continue; // Skip :name
                         }
+                        let key = quote_prop_key_if_needed(arg);
                         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                             let raw = &source[vs as usize..ve as usize];
                             let oxc_prop =
@@ -1063,7 +1123,7 @@ fn collect_slot_props(
                             } else {
                                 resolver.resolve_simple_expr(raw)
                             };
-                            parts.push(format!("{}: {}", arg, resolved));
+                            parts.push(format!("{}: {}", key, resolved));
                         }
                     }
                 }
@@ -1075,6 +1135,16 @@ fn collect_slot_props(
     }
 
     parts.join(", ")
+}
+
+/// Quote a property key if it's not a valid JS identifier (e.g., contains hyphens).
+/// `item-class` → `"item-class"`, `itemClass` → `itemClass` (unchanged).
+fn quote_prop_key_if_needed(key: &str) -> String {
+    if is_valid_js_ident(key) {
+        key.to_string()
+    } else {
+        format!("\"{}\"", key)
+    }
 }
 
 /// Visit a text node.

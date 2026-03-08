@@ -78,7 +78,7 @@ fn generate_all_tsx(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, Str
                 filename: Some(filename),
                 target: CompileTarget::TSX,
                 skip_source_map: false,
-                embed_ambient_types: true,
+                embed_ambient_types: false,
                 ..Default::default()
             };
             let verter_options = VerterCompileOptions {
@@ -218,9 +218,15 @@ pub fn run(
          export default component\n}\n",
     );
 
+    // Write a single shared @verter/types declaration file. Individual TSX files
+    // import from "@verter/types" but don't embed the ambient module block
+    // (embed_ambient_types=false), avoiding duplicate declarations across files.
+    let types_path = temp_dir.path().join("__verter_types.d.ts");
+    let _ = fs::write(&types_path, verter_core::VERTER_TYPES_AMBIENT_MODULE);
+
     // Build validation file list (Phase A TSX files).
     let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
-    let mut validation_paths: Vec<PathBuf> = vec![shims_path.clone()];
+    let mut validation_paths: Vec<PathBuf> = vec![shims_path.clone(), types_path];
 
     for (vue_path, tsx_code, tsx_path) in &validation_generated {
         let canon = strip_unc_prefix(&tsx_path.canonicalize().unwrap_or_else(|_| tsx_path.clone()));

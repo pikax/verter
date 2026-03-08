@@ -396,7 +396,7 @@ fn v_for_with_props_binding_attribute_removed() {
         result
     );
     assert!(
-        result.contains("__props.list.map("),
+        result.contains("__props.list).map("),
         "iterable should get __props. prefix, got: {}",
         result
     );
@@ -610,8 +610,15 @@ fn v_for_numeric_range() {
         "v-for must be removed, got: {}",
         result
     );
+    // Numeric range must be wrapped in Array.from() — calling .map() directly on
+    // a number literal (e.g., `10.map(...)`) is invalid JavaScript.
     assert!(
-        result.contains("10.map("),
+        result.contains("Array.from({length: 10}"),
+        "numeric range should use Array.from(), got: {}",
+        result
+    );
+    assert!(
+        result.contains(".map("),
         "numeric range should be iterable in .map(), got: {}",
         result
     );
@@ -652,7 +659,7 @@ fn v_for_setup_ref_iterable_binding() {
         result
     );
     assert!(
-        result.contains("todos.map(") && !result.contains("todos.value"),
+        result.contains("todos).map(") && !result.contains("todos.value"),
         "SetupRef iterable should be bare identifier in TSX mode (no .value), got: {}",
         result
     );
@@ -3155,4 +3162,197 @@ fn v_for_destructured_no_instance_prefix() {
         "destructured v-for param 'email' must NOT get instance prefix, got: {}",
         result
     );
+}
+
+// ── Bug fix tests: verter-tsc false errors ──────────────────────────
+
+#[test]
+fn template_v_if_v_slot_no_orphan_iife_close() {
+    // Bug: <template v-if v-slot> skips IIFE open but walker adds orphan }} close
+    let result = gen_tsx_template(
+        r#"<template><MyComp><template v-if="hasSlot" #indicator="bind"><slot name="indicator" /></template></MyComp></template>"#,
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // Should not have orphan `}}` (IIFE close without matching open)
+    // The JSX should be well-structured
+    assert!(
+        !result.contains("</>}}"),
+        "should not have orphan IIFE close after slot template, got: {}",
+        result
+    );
+}
+
+#[test]
+fn dynamic_component_closing_tag_no_attributes() {
+    // Bug: </component :is="as"> leaks attributes onto JSX closing tag
+    let result = gen_tsx_template(
+        r#"<template><component :is="tag">child</component :is="tag"></template>"#,
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // POSITIVE: should have the component render variable
+    assert!(
+        result.contains("___VERTER___component_render"),
+        "should use component_render for dynamic :is, got: {}",
+        result
+    );
+
+    // NEGATIVE: closing tag must NOT contain attributes
+    assert!(
+        !result.contains("</___VERTER___component_render :is"),
+        "closing tag must not have :is attribute, got: {}",
+        result
+    );
+    assert!(
+        !result.contains(r#"</___VERTER___component_render "#),
+        "closing tag must not have trailing content after tag name, got: {}",
+        result
+    );
+}
+
+#[test]
+fn v_for_numeric_range_valid_tsx() {
+    // Bug: v-for="i in 12" generates 12.map(...) which is invalid JS
+    let result =
+        gen_tsx_template(r#"<template><i v-for="i in 12" :key="i" class="line" /></template>"#);
+    eprintln!("TSX output:\n{}", result);
+
+    // POSITIVE: should have a .map() call
+    assert!(
+        result.contains(".map("),
+        "should generate a .map() call, got: {}",
+        result
+    );
+
+    // NEGATIVE: must NOT call .map() directly on a numeric literal
+    assert!(
+        !result.contains("12.map("),
+        "must not call .map() on numeric literal, got: {}",
+        result
+    );
+    // Also check that we don't get 12 followed by .map without space
+    assert!(
+        !result.contains("12 .map("),
+        "must not call .map() on numeric literal with space, got: {}",
+        result
+    );
+}
+
+#[test]
+fn v_for_numeric_expression_range_valid_tsx() {
+    // Bug: v-for="i in count + 1" where count+1 might be a numeric expression
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div v-for="i in count" :key="i">{{ i }}</div></template>"#,
+        &[("count", BindingType::SetupRef)],
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // Non-literal iterables should still work with .map()
+    assert!(
+        result.contains(".map("),
+        "should generate .map() for non-literal iterables, got: {}",
+        result
+    );
+}
+
+#[test]
+fn comment_between_v_if_v_else_valid_tsx() {
+    // Bug: HTML comments between v-if/v-else become JSX comments that break if/else chain
+    let result = gen_tsx_template(
+        r#"<template><div v-if="a">A</div><!-- comment --><div v-else>B</div></template>"#,
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // POSITIVE: should have both if and else branches
+    assert!(
+        result.contains("if("),
+        "should have if condition, got: {}",
+        result
+    );
+    assert!(
+        result.contains("else"),
+        "should have else branch, got: {}",
+        result
+    );
+
+    // NEGATIVE: JSX comment must NOT appear between } and else
+    // Valid: }else{  or }\nelse{
+    // Invalid: }{/* comment */}\nelse{
+    let cleaned = result.replace(char::is_whitespace, "");
+    assert!(
+        !cleaned.contains("}{/*"),
+        "JSX comment must not appear between if-closing and else, got: {}",
+        result
+    );
+}
+
+#[test]
+fn dynamic_component_inside_v_for_valid_tsx() {
+    // Bug: <component :is> IS the v-for element — puts const statement in arrow expression
+    // Real pattern from VirtualListItem.vue:
+    // <component v-for="(c, index) in children" :key="index" :is="c" />
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><component v-for="(c, index) in children" :key="index" :is="c" /></template>"#,
+        &[("children", BindingType::SetupConst)],
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // POSITIVE: should have component_render or extractRenderComponent
+    assert!(
+        result.contains("___VERTER___component_render")
+            || result.contains("extractRenderComponent"),
+        "should handle dynamic :is component, got: {}",
+        result
+    );
+
+    // NEGATIVE: const statement must NOT appear inside .map(() => (...))
+    // The arrow function with parens only allows expressions, not statements
+    assert!(
+        !result.contains("=> (const "),
+        "const statement must not appear in arrow expression body, got: {}",
+        result
+    );
+}
+
+#[test]
+fn dynamic_component_inside_jsx_children_valid_tsx() {
+    // Bug: <component :is> inside another element puts const in JSX children
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div><component :is="tag" /></div></template>"#,
+        &[("tag", BindingType::SetupConst)],
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // The const statement for extractRenderComponent must be in valid JS context,
+    // not inside JSX element children where it would be treated as text
+    // Valid patterns:
+    //   {(() => { const comp = ...; return <comp />; })()}
+    //   Block scope before JSX
+    // Invalid: <div>const comp = ...; <comp /></div>
+    assert!(
+        !result.contains(">const ___VERTER___component_render"),
+        "const statement must not appear as JSX text children, got: {}",
+        result
+    );
+}
+
+#[test]
+fn slot_props_kebab_case_quoted() {
+    // Bug: slot scope props with kebab-case names generate unquoted property names
+    // e.g., { item-class: "value" } which is invalid JS (item minus class)
+    let result = gen_tsx_template(
+        r#"<template><MyComp><template #default="{ itemClass }"><slot :item-class="itemClass" /></template></MyComp></template>"#,
+    );
+    eprintln!("TSX output:\n{}", result);
+
+    // If slot props contain kebab-case keys, they must be quoted
+    // This test verifies we don't generate unquoted hyphenated property names
+    if result.contains("item-class") {
+        assert!(
+            result.contains(r#""item-class""#) || result.contains("'item-class'"),
+            "kebab-case slot prop key must be quoted in JS object literal, got: {}",
+            result
+        );
+    }
 }

@@ -73,7 +73,8 @@ pub(crate) mod ide;
 // TSC code generation (vue-tsc replacement)
 pub mod tsc;
 
-// Re-export the standalone @verter/types declaration for the LSP
+// Re-export the @verter/types declarations for the LSP and verter-tsc
+pub use ide::script::VERTER_TYPES_AMBIENT_MODULE;
 pub use ide::script::VERTER_TYPES_STANDALONE_DTS;
 
 pub mod types;

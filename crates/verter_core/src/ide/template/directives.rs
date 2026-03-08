@@ -250,9 +250,33 @@ fn emit_mapped_v_for_iterable<'alloc>(
             source,
             resolver,
         );
-        let content = format!("{{{}", resolved);
-        // Map to the iterable start position
-        out.prepend_alloc_mapped_with_offset(target_pos, iterable_start, 1, &content);
+        // Numeric literals (e.g., `v-for="i in 12"`) can't have `.map()` called
+        // directly — `12.map(...)` is invalid JS. Wrap in Array.from() to produce
+        // a valid iterable with correct number[] type.
+        // Non-numeric expressions are wrapped in parens to prevent parse errors
+        // when the expression ends with a number (e.g., `endIndex - startIndex + 1`
+        // would become `+ 1.map(...)` without parens).
+        let content = if is_numeric_v_for_iterable(iterable) {
+            format!(
+                "{{Array.from({{length: {}}}, (_, __i) => __i + 1)",
+                resolved
+            )
+        } else {
+            format!("{{({}", resolved)
+        };
+        // Map to the iterable start position (offset 2 skips the `{(` prefix)
+        let offset = if is_numeric_v_for_iterable(iterable) {
+            1
+        } else {
+            2
+        };
+        out.prepend_alloc_mapped_with_offset(target_pos, iterable_start, offset, &content);
+        // Emit closing paren as unmapped synthetic text.
+        // Use mapped_with_offset (offset=len) to stay in the mapped_prepends vec,
+        // preserving call-order at the same position (regular prepends merge before mapped).
+        if !is_numeric_v_for_iterable(iterable) {
+            out.prepend_alloc_mapped_with_offset(target_pos, 0, 1, ")");
+        }
         return;
     }
 
@@ -273,7 +297,9 @@ fn emit_mapped_v_for_iterable<'alloc>(
         let bind_prefix = resolver.resolve_prefix(name);
         let bind_suffix = resolver.resolve_suffix(name);
 
-        let prefix = if first { "{" } else { "" };
+        // Wrap in parens to prevent parse errors with trailing numeric literals
+        // e.g., `endIndex - startIndex + 1` → `(endIndex - startIndex + 1).map(...)`
+        let prefix = if first { "{(" } else { "" };
         first = false;
 
         let content = format!("{}{}{}{}{}", prefix, gap, bind_prefix, name, bind_suffix);
@@ -285,15 +311,13 @@ fn emit_mapped_v_for_iterable<'alloc>(
 
     // Remaining iterable text after last reference.
     // Map the start to `cursor` so positions within the tail have correct source mapping.
-    let remaining = if cursor < iterable_end {
-        &source[cursor as usize..iterable_end as usize]
-    } else {
-        ""
-    };
-
-    if !remaining.is_empty() {
+    if cursor < iterable_end {
+        let remaining = &source[cursor as usize..iterable_end as usize];
         out.prepend_alloc_mapped_with_offset(target_pos, cursor, 0, remaining);
     }
+    // Emit closing paren as unmapped synthetic text.
+    // Use mapped_with_offset (offset=len) to stay in mapped_prepends vec for correct ordering.
+    out.prepend_alloc_mapped_with_offset(target_pos, 0, 1, ")");
 }
 
 /// Emit the closing of a v-for map expression.
@@ -598,6 +622,13 @@ fn resolve_v_for_iterable(
         }
     }
     resolver.resolve_simple_expr(iterable)
+}
+
+/// Check if a v-for iterable expression is a pure numeric literal (e.g., "12", "100").
+/// Vue supports `v-for="i in 12"` to iterate 1..12, but `12.map(...)` is invalid JS.
+fn is_numeric_v_for_iterable(iterable: &str) -> bool {
+    let trimmed = iterable.trim();
+    !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Parse a v-for expression into (params, source).

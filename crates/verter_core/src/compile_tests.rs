@@ -7750,7 +7750,7 @@ const handler = () => {}
 const items = [1]
 </script>
 <template><div v-for="item in items">{{ item + items.length }}</div></template>"#,
-            &["items.map((item) => (", "{ item + items.length }"],
+            &["items).map((item) => (", "{ item + items.length }"],
             &["_ctx."],
         ),
         (
@@ -8827,7 +8827,7 @@ fn tsx_v_for_item_in_items_emits_map_expression() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("items.map((item") || tsx.code.contains("_ctx.items.map((item"),
+        tsx.code.contains("items).map((item") || tsx.code.contains("_ctx.items).map((item"),
         "v-for item in items should compile to .map expression, got:\n{}",
         tsx.code
     );
@@ -8840,7 +8840,7 @@ fn tsx_v_for_item_of_items_emits_map_expression() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("items.map((item") || tsx.code.contains("_ctx.items.map((item"),
+        tsx.code.contains("items).map((item") || tsx.code.contains("_ctx.items).map((item"),
         "v-for item of items should compile to .map expression, got:\n{}",
         tsx.code
     );
