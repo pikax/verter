@@ -439,6 +439,56 @@ fn strip_json_comments(s: &str) -> String {
             }
         }
     }
+
+    // Strip trailing commas (JSONC feature used by tsconfig.json).
+    // Replaces `,` followed only by whitespace then `]` or `}`.
+    strip_trailing_commas(&out)
+}
+
+/// Remove trailing commas before `]` and `}` to make JSONC valid JSON.
+fn strip_trailing_commas(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_str = false;
+    let mut prev_bs = false;
+
+    while i < len {
+        let c = bytes[i];
+        if in_str {
+            out.push(c as char);
+            if c == b'\\' && !prev_bs {
+                prev_bs = true;
+            } else {
+                if c == b'"' && !prev_bs {
+                    in_str = false;
+                }
+                prev_bs = false;
+            }
+            i += 1;
+        } else if c == b'"' {
+            in_str = true;
+            out.push('"');
+            i += 1;
+        } else if c == b',' {
+            // Check if only whitespace follows before `]` or `}`
+            let mut j = i + 1;
+            while j < len && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < len && (bytes[j] == b']' || bytes[j] == b'}') {
+                // Skip the trailing comma
+                i += 1;
+            } else {
+                out.push(',');
+                i += 1;
+            }
+        } else {
+            out.push(c as char);
+            i += 1;
+        }
+    }
     out
 }
 
@@ -514,5 +564,42 @@ mod tests {
         let out = strip_json_comments(input);
         assert!(!out.contains("block"));
         assert!(out.contains("\"a\":"));
+    }
+
+    #[test]
+    fn strip_json_comments_removes_trailing_commas() {
+        let input = r#"{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "esnext",
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue",],
+}"#;
+        let out = strip_json_comments(input);
+        // Should parse as valid JSON after stripping
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&out);
+        assert!(
+            parsed.is_ok(),
+            "trailing commas should be stripped for valid JSON. Got: {}",
+            out
+        );
+        // Positive: content preserved
+        assert!(out.contains("\"target\""));
+        assert!(out.contains("\"esnext\""));
+        // Negative: no trailing commas before } or ]
+        assert!(
+            !out.contains(",\n}"),
+            "trailing comma before }} should be removed: {out}"
+        );
+    }
+
+    #[test]
+    fn strip_json_comments_preserves_commas_in_strings() {
+        let input = r#"{ "a": "hello, world", "b": 1 }"#;
+        let out = strip_json_comments(input);
+        assert!(
+            out.contains("hello, world"),
+            "commas inside strings should be preserved: {out}"
+        );
     }
 }
