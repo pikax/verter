@@ -1058,8 +1058,10 @@ pub const PATCH_STABLE_FRAGMENT: u32 = 64;
 pub const PATCH_KEYED_FRAGMENT: u32 = 128;
 /// Unkeyed fragment (v-for without :key).
 pub const PATCH_UNKEYED_FRAGMENT: u32 = 256;
+/// Component needs forced patching (has non-optimizable slots).
+pub const PATCH_NEED_PATCH: u32 = 512;
 /// Component needs force update (has dynamic slots).
-pub const PATCH_DYNAMIC_SLOTS: u32 = 512;
+pub const PATCH_DYNAMIC_SLOTS: u32 = 1024;
 
 /// Format a patch flag with dev-mode comment.
 /// Returns a bump-allocated string like `1 /* TEXT */`.
@@ -1111,6 +1113,7 @@ pub fn format_patch_flag<'a>(
             (PATCH_STABLE_FRAGMENT, "STABLE_FRAGMENT"),
             (PATCH_KEYED_FRAGMENT, "KEYED_FRAGMENT"),
             (PATCH_UNKEYED_FRAGMENT, "UNKEYED_FRAGMENT"),
+            (PATCH_NEED_PATCH, "NEED_PATCH"),
             (PATCH_DYNAMIC_SLOTS, "DYNAMIC_SLOTS"),
         ];
         for &(mask, name) in FLAG_NAMES {

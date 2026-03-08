@@ -431,6 +431,7 @@ fn self_closing_no_props() {
         false, // not block root (inner element test)
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
+        None,  // no resolved components in unit tests
     );
 
     assert_eq!(record.kind, ChildKind::Element);
@@ -475,6 +476,7 @@ fn empty_element_no_props() {
         false, // not block root (inner element test)
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
+        None,  // no resolved components in unit tests
     );
 
     assert_eq!(record.kind, ChildKind::Element);
@@ -525,6 +527,7 @@ fn element_with_static_text() {
         false, // not block root (inner element test)
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
+        None,  // no resolved components in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -578,6 +581,7 @@ fn element_with_static_class() {
         false, // not block root (inner element test)
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
+        None,  // no resolved components in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -639,6 +643,7 @@ fn element_with_multiple_static_props() {
         false, // not block root (inner element test)
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
+        None,  // no resolved components in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -702,6 +707,7 @@ fn element_with_props_and_text_child() {
         false, // not block root (inner element test)
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
+        None,  // no resolved components in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -749,6 +755,7 @@ fn element_with_boolean_attr() {
         false, // not block root (inner element test)
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
+        None,  // no resolved components in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -802,6 +809,7 @@ fn element_with_click_handler() {
         false, // not block root (inner element test)
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
+        None,  // no resolved components in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -877,6 +885,7 @@ fn element_with_leading_trailing_whitespace_removed() {
         false, // not block root (inner element test)
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
+        None,  // no resolved components in unit tests
     );
 
     let result = apply_output(source, out, &alloc);

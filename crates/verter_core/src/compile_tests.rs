@@ -5679,8 +5679,10 @@ fn template_only_scoped_style_grid_layout_scope_id_consistency() {
         .into_iter()
         .filter(|h| {
             // Only check Vue runtime helpers (e.g. _createElementVNode, _openBlock)
-            // Skip _ctx, _cache, etc.
+            // Skip _ctx, _cache, locally declared _hoisted_N, _component_X
             !["_ctx", "_cache"].contains(h)
+                && !h.starts_with("_hoisted_")
+                && !h.starts_with("_component_")
         })
         .collect();
     for helper in &re_helpers {

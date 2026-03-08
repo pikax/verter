@@ -343,6 +343,43 @@ pub struct NativeVModel {
     pub modifiers: String,
 }
 
+/// A runtime directive entry for `_withDirectives()` wrapping.
+///
+/// Represents v-show, custom directives (v-focus, v-loading, etc.), or
+/// any directive that needs runtime wrapping beyond the props object.
+pub struct DirectiveEntry {
+    /// The directive reference: either a VdomHelper name (e.g. `_vShow`)
+    /// or a `_resolveDirective("name")` call string.
+    pub directive_ref: String,
+    /// The resolved value expression (empty if no value)
+    pub value: String,
+    /// The arg expression as a quoted string (empty if no arg)
+    pub arg: String,
+    /// The modifier object string (empty if no modifiers)
+    pub modifiers: String,
+    /// VdomHelper import needed for the directive itself (e.g. VShow)
+    pub helper_import: Option<VdomHelper>,
+}
+
+/// Build a modifier object string from a prop's modifiers: `{ trim: true, number: true }`.
+/// Returns empty string if no modifiers.
+fn build_modifier_object(prop: &crate::types::NodeProp, source: &str) -> String {
+    if prop.modifiers.is_empty() {
+        return String::new();
+    }
+    let mut mods = String::from("{ ");
+    for (mi, modifier) in prop.modifiers.iter().enumerate() {
+        if mi > 0 {
+            mods.push_str(", ");
+        }
+        let mod_name = &source[modifier.start as usize..modifier.end as usize];
+        mods.push_str(mod_name);
+        mods.push_str(": true");
+    }
+    mods.push_str(" }");
+    mods
+}
+
 pub struct PropsResult {
     pub dynamic_props: Vec<String>,
     pub uses_merge: bool,
@@ -356,6 +393,8 @@ pub struct PropsResult {
     /// v-model on a native element (input/textarea/select) that needs
     /// `_withDirectives()` wrapping after the element VNode is created.
     pub native_vmodel: Option<NativeVModel>,
+    /// Runtime directive entries (v-show, custom directives) for `_withDirectives()`.
+    pub directive_entries: Vec<DirectiveEntry>,
 }
 
 /// Determine the appropriate vModel directive helper for a native element.
@@ -624,6 +663,7 @@ pub(crate) fn build_props_object_into(
     let mut uses_with_modifiers = false;
     let mut uses_with_keys = false;
     let mut native_vmodel: Option<NativeVModel> = None;
+    let mut directive_entries: Vec<DirectiveEntry> = Vec::new();
 
     let ClassStyleMerge {
         merge_class,
@@ -753,6 +793,36 @@ pub(crate) fn build_props_object_into(
 
                 if let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) {
                     let arg_name = &source[arg_start as usize..arg_end as usize];
+
+                    // Custom directive with arg: v-my-dir:arg.mod="val"
+                    // These need _withDirectives(), not regular props.
+                    if !is_bind && !is_on && directive_name != "v-model" {
+                        let directive_name_stripped =
+                            directive_name.strip_prefix("v-").unwrap_or(directive_name);
+                        let directive_ref =
+                            format!("_resolveDirective(\"{}\")", directive_name_stripped);
+                        let value = if let (Some(vs), Some(ve)) =
+                            (prop.value_start, prop.value_end)
+                        {
+                            let raw = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            resolve_expr(raw, vs, oxc_exp, resolver, force_js)
+                        } else {
+                            String::new()
+                        };
+
+                        let arg = format!("\"{}\"", arg_name);
+                        let modifiers = build_modifier_object(prop, source);
+
+                        directive_entries.push(DirectiveEntry {
+                            directive_ref,
+                            value,
+                            arg,
+                            modifiers,
+                            helper_import: None,
+                        });
+                        continue;
+                    }
 
                     if !first {
                         buf.push_str(", ");
@@ -1100,7 +1170,47 @@ pub(crate) fn build_props_object_into(
                         continue;
                     }
 
-                    // Other directives with no arg (v-ripple, v-show, etc.) — skip in props
+                    // Other directives with no arg: v-show, v-focus, v-loading, etc.
+                    // These are collected as directive entries for _withDirectives() wrapping.
+                    let is_vshow = directive_name == "v-show";
+                    // Skip codegen-only directives that don't need runtime wrapping
+                    let is_codegen_only = matches!(
+                        directive_name,
+                        "v-text" | "v-html" | "v-cloak" | "v-memo" | "v-pre"
+                    );
+                    if !is_codegen_only {
+                        let directive_ref = if is_vshow {
+                            "_vShow".to_string()
+                        } else {
+                            // Custom directive: will use _resolveDirective("name")
+                            let name = directive_name.strip_prefix("v-").unwrap_or(directive_name);
+                            format!("_resolveDirective(\"{}\")", name)
+                        };
+
+                        let value = if let (Some(vs), Some(ve)) =
+                            (prop.value_start, prop.value_end)
+                        {
+                            let raw = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            resolve_expr(raw, vs, oxc_exp, resolver, force_js)
+                        } else {
+                            String::new()
+                        };
+
+                        let modifiers = build_modifier_object(prop, source);
+
+                        directive_entries.push(DirectiveEntry {
+                            directive_ref,
+                            value,
+                            arg: String::new(),
+                            modifiers,
+                            helper_import: if is_vshow {
+                                Some(VdomHelper::VShow)
+                            } else {
+                                None
+                            },
+                        });
+                    }
                     continue;
                 }
             } else {
@@ -1373,6 +1483,7 @@ pub(crate) fn build_props_object_into(
         uses_guard_reactive_props,
         uses_to_handlers,
         native_vmodel,
+        directive_entries,
     }
 }
 
@@ -1409,6 +1520,79 @@ pub(super) fn format_dynamic_props_ref(
     arr
 }
 
+/// Emit the `_withDirectives()` closing part: `, [[dir, val, arg, mods], ...])`.
+///
+/// Handles both native v-model entries and directive entries (v-show, custom directives).
+/// Called from both self-closing and regular close tag paths.
+fn emit_with_directives_close<'alloc>(
+    buf: &mut String,
+    native_vmodel: &Option<NativeVModel>,
+    directive_entries: &[DirectiveEntry],
+    out: &mut CodeGenOutput<'alloc>,
+) {
+    let has_vmodel = native_vmodel.is_some();
+    let has_entries = !directive_entries.is_empty();
+    if !has_vmodel && !has_entries {
+        return;
+    }
+    out.add_vdom_import(VdomHelper::WithDirectives);
+    buf.push_str(", [");
+    let mut first = true;
+
+    // v-model entry first (if present)
+    if let Some(ref nvm) = native_vmodel {
+        buf.push('[');
+        buf.push_str(nvm.directive_helper.name());
+        buf.push_str(", ");
+        buf.push_str(&nvm.resolved_value);
+        if !nvm.modifiers.is_empty() {
+            buf.push_str(", void 0, ");
+            buf.push_str(&nvm.modifiers);
+        }
+        buf.push(']');
+        out.add_vdom_import(nvm.directive_helper);
+        first = false;
+    }
+
+    // Additional directive entries (v-show, custom directives)
+    for entry in directive_entries {
+        if !first {
+            buf.push_str(", ");
+        }
+        first = false;
+        buf.push('[');
+        buf.push_str(&entry.directive_ref);
+        if !entry.value.is_empty() || !entry.arg.is_empty() || !entry.modifiers.is_empty() {
+            buf.push_str(", ");
+            if entry.value.is_empty() {
+                buf.push_str("void 0");
+            } else {
+                buf.push_str(&entry.value);
+            }
+        }
+        if !entry.arg.is_empty() || !entry.modifiers.is_empty() {
+            buf.push_str(", ");
+            if entry.arg.is_empty() {
+                buf.push_str("void 0");
+            } else {
+                buf.push_str(&entry.arg);
+            }
+        }
+        if !entry.modifiers.is_empty() {
+            buf.push_str(", ");
+            buf.push_str(&entry.modifiers);
+        }
+        buf.push(']');
+        if let Some(helper) = entry.helper_import {
+            out.add_vdom_import(helper);
+        } else {
+            out.add_vdom_import(VdomHelper::ResolveDirective);
+        }
+    }
+
+    buf.push_str("])");
+}
+
 /// Process the leave phase of a VDOM element node.
 ///
 /// 1. Resolves whitespace in children
@@ -1432,8 +1616,9 @@ pub fn process_element_leave<'alloc>(
     v_for_prefix: Option<&str>,
     ast: &TemplateAst,
     is_block_root: bool,
-    hoisted_constants: Option<&mut Vec<String>>,
+    mut hoisted_constants: Option<&mut Vec<String>>,
     cache_index: Option<usize>,
+    mut resolved_components: Option<&mut Vec<(String, String)>>,
 ) -> ChildRecord {
     let tag_open = &element.tag_open;
     debug_assert!((tag_open.start as usize + 1) <= source.len());
@@ -1460,14 +1645,33 @@ pub fn process_element_leave<'alloc>(
     // Cached static elements use -1 (CACHED) patch flag, bypassing all diffing
     let is_cached = cache_index.is_some();
 
-    // Pre-scan: detect v-model on native elements for _withDirectives() wrapping.
-    // We need to know this before building the open tag so we can prepend the wrapper.
-    let has_native_vmodel = !element.tag_type.is_component()
+    // Pre-scan: detect directives needing _withDirectives() wrapping.
+    // v-model on native elements, v-show, and custom directives all need wrapping.
+    let has_directives_wrap = !element.tag_type.is_component()
         && element.props.iter().any(|p| {
-            p.is_directive && {
-                let dname = &source[p.start as usize..p.name_end as usize];
-                dname == "v-model"
+            if !p.is_directive {
+                return false;
             }
+            let dname = &source[p.start as usize..p.name_end as usize];
+            dname == "v-model"
+                || dname == "v-show"
+                || (!matches!(
+                    dname,
+                    ":" | "v-bind"
+                        | "@"
+                        | "v-on"
+                        | "v-if"
+                        | "v-else-if"
+                        | "v-else"
+                        | "v-for"
+                        | "v-slot"
+                        | "v-once"
+                        | "v-text"
+                        | "v-html"
+                        | "v-cloak"
+                        | "v-memo"
+                        | "v-pre"
+                ) && dname.starts_with("v-"))
         });
 
     // Step 3: Build open tag overwrite (reusing caller's buffer)
@@ -1489,8 +1693,8 @@ pub fn process_element_leave<'alloc>(
     if let Some(prefix) = v_for_prefix {
         buf.push_str(prefix);
     }
-    // Wrap with _withDirectives() for native v-model
-    if has_native_vmodel {
+    // Wrap with _withDirectives() for v-model, v-show, custom directives
+    if has_directives_wrap {
         buf.push_str("_withDirectives(");
     }
     // Block root elements (v-for items, v-if branches) need their own block scope
@@ -1516,7 +1720,7 @@ pub fn process_element_leave<'alloc>(
             buf.push_str(resolved_tag);
         } else {
             // Static component: resolve through bindings or _resolveComponent
-            let resolved = resolve_component_tag(tag_name, resolver, out, &options.self_name);
+            let resolved = resolve_component_tag(tag_name, resolver, out, &options.self_name, resolved_components);
             buf.push_str(&resolved);
         }
     } else {
@@ -1534,8 +1738,9 @@ pub fn process_element_leave<'alloc>(
     };
 
     // Props
-    let (dynamic_props, native_vmodel) = if has_props {
+    let (dynamic_props, native_vmodel, directive_entries) = if has_props {
         buf.push_str(", ");
+        let props_start = buf.len();
         let props_result = build_props_object_into(
             buf,
             element,
@@ -1545,6 +1750,38 @@ pub fn process_element_leave<'alloc>(
             skip_is_prop,
             options.force_js,
         );
+        // Hoist fully-static props objects to const _hoisted_N when:
+        // - hoist_static is enabled
+        // - no dynamic bindings, merges, normalizations, directives
+        // - not a component (components have variable tag resolution)
+        // - not already cached (redundant)
+        let can_hoist_props = options.hoist_static
+            && !is_cached
+            && !element.tag_type.is_component()
+            && props_result.dynamic_props.is_empty()
+            && !props_result.uses_merge
+            && !props_result.uses_normalize_class
+            && !props_result.uses_normalize_style
+            && !props_result.uses_normalize_props
+            && !props_result.uses_guard_reactive_props
+            && !props_result.uses_to_handlers
+            && props_result.native_vmodel.is_none()
+            && props_result.directive_entries.is_empty();
+        if can_hoist_props {
+            if let Some(ref mut hoisted) = hoisted_constants {
+                let props_str = buf[props_start..].to_string();
+                // Dedup: check if identical props object already hoisted
+                if let Some(idx) = hoisted.iter().position(|c| *c == props_str) {
+                    buf.truncate(props_start);
+                    buf.push_str(&format!("_hoisted_{}", idx + 1));
+                } else {
+                    hoisted.push(props_str);
+                    let idx = hoisted.len();
+                    buf.truncate(props_start);
+                    buf.push_str(&format!("_hoisted_{idx}"));
+                }
+            }
+        }
         if props_result.uses_merge {
             out.add_vdom_import(VdomHelper::MergeProps);
         }
@@ -1569,13 +1806,13 @@ pub fn process_element_leave<'alloc>(
         if props_result.uses_to_handlers {
             out.add_vdom_import(VdomHelper::ToHandlers);
         }
-        (props_result.dynamic_props, props_result.native_vmodel)
+        (props_result.dynamic_props, props_result.native_vmodel, props_result.directive_entries)
     } else {
         if has_children || patch_flag != 0 {
             // Need null placeholder for props when there are children or patch flags
             buf.push_str(", null");
         }
-        (Vec::new(), None)
+        (Vec::new(), None, Vec::new())
     };
     // For components with dynamic bound props, add PATCH_PROPS so that
     // shouldUpdateComponent can check listed dynamic props.
@@ -1654,20 +1891,8 @@ pub fn process_element_leave<'alloc>(
         if is_cached {
             buf.push(')');
         }
-        // Close _withDirectives() wrapper for native v-model
-        if let Some(ref nvm) = native_vmodel {
-            buf.push_str(", [[");
-            buf.push_str(nvm.directive_helper.name());
-            buf.push_str(", ");
-            buf.push_str(&nvm.resolved_value);
-            if !nvm.modifiers.is_empty() {
-                buf.push_str(", void 0, ");
-                buf.push_str(&nvm.modifiers);
-            }
-            buf.push_str("]])");
-            out.add_vdom_import(VdomHelper::WithDirectives);
-            out.add_vdom_import(nvm.directive_helper);
-        }
+        // Close _withDirectives() wrapper for v-model, v-show, custom directives
+        emit_with_directives_close(buf, &native_vmodel, &directive_entries, out);
         out.overwrite(tag_open.start, tag_open.end, buf);
 
         return ChildRecord {
@@ -1757,20 +1982,8 @@ pub fn process_element_leave<'alloc>(
     if is_cached {
         buf.push(')');
     }
-    // Close _withDirectives() wrapper for native v-model
-    if let Some(ref nvm) = native_vmodel {
-        buf.push_str(", [[");
-        buf.push_str(nvm.directive_helper.name());
-        buf.push_str(", ");
-        buf.push_str(&nvm.resolved_value);
-        if !nvm.modifiers.is_empty() {
-            buf.push_str(", void 0, ");
-            buf.push_str(&nvm.modifiers);
-        }
-        buf.push_str("]])");
-        out.add_vdom_import(VdomHelper::WithDirectives);
-        out.add_vdom_import(nvm.directive_helper);
-    }
+    // Close _withDirectives() wrapper for v-model, v-show, custom directives
+    emit_with_directives_close(buf, &native_vmodel, &directive_entries, out);
     // Extend the close tag overwrite start back to the last child's end
     // to consume trailing whitespace gaps (same reason as open tag above).
     let close_start = if has_children {

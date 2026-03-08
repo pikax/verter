@@ -105,6 +105,10 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// Cache index counter for `_cache[N]` static element wrapping.
     /// Incremented each time a fully-static element is cached.
     cache_index: usize,
+    /// Hoisted _resolveComponent() calls: Vec of (tag_name, variable_name).
+    /// Emitted as `const _component_x = _resolveComponent("x")` at the top
+    /// of the render function body. Insertion-ordered.
+    resolved_components: Vec<(String, String)>,
 }
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
@@ -124,6 +128,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             single_root: false,
             hoisted_constants: Vec::new(),
             cache_index: 0,
+            resolved_components: Vec::new(),
         }
     }
 
@@ -378,12 +383,46 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             "function render(_ctx, _cache, $props, $setup, $data, $options) {\n"
         };
 
-        // Combined preamble: hoisted constants + function signature
-        let full_prefix = if hoisted_preamble.is_empty() {
-            fn_sig.to_string()
+        // Build resolved component declarations (inside the function body)
+        // e.g., `const _component_el_button = _resolveComponent("el-button")\n`
+        let resolved_comp_preamble = if self.resolved_components.is_empty() {
+            String::new()
         } else {
-            let mut s = hoisted_preamble;
-            s.push_str(fn_sig);
+            let mut s = String::with_capacity(self.resolved_components.len() * 60);
+            for (tag, var) in &self.resolved_components {
+                // Check if this is a self-reference
+                let is_self_ref =
+                    !self.options.self_name.is_empty() && {
+                        let pascal =
+                            component::to_pascal_case(tag);
+                        pascal == self.options.self_name
+                    };
+                s.push_str("const ");
+                s.push_str(var);
+                s.push_str(" = _resolveComponent(\"");
+                s.push_str(tag);
+                if is_self_ref {
+                    s.push_str("\", true)\n");
+                } else {
+                    s.push_str("\")\n");
+                }
+            }
+            s
+        };
+
+        // Combined preamble: hoisted constants + function signature + resolved components
+        let full_prefix = {
+            let mut s = if hoisted_preamble.is_empty() {
+                fn_sig.to_string()
+            } else {
+                let mut p = hoisted_preamble;
+                p.push_str(fn_sig);
+                p
+            };
+            if !resolved_comp_preamble.is_empty() {
+                s.push_str(&resolved_comp_preamble);
+                s.push('\n');
+            }
             s
         };
 
@@ -748,6 +787,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             is_block_root,
             Some(&mut self.hoisted_constants),
             cache_idx,
+            Some(&mut self.resolved_components),
         );
         buf.clear();
         self.buf = buf;
@@ -1609,6 +1649,279 @@ mod tests {
         assert!(
             !code.contains("_createStaticVNode"),
             "Should NOT use createStaticVNode, got:\n{code}"
+        );
+    }
+
+    // ==================== withDirectives (v-show + custom directives) ====================
+
+    #[test]
+    fn vshow_with_directives() {
+        let code = gen_vdom_template(
+            "<template><div v-show=\"visible\">content</div></template>\n<script setup>\nimport { ref } from 'vue'\nconst visible = ref(true)\n</script>",
+        );
+        assert!(
+            code.contains("_withDirectives("),
+            "v-show should use _withDirectives, got:\n{code}"
+        );
+        assert!(
+            code.contains("_vShow"),
+            "v-show should use _vShow helper, got:\n{code}"
+        );
+        assert!(
+            !code.contains("v-show"),
+            "v-show attribute must not appear in output, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn vshow_with_other_props() {
+        let code = gen_vdom_template(
+            "<template><div class=\"foo\" v-show=\"visible\">content</div></template>\n<script setup>\nimport { ref } from 'vue'\nconst visible = ref(true)\n</script>",
+        );
+        assert!(
+            code.contains("_withDirectives("),
+            "v-show with class should use _withDirectives, got:\n{code}"
+        );
+        assert!(
+            code.contains("class: \"foo\""),
+            "Static class should still be present, got:\n{code}"
+        );
+        assert!(
+            code.contains("_vShow"),
+            "v-show helper should be present, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn custom_directive_resolve() {
+        let code = gen_vdom_template(
+            "<template><div v-focus>content</div></template>",
+        );
+        assert!(
+            code.contains("_withDirectives("),
+            "Custom directive should use _withDirectives, got:\n{code}"
+        );
+        assert!(
+            code.contains("_resolveDirective(\"focus\")"),
+            "Custom directive should use _resolveDirective, got:\n{code}"
+        );
+        assert!(
+            !code.contains("v-focus"),
+            "v-focus attribute must not appear in output, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn custom_directive_with_arg_and_modifiers() {
+        let code = gen_vdom_template(
+            "<template><div v-my-dir:arg.mod=\"val\">content</div></template>\n<script setup>\nconst val = 123\n</script>",
+        );
+        assert!(
+            code.contains("_withDirectives("),
+            "Custom directive with arg should use _withDirectives, got:\n{code}"
+        );
+        assert!(
+            code.contains("_resolveDirective(\"my-dir\")"),
+            "Custom directive should resolve with original name, got:\n{code}"
+        );
+        assert!(
+            code.contains("\"arg\""),
+            "Directive arg should be present as string, got:\n{code}"
+        );
+        assert!(
+            code.contains("mod: true"),
+            "Directive modifier should be present, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn vshow_plus_vmodel_combined() {
+        // Both v-show and v-model on same native element → single _withDirectives with both entries
+        let code = gen_vdom_template(
+            "<template><input v-model=\"msg\" v-show=\"visible\" /></template>\n<script setup>\nimport { ref } from 'vue'\nconst msg = ref('')\nconst visible = ref(true)\n</script>",
+        );
+        assert!(
+            code.contains("_withDirectives("),
+            "Combined v-model+v-show should use _withDirectives, got:\n{code}"
+        );
+        assert!(
+            code.contains("_vModelText"),
+            "v-model should produce _vModelText, got:\n{code}"
+        );
+        assert!(
+            code.contains("_vShow"),
+            "v-show should produce _vShow, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn custom_directive_with_value_no_arg() {
+        let code = gen_vdom_template(
+            "<template><div v-loading=\"isLoading\">content</div></template>\n<script setup>\nimport { ref } from 'vue'\nconst isLoading = ref(true)\n</script>",
+        );
+        assert!(
+            code.contains("_withDirectives("),
+            "v-loading should use _withDirectives, got:\n{code}"
+        );
+        assert!(
+            code.contains("_resolveDirective(\"loading\")"),
+            "v-loading should resolve directive, got:\n{code}"
+        );
+    }
+
+    // ==================== Dynamic slots (createSlots, _renderList) ====================
+
+    #[test]
+    fn dynamic_slot_with_vfor() {
+        // <template v-for="s in slots" #[s.name]> → _createSlots + _renderList
+        let code = gen_vdom_template(
+            "<template><MyComp><template v-for=\"s in slots\" #[s.name]><div>{{ s.content }}</div></template></MyComp></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst slots = [{name: 'a', content: 'x'}]\n</script>",
+        );
+        assert!(
+            code.contains("_createSlots("),
+            "v-for on slot should use _createSlots, got:\n{code}"
+        );
+        assert!(
+            code.contains("_renderList("),
+            "v-for on slot should use _renderList, got:\n{code}"
+        );
+        assert!(
+            code.contains("_: 2"),
+            "Dynamic slots should have _: 2, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn dynamic_slot_name() {
+        // <template #[dynamicName]> → dynamic slot entry
+        let code = gen_vdom_template(
+            "<template><MyComp><template #[dynamicName]><div>content</div></template></MyComp></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst dynamicName = 'header'\n</script>",
+        );
+        assert!(
+            code.contains("_createSlots("),
+            "Dynamic slot name should use _createSlots, got:\n{code}"
+        );
+        assert!(
+            code.contains("_: 2"),
+            "Dynamic slot should have _: 2, got:\n{code}"
+        );
+    }
+
+    // ==================== DYNAMIC_SLOTS patch flag (1024) ====================
+
+    #[test]
+    fn dynamic_slots_flag_vif() {
+        // Slot with v-if → 1024 DYNAMIC_SLOTS
+        let code = gen_vdom_template(
+            "<template><MyComp><template #header v-if=\"show\"><div>header</div></template><template #default><span>body</span></template></MyComp></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nimport { ref } from 'vue'\nconst show = ref(true)\n</script>",
+        );
+        assert!(
+            code.contains("1024"),
+            "Slot with v-if should emit DYNAMIC_SLOTS (1024), got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn stable_slots_no_dynamic_flag() {
+        // Static slots → no 1024 flag
+        let code = gen_vdom_template(
+            "<template><MyComp><template #header><div>header</div></template><template #default><span>body</span></template></MyComp></template>\n<script setup>\nimport MyComp from './MyComp.vue'\n</script>",
+        );
+        assert!(
+            !code.contains("1024"),
+            "Static slots should NOT emit DYNAMIC_SLOTS (1024), got:\n{code}"
+        );
+    }
+
+    // ==================== resolveComponent hoisting ====================
+
+    #[test]
+    fn resolve_component_hoisted() {
+        // Component used via _resolveComponent should be hoisted to const at top
+        let code = gen_vdom_template(
+            "<template><el-button>click</el-button></template>",
+        );
+        assert!(
+            code.contains("const _component_el_button = _resolveComponent(\"el-button\")"),
+            "resolveComponent should be hoisted as const, got:\n{code}"
+        );
+        // The call site should use the variable, not inline
+        assert!(
+            code.contains("_createBlock(_component_el_button"),
+            "Component call should use hoisted variable, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn resolve_component_dedup() {
+        // Same component used twice → only one const
+        let code = gen_vdom_template(
+            "<template><div><el-button>a</el-button><el-button>b</el-button></div></template>",
+        );
+        let count = code.matches("const _component_el_button").count();
+        assert_eq!(
+            count, 1,
+            "Same component should have only one hoisted const, got {count} in:\n{code}"
+        );
+    }
+
+    #[test]
+    fn resolve_component_naming() {
+        // el-button → _component_el_button
+        let code = gen_vdom_template(
+            "<template><my-header>x</my-header></template>",
+        );
+        assert!(
+            code.contains("_component_my_header"),
+            "Kebab-case component should use underscore-separated variable name, got:\n{code}"
+        );
+    }
+
+    // ==================== Static attribute object hoisting ====================
+
+    #[test]
+    fn hoisted_static_attrs() {
+        // <span class="foo"> with dynamic text → should hoist { class: "foo" } to _hoisted_N
+        // The span has dynamic content so it won't be fully cached, but its props are static
+        let code = gen_vdom_template(
+            r#"<template><div><span class="foo">{{ msg }}</span></div></template>"#,
+        );
+        assert!(
+            code.contains(r#"const _hoisted_1 = { class: "foo" }"#),
+            "Static class prop should be hoisted, got:\n{code}"
+        );
+        assert!(
+            code.contains("_hoisted_1"),
+            "Should reference _hoisted_1 at call site, got:\n{code}"
+        );
+        // Should NOT have inline { class: "foo" } inside createElementVNode
+        assert!(
+            !code.contains(r#"_createElementVNode("span", { class: "foo" }"#),
+            "Should NOT inline static props object, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn hoisted_static_attrs_dedup() {
+        // Same static attrs used twice with dynamic children → single hoisted constant
+        let code = gen_vdom_template(
+            r#"<template><div><span class="x">{{ a }}</span><span class="x">{{ b }}</span></div></template>"#,
+        );
+        assert!(
+            code.contains("const _hoisted_1"),
+            "Should hoist static attrs, got:\n{code}"
+        );
+        // Both spans should reference the same hoisted constant
+        let count = code.matches("_hoisted_1").count();
+        // 1 for the const declaration + 2 for the two usages = 3
+        assert!(
+            count >= 3,
+            "Same static attrs should be deduplicated (expected 3 occurrences of _hoisted_1), got {count} in:\n{code}"
+        );
+        // Should NOT have _hoisted_2 (since they're deduplicated)
+        assert!(
+            !code.contains("_hoisted_2"),
+            "Identical static attrs should share hoisted constant, got:\n{code}"
         );
     }
 }

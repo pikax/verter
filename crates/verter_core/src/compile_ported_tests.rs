@@ -677,7 +677,7 @@ fn test_props_no_pf_for_static() {
 // =========================================================================
 // ported from syntax/plugins/code_gen/template/tests.rs
 
-/// @ai-generated — Static props are inlined (not hoisted) in new pipeline
+/// @ai-generated — Static props are hoisted to const _hoisted_N
 #[test]
 fn test_hoist_static_props() {
     let allocator = Allocator::new();
@@ -693,16 +693,15 @@ fn test_hoist_static_props() {
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
-    // New pipeline inlines static props
+    // Static props should be hoisted
     assert!(
-        template.code.contains(r#"class: "app""#),
-        "Static props should be present in output, got:\n{}",
+        template.code.contains(r#"const _hoisted_1 = { class: "app" }"#),
+        "Static props should be hoisted, got:\n{}",
         template.code
     );
-    // Hoisting not implemented in new pipeline
     assert!(
-        !template.code.contains("_hoisted_"),
-        "New pipeline does not hoist static props, got:\n{}",
+        template.code.contains("_hoisted_1"),
+        "Should reference _hoisted_1 at call site, got:\n{}",
         template.code
     );
 }

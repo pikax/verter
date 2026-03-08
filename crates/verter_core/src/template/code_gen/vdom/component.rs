@@ -40,11 +40,15 @@ pub(super) fn vnode_helper(element: &ElementNode, is_block_root: bool) -> VdomHe
 /// 2. PascalCase conversion (e.g., `my-header` -> `$setup["MyHeader"]`)
 /// 3. Fallback: `_resolveComponent("TagName")`, with `maybeSelfReference=true`
 ///    when the PascalCase tag matches `self_name` (recursive self-reference).
+///
+/// When `hoisted_resolves` is provided, the `_resolveComponent()` call is hoisted
+/// to a `const _component_x` declaration and the variable name is returned.
 pub(super) fn resolve_component_tag(
     tag_name: &str,
     resolver: &BindingResolver<'_>,
     out: &mut CodeGenOutput<'_>,
     self_name: &str,
+    hoisted_resolves: Option<&mut Vec<(String, String)>>,
 ) -> String {
     // Check exact binding
     if resolver.get(tag_name).is_some() {
@@ -86,6 +90,19 @@ pub(super) fn resolve_component_tag(
 
     // Fallback: _resolveComponent("Name")
     out.add_vdom_import(VdomHelper::ResolveComponent);
+
+    // Hoist to const variable if hoisted_resolves is provided
+    if let Some(hoisted) = hoisted_resolves {
+        // Generate variable name: _component_el_button (hyphens → underscores)
+        let var_name = format!("_component_{}", tag_name.replace('-', "_"));
+
+        // Check if already hoisted
+        if !hoisted.iter().any(|(t, _)| t == tag_name) {
+            hoisted.push((tag_name.to_string(), var_name.clone()));
+        }
+        return var_name;
+    }
+
     let mut s = String::with_capacity(tag_name.len() + 32);
     s.push_str("_resolveComponent(\"");
     s.push_str(tag_name);

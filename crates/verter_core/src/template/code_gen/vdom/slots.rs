@@ -314,7 +314,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             resolved_tag.clone()
         } else {
             let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
-            component::resolve_component_tag(tag_name, &self.resolver, out, &self.options.self_name)
+            component::resolve_component_tag(tag_name, &self.resolver, out, &self.options.self_name, Some(&mut self.resolved_components))
         };
         let comp_helper = if is_block_root {
             VdomHelper::CreateBlock
@@ -331,17 +331,57 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         element::strip_interstitial_condition_nodes(&mut children, out, false);
         let has_children = !children.is_empty();
 
-        // Check if any slot children have v-if/v-else-if/v-else conditions
-        let any_dynamic = children.iter().any(|c| c.condition.is_some());
+        // Check if any slot children have v-if/v-else-if/v-else conditions,
+        // v-for, or dynamic slot names — all require _createSlots() dynamic format.
+        let any_dynamic = children.iter().any(|c| c.condition.is_some())
+            || el_children.iter().any(|&child_id| {
+                let node = &self.ast.nodes[child_id.0];
+                if let AstNodeKind::Element(ref child_el) = node.kind {
+                    if child_el.tag_type == TagType::Template {
+                        // v-for on slot template
+                        if child_el.v_for.is_some() {
+                            return true;
+                        }
+                        // Dynamic slot name: #[expr]
+                        if let Some(ref v_slot) = child_el.v_slot {
+                            if v_slot.is_dynamic == Some(true) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            });
 
         // Build slot name map: child start position -> slot name
+        // Also track dynamic slot info (dynamic names, v-for)
         let mut slot_names: FxHashMap<u32, &str> = FxHashMap::default();
+        let mut slot_is_dynamic_name: FxHashMap<u32, bool> = FxHashMap::default();
+        // v-for info: (params, resolved_iterable)
+        let mut slot_vfor_info: FxHashMap<u32, (String, String)> = FxHashMap::default();
         for &child_id in el_children {
             let node = &self.ast.nodes[child_id.0];
             if let AstNodeKind::Element(ref child_el) = node.kind {
                 if child_el.tag_type == TagType::Template && child_el.v_slot.is_some() {
                     let name = self.extract_v_slot_name(child_el, source);
-                    slot_names.insert(child_el.tag_open.start, name);
+                    let start = child_el.tag_open.start;
+                    slot_names.insert(start, name);
+                    if let Some(ref v_slot) = child_el.v_slot {
+                        slot_is_dynamic_name
+                            .insert(start, v_slot.is_dynamic == Some(true));
+                    }
+                    if let Some(ref v_for) = child_el.v_for {
+                        let full_expr =
+                            helpers::extract_directive_value(v_for, source);
+                        let (params, iterable) =
+                            helpers::parse_v_for_expression(full_expr);
+                        let resolved_iterable =
+                            self.resolver.resolve_simple_expr(iterable);
+                        slot_vfor_info.insert(
+                            start,
+                            (params.to_string(), resolved_iterable),
+                        );
+                    }
                 }
             }
         }
@@ -457,6 +497,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     &entries,
                     &children,
                     &slot_names,
+                    &slot_is_dynamic_name,
+                    &slot_vfor_info,
                     out,
                     source,
                     el_children,
@@ -484,7 +526,28 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         buf.clear();
         if has_children && any_dynamic {
             // Dynamic: close the _createSlots array and component call
-            buf.push_str("]))");
+            buf.push_str("])");
+            // Emit DYNAMIC_SLOTS patch flag (1024)
+            buf.push_str(", ");
+            let mut flag = helpers::PATCH_DYNAMIC_SLOTS;
+            if !dynamic_props.is_empty() {
+                flag |= helpers::PATCH_PROPS;
+            }
+            let flag_str = helpers::format_patch_flag(
+                flag,
+                self.options.is_production,
+                |s| out.alloc_str(s),
+            );
+            buf.push_str(flag_str);
+            if !dynamic_props.is_empty() {
+                buf.push_str(", ");
+                let props_ref = element::format_dynamic_props_ref(
+                    &dynamic_props,
+                    Some(&mut self.hoisted_constants),
+                );
+                buf.push_str(&props_ref);
+            }
+            buf.push(')');
         } else if has_children {
             // Static: close the slot object
             if self.options.is_production {
@@ -627,11 +690,15 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
 
     /// Emit dynamic slot format: each slot is `{ name: "x", fn: _withCtx(...) }`
     /// in an array, with ternary wrapping for conditional slots.
+    /// Dynamic slot names use `name: resolvedExpr` instead of `name: "staticName"`.
+    /// v-for slots use `_renderList(iterable, (params) => ({ name: expr, fn: ... }))`.
     fn emit_dynamic_slot_wrappers(
         &self,
         entries: &[SlotEntry],
         children: &[ChildRecord],
         slot_names: &FxHashMap<u32, &str>,
+        slot_is_dynamic_name: &FxHashMap<u32, bool>,
+        slot_vfor_info: &FxHashMap<u32, (String, String)>,
         out: &mut CodeGenOutput<'alloc>,
         source: &'alloc str,
         el_children: &[NodeId],
@@ -666,12 +733,44 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         }
                     }
 
-                    // Object wrapper: { name: "slot_name", fn:
-                    let wrapper = format!("{{ name: \"{slot_name}\", fn: ");
+                    // v-for wrapping: _renderList(iterable, (params) => {return ...})
+                    let has_vfor = slot_vfor_info.contains_key(&child.start);
+                    if has_vfor {
+                        let (params, iterable) = slot_vfor_info.get(&child.start).unwrap();
+                        let vfor_open = format!(
+                            "_renderList({iterable}, ({params}) => {{return "
+                        );
+                        out.prepend_alloc(child.start, &vfor_open);
+                        out.add_vdom_import(VdomHelper::RenderList);
+                    }
+
+                    // Object wrapper: { name: "slot_name", fn:  (or { name: expr, fn: for dynamic)
+                    let is_dynamic = slot_is_dynamic_name
+                        .get(&child.start)
+                        .copied()
+                        .unwrap_or(false);
+                    let wrapper = if is_dynamic {
+                        // Dynamic slot name: strip brackets and resolve
+                        let raw_name = slot_name.trim();
+                        let inner = if raw_name.starts_with('[') && raw_name.ends_with(']') {
+                            &raw_name[1..raw_name.len() - 1]
+                        } else {
+                            raw_name
+                        };
+                        let resolved = self.resolver.resolve_simple_expr(inner);
+                        format!("{{ name: {resolved}, fn: ")
+                    } else {
+                        format!("{{ name: \"{slot_name}\", fn: ")
+                    };
                     out.prepend_alloc(child.start, &wrapper);
 
                     // Close object
                     out.prepend_static(child.end, " }");
+
+                    // Close v-for wrapping
+                    if has_vfor {
+                        out.prepend_static(child.end, "})")
+                    }
 
                     // Ternary fallback for end of v-if chain
                     if is_start || (is_continuation && child.condition_prefix.is_some()) {
@@ -742,7 +841,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             resolved_tag.clone()
         } else {
             let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
-            component::resolve_component_tag(tag_name, &self.resolver, out, &self.options.self_name)
+            component::resolve_component_tag(tag_name, &self.resolver, out, &self.options.self_name, Some(&mut self.resolved_components))
         };
         let comp_helper = if is_block_root {
             VdomHelper::CreateBlock
