@@ -100,10 +100,15 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    let tsconfig_path = cli
+    let mut tsconfig_path = cli
         .project
         .clone()
         .unwrap_or_else(|| PathBuf::from("tsconfig.json"));
+
+    // tsc compatibility: if given a directory, auto-append tsconfig.json
+    if tsconfig_path.is_dir() {
+        tsconfig_path.push("tsconfig.json");
+    }
 
     let config = match tsconfig::load_tsconfig(&tsconfig_path) {
         Ok(c) => c,
