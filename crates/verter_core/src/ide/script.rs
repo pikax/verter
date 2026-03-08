@@ -4558,7 +4558,18 @@ fn emit_comp_function_for_element(
 ) {
     use std::fmt::Write;
 
-    let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+    let raw_tag = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+    // Kebab-case component names (e.g., `a-switch`) are referenced via their
+    // PascalCase const declaration (e.g., `const ASwitch = ...`). Using the raw
+    // kebab name would produce invalid JS (`instantiateComponent(a-switch, {})`).
+    let tag_name_owned;
+    let tag_name: &str = if raw_tag.contains('-') {
+        tag_name_owned = to_pascal_case(raw_tag);
+        &tag_name_owned
+    } else {
+        tag_name_owned = String::new();
+        raw_tag
+    };
 
     // Generate narrowing guard from condition scopes
     let guard = super::condition::generate_condition_text(condition_scopes)

@@ -3830,3 +3830,83 @@ fn balcard_vue_full_sfc_produces_valid_tsx() {
         parsed.errors.len(),
     );
 }
+
+#[test]
+fn custom_docs_block_before_template_produces_valid_tsx() {
+    let source = r#"<docs>
+---
+order: 0
+title:
+  zh-CN: 基本用法
+---
+## Notes
+</docs>
+
+<template>
+  <div>hello</div>
+</template>
+<script lang="ts" setup>
+import { ref } from 'vue';
+const checked = ref<boolean>(false);
+</script>"#;
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("Basic.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    eprintln!("=== DOCS BLOCK TSX ===\n{}\n=== END ===", tsx.code);
+
+    // Custom block content should not appear in TSX
+    assert!(
+        !tsx.code.contains("order: 0"),
+        "Custom block content should not leak into TSX"
+    );
+
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "TSX with custom block should have no parse errors. Got {} errors.\nOutput:\n{}",
+        parsed.errors.len(),
+        tsx.code
+    );
+}
+
+#[test]
+fn ant_design_switch_basic_produces_valid_tsx() {
+    let source = match std::fs::read_to_string("d:/dev/github/verter-test-repos/ant-design-vue/components/switch/demo/basic.vue") {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("SKIP: basic.vue not found");
+            return;
+        }
+    };
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("basic.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    eprintln!("=== ANT BASIC TSX ===\n{}\n=== END ===", tsx.code);
+
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC ERROR: {}", err);
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "Got {} errors",
+        parsed.errors.len(),
+    );
+}
