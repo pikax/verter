@@ -36,7 +36,7 @@ defineProps<Props>()
         r.contains("$props: import(\"vue\").PublicProps & Props"),
         "type name in new()"
     );
-    assert!(r.contains("ComponentPublicInstance"), "CPI declaration");
+    assert!(r.contains("PublicProps"), "PublicProps in constructor");
     assert!(
         !r.contains("import('./types').Props"),
         "should not use inline import() syntax"
@@ -1242,9 +1242,10 @@ defineProps<{ actions: Action[] }>()
         "constructor accepts props param: got {}",
         r
     );
+    // Negative: no ComponentPublicInstance in return type (causes excessive depth)
     assert!(
-        r.contains("import(\"vue\").ComponentPublicInstance &"),
-        "plain CPI intersection in return type: got {}",
+        !r.contains("ComponentPublicInstance"),
+        "no CPI in output — avoids excessive depth: got {}",
         r
     );
     // Negative: no Omit<CPI<...>> wrapping that causes excessive depth

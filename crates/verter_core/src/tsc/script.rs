@@ -1003,15 +1003,17 @@ fn generate_code(
         None => props_base.to_string(),
     };
 
-    // Generate simplified constructor: `new(props?: PublicProps & Props): CPI & { ... }`
-    // This avoids `Omit<ComponentPublicInstance<8 params>, keys>` which causes
-    // "Type instantiation is excessively deep" with self-referential prop types.
+    // Generate simplified constructor: `new(props?: PublicProps & Props): { $props, $emit, ... }`
+    // Does NOT include ComponentPublicInstance in the return type — CPI has many
+    // generic params that TypeScript expands, causing "Type instantiation is
+    // excessively deep" with self-referential prop types (e.g. Action → callback(Action)).
+    // The explicit $props/$emit/$slots/$data/$attrs/$refs fields cover instance access.
     match &full_gp {
         Some(gp) => out.push_str(&format!(
-            "  new<{gp}>(props?: import(\"vue\").PublicProps & {full_props}): import(\"vue\").ComponentPublicInstance & {{\n",
+            "  new<{gp}>(props?: import(\"vue\").PublicProps & {full_props}): {{\n",
         )),
         None => out.push_str(&format!(
-            "  new(props?: import(\"vue\").PublicProps & {full_props}): import(\"vue\").ComponentPublicInstance & {{\n",
+            "  new(props?: import(\"vue\").PublicProps & {full_props}): {{\n",
         )),
     }
 
