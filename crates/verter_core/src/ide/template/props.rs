@@ -258,7 +258,18 @@ fn process_merged_class_or_style<'alloc>(
             tvs,
             &format!("{}={{{}([", attr_name, helper_name),
         );
-        out.overwrite(tve, prop_end, &format!(",\"{}\"])}}", static_value));
+        // Escape newlines in the static value to avoid unterminated string literals
+        // when the value spans multiple lines (e.g., multi-line static style attributes).
+        let escaped_static = static_value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', " ")
+            .replace('\r', "");
+        out.overwrite(
+            tve,
+            prop_end,
+            &format!(",\"{}\"])}}", escaped_static),
+        );
         if let Some(oxc_p) = oxc_prop {
             if let Some(ref exp) = oxc_p.exp {
                 if let Some(ref bindings) = exp.bindings {
@@ -268,10 +279,15 @@ fn process_merged_class_or_style<'alloc>(
         }
     } else {
         // No dynamic value — shouldn't happen if merge flag is set, but handle gracefully
+        let escaped = static_value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', " ")
+            .replace('\r', "");
         out.overwrite(
             prop.start,
             prop_end,
-            &format!("{}=\"{}\"", attr_name, static_value),
+            &format!("{}=\"{}\"", attr_name, escaped),
         );
     }
 }

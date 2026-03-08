@@ -1709,6 +1709,36 @@ fn duplicate_keydown_handlers_use_spread_for_second() {
     );
 }
 
+#[test]
+fn multiline_static_style_merged_with_dynamic_no_unterminated_string() {
+    // When static style has newlines and is merged with :style, the static value
+    // must not produce an unterminated JS string literal inside normalizeStyle.
+    let result = gen_tsx_template_with_bindings(
+        "<template><div style=\"\n  position: absolute;\n  top: 0;\n\" :style=\"{ height: h + 'px' }\">hi</div></template>",
+        &[("h", BindingType::SetupConst)],
+    );
+    // Positive: should have normalizeStyle call
+    assert!(
+        result.contains("normalizeStyle"),
+        "merged style should use normalizeStyle. Got: {}",
+        result
+    );
+    // Negative: the static string inside normalizeStyle must NOT have literal newlines
+    // (which would be unterminated string literal TS1002)
+    let norm_idx = result.find("normalizeStyle").unwrap();
+    let after_norm = &result[norm_idx..];
+    // Find the string literal inside the normalizeStyle call
+    if let Some(quote_idx) = after_norm.find(",\"") {
+        let after_quote = &after_norm[quote_idx + 2..];
+        let end_quote = after_quote.find('"').unwrap_or(after_quote.len());
+        let static_str = &after_quote[..end_quote];
+        assert!(
+            !static_str.contains('\n'),
+            "static style string must not contain newlines. Got: {}", static_str
+        );
+    }
+}
+
 // ── Slot outlets in TSX ────────────────────────────────────────
 
 #[test]
