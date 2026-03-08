@@ -435,12 +435,56 @@ fn invoke_checker(
         }
     }
 
-    let output = cmd
-        .output()
+    // Spawn with piped I/O and drain stdout/stderr in background threads to
+    // avoid deadlock (child blocks on full pipe buffer if we don't read).
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to run {}: {e}", checker_bin.display()))?;
 
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned()
-        + &String::from_utf8_lossy(&output.stderr))
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut buf).ok();
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::BufReader::new(stderr), &mut buf).ok();
+        buf
+    });
+
+    // Poll with timeout
+    let timeout = std::time::Duration::from_secs(300); // 5 minutes
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    // Wait for reader threads to finish after kill
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(format!(
+                        "type checker timed out after {}s — try --use-tsc if tsgo hangs",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("error waiting for type checker: {e}")),
+        }
+    }
+
+    let stdout_bytes = stdout_handle.join().unwrap_or_default();
+    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+
+    Ok(String::from_utf8_lossy(&stdout_bytes).into_owned()
+        + &String::from_utf8_lossy(&stderr_bytes))
 }
 
 /// Write a synthetic tsconfig.json in `temp_dir` that:
