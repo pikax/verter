@@ -1460,4 +1460,74 @@ mod tests {
             "Dynamic attr key should have || \"\" fallback, got:\n{code}"
         );
     }
+
+    // ==================== toHandlers (v-on spread) ====================
+
+    #[test]
+    fn to_handlers_von_spread_alone_on_element() {
+        // v-on="handlers" → _toHandlers(handlers, true) on elements
+        let code = gen_vdom_template(
+            "<template><div v-on=\"handlers\">hi</div></template>\n<script setup>\nconst handlers = {}\n</script>",
+        );
+        assert!(
+            code.contains("_toHandlers("),
+            "v-on spread should use _toHandlers, got:\n{code}"
+        );
+        assert!(
+            code.contains(", true)"),
+            "v-on spread on element should have true arg, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn to_handlers_von_spread_on_component() {
+        // v-on="handlers" on component → _toHandlers(handlers) without true
+        let code = gen_vdom_template(
+            "<template><MyComp v-on=\"handlers\" /></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst handlers = {}\n</script>",
+        );
+        assert!(
+            code.contains("_toHandlers("),
+            "Component v-on spread should use _toHandlers, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_toHandlers($setup.handlers, true)"),
+            "Component v-on spread should NOT have true arg, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn to_handlers_von_spread_with_regular_event() {
+        // @click + v-on="handlers" → _mergeProps({onClick:...}, _toHandlers(handlers, true))
+        let code = gen_vdom_template(
+            "<template><div @click=\"onClick\" v-on=\"handlers\">hi</div></template>\n<script setup>\nconst onClick = () => {}\nconst handlers = {}\n</script>",
+        );
+        assert!(
+            code.contains("_mergeProps("),
+            "v-on spread + regular event should use _mergeProps, got:\n{code}"
+        );
+        assert!(
+            code.contains("_toHandlers("),
+            "v-on spread in mergeProps should use _toHandlers, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn to_handlers_vbind_and_von_spreads() {
+        // v-bind="attrs" v-on="handlers" → _mergeProps(attrs, _toHandlers(handlers, true))
+        let code = gen_vdom_template(
+            "<template><div v-bind=\"attrs\" v-on=\"handlers\">hi</div></template>\n<script setup>\nconst attrs = {}\nconst handlers = {}\n</script>",
+        );
+        assert!(
+            code.contains("_mergeProps("),
+            "v-bind + v-on spreads should use _mergeProps, got:\n{code}"
+        );
+        assert!(
+            code.contains("_toHandlers("),
+            "v-on spread should be wrapped with _toHandlers, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_toHandlers($setup.attrs"),
+            "v-bind spread should NOT use _toHandlers, got:\n{code}"
+        );
+    }
 }

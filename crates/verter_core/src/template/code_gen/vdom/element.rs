@@ -352,6 +352,7 @@ pub struct PropsResult {
     pub uses_with_keys: bool,
     pub uses_normalize_props: bool,
     pub uses_guard_reactive_props: bool,
+    pub uses_to_handlers: bool,
     /// v-model on a native element (input/textarea/select) that needs
     /// `_withDirectives()` wrapping after the element VNode is created.
     pub native_vmodel: Option<NativeVModel>,
@@ -614,7 +615,8 @@ pub(crate) fn build_props_object_into(
     let mut dynamic_props: Vec<String> = Vec::with_capacity(4);
     // Collect spread expressions from v-bind/v-on without args.
     // These need _mergeProps() wrapping when mixed with regular props.
-    let mut spreads: Vec<String> = Vec::with_capacity(2);
+    // Bool flag: true = v-on spread (needs _toHandlers), false = v-bind spread.
+    let mut spreads: Vec<(String, bool)> = Vec::with_capacity(2);
     let mut has_regular_props = false;
     let mut has_dynamic_key = false;
     let mut uses_normalize_class = false;
@@ -642,7 +644,7 @@ pub(crate) fn build_props_object_into(
                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                     let raw = &source[vs as usize..ve as usize];
                     let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
-                    spreads.push(resolve_expr(raw, vs, oxc_exp, resolver, force_js));
+                    spreads.push((resolve_expr(raw, vs, oxc_exp, resolver, force_js), is_on));
                 }
                 continue;
             }
@@ -1300,23 +1302,47 @@ pub(crate) fn build_props_object_into(
     }
     let mut uses_normalize_props = wrap_normalize_for_dynamic_key;
     let mut uses_guard_reactive_props = false;
+    let mut uses_to_handlers = false;
+    let is_component = element.tag_type.is_component();
+
+    // Helper: format a spread expression, wrapping v-on spreads with _toHandlers
+    let format_spread = |buf: &mut String, spread: &(String, bool)| {
+        let (expr, is_von) = spread;
+        if *is_von {
+            buf.push_str("_toHandlers(");
+            buf.push_str(expr);
+            if !is_component {
+                buf.push_str(", true");
+            }
+            buf.push(')');
+        } else {
+            buf.push_str(expr);
+        }
+    };
 
     if use_merge {
         // Spreads mixed with regular props → _mergeProps({...}, spread1, spread2)
         // No normalizeProps/guardReactiveProps needed — _mergeProps handles normalization
         for spread in &spreads {
             buf.push_str(", ");
-            buf.push_str(spread);
+            format_spread(buf, spread);
+            if spread.1 {
+                uses_to_handlers = true;
+            }
         }
         buf.push(')');
     } else if !spreads.is_empty() && !has_regular_props {
-        if spreads.len() == 1 {
-            // Single spread, no regular props → _normalizeProps(_guardReactiveProps(expr))
+        if spreads.len() == 1 && !spreads[0].1 {
+            // Single v-bind spread, no regular props → _normalizeProps(_guardReactiveProps(expr))
             buf.push_str("_normalizeProps(_guardReactiveProps(");
-            buf.push_str(&spreads[0]);
+            buf.push_str(&spreads[0].0);
             buf.push_str("))");
             uses_normalize_props = true;
             uses_guard_reactive_props = true;
+        } else if spreads.len() == 1 && spreads[0].1 {
+            // Single v-on spread, no regular props → _toHandlers(expr, true)
+            format_spread(buf, &spreads[0]);
+            uses_to_handlers = true;
         } else {
             // Multiple spreads, no regular props → _mergeProps(expr1, expr2)
             buf.push_str("_mergeProps(");
@@ -1324,7 +1350,10 @@ pub(crate) fn build_props_object_into(
                 if i > 0 {
                     buf.push_str(", ");
                 }
-                buf.push_str(spread);
+                format_spread(buf, spread);
+                if spread.1 {
+                    uses_to_handlers = true;
+                }
             }
             buf.push(')');
         }
@@ -1339,6 +1368,7 @@ pub(crate) fn build_props_object_into(
         uses_with_keys,
         uses_normalize_props,
         uses_guard_reactive_props,
+        uses_to_handlers,
         native_vmodel,
     }
 }
@@ -1484,6 +1514,9 @@ pub fn process_element_leave<'alloc>(
         }
         if props_result.uses_guard_reactive_props {
             out.add_vdom_import(VdomHelper::GuardReactiveProps);
+        }
+        if props_result.uses_to_handlers {
+            out.add_vdom_import(VdomHelper::ToHandlers);
         }
         (props_result.dynamic_props, props_result.native_vmodel)
     } else {

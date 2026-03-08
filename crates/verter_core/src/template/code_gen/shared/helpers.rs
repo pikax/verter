@@ -36,6 +36,7 @@ pub const V_SHOW: &str = "_vShow";
 pub const CREATE_STATIC_VNODE: &str = "_createStaticVNode";
 pub const NORMALIZE_PROPS: &str = "_normalizeProps";
 pub const GUARD_REACTIVE_PROPS: &str = "_guardReactiveProps";
+pub const TO_HANDLERS: &str = "_toHandlers";
 
 // ======================== Vue built-in components ========================
 // These are imported directly from "vue" (e.g., `Suspense as _Suspense`)
@@ -102,8 +103,8 @@ pub const SSR_LOOSE_EQUAL: &str = "_ssrLooseEqual";
 
 // ======================== Helper import bitflags ========================
 
-/// VDOM runtime helper identifier. Each variant is a distinct bit in a `u32`.
-#[repr(u32)]
+/// VDOM runtime helper identifier. Each variant is a distinct bit in a `u64`.
+#[repr(u64)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum VdomHelper {
     CreateElementVNode = 1,
@@ -138,6 +139,7 @@ pub enum VdomHelper {
     CreateStaticVNode = 1 << 29,
     NormalizeProps = 1 << 30,
     GuardReactiveProps = 1 << 31,
+    ToHandlers = 1 << 32,
 }
 
 impl VdomHelper {
@@ -177,12 +179,13 @@ impl VdomHelper {
             Self::CreateStaticVNode => CREATE_STATIC_VNODE,
             Self::NormalizeProps => NORMALIZE_PROPS,
             Self::GuardReactiveProps => GUARD_REACTIVE_PROPS,
+            Self::ToHandlers => TO_HANDLERS,
         }
     }
 }
 
 /// Ordered lookup table for `VdomHelperFlags::to_imports()`.
-const ALL_VDOM: [VdomHelper; 32] = [
+const ALL_VDOM: [VdomHelper; 33] = [
     VdomHelper::CreateElementVNode,
     VdomHelper::CreateElementBlock,
     VdomHelper::CreateVNode,
@@ -215,11 +218,12 @@ const ALL_VDOM: [VdomHelper; 32] = [
     VdomHelper::CreateStaticVNode,
     VdomHelper::NormalizeProps,
     VdomHelper::GuardReactiveProps,
+    VdomHelper::ToHandlers,
 ];
 
-/// Bitflag set of VDOM runtime helpers. Wraps a `u32` with O(1) add/has.
+/// Bitflag set of VDOM runtime helpers. Wraps a `u64` with O(1) add/has.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct VdomHelperFlags(pub u32);
+pub struct VdomHelperFlags(pub u64);
 
 impl VdomHelperFlags {
     /// Empty set.
@@ -238,13 +242,13 @@ impl VdomHelperFlags {
     #[cfg(test)]
     #[inline(always)]
     pub const fn has(self, h: VdomHelper) -> bool {
-        (self.0 & (h as u32)) != 0
+        (self.0 & (h as u64)) != 0
     }
 
     /// Add a helper (returns new value).
     #[inline(always)]
     pub const fn add(self, h: VdomHelper) -> Self {
-        Self(self.0 | (h as u32))
+        Self(self.0 | (h as u64))
     }
 
     /// Merge two flag sets.

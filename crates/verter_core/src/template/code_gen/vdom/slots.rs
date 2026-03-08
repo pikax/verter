@@ -405,6 +405,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             if props_result.uses_guard_reactive_props {
                 out.add_vdom_import(VdomHelper::GuardReactiveProps);
             }
+            if props_result.uses_to_handlers {
+                out.add_vdom_import(VdomHelper::ToHandlers);
+            }
             props_result.dynamic_props
         } else {
             if has_children {
@@ -817,6 +820,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
             if props_result.uses_guard_reactive_props {
                 out.add_vdom_import(VdomHelper::GuardReactiveProps);
+            }
+            if props_result.uses_to_handlers {
+                out.add_vdom_import(VdomHelper::ToHandlers);
             }
             props_result.dynamic_props
         } else {
