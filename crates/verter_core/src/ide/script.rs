@@ -332,9 +332,11 @@ pub fn generate_ide_script<'alloc>(
             );
         }
         (None, None) => {
-            // No script blocks — emit minimal wrapper + full type constructs
-            return_close = emit_minimal_wrapper(&mut out, options, 0, template_end);
+            // No script blocks — emit minimal wrapper + full type constructs.
+            // Imports must come BEFORE the function wrapper (TS1232: imports
+            // can only appear at the top level of a module).
             emit_helper_imports(&mut out, 0, options, &builtin_components, template_ast);
+            return_close = emit_minimal_wrapper(&mut out, options, 0, template_end);
             emit_type_constructs(
                 &mut type_constructs,
                 &None, // no generics
@@ -342,6 +344,7 @@ pub fn generate_ide_script<'alloc>(
                 source,
                 options,
                 false, // no getCurrentInstance
+                false, // no Comp functions → skip attributes type
             );
         }
     }
@@ -1177,6 +1180,7 @@ fn process_tsx_script_setup<'alloc>(
         source,
         options,
         has_get_current_instance,
+        true, // has Comp functions
     );
 
     (deferred_return_close, destructured_block_meta)
@@ -1242,6 +1246,7 @@ fn process_tsx_script_setup_error_mode(
         source,
         options,
         false, // no getCurrentInstance detection
+        true,  // emit attributes type (error mode still needs it)
     );
 
     deferred_return_close
@@ -2664,6 +2669,7 @@ fn process_tsx_script_only<'alloc>(
         source,
         options,
         false, // no getCurrentInstance detection for Options API
+        true,  // emit attributes type
     );
 }
 
@@ -2895,7 +2901,8 @@ fn process_standard_macro(
         if d.name.is_none() && !is_no_return {
             let binding_start = ctx.content_start + d.binding_span.start;
             let binding_end = ctx.content_start + d.binding_span.end;
-            ctx.out.overwrite(binding_start, binding_end, &auto_var_name);
+            ctx.out
+                .overwrite(binding_start, binding_end, &auto_var_name);
         }
     }
 
@@ -3701,6 +3708,10 @@ fn emit_helper_imports(
 }
 
 /// Emit all type constructs to the `buf` string (no sourcemap).
+///
+/// `emit_attributes_type`: when false, skip the `___VERTER___attributes` type alias.
+/// Template-only SFCs have no Comp functions that reference it, so emitting it
+/// produces TS6196 "declared but never used".
 fn emit_type_constructs(
     buf: &mut String,
     generic_info: &Option<IdeGenericInfo>,
@@ -3708,9 +3719,12 @@ fn emit_type_constructs(
     _source: &str,
     options: &IdeScriptOptions<'_>,
     _has_get_current_instance: bool,
+    emit_attributes_type: bool,
 ) {
     // Emit ___VERTER___attributes type alias
-    if options.is_jsx {
+    if !emit_attributes_type {
+        // Skip — caller knows this type won't be referenced
+    } else if options.is_jsx {
         // JS mode: JSDoc @typedef
         if let Some(ref attrs) = attrs_type {
             buf.push_str(&format!(
@@ -4257,6 +4271,7 @@ fn walk_children_for_comp(
                     &new_comp_scopes,
                     is_jsx,
                     &props_lit,
+                    prop_names,
                 );
                 all_comp_offsets.push(offset);
                 if emit_root_comps {
@@ -4480,7 +4495,7 @@ fn serialize_element_props(
                     // If the expression is a bare identifier matching a prop name,
                     // prefix with `__props.` since props aren't destructured at
                     // script scope (where Comp functions live).
-                    let resolved = resolve_prop_refs_in_expr(expr, prop_names);
+                    let resolved = resolve_all_prop_refs_in_expr(expr, prop_names);
                     entries.push(format!("\"{}\": {}", arg_name, resolved));
                 }
             } else if name == "@" || name == "v-on" {
@@ -4509,25 +4524,41 @@ fn serialize_element_props(
 ///
 /// For simple identifiers (e.g., `tag` → `__props.tag`) this is straightforward.
 /// For member expressions (e.g., `tag.value` where `tag` is a prop), prefix the
-/// root identifier. For complex expressions, scan for leading identifier tokens.
-fn resolve_prop_refs_in_expr(expr: &str, prop_names: &rustc_hash::FxHashSet<&str>) -> String {
-    let trimmed = expr.trim();
-    if trimmed.is_empty() {
+/// Resolve ALL prop name identifiers in an expression, replacing each bare prop
+/// name with `__props.propName`. Used for Comp function condition guards where the
+/// raw template expression may contain multiple prop references (e.g., `showBoard || isEditing`).
+fn resolve_all_prop_refs_in_expr(expr: &str, prop_names: &rustc_hash::FxHashSet<&str>) -> String {
+    if prop_names.is_empty() {
         return expr.to_string();
     }
-
-    // Extract the leading identifier from the expression.
-    // e.g., "tag" → "tag", "tag.value" → "tag", "items[0]" → "items"
-    let ident_end = trimmed
-        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
-        .unwrap_or(trimmed.len());
-    let leading_ident = &trimmed[..ident_end];
-
-    if !leading_ident.is_empty() && prop_names.contains(leading_ident) {
-        format!("__props.{}", trimmed)
-    } else {
-        expr.to_string()
+    let bytes = expr.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(expr.len());
+    let mut i = 0;
+    while i < len {
+        let b = bytes[i];
+        if b.is_ascii_alphabetic() || b == b'_' || b == b'$' {
+            // Start of an identifier
+            let start = i;
+            i += 1;
+            while i < len
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+            {
+                i += 1;
+            }
+            let ident = &expr[start..i];
+            // Skip if preceded by '.' (property access, not bare identifier)
+            let preceded_by_dot = start > 0 && bytes[start - 1] == b'.';
+            if !preceded_by_dot && prop_names.contains(ident) {
+                result.push_str("__props.");
+            }
+            result.push_str(ident);
+        } else {
+            result.push(b as char);
+            i += 1;
+        }
     }
+    result
 }
 
 /// Convert an event name to `onXxx` format.
@@ -4566,6 +4597,7 @@ fn emit_comp_function_for_element(
     comp_scopes: &[CompScope],
     is_jsx: bool,
     props_literal: &str,
+    prop_names: &rustc_hash::FxHashSet<&str>,
 ) {
     use std::fmt::Write;
 
@@ -4577,7 +4609,10 @@ fn emit_comp_function_for_element(
     if raw_tag == "component" {
         use std::fmt::Write;
         let guard = super::condition::generate_condition_text(condition_scopes)
-            .map(|text| format!("\n  if(!({})) return null;", text))
+            .map(|text| {
+                let resolved = resolve_all_prop_refs_in_expr(&text, prop_names);
+                format!("\n  if(!({})) return null;", resolved)
+            })
             .unwrap_or_default();
         write!(
             buf,
@@ -4593,21 +4628,25 @@ fn emit_comp_function_for_element(
         return;
     }
 
-    // Kebab-case component names (e.g., `a-switch`) are referenced via their
-    // PascalCase const declaration (e.g., `const ASwitch = ...`). Using the raw
-    // kebab name would produce invalid JS (`instantiateComponent(a-switch, {})`).
-    let tag_name_owned;
-    let tag_name: &str = if raw_tag.contains('-') {
-        tag_name_owned = to_pascal_case(raw_tag);
-        &tag_name_owned
+    // Component tag names in templates use case-insensitive matching against imports.
+    // `<card>` resolves to `Card`, `<a-switch>` to `ASwitch`. PascalCase-convert
+    // for component tags; HTML elements keep their raw lowercase name for
+    // HTMLElementTagNameMap lookup.
+    let pascal_tag = to_pascal_case(raw_tag);
+    let tag_name: &str = if el.tag_type == TagType::Component {
+        &pascal_tag
     } else {
-        tag_name_owned = String::new();
         raw_tag
     };
 
-    // Generate narrowing guard from condition scopes
+    // Generate narrowing guard from condition scopes.
+    // Resolve prop names to __props.propName since Comp functions are outside the
+    // template block scope where __props destructuring is available.
     let guard = super::condition::generate_condition_text(condition_scopes)
-        .map(|text| format!("\n  if(!({})) return null;", text))
+        .map(|text| {
+            let resolved = resolve_all_prop_refs_in_expr(&text, prop_names);
+            format!("\n  if(!({})) return null;", resolved)
+        })
         .unwrap_or_default();
 
     match el.tag_type {
@@ -6804,6 +6843,40 @@ const el2 = ref<HTMLSpanElement>()
         assert!(
             bindings.is_empty(),
             "template-only SFC should have no bindings"
+        );
+    }
+
+    #[test]
+    fn no_script_blocks_imports_before_function_wrapper() {
+        // TS1232: imports inside a function body are invalid.
+        // Template-only SFCs must emit imports BEFORE the function wrapper.
+        let (code, _, _) = gen_tsx_script_full(r#"<template><div>hello</div></template>"#);
+
+        let import_pos = code.find("import ").expect("should have import statement");
+        let fn_pos = code
+            .find("export function ___VERTER___TemplateBindingFN")
+            .expect("should have function wrapper");
+
+        assert!(
+            import_pos < fn_pos,
+            "imports (pos {}) must appear BEFORE function wrapper (pos {})\n---\n{}",
+            import_pos,
+            fn_pos,
+            code
+        );
+    }
+
+    #[test]
+    fn no_script_blocks_no_unused_attributes_type() {
+        // TS6196: template-only SFCs should NOT emit ___VERTER___attributes type
+        // since there are no Comp functions to reference it.
+        let (_, _, type_constructs) =
+            gen_tsx_script_full(r#"<template><div>hello</div></template>"#);
+
+        assert!(
+            !type_constructs.contains("___VERTER___attributes"),
+            "template-only SFC should NOT emit ___VERTER___attributes (unused), got:\n{}",
+            type_constructs
         );
     }
 

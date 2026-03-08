@@ -218,7 +218,9 @@ pub fn process_element_props<'alloc>(
                 } else {
                     false
                 };
-                process_v_on(prop, oxc_prop, source, out, alloc, resolver, v_if_guard, use_spread);
+                process_v_on(
+                    prop, oxc_prop, source, out, alloc, resolver, v_if_guard, use_spread,
+                );
             }
             "html" => process_v_html(prop, oxc_prop, source, out, resolver),
             "text" => process_v_text(prop, oxc_prop, source, out, resolver),
@@ -265,11 +267,7 @@ fn process_merged_class_or_style<'alloc>(
             .replace('"', "\\\"")
             .replace('\n', " ")
             .replace('\r', "");
-        out.overwrite(
-            tve,
-            prop_end,
-            &format!(",\"{}\"])}}", escaped_static),
-        );
+        out.overwrite(tve, prop_end, &format!(",\"{}\"])}}", escaped_static));
         if let Some(oxc_p) = oxc_prop {
             if let Some(ref exp) = oxc_p.exp {
                 if let Some(ref bindings) = exp.bindings {
@@ -454,6 +452,7 @@ fn process_v_bind<'alloc>(
 /// - `@click="handler"` → `onClick={handler}`
 /// - `@click="handler($event)"` → `onClick={($event) => handler($event)}`
 /// - `v-on="{ mousedown: doThis }"` → `{...{ mousedown: doThis }}` (spread, #49)
+#[allow(clippy::too_many_arguments)]
 fn process_v_on<'alloc>(
     prop: &NodeProp,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
@@ -786,7 +785,7 @@ fn process_v_model<'alloc>(
                 (dn == "on" || dn == "@")
                     && p.arg_start
                         .zip(p.arg_end)
-                        .map(|(a, b)| &source[a as usize..b as usize] == vue_event)
+                        .map(|(a, b)| source[a as usize..b as usize] == vue_event)
                         .unwrap_or(false)
             }
         });

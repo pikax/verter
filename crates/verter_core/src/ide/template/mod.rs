@@ -295,11 +295,8 @@ fn walk_element<'a, 'alloc>(
                     ctx.out.overwrite(el.tag_open.start, arg_start, "<>{\"");
                     // Slot name stays at [arg_start, arg_end) — sourcemap preserves position
                     // Overwrite everything after slot name through close of open tag → "}
-                    ctx.out.overwrite(
-                        arg_end,
-                        el.tag_open.end,
-                        &format!("\"}}{frag_suffix}"),
-                    );
+                    ctx.out
+                        .overwrite(arg_end, el.tag_open.end, &format!("\"}}{frag_suffix}"));
                 } else {
                     // Default slot (no name): <template v-slot> → <>
                     ctx.out.overwrite(
@@ -646,7 +643,9 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
         // would be parsed as `return {}` (object literal), breaking the syntax.
         if let AstNodeKind::Element(child_el) = &ctx.ast.nodes[child_id.0].kind {
             let has_dynamic_is = child_el.tag_type == TagType::Component
-                && &ctx.source[child_el.tag_open.start as usize + 1..child_el.tag_open.name_end as usize] == "component"
+                && &ctx.source
+                    [child_el.tag_open.start as usize + 1..child_el.tag_open.name_end as usize]
+                    == "component"
                 && child_el.props.iter().any(|p| {
                     p.is_directive
                         && directive_name(p, ctx.source) == "bind"

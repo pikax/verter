@@ -1699,7 +1699,8 @@ fn duplicate_keydown_handlers_use_spread_for_second() {
     assert!(
         on_keydown_attr <= 1,
         "should have at most one onKeyDown= attribute (rest as spread). Got {} in: {}",
-        on_keydown_attr, result
+        on_keydown_attr,
+        result
     );
     // Should still reference both handlers somehow
     assert!(
@@ -1758,7 +1759,8 @@ fn multiline_static_style_merged_with_dynamic_no_unterminated_string() {
         let static_str = &after_quote[..end_quote];
         assert!(
             !static_str.contains('\n'),
-            "static style string must not contain newlines. Got: {}", static_str
+            "static style string must not contain newlines. Got: {}",
+            static_str
         );
     }
 }
@@ -3620,7 +3622,9 @@ fn v_show_with_style_binding_no_leaked_prefix() {
     );
 
     // Negative: no stray binding prefixes leaked outside the style attribute
-    let style_end = result.find("}}").expect("should have closing }} for style object");
+    let style_end = result
+        .find("}}")
+        .expect("should have closing }} for style object");
     let after_style = &result[style_end + 2..];
     assert!(
         !after_style.contains("___VERTER___instance."),
@@ -3725,7 +3729,10 @@ fn component_is_with_v_if_and_v_text_produces_valid_jsx() {
             ("title", BindingType::SetupConst),
         ],
     );
-    eprintln!("=== COMPONENT :IS + V-IF + V-TEXT ===\n{}\n=== END ===", result);
+    eprintln!(
+        "=== COMPONENT :IS + V-IF + V-TEXT ===\n{}\n=== END ===",
+        result
+    );
 
     // Must contain v-text → textContent conversion
     assert!(
@@ -3881,7 +3888,9 @@ const checked = ref<boolean>(false);
 
 #[test]
 fn ant_design_switch_basic_produces_valid_tsx() {
-    let source = match std::fs::read_to_string("d:/dev/github/verter-test-repos/ant-design-vue/components/switch/demo/basic.vue") {
+    let source = match std::fs::read_to_string(
+        "d:/dev/github/verter-test-repos/ant-design-vue/components/switch/demo/basic.vue",
+    ) {
         Ok(s) => s,
         Err(_) => {
             eprintln!("SKIP: basic.vue not found");
@@ -3933,7 +3942,11 @@ fn activist_card_topic_selection_produces_valid_tsx() {
     for err in &parsed.errors {
         eprintln!("OXC ERROR: {}", err);
     }
-    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+    assert!(
+        parsed.errors.is_empty(),
+        "Got {} errors",
+        parsed.errors.len()
+    );
 }
 
 #[test]
@@ -3957,7 +3970,11 @@ fn activist_machine_steps_produces_valid_tsx() {
     for err in &parsed.errors {
         eprintln!("OXC ERROR: {}", err);
     }
-    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+    assert!(
+        parsed.errors.is_empty(),
+        "Got {} errors",
+        parsed.errors.len()
+    );
 }
 
 /// <component :is="..."> should not generate a ___VERTER___Comp function with
@@ -3990,7 +4007,11 @@ const tag = 'div';
 
     // Parse to ensure valid TSX
     let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
-    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+    assert!(
+        parsed.errors.is_empty(),
+        "Got {} errors",
+        parsed.errors.len()
+    );
 }
 
 #[test]
@@ -4071,14 +4092,23 @@ const { msg, count } = defineProps<{
     for err in &parsed.errors {
         eprintln!("OXC ERROR: {}", err);
     }
-    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+    assert!(
+        parsed.errors.is_empty(),
+        "Got {} errors",
+        parsed.errors.len()
+    );
 }
 
 #[test]
 fn nexus_bloc_produces_valid_tsx() {
-    let source = match std::fs::read_to_string("d:/dev/accioresearch/WLS/nexus/nexus-ui/packages/ui/src/components/atom/Bloc/Bloc.vue") {
+    let source = match std::fs::read_to_string(
+        "d:/dev/accioresearch/WLS/nexus/nexus-ui/packages/ui/src/components/atom/Bloc/Bloc.vue",
+    ) {
         Ok(s) => s,
-        Err(_) => { eprintln!("SKIP: file not found"); return; }
+        Err(_) => {
+            eprintln!("SKIP: file not found");
+            return;
+        }
     };
     let alloc = Allocator::new();
     let options = crate::compile::CodegenOptions {
@@ -4095,5 +4125,67 @@ fn nexus_bloc_produces_valid_tsx() {
     for err in &parsed.errors {
         eprintln!("OXC ERROR: {}", err);
     }
-    assert!(parsed.errors.is_empty(), "Got {} errors", parsed.errors.len());
+    assert!(
+        parsed.errors.is_empty(),
+        "Got {} errors",
+        parsed.errors.len()
+    );
+}
+
+#[test]
+fn runtime_define_props_in_template_scope() {
+    // Runtime defineProps({...}) without assignment should expose prop names
+    // in the template scope. TS2304 "Cannot find name" if they're not.
+    let source = r#"<template>
+  <div v-if="showBoard">
+    <router-link :to="`/boards/${url}`">{{ name }}</router-link>
+  </div>
+</template>
+
+<script setup lang="ts">
+defineProps({
+  name: { type: String, required: true },
+  url: { type: String, required: true },
+  showBoard: { type: Boolean, required: true },
+});
+</script>"#;
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("BoardBadge.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    eprintln!("=== RUNTIME PROPS TSX ===\n{}\n=== END ===", tsx.code);
+
+    // Positive: props should be accessible via __props in template
+    assert!(
+        tsx.code.contains("__props.showBoard"),
+        "showBoard should be accessed via __props in template, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("__props.url") || tsx.code.contains("__props.name"),
+        "url/name should be accessed via __props in template, got:\n{}",
+        tsx.code
+    );
+
+    // Negative: Comp function condition guards must also use __props
+    // (TS2304 "Cannot find name 'showBoard'" if bare)
+    assert!(
+        !tsx.code.contains("if(!((showBoard)))"),
+        "Comp function guard must NOT use bare 'showBoard' — should be __props.showBoard, got:\n{}",
+        tsx.code
+    );
+
+    // OXC validation
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Full TSX should parse without errors. Got {} errors:\n{}",
+        parsed.errors.len(),
+        tsx.code
+    );
 }

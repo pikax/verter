@@ -429,16 +429,14 @@ pub fn emit_v_show<'alloc>(
         // The parser stores `:style` as directive name `:` (or `v-bind`) with
         // argument `style` in arg_start..arg_end.
         let existing_style = el.props.iter().enumerate().find(|(i, p)| {
-            *i != show_idx
-                && p.is_directive
-                && {
-                    let dir_name = &source[p.start as usize..p.name_end as usize];
-                    (dir_name == ":" || dir_name == "v-bind")
-                        && p.arg_start
-                            .zip(p.arg_end)
-                            .map(|(a, b)| &source[a as usize..b as usize] == "style")
-                            .unwrap_or(false)
-                }
+            *i != show_idx && p.is_directive && {
+                let dir_name = &source[p.start as usize..p.name_end as usize];
+                (dir_name == ":" || dir_name == "v-bind")
+                    && p.arg_start
+                        .zip(p.arg_end)
+                        .map(|(a, b)| &source[a as usize..b as usize] == "style")
+                        .unwrap_or(false)
+            }
         });
 
         if let Some((style_idx, style_prop)) = existing_style {
@@ -449,8 +447,7 @@ pub fn emit_v_show<'alloc>(
             if let (Some(svs), Some(sve)) = (style_prop.value_start, style_prop.value_end) {
                 let style_expr = &source[svs as usize..sve as usize];
                 let resolved_style = if let Some(oxc_el) = oxc_el {
-                    if let Some(oxc_prop) =
-                        oxc_el.props.iter().find(|p| p.prop_index == style_idx)
+                    if let Some(oxc_prop) = oxc_el.props.iter().find(|p| p.prop_index == style_idx)
                     {
                         if let Some(ref exp) = oxc_prop.exp {
                             build_prefixed_expr(style_expr, svs, exp, resolver, &[])
