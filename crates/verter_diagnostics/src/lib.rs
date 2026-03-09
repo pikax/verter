@@ -19,6 +19,7 @@
 //! AnalysisSnapshot → LintVisitor → [Rule1, Rule2, ...] → DiagnosticSet
 //! ```
 
+pub mod casing;
 mod comment_directives;
 mod config;
 mod context;

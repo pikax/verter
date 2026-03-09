@@ -5,21 +5,13 @@
 
 // @ai-generated
 
+use crate::casing::is_pascal_case;
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
 use verter_analysis::template::TemplateElement;
 
 pub struct ComponentNameInTemplateCasing;
-
-/// Check if a string is PascalCase (starts uppercase, no hyphens).
-fn is_pascal_case(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let first = s.chars().next().unwrap();
-    first.is_ascii_uppercase() && !s.contains('-')
-}
 
 impl LintRule for ComponentNameInTemplateCasing {
     fn name(&self) -> &'static str {

@@ -48,6 +48,18 @@ pub mod element;
 pub mod interpolation;
 pub mod props;
 mod slots;
+
+/// Check if a directive name is `v-bind` (`:` or `v-bind`).
+#[inline]
+pub(crate) fn is_v_bind(name: &str) -> bool {
+    name == ":" || name == "v-bind"
+}
+
+/// Check if a directive name is `v-on` (`@` or `v-on`).
+#[inline]
+pub(crate) fn is_v_on(name: &str) -> bool {
+    name == "@" || name == "v-on"
+}
 pub mod text;
 
 use rustc_hash::FxHashMap;

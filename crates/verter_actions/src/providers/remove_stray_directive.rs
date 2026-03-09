@@ -28,15 +28,7 @@ impl ActionProvider for RemoveStrayDirective {
             return vec![];
         }
 
-        // Expand backwards to include leading whitespace
-        let remove_start = {
-            let before = &source[..start];
-            if before.ends_with(' ') || before.ends_with('\t') {
-                start - 1
-            } else {
-                start
-            }
-        };
+        let remove_start = crate::provider::expand_remove_start(source, start);
 
         // Determine if it's v-else or v-else-if for the title
         let directive_text = &source[start..end];

@@ -6,25 +6,13 @@
 
 // @ai-generated
 
+use crate::casing::is_pascal_case;
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
 use verter_analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
 
 pub struct ComponentDefinitionNameCasing;
-
-/// Returns true if a string is PascalCase (starts with uppercase, no hyphens).
-fn is_pascal_case(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let first = s.chars().next().unwrap();
-    if !first.is_ascii_uppercase() {
-        return false;
-    }
-    // Must not contain hyphens (that would be kebab-case)
-    !s.contains('-')
-}
 
 impl LintRule for ComponentDefinitionNameCasing {
     fn name(&self) -> &'static str {

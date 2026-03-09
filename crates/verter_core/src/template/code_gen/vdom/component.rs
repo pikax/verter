@@ -176,7 +176,7 @@ pub(super) fn resolve_dynamic_component<'a>(
             continue;
         }
         let directive_name = &source[prop.start as usize..prop.name_end as usize];
-        let is_bind = directive_name == ":" || directive_name == "v-bind";
+        let is_bind = super::is_v_bind(directive_name);
         if !is_bind {
             continue;
         }

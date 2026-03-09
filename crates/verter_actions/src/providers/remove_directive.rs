@@ -42,15 +42,7 @@ impl ActionProvider for RemoveDirective {
             return vec![];
         }
 
-        // Expand backwards to include leading whitespace
-        let remove_start = {
-            let before = &source[..start];
-            if before.ends_with(' ') || before.ends_with('\t') {
-                start - 1
-            } else {
-                start
-            }
-        };
+        let remove_start = crate::provider::expand_remove_start(source, start);
 
         vec![CodeAction {
             title: title.to_string(),

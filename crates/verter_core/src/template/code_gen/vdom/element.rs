@@ -166,7 +166,7 @@ fn emit_merged_event_handler_value(
     let mut uses_wk = false;
 
     let dname = &source[prop.start as usize..prop.name_end as usize];
-    let is_on = dname == "@" || dname == "v-on";
+    let is_on = super::is_v_on(dname);
 
     // Classify modifiers (only for @event directives, not :onXxx bindings)
     let mut runtime_mods: Vec<&str> = Vec::new();
@@ -420,7 +420,7 @@ fn determine_native_vmodel_directive(
             for prop in &element.props {
                 if prop.is_directive {
                     let dname = &source[prop.start as usize..prop.name_end as usize];
-                    let is_bind = dname == ":" || dname == "v-bind";
+                    let is_bind = super::is_v_bind(dname);
                     if is_bind {
                         if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
                             let arg = &source[as_ as usize..ae as usize];
@@ -473,7 +473,7 @@ fn pre_scan_class_style_merge<'a>(
     for prop in element_props {
         if prop.is_directive {
             let directive_name = &source[prop.start as usize..prop.name_end as usize];
-            let is_bind = directive_name == ":" || directive_name == "v-bind";
+            let is_bind = super::is_v_bind(directive_name);
             if is_bind {
                 if let (Some(arg_s), Some(arg_e)) = (prop.arg_start, prop.arg_end) {
                     let arg = &source[arg_s as usize..arg_e as usize];
@@ -538,7 +538,7 @@ fn pre_scan_vmodel_handler_merge(element: &ElementNode, source: &str) -> Vec<(us
             continue;
         }
         let dname = &source[prop.start as usize..prop.name_end as usize];
-        if dname != "@" && dname != "v-on" {
+        if !super::is_v_on(dname) {
             continue;
         }
         if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
@@ -583,8 +583,8 @@ fn pre_scan_event_handler_merge(
             continue;
         }
         let dname = &source[prop.start as usize..prop.name_end as usize];
-        let is_on = dname == "@" || dname == "v-on";
-        let is_bind = dname == ":" || dname == "v-bind";
+        let is_on = super::is_v_on(dname);
+        let is_bind = super::is_v_bind(dname);
         if !is_on && !is_bind {
             continue;
         }
@@ -678,8 +678,8 @@ pub(crate) fn build_props_object_into(
         }
         if prop.is_directive {
             let directive_name = &source[prop.start as usize..prop.name_end as usize];
-            let is_bind = directive_name == ":" || directive_name == "v-bind";
-            let is_on = directive_name == "@" || directive_name == "v-on";
+            let is_bind = super::is_v_bind(directive_name);
+            let is_on = super::is_v_on(directive_name);
 
             if (is_bind || is_on) && prop.arg_start.is_none() {
                 // v-bind="expr" or v-on="expr" without arg → spread
@@ -786,8 +786,8 @@ pub(crate) fn build_props_object_into(
 
             if prop.is_directive {
                 let directive_name = &source[prop.start as usize..prop.name_end as usize];
-                let is_bind = directive_name == ":" || directive_name == "v-bind";
-                let is_on = directive_name == "@" || directive_name == "v-on";
+                let is_bind = super::is_v_bind(directive_name);
+                let is_on = super::is_v_on(directive_name);
 
                 if (is_bind || is_on) && prop.arg_start.is_none() {
                     continue; // Handled as spread above

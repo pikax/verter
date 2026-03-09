@@ -6,33 +6,13 @@
 
 // @ai-generated
 
+use crate::casing::{has_uppercase, to_kebab_case};
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
 use verter_analysis::template::{TemplateDirective, TemplateElement};
 
 pub struct VOnEventHyphenation;
-
-/// Returns true if the string contains any ASCII uppercase letter.
-fn has_uppercase(s: &str) -> bool {
-    s.chars().any(|c| c.is_ascii_uppercase())
-}
-
-/// Converts a camelCase string to kebab-case.
-fn to_kebab_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 4);
-    for (i, c) in s.chars().enumerate() {
-        if c.is_ascii_uppercase() {
-            if i > 0 {
-                result.push('-');
-            }
-            result.push(c.to_ascii_lowercase());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
 
 impl LintRule for VOnEventHyphenation {
     fn name(&self) -> &'static str {

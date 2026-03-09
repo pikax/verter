@@ -23,6 +23,19 @@ pub struct ActionContext<'a> {
     pub styles: &'a [StyleBlockAnalysis],
 }
 
+/// Expand a removal span backwards to include leading whitespace (spaces/tabs).
+/// Removes all contiguous whitespace before `start`, matching the behavior
+/// needed when deleting an attribute from an element tag.
+pub fn expand_remove_start(source: &str, start: usize) -> usize {
+    let before = source[..start].as_bytes();
+    let ws = before
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
+    start - ws
+}
+
 /// Trait for action providers. Each provider handles one or more diagnostic rules
 /// or refactoring patterns.
 pub trait ActionProvider: Send + Sync {

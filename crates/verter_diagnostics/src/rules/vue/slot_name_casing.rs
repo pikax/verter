@@ -5,17 +5,13 @@
 
 // @ai-generated
 
+use crate::casing::{has_uppercase, to_kebab_case};
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
 use verter_analysis::template::TemplateAnalysisSnapshot;
 
 pub struct SlotNameCasing;
-
-/// Check if a name contains any uppercase characters (indicating non-kebab-case).
-fn has_uppercase(name: &str) -> bool {
-    name.chars().any(|c| c.is_ascii_uppercase())
-}
 
 impl LintRule for SlotNameCasing {
     fn name(&self) -> &'static str {
@@ -55,22 +51,6 @@ impl LintRule for SlotNameCasing {
             }
         }
     }
-}
-
-/// Convert camelCase or PascalCase to kebab-case.
-fn to_kebab_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 4);
-    for (i, ch) in s.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if i > 0 {
-                result.push('-');
-            }
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push(ch);
-        }
-    }
-    result
 }
 
 #[cfg(test)]

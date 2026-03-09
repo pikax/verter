@@ -37,17 +37,7 @@ impl ActionProvider for RemoveAttribute {
             return vec![];
         }
 
-        // Expand backwards to include leading whitespace
-        let remove_start = {
-            let before = &source[..start];
-            let ws = before
-                .as_bytes()
-                .iter()
-                .rev()
-                .take_while(|&&b| b == b' ' || b == b'\t')
-                .count();
-            start - ws
-        };
+        let remove_start = crate::provider::expand_remove_start(source, start);
 
         vec![CodeAction {
             title: title.to_string(),
