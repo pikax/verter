@@ -376,8 +376,8 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
         "import type statement present"
     );
     assert!(
-        r.contains("$props: import(\"vue\").PublicProps & Props"),
-        "type name in $props"
+        r.contains("Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>"),
+        "defaulted imported props should be wrapped to make keys optional: {r}"
     );
     assert!(!r.contains("withDefaults"), "macro removed");
 }
@@ -516,10 +516,44 @@ const user = defineModel<User>()
 </script><template/>"#,
     );
 
+    assert!(
+        r.contains("import type { User } from './types'"),
+        "import type statement for model should be emitted: {r}"
+    );
     assert!(r.contains("modelValue?: User"), "TS User type");
     assert!(
         r.contains("event: 'update:modelValue', v: User"),
         "emit type with User in $emit overload"
+    );
+}
+
+#[test]
+fn tsc_codegen_define_model_local_type_dependencies_are_emitted() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+interface Role {
+  name: string
+}
+
+interface User {
+  role: Role
+}
+
+const user = defineModel<User>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("interface User"),
+        "User interface should be emitted: {r}"
+    );
+    assert!(
+        r.contains("interface Role"),
+        "Role interface should be emitted: {r}"
+    );
+    assert!(
+        r.contains("modelValue?: User"),
+        "model should keep the named User type: {r}"
     );
 }
 
@@ -684,8 +718,10 @@ const stopObservation = ref(false)
         "imported type as import statement"
     );
     assert!(
-        r.contains("$props: import(\"vue\").PublicProps & WatermarkProps"),
-        "type name in $props"
+        r.contains(
+            "$props: import(\"vue\").PublicProps & Omit<WatermarkProps, 'zIndex' | 'rotate' | 'content' | 'gap'> & Partial<Pick<WatermarkProps, 'zIndex' | 'rotate' | 'content' | 'gap'>>"
+        ),
+        "defaulted imported props should be optional in $props"
     );
     assert!(!r.contains("const style"), "no script body");
     assert!(!r.contains("const fontGap"), "no computed");
@@ -919,6 +955,55 @@ defineProps<MyProps>()
 }
 
 #[test]
+fn tsc_codegen_define_emits_imported_type_emits_import_statement() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import type { Emits } from './types'
+defineEmits<Emits>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("import type { Emits } from './types'"),
+        "defineEmits imported type should emit import type statement: {r}"
+    );
+    assert!(
+        r.contains("__EmitFn<Emits>"),
+        "defineEmits imported type should be preserved in $emit: {r}"
+    );
+    assert!(
+        r.contains("__EmitToProps<Emits>"),
+        "defineEmits imported type should be preserved in $props: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_define_emits_local_type_dependencies_are_emitted() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+interface Payload {
+  value: string
+}
+
+interface Emits {
+  (e: 'submit', payload: Payload): void
+}
+
+defineEmits<Emits>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("interface Emits"),
+        "defineEmits local type should emit the root declaration: {r}"
+    );
+    assert!(
+        r.contains("interface Payload"),
+        "defineEmits local type should emit transitive local declarations: {r}"
+    );
+}
+
+#[test]
 fn tsc_codegen_type_import_with_defaults() {
     let r = gen_tsc(
         r#"<script setup lang="ts">
@@ -933,10 +1018,12 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
         "should emit import type with withDefaults: got {}",
         r
     );
-    // $props should reference the type name
+    // $props should preserve the named type while optionalizing defaulted keys
     assert!(
-        r.contains("$props: import(\"vue\").PublicProps & Props"),
-        "should reference type name in $props: got {}",
+        r.contains(
+            "$props: import(\"vue\").PublicProps & Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>"
+        ),
+        "should wrap named props when defaults are present: got {}",
         r
     );
 }
@@ -1256,6 +1343,40 @@ defineProps<{ actions: Action[] }>()
     );
 }
 
+#[test]
+fn tsc_codegen_transitive_local_type_dependencies_are_emitted() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+interface Role {
+  name: string
+}
+
+interface User {
+  role: Role
+}
+
+interface Props {
+  user: User
+}
+
+defineProps<Props>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("interface Props"),
+        "Props should be emitted: {r}"
+    );
+    assert!(
+        r.contains("interface User"),
+        "User should be emitted transitively: {r}"
+    );
+    assert!(
+        r.contains("interface Role"),
+        "Role should be emitted transitively: {r}"
+    );
+}
+
 // ── attrs attribute on <script setup> ────────────────────────────────────────
 
 #[test]
@@ -1329,6 +1450,24 @@ defineProps<{ items: T[] }>()
 }
 
 #[test]
+fn tsc_codegen_attrs_imported_named_type_emits_import_statement() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" attrs="Attrs">
+import type { Attrs } from './types'
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("import type { Attrs } from './types'"),
+        "named attrs type should emit import type statement: {r}"
+    );
+    assert!(
+        r.contains("$attrs: Attrs"),
+        "named attrs type should be preserved: {r}"
+    );
+}
+
+#[test]
 fn tsc_codegen_use_attrs_type_arg_fallback() {
     let r = gen_tsc(
         r#"<script setup lang="ts">
@@ -1348,6 +1487,54 @@ const attrs = useAttrs<{ class?: string; id?: string }>()
         !r.contains("$attrs: {},"),
         "should not have empty $attrs when useAttrs<T> provides type, got:\n{}",
         r
+    );
+}
+
+#[test]
+fn tsc_codegen_use_attrs_local_type_dependencies_are_emitted() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { useAttrs } from 'vue'
+
+interface Role {
+  label: string
+}
+
+interface Attrs {
+  role: Role
+}
+
+const attrs = useAttrs<Attrs>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("$attrs: Attrs"),
+        "named attrs type should be preserved: {r}"
+    );
+    assert!(
+        r.contains("interface Attrs"),
+        "Attrs interface should be emitted: {r}"
+    );
+    assert!(
+        r.contains("interface Role"),
+        "Role interface should be emitted transitively: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_dedupes_shared_named_type_references_across_surfaces() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" attrs="Shared">
+import type { Shared } from './types'
+const model = defineModel<Shared>()
+</script><template/>"#,
+    );
+
+    let count = r.matches("import type { Shared } from './types'").count();
+    assert_eq!(
+        count, 1,
+        "Shared import should be emitted once across surfaces: {r}"
     );
 }
 

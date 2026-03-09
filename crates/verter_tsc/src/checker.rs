@@ -53,6 +53,11 @@ pub struct CheckResult {
     pub emitted_files: Vec<PathBuf>,
 }
 
+struct CheckerInvocation {
+    output: String,
+    success: bool,
+}
+
 /// Phase A: Generate full TSX (script body + template) for every `.vue` file in parallel.
 ///
 /// Uses `compile()` with `CompileTarget::IDE` for full type checking.
@@ -335,10 +340,10 @@ pub fn run(
         &config.root_dir,
     );
 
-    let diagnostics = match validation_tsconfig {
+    let mut diagnostics = match validation_tsconfig {
         Ok(tsconfig_path) => match invoke_checker(&checker_bin, &tsconfig_path, &validation_opts) {
-            Ok(raw_output) => {
-                let raw_diags = reporter::parse_tsc_output(&raw_output);
+            Ok(invocation) => {
+                let raw_diags = reporter::parse_tsc_output(&invocation.output);
                 remap_diagnostics(raw_diags, &tsx_to_vue)
             }
             Err(e) => {
@@ -370,17 +375,24 @@ pub fn run(
         match decl_tsconfig {
             Ok(tsconfig_path) => {
                 match invoke_checker(&checker_bin, &tsconfig_path, &decl_opts) {
-                    Ok(_) => {
+                    Ok(invocation) => {
+                        let raw_diags = reporter::parse_tsc_output(&invocation.output);
+                        diagnostics.extend(remap_diagnostics(raw_diags, &tsx_to_vue));
+
                         // Post-process: rename .tsc.tsx.d.ts → .vue.d.ts
-                        if let (Some(decl_dir), Some(ref decl_gen)) =
-                            (&opts.declaration_dir, &declaration_generated)
-                        {
-                            postprocess_vue_declarations(decl_dir, decl_gen, &config.root_dir);
+                        if invocation.success {
+                            if let (Some(decl_dir), Some(ref decl_gen)) =
+                                (&opts.declaration_dir, &declaration_generated)
+                            {
+                                postprocess_vue_declarations(decl_dir, decl_gen, &config.root_dir);
+                            }
+                            opts.declaration_dir
+                                .as_ref()
+                                .map(|d| collect_dts_files(d))
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
                         }
-                        opts.declaration_dir
-                            .as_ref()
-                            .map(|d| collect_dts_files(d))
-                            .unwrap_or_default()
                     }
                     Err(e) => {
                         eprintln!("verter-tsc: Phase B (declarations) failed: {e}");
@@ -403,12 +415,13 @@ pub fn run(
     }
 }
 
-/// Invoke the type-checker binary and return its combined stdout+stderr output.
+/// Invoke the type-checker binary and return its combined stdout+stderr output
+/// plus whether the subprocess exited successfully.
 fn invoke_checker(
     checker_bin: &Path,
     tsconfig_path: &Path,
     opts: &EmitOptions,
-) -> Result<String, String> {
+) -> Result<CheckerInvocation, String> {
     let mut cmd = if cfg!(target_os = "windows")
         && !reporter::is_native_binary(checker_bin)
         && checker_bin
@@ -460,9 +473,9 @@ fn invoke_checker(
     // Poll with timeout
     let timeout = std::time::Duration::from_secs(300); // 5 minutes
     let start = std::time::Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_status)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
@@ -478,13 +491,16 @@ fn invoke_checker(
             }
             Err(e) => return Err(format!("error waiting for type checker: {e}")),
         }
-    }
+    };
 
     let stdout_bytes = stdout_handle.join().unwrap_or_default();
     let stderr_bytes = stderr_handle.join().unwrap_or_default();
 
-    Ok(String::from_utf8_lossy(&stdout_bytes).into_owned()
-        + &String::from_utf8_lossy(&stderr_bytes))
+    Ok(CheckerInvocation {
+        output: String::from_utf8_lossy(&stdout_bytes).into_owned()
+            + &String::from_utf8_lossy(&stderr_bytes),
+        success: status.success(),
+    })
 }
 
 /// Write a synthetic tsconfig.json in `temp_dir` that:
@@ -1089,6 +1105,169 @@ fn cleanup_empty_dirs(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tsconfig::load_tsconfig;
+
+    fn write_mock_tsc(project_root: &Path, mode: &str) {
+        let bin_dir = project_root.join("node_modules").join(".bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("mock-mode.txt"), mode).unwrap();
+
+        #[cfg(target_os = "windows")]
+        {
+            let ps1 = bin_dir.join("mock-tsc.ps1");
+            fs::write(
+                &ps1,
+                r#"
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+
+$project = ''
+$declaration = $false
+$declarationDir = ''
+
+for ($i = 0; $i -lt $Args.Length; $i++) {
+    switch ($Args[$i]) {
+        '--project' {
+            $project = $Args[$i + 1]
+            $i++
+            continue
+        }
+        '--declaration' {
+            $declaration = $true
+            continue
+        }
+        '--declarationDir' {
+            $declarationDir = $Args[$i + 1]
+            $i++
+            continue
+        }
+    }
+}
+
+if (-not $declaration) {
+    exit 0
+}
+
+$mode = (Get-Content (Join-Path $PSScriptRoot 'mock-mode.txt') -Raw).Trim()
+$tsconfigDir = Split-Path -Parent $project
+$tscTsx = Get-ChildItem -Path $tsconfigDir -Recurse -Filter *.tsc.tsx | Select-Object -First 1
+
+if ($mode -eq 'phase-b-fail') {
+    $file = $tscTsx.FullName.Replace('\', '/')
+    Write-Output "$file(1,1): error TS2304: Cannot find name 'MissingType'."
+    exit 2
+}
+
+New-Item -ItemType Directory -Force -Path $declarationDir | Out-Null
+$emitted = Join-Path $declarationDir ($tscTsx.Name + '.d.ts')
+Set-Content -Path $emitted -Value 'export declare const ok: number;'
+exit 0
+"#,
+            )
+            .unwrap();
+            fs::write(
+                bin_dir.join("tsc.cmd"),
+                "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0mock-tsc.ps1\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            )
+            .unwrap();
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let script = bin_dir.join("tsc");
+            fs::write(
+                &script,
+                r#"#!/bin/sh
+project=""
+declaration=0
+declaration_dir=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --project)
+      project="$2"
+      shift 2
+      ;;
+    --declaration)
+      declaration=1
+      shift
+      ;;
+    --declarationDir)
+      declaration_dir="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [ "$declaration" -ne 1 ]; then
+  exit 0
+fi
+
+mode=$(tr -d '\r\n' < "$(dirname "$0")/mock-mode.txt")
+tsconfig_dir=$(dirname "$project")
+tsc_tsx=$(find "$tsconfig_dir" -name '*.tsc.tsx' | head -n 1)
+
+if [ "$mode" = "phase-b-fail" ]; then
+  printf "%s(1,1): error TS2304: Cannot find name 'MissingType'.\n" "$tsc_tsx"
+  exit 2
+fi
+
+mkdir -p "$declaration_dir"
+printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc_tsx").d.ts"
+"#,
+            )
+            .unwrap();
+
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+    }
+
+    fn create_run_fixture(
+        mode: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::tsconfig::TsConfig,
+        PathBuf,
+        PathBuf,
+    ) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        let src_dir = root.join("src");
+        let vue_path = src_dir.join("Test.vue");
+        let tsconfig_path = root.join("tsconfig.json");
+        let decl_dir = root.join("dist").join("types");
+
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(
+            &vue_path,
+            r#"<script setup lang="ts">
+const props = defineProps<{ msg: string }>()
+</script>
+<template><div>{{ props.msg }}</div></template>
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &tsconfig_path,
+            r#"{
+  "compilerOptions": {
+    "strict": true
+  },
+  "files": ["src/Test.vue"]
+}"#,
+        )
+        .unwrap();
+        write_mock_tsc(&root, mode);
+
+        let config = load_tsconfig(&tsconfig_path).expect("test tsconfig should load");
+        (temp, config, tsconfig_path, decl_dir)
+    }
 
     /// Helper: write a minimal tsconfig and read back the `files` array.
     fn written_files(tsc_tsx_files: &[PathBuf], declaration: bool) -> Vec<String> {
@@ -1717,6 +1896,79 @@ mod tests {
         assert!(
             !is_temp_tsconfig_error(&d3),
             "should not filter source file errors"
+        );
+    }
+
+    #[test]
+    fn run_declaration_phase_failure_returns_remapped_diagnostics_and_skips_emitted_files() {
+        let (_temp, config, tsconfig_path, decl_dir) = create_run_fixture("phase-b-fail");
+        let result = run(
+            &config,
+            &tsconfig_path,
+            &EmitOptions {
+                no_emit: false,
+                declaration: true,
+                declaration_dir: Some(decl_dir.clone()),
+            },
+            TypeCheckerBinary::ForceTsc,
+        );
+
+        assert_eq!(
+            result.diagnostics.len(),
+            1,
+            "declaration-phase failures should surface diagnostics"
+        );
+        let diagnostic = &result.diagnostics[0];
+        assert_eq!(diagnostic.ts_code, 2304, "should preserve TypeScript code");
+        assert!(
+            diagnostic.message.contains("MissingType"),
+            "should preserve checker message: {}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic
+                .file
+                .replace('\\', "/")
+                .ends_with("/src/Test.vue"),
+            "diagnostic should remap back to the vue file: {}",
+            diagnostic.file
+        );
+        assert!(
+            result.emitted_files.is_empty(),
+            "declaration-phase failure must not report emitted files"
+        );
+        assert!(
+            !decl_dir.join("src/Test.vue.d.ts").exists(),
+            "declaration-phase failure must not postprocess vue declarations"
+        );
+    }
+
+    #[test]
+    fn run_declaration_phase_success_postprocesses_vue_declarations() {
+        let (_temp, config, tsconfig_path, decl_dir) = create_run_fixture("phase-b-success");
+        let result = run(
+            &config,
+            &tsconfig_path,
+            &EmitOptions {
+                no_emit: false,
+                declaration: true,
+                declaration_dir: Some(decl_dir.clone()),
+            },
+            TypeCheckerBinary::ForceTsc,
+        );
+
+        let target = decl_dir.join("src/Test.vue.d.ts");
+        assert!(
+            result.diagnostics.is_empty(),
+            "successful declaration run should not add diagnostics"
+        );
+        assert!(
+            target.exists(),
+            "should postprocess .tsc.tsx output into .vue.d.ts"
+        );
+        assert!(
+            result.emitted_files.iter().any(|path| path == &target),
+            "emitted files should include the final .vue.d.ts output"
         );
     }
 }

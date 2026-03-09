@@ -36,7 +36,7 @@ use oxc_ast::ast::{Expression, Statement};
 use oxc_ast::{Comment, CommentContent};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::common::Span;
 use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
@@ -92,6 +92,11 @@ struct ModelEntry {
     ts_type: String,
 }
 
+struct LocalTypeDecl<'a> {
+    name: &'a str,
+    text: &'a str,
+}
+
 #[derive(Default)]
 struct TscMacroState {
     // defineOptions
@@ -104,6 +109,7 @@ struct TscMacroState {
     props_runtime: Vec<(String, String)>,
     // defineProps — TypeScript type info
     props_ts: Option<PropsTs>,
+    defaulted_prop_names: Vec<String>,
 
     // defineEmits — runtime emit names (for array output)
     emits_names: Vec<String>,
@@ -181,9 +187,16 @@ pub fn generate_tsc_output_with_options(
 
     // ── 4. Collect type-only imports ──────────────────────────────────
     let type_imports = collect_type_imports(&parsed.items);
+    let mut type_usage_tracker = TypeUsageTracker::new(&parsed.items, content_str, &type_imports);
 
     // ── 5. Build macro state ──────────────────────────────────────────
-    let state = build_macro_state(&parsed.items, content_str, &type_imports, &program.comments);
+    let mut state = build_macro_state(
+        &parsed.items,
+        content_str,
+        &type_imports,
+        &program.comments,
+        &mut type_usage_tracker,
+    );
 
     // ── 6. Extract generic params ────────────────────────────────────
     let generic_params = setup
@@ -205,6 +218,11 @@ pub fn generate_tsc_output_with_options(
     };
 
     // ── 7. Extract root element tag for attrs fallthrough ──────────
+    if let Some(attrs) = attrs_type {
+        type_usage_tracker.mark_type_text(attrs);
+    }
+    type_usage_tracker.finalize(&mut state);
+
     let root_element_tag = if attrs_type.is_none() && !state.has_inherit_attrs_false {
         extract_root_element_tag(syntax.template_ast(), sfc_source)
     } else {
@@ -265,6 +283,149 @@ fn collect_type_imports<'a>(items: &[ScriptItem<'a>]) -> FxHashMap<&'a str, Type
     map
 }
 
+struct TypeUsageTracker<'a> {
+    imports: Vec<(&'a str, &'a str)>,
+    import_lookup: FxHashMap<&'a str, &'a str>,
+    locals: Vec<LocalTypeDecl<'a>>,
+    local_lookup: FxHashMap<&'a str, usize>,
+    needed_imports: FxHashSet<&'a str>,
+    needed_locals: FxHashSet<&'a str>,
+}
+
+impl<'a> TypeUsageTracker<'a> {
+    fn new(
+        items: &[ScriptItem<'a>],
+        content_str: &'a str,
+        type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
+    ) -> Self {
+        let mut imports = Vec::new();
+        for item in items {
+            if let ScriptItem::Import(imp) = item {
+                for binding in &imp.bindings {
+                    if imp.is_type_only || binding.is_type_only {
+                        imports.push((binding.name, imp.source));
+                    }
+                }
+            }
+        }
+
+        let mut locals = Vec::new();
+        let mut local_lookup = FxHashMap::default();
+        for item in items {
+            if let ScriptItem::TypeDeclaration(td) = item {
+                if let Some(name) = td.name {
+                    let idx = locals.len();
+                    locals.push(LocalTypeDecl {
+                        name,
+                        text: &content_str[td.span.start as usize..td.span.end as usize],
+                    });
+                    local_lookup.insert(name, idx);
+                }
+            }
+        }
+
+        let import_lookup = type_imports
+            .iter()
+            .map(|(name, info)| (*name, info.source))
+            .collect();
+
+        Self {
+            imports,
+            import_lookup,
+            locals,
+            local_lookup,
+            needed_imports: FxHashSet::default(),
+            needed_locals: FxHashSet::default(),
+        }
+    }
+
+    fn mark_type_text(&mut self, type_text: &str) {
+        let refs = self.collect_references(type_text, None);
+        for name in refs {
+            self.mark_name(name);
+        }
+    }
+
+    fn mark_name(&mut self, name: &'a str) {
+        if self.local_lookup.contains_key(name) {
+            if self.needed_locals.insert(name) {
+                let refs = {
+                    let decl = &self.locals[self.local_lookup[name]];
+                    self.collect_references(decl.text, Some(name))
+                };
+                for dep in refs {
+                    self.mark_name(dep);
+                }
+            }
+        } else if self.import_lookup.contains_key(name) {
+            self.needed_imports.insert(name);
+        }
+    }
+
+    fn collect_references(&self, text: &str, skip_name: Option<&str>) -> Vec<&'a str> {
+        let mut refs = Vec::new();
+        let mut seen = FxHashSet::default();
+        let bytes = text.as_bytes();
+        let mut idx = 0;
+
+        while idx < bytes.len() {
+            if is_ident_start(bytes[idx]) {
+                let start = idx;
+                idx += 1;
+                while idx < bytes.len() && is_ident_continue(bytes[idx]) {
+                    idx += 1;
+                }
+                let token = &text[start..idx];
+                if skip_name.is_some_and(|skip| skip == token) {
+                    continue;
+                }
+
+                if let Some((name, _)) = self.local_lookup.get_key_value(token) {
+                    let name = *name;
+                    if seen.insert(name) {
+                        refs.push(name);
+                    }
+                } else if let Some((name, _)) = self.import_lookup.get_key_value(token) {
+                    let name = *name;
+                    if seen.insert(name) {
+                        refs.push(name);
+                    }
+                }
+            } else {
+                idx += 1;
+            }
+        }
+
+        refs
+    }
+
+    fn finalize(self, state: &mut TscMacroState) {
+        let mut emitted_imports = FxHashSet::default();
+        for (name, source) in self.imports {
+            if self.needed_imports.contains(name) {
+                let stmt = format!("import type {{ {} }} from '{}'", name, source);
+                if emitted_imports.insert(stmt.clone()) {
+                    state.type_import_stmts.push(stmt);
+                }
+            }
+        }
+
+        for local in self.locals {
+            if self.needed_locals.contains(local.name) {
+                state.local_types.push(local.text.to_string());
+            }
+        }
+    }
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
+}
+
+fn is_ident_continue(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
 // ── Step 5: build macro state ─────────────────────────────────────────────────
 
 fn build_macro_state<'a>(
@@ -272,6 +433,7 @@ fn build_macro_state<'a>(
     content_str: &'a str,
     type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
     comments: &[Comment],
+    type_usage_tracker: &mut TypeUsageTracker<'a>,
 ) -> TscMacroState {
     let mut state = TscMacroState::default();
 
@@ -300,6 +462,7 @@ fn build_macro_state<'a>(
                     content_str,
                     type_imports,
                     comments,
+                    type_usage_tracker,
                     &mut state,
                 );
             }
@@ -314,6 +477,7 @@ fn build_macro_state<'a>(
                     object_arg.as_ref(),
                     array_arg.as_ref(),
                     content_str,
+                    type_usage_tracker,
                     &mut state,
                 );
             }
@@ -322,7 +486,13 @@ fn build_macro_state<'a>(
                 name_span,
                 ..
             } => {
-                process_model(type_params.as_ref(), *name_span, content_str, &mut state);
+                process_model(
+                    type_params.as_ref(),
+                    *name_span,
+                    content_str,
+                    type_usage_tracker,
+                    &mut state,
+                );
             }
             ScriptMacro::WithDefaults {
                 define_props_type_params,
@@ -337,6 +507,7 @@ fn build_macro_state<'a>(
                     content_str,
                     type_imports,
                     comments,
+                    type_usage_tracker,
                     &mut state,
                 );
                 // Then mark props with defaults as optional
@@ -345,59 +516,34 @@ fn build_macro_state<'a>(
                 }
             }
             ScriptMacro::DefineSlots { type_params, .. } => {
-                process_slots(type_params.as_ref(), content_str, type_imports, &mut state);
+                process_slots(
+                    type_params.as_ref(),
+                    content_str,
+                    type_imports,
+                    type_usage_tracker,
+                    &mut state,
+                );
             }
             _ => {}
         }
     }
 
-    // Only collect local type declarations that are referenced by props or slots.
-    // This avoids TS6196 (unused) and TS2304 (unresolved transitive deps) errors
-    // from type declarations that our output never references.
-    collect_referenced_local_types(items, content_str, &mut state);
-
     state
-}
-
-/// Collect local type declarations only if they're referenced by props or slots.
-///
-/// When `defineProps<LocalType>()` resolves to `PropsTs::TypeText("LocalType")`,
-/// or `defineSlots<LocalSlots>()` references a local interface, we need the local
-/// type declaration so tsc can resolve the name.
-fn collect_referenced_local_types(
-    items: &[ScriptItem<'_>],
-    content_str: &str,
-    state: &mut TscMacroState,
-) {
-    // Determine which type names are actually needed.
-    let mut needed_names: Vec<&str> = Vec::new();
-    if let Some(PropsTs::TypeText(text)) = &state.props_ts {
-        needed_names.push(text.as_str());
-    }
-    if let Some(slots) = &state.slots_ts {
-        needed_names.push(slots.as_str());
-    }
-
-    if needed_names.is_empty() {
-        return;
-    }
-
-    for item in items {
-        if let ScriptItem::TypeDeclaration(td) = item {
-            if let Some(name) = td.name {
-                if needed_names.contains(&name) {
-                    let text = &content_str[td.span.start as usize..td.span.end as usize];
-                    state.local_types.push(text.to_string());
-                }
-            }
-        }
-    }
 }
 
 /// Given a `withDefaults(defineProps<{...}>(), { key1: ..., key2: ... })` defaults
 /// object, mark those props as optional in the already-built props_ts.
 fn process_props_with_defaults(defaults: &MacroObjectArg<'_>, state: &mut TscMacroState) {
     let default_names: Vec<&str> = defaults.properties.iter().map(|p| p.name).collect();
+    for name in &default_names {
+        if !state
+            .defaulted_prop_names
+            .iter()
+            .any(|existing| existing == name)
+        {
+            state.defaulted_prop_names.push((*name).to_string());
+        }
+    }
 
     if let Some(PropsTs::Inline(ref mut entries)) = state.props_ts {
         for entry in entries.iter_mut() {
@@ -446,22 +592,20 @@ fn process_props<'a>(
     content_str: &'a str,
     type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
     comments: &[Comment],
+    type_usage_tracker: &mut TypeUsageTracker<'a>,
     state: &mut TscMacroState,
 ) {
     if let Some(tp) = type_params {
         let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
 
-        if tp.unresolved_type_ref {
+        if looks_like_named_type_reference(type_text) {
             if let Some(info) = type_imports.get(type_text) {
-                // Emit a proper import type statement and use the type name directly
-                state.type_import_stmts.push(format!(
-                    "import type {{ {} }} from '{}'",
-                    type_text, info.source
-                ));
+                let _ = info;
                 state.props_ts = Some(PropsTs::TypeRef(type_text.to_string()));
             } else {
                 state.props_ts = Some(PropsTs::TypeText(type_text.to_string()));
             }
+            type_usage_tracker.mark_type_text(type_text);
         } else if !tp.resolved.props.is_empty() {
             let entries = tp
                 .resolved
@@ -481,6 +625,7 @@ fn process_props<'a>(
                         runtime_types_to_ts(&prop.types)
                     };
                     let comment = find_leading_jsdoc(comments, prop.key.start, content_str);
+                    type_usage_tracker.mark_type_text(&ts_type);
                     InlinePropEntry {
                         name,
                         optional: prop.optional,
@@ -492,6 +637,7 @@ fn process_props<'a>(
             state.props_ts = Some(PropsTs::Inline(entries));
         } else {
             state.props_ts = Some(PropsTs::TypeText(type_text.to_string()));
+            type_usage_tracker.mark_type_text(type_text);
         }
     } else if let Some(obj) = object_arg {
         // Object-syntax: uses AST-extracted MacroProperty fields exclusively.
@@ -517,6 +663,7 @@ fn process_props<'a>(
             } else {
                 runtime_types_to_ts(&prop.runtime_types)
             };
+            type_usage_tracker.mark_type_text(&ts_type);
 
             let optional = !prop.required || prop.has_default;
             entries.push(InlinePropEntry {
@@ -604,12 +751,14 @@ fn process_emits<'a>(
     object_arg: Option<&MacroObjectArg<'a>>,
     array_arg: Option<&MacroArrayArg>,
     content_str: &str,
+    type_usage_tracker: &mut TypeUsageTracker<'a>,
     state: &mut TscMacroState,
 ) {
     if let Some(tp) = type_params {
         // Store the raw type parameter text for $props inference
         let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
         state.emits_type_param_text = Some(type_text.to_string());
+        type_usage_tracker.mark_type_text(type_text);
 
         for emit in &tp.resolved.emits {
             state.emits_names.push(emit.name.clone());
@@ -634,6 +783,7 @@ fn process_emits<'a>(
         // Store raw object text for __EmitToProps/__EmitFn type inference
         let obj_text = content_str[obj.span.start as usize..obj.span.end as usize].trim();
         state.emits_object_text = Some(obj_text.to_string());
+        type_usage_tracker.mark_type_text(obj_text);
 
         for prop in &obj.properties {
             let name = prop
@@ -653,6 +803,7 @@ fn process_model(
     type_params: Option<&MacroTypeParams>,
     name_span: Option<Span>,
     content_str: &str,
+    type_usage_tracker: &mut TypeUsageTracker<'_>,
     state: &mut TscMacroState,
 ) {
     let model_name = match name_span {
@@ -669,6 +820,7 @@ fn process_model(
             .to_string(),
         None => "unknown".to_string(),
     };
+    type_usage_tracker.mark_type_text(&ts_type);
 
     state.models.push(ModelEntry {
         name: model_name,
@@ -679,29 +831,16 @@ fn process_model(
 fn process_slots(
     type_params: Option<&MacroTypeParams>,
     content_str: &str,
-    type_imports: &FxHashMap<&str, TypeImportInfo<'_>>,
+    _type_imports: &FxHashMap<&str, TypeImportInfo<'_>>,
+    type_usage_tracker: &mut TypeUsageTracker<'_>,
     state: &mut TscMacroState,
 ) {
     let Some(tp) = type_params else {
         return;
     };
     let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-
-    if tp.unresolved_type_ref {
-        if let Some(info) = type_imports.get(type_text) {
-            state.type_import_stmts.push(format!(
-                "import type {{ {} }} from '{}'",
-                type_text, info.source
-            ));
-            state.slots_ts = Some(type_text.to_string());
-        } else {
-            // Local type reference (e.g. interface MySlots { ... })
-            state.slots_ts = Some(type_text.to_string());
-        }
-    } else {
-        // Inline type literal
-        state.slots_ts = Some(type_text.to_string());
-    }
+    state.slots_ts = Some(type_text.to_string());
+    type_usage_tracker.mark_type_text(type_text);
 }
 
 // ── Step 6: generate code ─────────────────────────────────────────────────────
@@ -956,7 +1095,7 @@ fn generate_code(
     // DefineComponent, then provides a single `new()` that returns the
     // intersection of ComponentPublicInstance and the typed instance shape.
     // This ensures barrel re-exports preserve the correct $props/$emit types.
-    let props_type = build_props_type(&state.props_ts, &state.models);
+    let props_type = build_props_type(&state.props_ts, &state.models, &state.defaulted_prop_names);
 
     out.push_str(&format!(
         "declare const {name}: __OmitNew<typeof __comp> & {{\n",
@@ -1023,11 +1162,7 @@ fn generate_code(
     // For type-based or object-arg defineEmits, use __EmitToProps<RawType> to
     // infer correct handler types. For array-only syntax, fall back to manual fields.
     let emits_props = if let Some(ref type_text) = state.emits_type_param_text {
-        if !state.emits_ts.is_empty() {
-            Some(format!("__EmitToProps<{}>", type_text))
-        } else {
-            None
-        }
+        Some(format!("__EmitToProps<{}>", type_text))
     } else if let Some(ref obj_text) = state.emits_object_text {
         Some(format!("__EmitToProps<{}>", obj_text))
     } else {
@@ -1233,15 +1368,67 @@ fn camelize_event_name(s: &str) -> String {
     result
 }
 
-fn build_props_type(props_ts: &Option<PropsTs>, models: &[ModelEntry]) -> String {
+fn looks_like_named_type_reference(type_text: &str) -> bool {
+    let trimmed = type_text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if matches!(trimmed.as_bytes()[0], b'{' | b'[' | b'(' | b'"' | b'\'') {
+        return false;
+    }
+    if trimmed.contains(['|', '&', ';', ':', '=']) {
+        return false;
+    }
+
+    !matches!(
+        trimmed,
+        "string"
+            | "number"
+            | "boolean"
+            | "symbol"
+            | "bigint"
+            | "any"
+            | "unknown"
+            | "never"
+            | "void"
+            | "null"
+            | "undefined"
+            | "true"
+            | "false"
+    )
+}
+
+fn wrap_defaulted_props(base: &str, defaulted_prop_names: &[String]) -> String {
+    if defaulted_prop_names.is_empty() {
+        return base.to_string();
+    }
+
+    let quoted_names = defaulted_prop_names
+        .iter()
+        .map(|name| format!("'{}'", name))
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    format!(
+        "Omit<{base}, {quoted_names}> & Partial<Pick<{base}, {quoted_names}>>",
+        base = base,
+        quoted_names = quoted_names,
+    )
+}
+
+fn build_props_type(
+    props_ts: &Option<PropsTs>,
+    models: &[ModelEntry],
+    defaulted_prop_names: &[String],
+) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     match props_ts {
         Some(PropsTs::TypeRef(name)) => {
-            parts.push(name.clone());
+            parts.push(wrap_defaulted_props(name, defaulted_prop_names));
         }
         Some(PropsTs::TypeText(text)) => {
-            parts.push(text.clone());
+            parts.push(wrap_defaulted_props(text, defaulted_prop_names));
         }
         Some(PropsTs::Inline(entries)) if !entries.is_empty() => {
             let fields: Vec<String> = entries
