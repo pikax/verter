@@ -638,6 +638,50 @@ describe("preCompile", () => {
   });
 });
 
+describe("closeBundle hook", () => {
+  beforeEach(() => {
+    resetHost();
+  });
+
+  afterEach(() => {
+    resetHost();
+  });
+
+  it("plugin has a closeBundle hook that resets the host", async () => {
+    const plugin = unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+
+    // Force host creation by transforming a file
+    const sfc = `<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n`;
+    await plugin.transform(sfc, "/test/CloseBundle.vue");
+
+    // Verify closeBundle hook exists
+    expect(typeof plugin.closeBundle).toBe("function");
+
+    // Call closeBundle — should not throw
+    plugin.closeBundle();
+
+    // After closeBundle, loadHost() should create a NEW host (the old one was nulled)
+    // We verify by importing loadHost and checking it works without error
+    const { loadHost } = await import("./core/compiler");
+    const newHost = loadHost();
+    expect(newHost).toBeDefined();
+  });
+
+  it("closeBundle is safe to call even when no host was created", () => {
+    const plugin = unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+
+    // closeBundle should not throw even if no host was ever created
+    expect(typeof plugin.closeBundle).toBe("function");
+    expect(() => plugin.closeBundle()).not.toThrow();
+  });
+});
+
 describe("bundler entry points", () => {
   // @ai-generated - Tests that each bundler export creates a function
   it("vite export creates a plugin factory", async () => {

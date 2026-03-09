@@ -5,7 +5,7 @@ import type { VerterPluginOptions, HmrStrategy, BlockPreprocessor } from "./core
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 import type { HostCompileProfile, HostUpdateResult, NativeBlockOverrideEntry } from "@verter/native";
 import type { VerterHost } from "@verter/native";
-import { loadHost, generateComponentId, processStyle } from "./core/compiler";
+import { loadHost, generateComponentId, processStyle, resetHost } from "./core/compiler";
 import { parseVueRequest } from "./core/utils";
 import { preprocessBlock } from "./core/preprocessor";
 
@@ -450,6 +450,10 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       // Non-Vite mode: inline everything (no sub-request support).
       // TS stripping is handled by the host via forceJs: true in the profile.
       return { code: main.code, map: null };
+    },
+
+    closeBundle() {
+      resetHost();
     },
 
     buildEnd() {
