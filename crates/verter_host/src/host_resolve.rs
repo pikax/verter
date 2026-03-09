@@ -225,6 +225,7 @@ impl VerterHost {
                     style_override_layer: entry.style_overrides.get(&profile_hash).cloned(),
                     content_override_layer: entry.content_overrides.get(&profile_hash).cloned(),
                     macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
+                    script_imports: entry.script_analysis.imports.clone(),
                     cached_parse: entry.cached_parse.clone(),
                     style_v_bind_vars: entry
                         .style_analyses
@@ -513,8 +514,12 @@ impl VerterHost {
                 map
             };
 
-            for req in &snapshot.external_requests {
+            for (idx, req) in snapshot.external_requests.iter().enumerate() {
                 if !ext_sources.contains_key(&req.resolved_canonical_id) {
+                    let span = snapshot
+                        .src_blocks
+                        .get(idx)
+                        .map(|block| verter_span::Span::new(block.tag_open_start, block.tag_open_end));
                     diagnostics =
                         diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
                             severity: HostSeverity::Error,
@@ -523,7 +528,7 @@ impl VerterHost {
                                 "missing external source '{}' for '{}'",
                                 req.specifier, snapshot.canonical_id
                             ),
-                            span: None,
+                            span,
                         }]));
                 }
             }
@@ -559,6 +564,8 @@ impl VerterHost {
             ..CodegenOptions::default()
         };
 
+        let mut unresolved_macro_type_diags = Vec::new();
+
         // Pre-resolve external types for cross-file type resolution in defineProps/defineEmits.
         // For each macro_type_dep, resolve the import source to a dep file, then call
         // resolve_external_type() on its source to get the resolved type elements.
@@ -590,6 +597,21 @@ impl VerterHost {
                     {
                         resolved.insert(dep.type_name.clone(), elements);
                     }
+                } else {
+                    let span = snapshot
+                        .script_imports
+                        .iter()
+                        .find(|import| import.source == dep.import_source)
+                        .map(|import| import.span);
+                    unresolved_macro_type_diags.push(HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_MISSING_MACRO_TYPE_DEP".to_string(),
+                        message: format!(
+                            "missing macro type dependency '{}' for type '{}' in '{}'",
+                            dep.import_source, dep.type_name, snapshot.canonical_id
+                        ),
+                        span,
+                    });
                 }
             }
             if resolved.is_empty() {
@@ -598,6 +620,11 @@ impl VerterHost {
                 Some(resolved)
             }
         };
+
+        if !unresolved_macro_type_diags.is_empty() {
+            diagnostics = diagnostics.merge(DiagnosticsSnapshot::from_vec(unresolved_macro_type_diags));
+            return Err(diagnostics);
+        }
 
         let scope = self.config.effective_scope();
         let verter_opts = VerterCompileOptions {
@@ -816,3 +843,7 @@ impl VerterHost {
         Ok((outputs, compile_diags, cached_tsx, template_analysis))
     }
 }
+
+#[cfg(test)]
+#[path = "host_resolve_tests.rs"]
+mod host_resolve_tests;

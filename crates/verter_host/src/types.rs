@@ -814,6 +814,9 @@ pub(crate) struct CompileInput {
     pub(crate) content_override_layer: Option<ContentOverrideLayer>,
     /// Macro type dependencies for cross-file type resolution.
     pub(crate) macro_type_deps: Vec<verter_analysis::MacroTypeDep>,
+    /// Import declarations from the SFC script analysis.
+    /// Used to attach precise spans to unresolved compile blockers.
+    pub(crate) script_imports: Vec<verter_analysis::AnalyzedImport>,
     /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
     pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
     /// Binding names referenced in style `v-bind()` expressions.

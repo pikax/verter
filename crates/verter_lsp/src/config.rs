@@ -45,8 +45,10 @@ struct PathAliasReplacement {
 
 /// Resolves import specifiers using tsconfig.json `compilerOptions.paths`.
 ///
-/// Built from discovered tsconfig.json files in the workspace.
-/// Resolves aliased imports like `@/components/Foo.vue` to absolute file paths.
+/// This is the current alias-only resolver. It is intentionally narrower than
+/// the planned native `ProjectResolver`, which will need to cover tsconfig,
+/// Node/package resolution, and provider-target mapping without assuming direct
+/// provider disk access.
 #[derive(Debug, Default)]
 pub struct TsConfigPathResolver {
     aliases: Vec<PathAlias>,

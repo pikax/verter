@@ -89,7 +89,7 @@ impl ProjectSync {
     pub async fn sync_file(&self, path: &str, content: &str) -> Result<(), TypeProviderError> {
         match self.mode {
             ProjectSyncMode::FullProject => self.provider.update_file(path, content).await,
-            ProjectSyncMode::TsxOnly => Ok(()), // Type provider reads from disk
+            ProjectSyncMode::TsxOnly => Ok(()), // Legacy until provider-fed project sync lands.
         }
     }
 

@@ -2367,10 +2367,14 @@ fn cross_file_type_resolution_resolves_external_props() {
     );
 }
 
-/// @ai-generated - Cross-file type resolution: missing dependency falls back gracefully
+/// @ai-generated - Cross-file type resolution: missing dependency is a compile blocker
 #[test]
-fn cross_file_type_resolution_missing_dep_compiles_without_crash() {
-    let host = VerterHost::new(HostConfig::default());
+fn cross_file_type_resolution_missing_dep_reports_compile_error() {
+    let host = VerterHost::new(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    });
 
     // Upsert SFC that imports a type but the dep file is NOT upserted
     let _ = upsert_vue(
@@ -2379,20 +2383,29 @@ fn cross_file_type_resolution_missing_dep_compiles_without_crash() {
         "<script setup lang=\"ts\">\nimport type { MissingProps } from './missing'\ndefineProps<MissingProps>()\n</script>\n<template><div>hello</div></template>",
     );
 
-    // Should still compile without crashing (dep not found → no external types resolved)
-    let result = host
+    let err = host
         .get_virtual_file(VirtualQuery {
             raw_id: Some("/src/Comp.vue".to_string()),
             canonical_id: None,
             node_kind: None,
             compile_profile: profile_dev(),
         })
-        .unwrap();
+        .unwrap_err();
 
-    assert!(
-        !result.code.is_empty(),
-        "should produce output even without resolved external types"
-    );
+    match err {
+        HostError::CompileError { diagnostics } => {
+            assert!(
+                diagnostics
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"
+                        && d.message.contains("./missing")),
+                "expected missing macro type dependency diagnostic, got: {:?}",
+                diagnostics.diagnostics
+            );
+        }
+        other => panic!("expected compile error, got {other:?}"),
+    }
 }
 
 // ======================== lang field + export type ========================

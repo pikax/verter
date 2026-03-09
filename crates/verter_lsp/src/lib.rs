@@ -4,6 +4,7 @@ pub mod config;
 pub mod css;
 pub mod documents;
 pub mod features;
+pub mod project_resolver;
 pub mod server;
 pub mod statistics;
 pub mod sync_coordinator;
@@ -66,8 +67,9 @@ pub struct LspConfig {
 /// Controls what data `verter_lsp` sends to the type provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProjectSyncMode {
-    /// Only send `.vue` -> TSX replacements.
-    /// The type provider reads `.ts`, `node_modules/`, `tsconfig.json` from disk.
+    /// Legacy mode: only send `.vue` -> TSX replacements.
+    /// The type provider still reads `.ts`, `node_modules/`, and `tsconfig.json`
+    /// from disk until the native project resolver and provider-fed sync land.
     #[default]
     TsxOnly,
     /// Send ALL files: `.vue` as TSX, `.ts`/`.js` as-is, `tsconfig.json`, type declarations.
