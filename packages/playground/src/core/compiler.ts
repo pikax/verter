@@ -3,7 +3,9 @@ import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from 
 import type { VersionEntry } from "./versions";
 import { combineSourceMaps } from "./sourcemap";
 
-// Inline types matching Rust WASM bindings (avoid @verter/wasm import resolution issues)
+// Inline types matching Rust WASM bindings (avoid @verter/wasm import resolution issues).
+// `spanStart`/`spanEnd` are absolute source offsets in UTF-16 unless a field is
+// explicitly documented as generated TSX output metadata.
 export interface HostTextEdit {
   spanStart: number;
   spanEnd: number;

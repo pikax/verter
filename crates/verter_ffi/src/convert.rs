@@ -349,9 +349,21 @@ fn clamp_to_char_boundary(source: &str, byte_offset: usize) -> usize {
     clamped
 }
 
-fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> u32 {
+pub fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> u32 {
     let clamped = clamp_to_char_boundary(source, byte_offset as usize);
     source[..clamped].encode_utf16().count() as u32
+}
+
+pub fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
+    let mut utf16_count = 0u32;
+    for (byte_idx, ch) in source.char_indices() {
+        let next = utf16_count + ch.len_utf16() as u32;
+        if utf16_offset <= utf16_count || utf16_offset < next {
+            return byte_idx as u32;
+        }
+        utf16_count = next;
+    }
+    source.len() as u32
 }
 
 fn maybe_utf16_offset(raw: Option<u32>, source: Option<&str>) -> Option<u32> {
@@ -633,56 +645,20 @@ pub enum OffsetEncoding {
 pub fn convert_offset(text: &str, byte_offset: u32, encoding: OffsetEncoding) -> u32 {
     match encoding {
         OffsetEncoding::Utf8 => byte_offset,
-        OffsetEncoding::Utf16 => utf8_to_utf16_offset(text, byte_offset),
+        OffsetEncoding::Utf16 => byte_offset_to_utf16(text, byte_offset),
         OffsetEncoding::Utf32 => utf8_to_utf32_offset(text, byte_offset),
     }
 }
 
 /// Convert a UTF-8 byte offset to UTF-16 code unit offset.
 pub fn utf8_to_utf16_offset(text: &str, byte_offset: u32) -> u32 {
-    let bytes = text.as_bytes();
-    let limit = (byte_offset as usize).min(bytes.len());
-    let mut utf16_offset: u32 = 0;
-    let mut i = 0;
-    while i < limit {
-        let b = bytes[i];
-        let char_len = if b < 0x80 {
-            1
-        } else if b < 0xE0 {
-            2
-        } else if b < 0xF0 {
-            3
-        } else {
-            4
-        };
-        // 4-byte UTF-8 sequences (astral plane) encode as 2 UTF-16 code units (surrogate pair)
-        utf16_offset += if char_len == 4 { 2 } else { 1 };
-        i += char_len;
-    }
-    utf16_offset
+    byte_offset_to_utf16(text, byte_offset)
 }
 
 /// Convert a UTF-8 byte offset to UTF-32 (codepoint) offset.
 fn utf8_to_utf32_offset(text: &str, byte_offset: u32) -> u32 {
-    let bytes = text.as_bytes();
-    let limit = (byte_offset as usize).min(bytes.len());
-    let mut codepoints: u32 = 0;
-    let mut i = 0;
-    while i < limit {
-        let b = bytes[i];
-        let char_len = if b < 0x80 {
-            1
-        } else if b < 0xE0 {
-            2
-        } else if b < 0xF0 {
-            3
-        } else {
-            4
-        };
-        codepoints += 1;
-        i += char_len;
-    }
-    codepoints
+    let clamped = clamp_to_char_boundary(text, byte_offset as usize);
+    text[..clamped].chars().count() as u32
 }
 
 /// Input for a single binding's source span conversion.
@@ -1815,6 +1791,24 @@ mod tests {
 
         // byte offset 4 (past the char) → 2 UTF-16 code units
         assert_eq!(byte_offset_to_utf16(source, 4), 2);
+    }
+
+    /// UTF-16 offsets inside a surrogate pair clamp to the scalar start.
+    #[test]
+    fn utf16_to_byte_offset_clamps_inside_surrogate_pair() {
+        let _source = "a\u{1F600}b";
+        let source = "aðŸ˜€b";
+        let _ = source;
+        let source = "a\u{1F600}b";
+        assert_eq!(utf16_to_byte_offset(source, 0), 0);
+        assert_eq!(utf16_to_byte_offset(source, 1), 1);
+        assert_eq!(
+            utf16_to_byte_offset(source, 2),
+            1,
+            "offset inside the emoji surrogate pair should clamp to the emoji start"
+        );
+        assert_eq!(utf16_to_byte_offset(source, 3), 5);
+        assert_eq!(utf16_to_byte_offset(source, 4), 6);
     }
 
     /// Verify that ASCII text is a 1:1 mapping (byte offset == UTF-16 offset).

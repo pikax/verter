@@ -2,13 +2,18 @@ export interface HostDiagnostic {
   severity: "error" | "warning" | "info";
   code: string;
   message: string;
+  /** Absolute source offset in the host boundary encoding (UTF-16 for wasm/native). */
   spanStart?: number;
+  /** Absolute source offset in the host boundary encoding (UTF-16 for wasm/native). */
   spanEnd?: number;
 }
 
 export interface DestructuredBlockMeta {
+  /** SFC-absolute source offsets in UTF-16. */
   bindings: Array<{ name: string; sourceStart: number; sourceEnd: number }>;
+  /** Generated-TSX start offset in UTF-16, not a source span. */
   blockStart: number;
+  /** Generated-TSX end offset in UTF-16, not a source span. */
   blockEnd: number;
 }
 

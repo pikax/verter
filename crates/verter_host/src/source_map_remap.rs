@@ -2,8 +2,8 @@
 //!
 //! When a `<style lang="sass">` block is transpiled to CSS by the extension,
 //! the CSS analysis spans reference byte offsets in the compiled CSS. This module
-//! remaps those spans back to byte offsets in the original preprocessor source
-//! (relative to the style block content start in the SFC).
+//! remaps those spans back to byte offsets in the original preprocessor source,
+//! preserving their stored SFC-absolute coordinate system.
 
 use sourcemap::SourceMap;
 use verter_analysis::style::CssAnalysis;
@@ -11,10 +11,11 @@ use verter_analysis::style::CssAnalysis;
 /// Remap all spans in a `CssAnalysis` from compiled CSS byte offsets to
 /// original source byte offsets using a source map.
 ///
-/// - `analysis`: CSS analysis with spans relative to compiled CSS content start.
+/// - `analysis`: CSS analysis with stored SFC-absolute spans.
 /// - `compiled_css`: The compiled CSS content (used to compute line/col from byte offsets).
 /// - `source_map_json`: The source map JSON string from the preprocessor.
 /// - `original_content`: The original preprocessor source content (used to compute byte offsets from line/col).
+/// - `content_offset`: SFC-absolute start offset of the style block content.
 ///
 /// Returns `true` if remapping succeeded, `false` if the source map couldn't be parsed.
 pub fn remap_css_analysis_spans(
@@ -22,6 +23,7 @@ pub fn remap_css_analysis_spans(
     compiled_css: &str,
     source_map_json: &str,
     original_content: &str,
+    content_offset: u32,
 ) -> bool {
     let sm = match SourceMap::from_slice(source_map_json.as_bytes()) {
         Ok(sm) => sm,
@@ -36,6 +38,7 @@ pub fn remap_css_analysis_spans(
         remap_span(
             &mut sel.span.start,
             &mut sel.span.end,
+            content_offset,
             &sm,
             &compiled_lines,
             &original_lines,
@@ -47,6 +50,7 @@ pub fn remap_css_analysis_spans(
         remap_span(
             &mut cls.span.start,
             &mut cls.span.end,
+            content_offset,
             &sm,
             &compiled_lines,
             &original_lines,
@@ -58,6 +62,7 @@ pub fn remap_css_analysis_spans(
         remap_span(
             &mut id.span.start,
             &mut id.span.end,
+            content_offset,
             &sm,
             &compiled_lines,
             &original_lines,
@@ -71,14 +76,17 @@ pub fn remap_css_analysis_spans(
 fn remap_span(
     start: &mut u32,
     end: &mut u32,
+    content_offset: u32,
     sm: &SourceMap,
     compiled_lines: &LineStarts,
     original_lines: &LineStarts,
 ) {
-    if let Some(new_start) = remap_offset(*start, sm, compiled_lines, original_lines) {
-        if let Some(new_end) = remap_offset(*end, sm, compiled_lines, original_lines) {
-            *start = new_start;
-            *end = new_end;
+    let rel_start = start.saturating_sub(content_offset);
+    let rel_end = end.saturating_sub(content_offset);
+    if let Some(new_start) = remap_offset(rel_start, sm, compiled_lines, original_lines) {
+        if let Some(new_end) = remap_offset(rel_end, sm, compiled_lines, original_lines) {
+            *start = content_offset + new_start;
+            *end = content_offset + new_end;
         }
     }
 }
@@ -261,7 +269,7 @@ mod tests {
         );
 
         // Apply remapping
-        let success = remap_css_analysis_spans(&mut css, compiled, &sm_json, original);
+        let success = remap_css_analysis_spans(&mut css, compiled, &sm_json, original, 0);
         assert!(success, "source map remapping should succeed");
 
         // After remapping, selector spans should point to original Sass
@@ -323,7 +331,7 @@ mod tests {
         );
         let mut css = analysis.css.unwrap();
 
-        let success = remap_css_analysis_spans(&mut css, compiled, &sm_json, original);
+        let success = remap_css_analysis_spans(&mut css, compiled, &sm_json, original, 0);
         assert!(success);
 
         // .used class should be at offset 1 (after '.') in original, i.e. byte 1
@@ -379,7 +387,7 @@ mod tests {
         );
         let mut css = analysis.css.unwrap();
 
-        let success = remap_css_analysis_spans(&mut css, compiled, &sm_json, original);
+        let success = remap_css_analysis_spans(&mut css, compiled, &sm_json, original, 0);
         assert!(success);
 
         // Selector text should be preserved (not affected by remapping)
@@ -431,7 +439,7 @@ mod tests {
         let mut css = analysis.css.clone().unwrap();
         let original_css = analysis.css.unwrap();
 
-        let success = remap_css_analysis_spans(&mut css, content, &sm_json, content);
+        let success = remap_css_analysis_spans(&mut css, content, &sm_json, content, 0);
         assert!(success);
 
         // With identity mapping, spans should be unchanged
@@ -475,7 +483,7 @@ mod tests {
         );
         let mut css = analysis.css.unwrap();
 
-        let result = remap_css_analysis_spans(&mut css, compiled, "not valid json", original);
+        let result = remap_css_analysis_spans(&mut css, compiled, "not valid json", original, 0);
         assert!(!result, "should return false for invalid source map");
     }
 }

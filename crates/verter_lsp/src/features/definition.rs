@@ -502,19 +502,14 @@ fn find_css_selector_definition(
             CssTarget::Class(name) => {
                 for cls in &css.classes {
                     if cls.name == *name && cls.span.start > 0 {
-                        // Convert content-relative offset to SFC-absolute
-                        let abs_start = style.content_offset + cls.span.start;
-                        let abs_end = style.content_offset + cls.span.end;
-                        return span_definition(abs_start, abs_end, line_index);
+                        return span_definition(cls.span.start, cls.span.end, line_index);
                     }
                 }
             }
             CssTarget::Id(name) => {
                 for id in &css.ids {
                     if id.name == *name && id.span.start > 0 {
-                        let abs_start = style.content_offset + id.span.start;
-                        let abs_end = style.content_offset + id.span.end;
-                        return span_definition(abs_start, abs_end, line_index);
+                        return span_definition(id.span.start, id.span.end, line_index);
                     }
                 }
             }
@@ -577,12 +572,10 @@ fn find_css_target_in_style(
             None => continue,
         };
 
-        let co = style.content_offset as usize;
-
         // Check classes
         for cls in &css.classes {
-            let abs_start = co + cls.span.start as usize;
-            let abs_end = co + cls.span.end as usize;
+            let abs_start = cls.span.start as usize;
+            let abs_end = cls.span.end as usize;
             if offset >= abs_start && offset < abs_end {
                 // Verify the source matches
                 if abs_end <= source.len() && source[abs_start..abs_end] == cls.name {
@@ -593,8 +586,8 @@ fn find_css_target_in_style(
 
         // Check IDs
         for id in &css.ids {
-            let abs_start = co + id.span.start as usize;
-            let abs_end = co + id.span.end as usize;
+            let abs_start = id.span.start as usize;
+            let abs_end = id.span.end as usize;
             if offset >= abs_start
                 && offset < abs_end
                 && abs_end <= source.len()
@@ -720,30 +713,29 @@ fn dom_query_css_fallback(
 
     for style in &analysis.styles {
         let css = style.css.as_ref()?;
-        let co = style.content_offset;
 
         if let Some(class_name) = selector.strip_prefix('.') {
             for cls in &css.classes {
                 if cls.name == class_name {
-                    return span_definition(co + cls.span.start, co + cls.span.end, line_index);
+                    return span_definition(cls.span.start, cls.span.end, line_index);
                 }
             }
         } else if let Some(id_name) = selector.strip_prefix('#') {
             for id in &css.ids {
                 if id.name == id_name {
-                    return span_definition(co + id.span.start, co + id.span.end, line_index);
+                    return span_definition(id.span.start, id.span.end, line_index);
                 }
             }
         } else if call.kind == DomQueryKind::GetElementById {
             for id in &css.ids {
                 if id.name == *selector {
-                    return span_definition(co + id.span.start, co + id.span.end, line_index);
+                    return span_definition(id.span.start, id.span.end, line_index);
                 }
             }
         } else if call.kind == DomQueryKind::GetElementsByClassName {
             for cls in &css.classes {
                 if cls.name == *selector {
-                    return span_definition(co + cls.span.start, co + cls.span.end, line_index);
+                    return span_definition(cls.span.start, cls.span.end, line_index);
                 }
             }
         }

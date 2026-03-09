@@ -636,6 +636,58 @@ fn test_content_offset_stored() {
 }
 
 #[test]
+fn test_selector_class_and_id_spans_are_sfc_absolute() {
+    let css = ".btn, #app { color: red; }";
+    let content_offset = 100u32;
+    let analysis = analyze_css_with_offset(css, content_offset);
+    let css_data = analysis.css.as_ref().unwrap();
+
+    let selector = css_data
+        .selectors
+        .iter()
+        .find(|sel| sel.text == ".btn")
+        .expect("should find selector");
+    assert!(
+        selector.span.start >= content_offset,
+        "selector span should be SFC-absolute"
+    );
+    assert_eq!(
+        &css[(selector.span.start - content_offset) as usize
+            ..(selector.span.end - content_offset) as usize],
+        ".btn"
+    );
+
+    let class = css_data
+        .classes
+        .iter()
+        .find(|c| c.name == "btn")
+        .expect("should find .btn");
+    assert!(
+        class.span.start >= content_offset,
+        "class span should be SFC-absolute"
+    );
+    assert_eq!(
+        &css[(class.span.start - content_offset) as usize
+            ..(class.span.end - content_offset) as usize],
+        "btn"
+    );
+
+    let id = css_data
+        .ids
+        .iter()
+        .find(|i| i.name == "app")
+        .expect("should find #app");
+    assert!(
+        id.span.start >= content_offset,
+        "id span should be SFC-absolute"
+    );
+    assert_eq!(
+        &css[(id.span.start - content_offset) as usize..(id.span.end - content_offset) as usize],
+        "app"
+    );
+}
+
+#[test]
 fn test_compound_selector_spans() {
     let css = ".btn.primary { color: red; }";
     let analysis = analyze_css(css);

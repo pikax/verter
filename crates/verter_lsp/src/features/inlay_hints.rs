@@ -23,7 +23,7 @@ use verter_host::FileAnalysisSnapshot;
 /// - `useTemplateRef()` calls showing matched template refs
 pub fn verter_inlay_hints(
     source: &str,
-    blocks: &[SfcBlock],
+    _blocks: &[SfcBlock],
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Vec<InlayHint> {
@@ -31,17 +31,9 @@ pub fn verter_inlay_hints(
 
     let template = analysis.template.as_ref();
 
-    // Find the script block offset to convert script-relative spans to SFC-absolute
-    let script_offset = blocks
-        .iter()
-        .find(|b| b.tag_name == "script" && b.is_setup())
-        .or_else(|| blocks.iter().find(|b| b.tag_name == "script"))
-        .map(|b| b.open_tag_end)
-        .unwrap_or(0);
-
     // DOM query inlay hints
     for call in &analysis.dom_query_calls {
-        if let Some(hint) = dom_query_hint(call, script_offset, template, line_index) {
+        if let Some(hint) = dom_query_hint(call, template, line_index) {
             hints.push(hint);
         }
     }
@@ -49,8 +41,7 @@ pub fn verter_inlay_hints(
     // useTemplateRef inlay hints
     for call in &analysis.vue_api_calls {
         if call.api == VueApiClassification::UseTemplateRef {
-            if let Some(hint) = template_ref_hint(call, script_offset, source, template, line_index)
-            {
+            if let Some(hint) = template_ref_hint(call, source, template, line_index) {
                 hints.push(hint);
             }
         }
@@ -67,7 +58,6 @@ pub fn verter_inlay_hints(
 /// - `getElementById('app')` → `<div id="app"> (line 3)`
 fn dom_query_hint(
     call: &DomQueryCallSite,
-    script_offset: u32,
     template: Option<&TemplateAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Option<InlayHint> {
@@ -92,7 +82,7 @@ fn dom_query_hint(
         if call.kind == DomQueryKind::QuerySelector || call.kind == DomQueryKind::GetElementById {
             // Single-element queries: show first match
             if let Some(&idx) = matches.first() {
-                format_element_hint(&elements[idx], idx, line_index, script_offset)
+                format_element_hint(&elements[idx], idx, line_index)
             } else if maybe_count > 0 {
                 format!(
                     "{maybe_count} possible match{}",
@@ -126,8 +116,7 @@ fn dom_query_hint(
     };
 
     // Position the hint at the end of the call expression (absolute SFC offset)
-    let absolute_offset = script_offset + call.span.end;
-    let position = line_index.offset_to_position(absolute_offset)?;
+    let position = line_index.offset_to_position(call.span.end)?;
 
     Some(InlayHint {
         position,
@@ -144,7 +133,6 @@ fn dom_query_hint(
 /// Generate an inlay hint for a `useTemplateRef('foo')` call.
 fn template_ref_hint(
     call: &VueApiCallSite,
-    script_offset: u32,
     _source: &str,
     template: Option<&TemplateAnalysisSnapshot>,
     line_index: &LineIndex,
@@ -164,8 +152,7 @@ fn template_ref_hint(
         format!("ref \"{ref_name}\" not found in template")
     };
 
-    let absolute_offset = script_offset + call.span.end;
-    let position = line_index.offset_to_position(absolute_offset)?;
+    let position = line_index.offset_to_position(call.span.end)?;
 
     Some(InlayHint {
         position,
@@ -180,12 +167,7 @@ fn template_ref_hint(
 }
 
 /// Format a single matched element for an inlay hint.
-fn format_element_hint(
-    el: &TemplateElement,
-    _index: usize,
-    line_index: &LineIndex,
-    _script_offset: u32,
-) -> String {
+fn format_element_hint(el: &TemplateElement, _index: usize, line_index: &LineIndex) -> String {
     // Build a short element representation
     let mut desc = format!("<{}", el.tag);
 

@@ -64,7 +64,7 @@ pub struct StyleBlockAnalysis {
     pub module_name: Option<String>,
 
     /// Byte offset of the style block content start within the SFC source.
-    /// Used to convert content-relative spans to SFC-absolute spans.
+    /// Stored as block metadata for remapping and block identity.
     #[serde(default)]
     pub content_offset: u32,
 
@@ -128,7 +128,7 @@ pub struct AnalyzedSelector {
     pub text: String,
     /// Specificity tuple: (id, class, type).
     pub specificity: (u32, u32, u32),
-    /// Byte offset span, relative to style block content start.
+    /// SFC-absolute byte span of the selector text.
     pub span: Span,
     /// Parsed selector structure for matching. `None` for unparseable selectors.
     pub structure: Option<StructuredSelector>,
@@ -279,7 +279,7 @@ pub enum AttributeOperator {
 #[derive(Debug, Clone)]
 pub struct AnalyzedCssClass {
     pub name: String,
-    /// Byte offset span (after '.') relative to style block content start.
+    /// SFC-absolute byte span of the class name (after `.`).
     pub span: Span,
 }
 
@@ -317,7 +317,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedCssClass {
 #[derive(Debug, Clone)]
 pub struct AnalyzedCssId {
     pub name: String,
-    /// Byte offset span (after '#') relative to style block content start.
+    /// SFC-absolute byte span of the ID name (after `#`).
     pub span: Span,
 }
 
@@ -473,6 +473,7 @@ pub enum StyleAnalysisLang {
 /// Scans `css_content` with a byte-level scanner to extract selectors, specificity,
 /// classes, IDs, custom properties, and at-rules.
 /// `vue_input` contains pre-extracted Vue features from verter_core.
+/// All stored spans are SFC-absolute byte offsets.
 pub fn build_css_style_analysis(
     css_content: &str,
     vue_input: VueStyleInput,
@@ -1376,7 +1377,10 @@ fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
                             analysis.selectors.push(AnalyzedSelector {
                                 text: sel_trimmed.to_string(),
                                 specificity,
-                                span: Span::new(sel_offset, sel_offset + sel_trimmed.len() as u32),
+                                span: Span::new(
+                                    content_offset + sel_offset,
+                                    content_offset + sel_offset + sel_trimmed.len() as u32,
+                                ),
                                 structure,
                             });
                         }
@@ -1388,6 +1392,7 @@ fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
                     extract_classes_and_ids_from_selector(
                         selector_text,
                         selector_offset,
+                        content_offset,
                         &mut analysis,
                     );
 
@@ -1882,11 +1887,12 @@ fn compute_specificity_from_text(selector: &str) -> (u32, u32, u32) {
     (ids, classes, types)
 }
 
-/// Extract `.class` and `#id` occurrences from selector text, recording byte spans
-/// relative to the CSS content start.
+/// Extract `.class` and `#id` occurrences from selector text, recording
+/// SFC-absolute byte spans.
 fn extract_classes_and_ids_from_selector(
     selector_text: &str,
     offset_in_css: usize,
+    content_offset: u32,
     analysis: &mut CssAnalysis,
 ) {
     let bytes = selector_text.as_bytes();
@@ -1939,8 +1945,8 @@ fn extract_classes_and_ids_from_selector(
                     continue;
                 }
 
-                let abs_start = (offset_in_css + name_start) as u32;
-                let abs_end = (offset_in_css + end) as u32;
+                let abs_start = content_offset + (offset_in_css + name_start) as u32;
+                let abs_end = content_offset + (offset_in_css + end) as u32;
 
                 if b == b'.' {
                     analysis.classes.push(AnalyzedCssClass {

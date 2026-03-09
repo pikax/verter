@@ -455,83 +455,21 @@ fn test_span_based_rename_no_false_positives() {
 }
 
 #[test]
-fn test_analysis_span_offset_single_block() {
-    let source = "<template><div></div></template>\n<script setup>\nconst x = 1\n</script>";
-    let blocks = scan_sfc_blocks(source);
-    let script = blocks.iter().find(|b| b.tag_name == "script").unwrap();
-    let (content_start, content_end) = script.content_range();
-    let content = &source[content_start as usize..content_end as usize];
-
-    // Find "x" within the script content
-    let x_in_content = content.find('x').unwrap() as u32;
-    let abs = analysis_span_to_sfc_offset(x_in_content, &blocks);
-    assert_eq!(abs, content_start + x_in_content);
-
-    // Verify it points to "x" in the SFC source
-    assert_eq!(&source[abs as usize..abs as usize + 1], "x");
-}
-
-#[test]
-fn test_analysis_span_offset_dual_blocks() {
-    let source = "<script>\nexport default { name: 'App' }\n</script>\n<script setup>\nconst count = ref(0)\n</script>";
-    let blocks = scan_sfc_blocks(source);
-
-    let normal = blocks
-        .iter()
-        .find(|b| b.tag_name == "script" && !b.is_setup())
-        .unwrap();
-    let setup = blocks
-        .iter()
-        .find(|b| b.tag_name == "script" && b.is_setup())
-        .unwrap();
-
-    let (n_start, n_end) = normal.content_range();
-    let normal_len = n_end - n_start;
-    let (s_start, s_end) = setup.content_range();
-    let setup_content = &source[s_start as usize..s_end as usize];
-
-    // Offset 0 should map to the start of normal script content
-    let abs_normal = analysis_span_to_sfc_offset(0, &blocks);
-    assert_eq!(abs_normal, n_start);
-
-    // Offset past normal content + \n separator should map to setup content
-    let setup_base = normal_len + 1; // +1 for the \n separator
-    let abs_setup = analysis_span_to_sfc_offset(setup_base, &blocks);
-    assert_eq!(abs_setup, s_start);
-
-    // "count" in setup block content, mapped through combined offset
-    let count_in_setup = setup_content.find("count").unwrap() as u32;
-    let count_in_combined = setup_base + count_in_setup;
-    let abs_count = analysis_span_to_sfc_offset(count_in_combined, &blocks);
-    assert_eq!(
-        &source[abs_count as usize..abs_count as usize + 5],
-        "count",
-        "should point to 'count' in <script setup>"
-    );
-}
-
-#[test]
 fn test_rename_with_dual_script_blocks() {
     let source = "<template>\n  {{ count }}\n</template>\n<script>\nexport default {}\n</script>\n<script setup>\nconst count = ref(0)\n</script>";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    let normal = blocks
-        .iter()
-        .find(|b| b.tag_name == "script" && !b.is_setup())
-        .unwrap();
     let setup = blocks
         .iter()
         .find(|b| b.tag_name == "script" && b.is_setup())
         .unwrap();
-    let (n_start, n_end) = normal.content_range();
-    let normal_len = n_end - n_start;
     let (s_start, s_end) = setup.content_range();
     let setup_content = &source[s_start as usize..s_end as usize];
 
-    // "count" in <script setup> content, mapped to combined content offset
+    // "count" in <script setup> content, stored as an SFC-absolute host span
     let count_in_setup = setup_content.find("count").unwrap() as u32;
-    let count_combined_offset = normal_len + 1 + count_in_setup;
+    let count_sfc_offset = s_start + count_in_setup;
 
     let template_count = source.find("count").unwrap();
 
@@ -543,7 +481,7 @@ fn test_rename_with_dual_script_blocks() {
             reactivity_kind: ReactivityKind::Ref,
             type_annotation: None,
             initializer: None,
-            span: verter_span::Span::new(count_combined_offset, count_combined_offset + 5),
+            span: verter_span::Span::new(count_sfc_offset, count_sfc_offset + 5),
             used_in_script: false,
             used_in_style: false,
         }],
@@ -585,7 +523,6 @@ fn test_rename_with_dual_script_blocks() {
     );
 
     // Verify the declaration edit points to "count" in <script setup>, not somewhere random
-    let count_sfc_offset = source.rfind("count").unwrap() as u32;
     assert!(
         edits
             .iter()

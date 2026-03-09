@@ -344,24 +344,19 @@ pub(crate) fn collect_css_ref_spans(
             Some(c) => c,
             None => continue,
         };
-        let co = style.content_offset;
 
         match target {
             CssRefTarget::Class(name) => {
                 for cls in &css.classes {
                     if cls.name == *name && cls.span.start > 0 {
-                        let abs_start = co + cls.span.start;
-                        let abs_end = co + cls.span.end;
-                        spans.push((abs_start, abs_end));
+                        spans.push((cls.span.start, cls.span.end));
                     }
                 }
             }
             CssRefTarget::Id(name) => {
                 for id in &css.ids {
                     if id.name == *name && id.span.start > 0 {
-                        let abs_start = co + id.span.start;
-                        let abs_end = co + id.span.end;
-                        spans.push((abs_start, abs_end));
+                        spans.push((id.span.start, id.span.end));
                     }
                 }
             }
@@ -479,11 +474,10 @@ pub(crate) fn find_css_target_in_style_refs(
             Some(c) => c,
             None => continue,
         };
-        let co = style.content_offset as usize;
 
         for cls in &css.classes {
-            let abs_start = co + cls.span.start as usize;
-            let abs_end = co + cls.span.end as usize;
+            let abs_start = cls.span.start as usize;
+            let abs_end = cls.span.end as usize;
             if offset >= abs_start
                 && offset < abs_end
                 && abs_end <= source.len()
@@ -494,8 +488,8 @@ pub(crate) fn find_css_target_in_style_refs(
         }
 
         for id in &css.ids {
-            let abs_start = co + id.span.start as usize;
-            let abs_end = co + id.span.end as usize;
+            let abs_start = id.span.start as usize;
+            let abs_end = id.span.end as usize;
             if offset >= abs_start
                 && offset < abs_end
                 && abs_end <= source.len()

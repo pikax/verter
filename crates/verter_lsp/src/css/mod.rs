@@ -244,7 +244,6 @@ fn selector_hover(
     line_index: &LineIndex,
 ) -> Option<Hover> {
     let (content_start, _) = style_block.content_range();
-    let offset_in_css = offset as u32 - content_start;
 
     // Find the matching style analysis for this block
     let style = analysis
@@ -258,7 +257,7 @@ fn selector_hover(
     let selector = css
         .selectors
         .iter()
-        .find(|sel| offset_in_css >= sel.span.start && offset_in_css <= sel.span.end)?;
+        .find(|sel| (offset as u32) >= sel.span.start && (offset as u32) <= sel.span.end)?;
 
     let structure = selector.structure.as_ref()?;
 
@@ -286,7 +285,7 @@ fn selector_hover(
                     selector.specificity.2,
                 ),
             }),
-            range: selector_range(selector, content_start, line_index),
+            range: selector_range(selector, line_index),
         });
     }
 
@@ -318,7 +317,7 @@ fn selector_hover(
             kind: MarkupKind::Markdown,
             value: lines.join("\n\n"),
         }),
-        range: selector_range(selector, content_start, line_index),
+        range: selector_range(selector, line_index),
     })
 }
 
@@ -344,11 +343,10 @@ fn format_element_match(el: &verter_analysis::TemplateElement, line_index: &Line
 /// Compute the LSP range for a selector's span.
 fn selector_range(
     selector: &verter_analysis::style::AnalyzedSelector,
-    content_start: u32,
     line_index: &LineIndex,
 ) -> Option<Range> {
-    let start = line_index.offset_to_position(content_start + selector.span.start)?;
-    let end = line_index.offset_to_position(content_start + selector.span.end)?;
+    let start = line_index.offset_to_position(selector.span.start)?;
+    let end = line_index.offset_to_position(selector.span.end)?;
     Some(Range { start, end })
 }
 

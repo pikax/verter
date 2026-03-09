@@ -247,20 +247,21 @@ pub struct FfiVirtualFileResponse {
 pub struct FfiDestructuredBinding {
     /// Binding identifier name.
     pub name: String,
-    /// SFC-absolute start offset of the original declaration (target encoding).
+    /// SFC-absolute start offset of the original source declaration (target encoding).
     pub source_start: u32,
-    /// SFC-absolute end offset of the original declaration (target encoding).
+    /// SFC-absolute end offset of the original source declaration (target encoding).
     pub source_end: u32,
 }
 
-/// Metadata for the destructured block region in the generated TSX (target encoding).
+/// Metadata for the destructured block region in the generated TSX output
+/// (target encoding, not source spans).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FfiDestructuredBlockMeta {
     pub bindings: Vec<FfiDestructuredBinding>,
-    /// Start offset of the destructured block in the generated TSX (target encoding).
+    /// Start offset of the destructured block in the generated TSX output (target encoding).
     pub block_start: u32,
-    /// End offset of the destructured block in the generated TSX (target encoding).
+    /// End offset of the destructured block in the generated TSX output (target encoding).
     pub block_end: u32,
 }
 

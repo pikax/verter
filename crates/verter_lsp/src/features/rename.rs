@@ -90,56 +90,11 @@ fn prepare_rename_css(
     None
 }
 
-/// Convert an analysis span offset (relative to the combined script content that the
-/// host passes to OXC) to an SFC-absolute byte offset.
-///
-/// The host concatenates script block contents in order `[<script>, <script setup>]`
-/// separated by `\n`. OXC spans are relative to this combined string. This function
-/// determines which block the offset falls in and converts to an SFC-absolute offset.
-fn analysis_span_to_sfc_offset(span_offset: u32, blocks: &[SfcBlock]) -> u32 {
-    let script_blocks: Vec<&SfcBlock> = blocks.iter().filter(|b| b.tag_name == "script").collect();
-
-    match script_blocks.len() {
-        0 => span_offset,
-        1 => script_blocks[0].content_range().0 + span_offset,
-        _ => {
-            // Dual block: host concatenates [normal, setup] with \n separator.
-            let normal = script_blocks.iter().find(|b| !b.is_setup());
-            let setup = script_blocks.iter().find(|b| b.is_setup());
-
-            match (normal, setup) {
-                (Some(n), Some(s)) => {
-                    let (n_start, n_end) = n.content_range();
-                    let normal_len = n_end - n_start;
-                    if span_offset <= normal_len {
-                        n_start + span_offset
-                    } else {
-                        // Skip past normal content + \n separator
-                        s.content_range().0 + (span_offset - normal_len - 1)
-                    }
-                }
-                (Some(n), None) => n.content_range().0 + span_offset,
-                (None, Some(s)) => s.content_range().0 + span_offset,
-                (None, None) => span_offset,
-            }
-        }
-    }
-}
-
 /// Perform a rename of the symbol at the given position to `new_name`.
 ///
 /// Finds all occurrences in script and template blocks and returns a
 /// `WorkspaceEdit` with text edits for each occurrence.
 ///
-/// ## Coordinate systems
-///
-/// Analysis spans (`AnalyzedBinding.span.start`, `AnalyzedImportBinding.span.start`)
-/// are byte offsets relative to the combined script content that the host passes to
-/// OXC for parsing. These must be converted to SFC-absolute offsets before calling
-/// `span_to_edit()`. See `analysis_span_to_sfc_offset()` for the conversion logic.
-///
-/// Template binding occurrences (`TemplateBindingOccurrence.span.start`) are already
-/// SFC-absolute and need no conversion.
 pub fn rename_at_position(
     position: &Position,
     new_name: &str,
@@ -170,12 +125,13 @@ pub fn rename_at_position(
 
     let mut edits: Vec<TextEdit> = Vec::new();
 
-    // Collect declaration spans (convert script-relative → SFC-absolute)
+    // Host analysis spans are already SFC-absolute.
+    // Collect declaration spans from the host snapshot.
     if let Some(binding) = analysis.bindings.iter().find(|b| b.name == word) {
         if binding.span.start > 0 || binding.span.end > 0 {
-            let abs_start = analysis_span_to_sfc_offset(binding.span.start, blocks);
-            let abs_end = analysis_span_to_sfc_offset(binding.span.end, blocks);
-            if let Some(edit) = span_to_edit(abs_start, abs_end, new_name, line_index) {
+            if let Some(edit) =
+                span_to_edit(binding.span.start, binding.span.end, new_name, line_index)
+            {
                 edits.push(edit);
             }
         }
@@ -183,9 +139,9 @@ pub fn rename_at_position(
     for import in &analysis.imports {
         for binding in &import.bindings {
             if binding.name == word && (binding.span.start > 0 || binding.span.end > 0) {
-                let abs_start = analysis_span_to_sfc_offset(binding.span.start, blocks);
-                let abs_end = analysis_span_to_sfc_offset(binding.span.end, blocks);
-                if let Some(edit) = span_to_edit(abs_start, abs_end, new_name, line_index) {
+                if let Some(edit) =
+                    span_to_edit(binding.span.start, binding.span.end, new_name, line_index)
+                {
                     edits.push(edit);
                 }
             }

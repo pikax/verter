@@ -296,7 +296,7 @@ pub struct VueApiCallSite {
 pub struct VueApiCallbackParam {
     /// Parameter name.
     pub name: String,
-    /// Script-relative byte span of the parameter name.
+    /// SFC-absolute byte span of the parameter name.
     pub span: Span,
     /// Inferred type string (e.g., "number" from unwrapping `Ref<number>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -780,10 +780,9 @@ pub struct ExportSignature {
     pub declaration_hash: Hash16,
     /// Whether this is a type-only export (`export type` or `export interface`).
     pub is_type: bool,
-    /// Byte span of the export's identifier within the script content.
+    /// SFC-absolute byte span of the export's identifier.
     /// Points to the identifier name (e.g., `foo` in `export function foo()`),
     /// or `default` keyword for anonymous default exports.
-    /// Script-content-relative; add script content offset for SFC-absolute.
     pub span: Span,
     /// Source module for re-exports (e.g., `"./Popup.vue"`). None for local exports.
     #[serde(skip_serializing_if = "Option::is_none", default)]

@@ -330,6 +330,7 @@ impl VerterHost {
                         &ov.code,
                         sm_json,
                         original_content,
+                        content_offset,
                     );
                 }
 

@@ -705,6 +705,10 @@ fn adjust_analysis_spans(
     for call in &mut analysis.vue_api_calls {
         call.span.start = map(call.span.start);
         call.span.end = map(call.span.end);
+        for param in &mut call.callback_params {
+            param.span.start = map(param.span.start);
+            param.span.end = map(param.span.end);
+        }
     }
     for call in &mut analysis.dom_query_calls {
         call.span.start = map(call.span.start);
@@ -1405,6 +1409,39 @@ const x = ref(0)
     // ═══════════════════════════════════════════════════════════
     // Preprocessor request tests
     // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn vue_api_callback_param_spans_are_sfc_absolute() {
+        let source = r#"<template><div/></template>
+<script setup>
+import { watch, ref } from 'vue'
+const count = ref(0)
+watch(count, (value, oldValue) => {
+  console.log(value, oldValue)
+})
+</script>"#;
+        let (snap, _parsed) = parse_vue_snapshot("App.vue", source, AnalysisScope::LSP);
+
+        let watch_call = snap
+            .script_analysis
+            .vue_api_calls
+            .iter()
+            .find(|call| call.api == verter_analysis::VueApiClassification::Watch)
+            .expect("should find watch() call");
+
+        assert_eq!(watch_call.callback_params.len(), 2);
+
+        let value_start = source.find("(value, oldValue)").unwrap() + 1;
+        let old_value_start = source.find("oldValue").unwrap();
+        assert_eq!(
+            watch_call.callback_params[0].span.start as usize,
+            value_start
+        );
+        assert_eq!(
+            watch_call.callback_params[1].span.start as usize,
+            old_value_start
+        );
+    }
 
     /// @ai-generated - template_lang captured for pug
     #[test]

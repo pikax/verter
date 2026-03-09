@@ -555,14 +555,7 @@ fn build_script_snapshot(
 
 /// Convert a UTF-16 offset to a UTF-8 byte offset.
 fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
-    let mut utf16_count = 0u32;
-    for (byte_idx, ch) in source.char_indices() {
-        if utf16_count >= utf16_offset {
-            return byte_idx as u32;
-        }
-        utf16_count += ch.len_utf16() as u32;
-    }
-    source.len() as u32
+    verter_ffi::convert::utf16_to_byte_offset(source, utf16_offset)
 }
 
 /// Monaco SymbolKind constants (subset used for document symbols).
@@ -732,11 +725,7 @@ fn build_document_symbols_from_analysis(
 
 /// Safe UTF-16 conversion that handles 0 as identity.
 fn byte_offset_to_utf16_safe(source: &str, byte_offset: u32) -> u32 {
-    if byte_offset == 0 || source.is_empty() {
-        return 0;
-    }
-    let clamped = source.len().min(byte_offset as usize);
-    source[..clamped].encode_utf16().count() as u32
+    verter_ffi::convert::byte_offset_to_utf16(source, byte_offset)
 }
 
 /// Build CSS selector match results for visualization.

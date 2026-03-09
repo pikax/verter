@@ -1931,11 +1931,12 @@ mod tests {
         assert!(header_sel.is_some(), ".header selector should exist");
         let header_sel = header_sel.unwrap();
 
-        // .header is at content-relative offset 1 (line 0 is the `\n` after the tag)
-        // The remapped span_start should be 1 (relative to content_offset)
+        // .header is one byte into the style content (after the leading newline),
+        // so the stored span is SFC-absolute content_offset + 1.
         assert_eq!(
-            header_sel.span.start, 1,
-            ".header should start at offset 1 (after leading newline) in original content"
+            header_sel.span.start,
+            sass_block_after.content_offset + 1,
+            ".header should be stored as an SFC-absolute span"
         );
 
         // content_offset should point right after `>` of `<style lang="sass">`
@@ -1946,12 +1947,12 @@ mod tests {
             "content_offset should point right after the style tag"
         );
 
-        // Double-check: content_offset + span_start should give the SFC-absolute offset of ".header"
-        let sfc_absolute = sass_block_after.content_offset + header_sel.span.start;
+        // Double-check the stored absolute span points directly at ".header".
+        let sfc_absolute = header_sel.span.start;
         assert_eq!(
             &sfc[sfc_absolute as usize..sfc_absolute as usize + 7],
             ".header",
-            "SFC-absolute offset should point to '.header' in the original SFC"
+            "stored selector span should point to '.header' in the original SFC"
         );
     }
 

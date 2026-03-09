@@ -136,9 +136,9 @@ export interface DestructuredBinding {
 /** Metadata for the destructured block region in the generated TSX. */
 export interface DestructuredBlockMeta {
   bindings: DestructuredBinding[];
-  /** Start offset of the destructured block in the generated TSX (UTF-16). */
+  /** Start offset of the destructured block in the generated TSX output (UTF-16). */
   blockStart: number;
-  /** End offset of the destructured block in the generated TSX (UTF-16). */
+  /** End offset of the destructured block in the generated TSX output (UTF-16). */
   blockEnd: number;
 }
 
