@@ -990,7 +990,7 @@ impl VerterLanguageServer {
                     })?;
 
                     // Find matching prop field in child's defineProps
-                    for mac in &child_analysis.macros {
+                    for mac in child_analysis.macros.iter() {
                         if let Some(pf) = mac.prop_fields.iter().find(|pf| pf.name == prop.name) {
                             if pf.span.start > 0 || pf.span.end > 0 {
                                 let start_pos = child_line_index
@@ -6242,6 +6242,7 @@ mod tests {
             vue_api_calls: Vec::new(),
             dom_query_calls: Vec::new(),
             css_var_manipulations: Vec::new(),
+            script_binding_occurrences: Vec::new(),
             first_await_offset: None,
             type_enhancements: None,
         };

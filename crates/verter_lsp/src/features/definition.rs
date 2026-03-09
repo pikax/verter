@@ -112,7 +112,7 @@ pub fn definition_at_position(
                 _ => None,
             };
             if let Some(kind) = macro_kind {
-                for mac in &analysis.macros {
+                for mac in analysis.macros.iter() {
                     if mac.kind == kind && (mac.span.start > 0 || mac.span.end > 0) {
                         return span_definition(mac.span.start, mac.span.end, line_index);
                     }
@@ -254,7 +254,7 @@ pub fn definition_at_position(
                 }
             }
             // Check individual prop fields from defineProps
-            for mac in &analysis.macros {
+            for mac in analysis.macros.iter() {
                 if let Some(pf) = mac.prop_fields.iter().find(|pf| pf.name == *word) {
                     if pf.span.start > 0 || pf.span.end > 0 {
                         return span_definition(pf.span.start, pf.span.end, line_index);
@@ -262,7 +262,7 @@ pub fn definition_at_position(
                 }
             }
             // Check macro binding names
-            for mac in &analysis.macros {
+            for mac in analysis.macros.iter() {
                 if mac.binding_name.as_ref().is_some_and(|n| n == word)
                     && (mac.span.start > 0 || mac.span.end > 0)
                 {
@@ -417,7 +417,7 @@ fn css_definition_from_template(
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<GotoDefinitionResponse> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     // Find which attribute (if any) contains the cursor
     let target = find_css_target_in_template(offset, source, template)?;
@@ -496,7 +496,7 @@ fn find_css_selector_definition(
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<GotoDefinitionResponse> {
-    for style in &analysis.styles {
+    for style in analysis.styles.iter() {
         let css = style.css.as_ref()?;
         match target {
             CssTarget::Class(name) => {
@@ -526,7 +526,7 @@ fn css_definition_from_style(
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<GotoDefinitionResponse> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     // Find which style block contains the cursor and extract the class/id name
     let target = find_css_target_in_style(offset, source, analysis)?;
@@ -566,7 +566,7 @@ fn find_css_target_in_style(
     source: &str,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<CssTarget> {
-    for style in &analysis.styles {
+    for style in analysis.styles.iter() {
         let css = match style.css.as_ref() {
             Some(c) => c,
             None => continue,
@@ -671,7 +671,7 @@ fn dom_query_definition(
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<GotoDefinitionResponse> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
     let elements = &template.elements;
 
     // DomQueryCallSite spans are SFC-absolute (adjusted by verter_host during analysis)
@@ -711,7 +711,7 @@ fn dom_query_css_fallback(
 ) -> Option<GotoDefinitionResponse> {
     let selector = &call.selector_text;
 
-    for style in &analysis.styles {
+    for style in analysis.styles.iter() {
         let css = style.css.as_ref()?;
 
         if let Some(class_name) = selector.strip_prefix('.') {

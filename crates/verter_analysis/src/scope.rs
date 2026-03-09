@@ -35,6 +35,9 @@ bitflags::bitflags! {
         /// Analyze function return reactivity (for composables).
         const FUNC_RETURNS      = 1 << 7;
 
+        /// Script-side binding usage occurrences with exact spans.
+        const SCRIPT_USAGES     = 1 << 14;
+
         // ── Template (bits 8–15) ──
 
         /// Component usages + prop expressions.
@@ -155,7 +158,8 @@ impl AnalysisScope {
                 .union(Self::MACROS)
                 .union(Self::REACTIVITY)
                 .union(Self::VUE_API_USAGE)
-                .union(Self::FUNC_RETURNS),
+                .union(Self::FUNC_RETURNS)
+                .union(Self::SCRIPT_USAGES),
         )
     }
 

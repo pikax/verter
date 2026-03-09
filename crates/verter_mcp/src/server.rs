@@ -16,7 +16,9 @@ use verter_diagnostics::{Linter, Severity};
 use verter_host::VerterHost;
 
 use crate::config::McpServerConfig;
-use crate::helpers::{ensure_loaded, ensure_template_analysis, mcp_err, resolve_path};
+use crate::helpers::{
+    batch_analysis_with_template, ensure_loaded, ensure_template_analysis, mcp_err, resolve_path,
+};
 use crate::scanner;
 use crate::tools::scoring;
 
@@ -192,15 +194,16 @@ fn build_script_snapshot(
 ) -> verter_analysis::types::ScriptAnalysisSnapshot {
     verter_analysis::types::ScriptAnalysisSnapshot {
         imports: analysis.imports.clone(),
-        module_references: analysis.module_references.clone(),
+        module_references: analysis.module_references.to_vec(),
         bindings: analysis.bindings.clone(),
-        macros: analysis.macros.clone(),
-        macro_type_deps: analysis.macro_type_deps.clone(),
+        macros: analysis.macros.to_vec(),
+        macro_type_deps: analysis.macro_type_deps.to_vec(),
         flags: AnalysisFlags::from_bits_truncate(analysis.script_flags),
         exported_functions: Vec::new(),
-        vue_api_calls: analysis.vue_api_calls.clone(),
-        dom_query_calls: analysis.dom_query_calls.clone(),
-        css_var_manipulations: analysis.css_var_manipulations.clone(),
+        vue_api_calls: analysis.vue_api_calls.to_vec(),
+        dom_query_calls: analysis.dom_query_calls.to_vec(),
+        css_var_manipulations: analysis.css_var_manipulations.to_vec(),
+        script_binding_occurrences: analysis.script_binding_occurrences.to_vec(),
         first_await_offset: None,
         type_enhancements: None,
     }
@@ -383,7 +386,7 @@ impl VerterMcpServer {
             "expose": [],
         });
 
-        for m in &analysis.macros {
+        for m in analysis.macros.iter() {
             match m.kind {
                 AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
                     api["props"] = serde_json::to_value(m).unwrap_or_default();
@@ -558,42 +561,42 @@ impl VerterMcpServer {
         // Build a map of file -> template classes used
         let mut file_template_classes: HashMap<String, HashSet<String>> = HashMap::new();
 
-        for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
-                continue;
-            }
-            let _ = ensure_template_analysis(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                // Collect non-scoped class definitions
-                for style in &analysis.styles {
-                    if !style.scoped {
-                        if let Some(css) = &style.css {
-                            for cls in &css.classes {
-                                global_class_files
-                                    .entry(cls.name.clone())
-                                    .or_default()
-                                    .push(id.clone());
-                            }
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+        for (canonical, analysis) in &analyses {
+            // Collect non-scoped class definitions
+            for style in analysis.styles.iter() {
+                if !style.scoped {
+                    if let Some(css) = &style.css {
+                        for cls in &css.classes {
+                            global_class_files
+                                .entry(cls.name.clone())
+                                .or_default()
+                                .push(canonical.clone());
                         }
                     }
                 }
+            }
 
-                // Collect template class usage
-                if let Some(tpl) = &analysis.template {
-                    let mut classes = HashSet::new();
-                    for el in &tpl.elements {
-                        for attr in &el.attributes {
-                            if attr.name == "class" {
-                                if let Some(val) = &attr.value {
-                                    for cls in val.split_whitespace() {
-                                        classes.insert(cls.to_string());
-                                    }
+            // Collect template class usage
+            if let Some(tpl) = &analysis.template {
+                let mut classes = HashSet::new();
+                for el in &tpl.elements {
+                    for attr in &el.attributes {
+                        if attr.name == "class" {
+                            if let Some(val) = &attr.value {
+                                for cls in val.split_whitespace() {
+                                    classes.insert(cls.to_string());
                                 }
                             }
                         }
                     }
-                    file_template_classes.insert(id.clone(), classes);
                 }
+                file_template_classes.insert(canonical.clone(), classes);
             }
         }
 
@@ -676,7 +679,7 @@ impl VerterMcpServer {
         let script_snapshot = build_script_snapshot(&analysis);
         let diags = linter.lint_with_source(
             Some(&script_snapshot),
-            analysis.template.as_ref(),
+            analysis.template.as_deref(),
             &analysis.styles,
             source_str,
         );
@@ -745,22 +748,20 @@ impl VerterMcpServer {
         let mut total_info = 0usize;
         let mut by_file = serde_json::Map::new();
 
-        for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
-                continue;
-            }
-            let _ = ensure_template_analysis(&self.host, id);
-            let analysis = match self.host.get_analysis(id) {
-                Some(a) => a,
-                None => continue,
-            };
-            let source = self.host.get_source(id);
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+        for (canonical, analysis) in &analyses {
+            let source = self.host.get_source(canonical);
             let source_str = source.as_deref();
 
-            let script_snapshot = build_script_snapshot(&analysis);
+            let script_snapshot = build_script_snapshot(analysis);
             let diags = linter.lint_with_source(
                 Some(&script_snapshot),
-                analysis.template.as_ref(),
+                analysis.template.as_deref(),
                 &analysis.styles,
                 source_str,
             );
@@ -774,7 +775,7 @@ impl VerterMcpServer {
 
             // Filter against baseline
             if let Some(ref baseline) = baseline {
-                let rel = crate::baseline::make_relative(id, &root);
+                let rel = crate::baseline::make_relative(canonical, &root);
                 diag_vec.retain(|d| {
                     let span_content = source_str
                         .and_then(|s| s.get(d.span.start as usize..d.span.end as usize))
@@ -798,7 +799,7 @@ impl VerterMcpServer {
 
             if !filtered.is_empty() {
                 by_file.insert(
-                    id.clone(),
+                    canonical.clone(),
                     serde_json::to_value(&filtered).unwrap_or_default(),
                 );
             }
@@ -840,7 +841,7 @@ impl VerterMcpServer {
         let script_snapshot = build_script_snapshot(&analysis);
         let diags = self.linter.lint_with_source(
             Some(&script_snapshot),
-            analysis.template.as_ref(),
+            analysis.template.as_deref(),
             &analysis.styles,
             Some(&source),
         );
@@ -849,7 +850,7 @@ impl VerterMcpServer {
             source: &source,
             file_id: &canonical,
             diagnostics: &diags,
-            template: analysis.template.as_ref(),
+            template: analysis.template.as_deref(),
             script: Some(&script_snapshot),
             styles: &analysis.styles,
         };
@@ -989,38 +990,37 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let mut graph = serde_json::Map::new();
 
-        for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
-                continue;
-            }
-            if let Some(root) = &params.root {
-                let root_resolved = self.resolve(root);
-                if !id.starts_with(&root_resolved) && id != &root_resolved {
-                    continue;
-                }
-            }
-
-            let _ = ensure_template_analysis(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                if let Some(tpl) = &analysis.template {
-                    let components: Vec<serde_json::Value> = tpl
-                        .components
-                        .iter()
-                        .map(|c| {
-                            serde_json::json!({
-                                "name": c.name,
-                                "import_source": c.import_source,
-                                "is_dynamic": c.is_dynamic,
-                                "props_count": c.props.len(),
-                            })
+        let root_resolved = params.root.as_ref().map(|r| self.resolve(r));
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(id, _)| {
+                root_resolved
+                    .as_ref()
+                    .map_or(true, |root| id.starts_with(root) || id == root)
+            })
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+        for (canonical, analysis) in &analyses {
+            if let Some(tpl) = &analysis.template {
+                let components: Vec<serde_json::Value> = tpl
+                    .components
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "name": c.name,
+                            "import_source": c.import_source,
+                            "is_dynamic": c.is_dynamic,
+                            "props_count": c.props.len(),
                         })
-                        .collect();
-                    if !components.is_empty() {
-                        graph.insert(
-                            id.clone(),
-                            serde_json::to_value(&components).unwrap_or_default(),
-                        );
-                    }
+                    })
+                    .collect();
+                if !components.is_empty() {
+                    graph.insert(
+                        canonical.clone(),
+                        serde_json::to_value(&components).unwrap_or_default(),
+                    );
                 }
             }
         }
@@ -1108,7 +1108,7 @@ impl VerterMcpServer {
             }
             let _ = ensure_loaded(&self.host, id);
             if let Some(analysis) = self.host.get_analysis(id) {
-                for call in &analysis.vue_api_calls {
+                for call in analysis.vue_api_calls.iter() {
                     match call.api {
                         VueApiClassification::Provide => {
                             if let Some(key) = &call.arg_value {
@@ -1172,48 +1172,48 @@ impl VerterMcpServer {
         let mut component_props: HashMap<String, Vec<String>> = HashMap::new();
         let mut component_required: HashMap<String, Vec<String>> = HashMap::new();
 
-        for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
-                continue;
-            }
-            let _ = ensure_template_analysis(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                let comp_name = std::path::Path::new(id.as_str())
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+        for (canonical, analysis) in &analyses {
+            let comp_name = std::path::Path::new(canonical.as_str())
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
 
-                // Primary source: macro prop_fields
-                let mut prop_names: Vec<String> = Vec::new();
-                let mut required: Vec<String> = Vec::new();
-                for m in &analysis.macros {
-                    if matches!(
-                        m.kind,
-                        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
-                    ) {
-                        for f in &m.prop_fields {
-                            prop_names.push(f.name.clone());
+            // Primary source: macro prop_fields
+            let mut prop_names: Vec<String> = Vec::new();
+            let mut required: Vec<String> = Vec::new();
+            for m in analysis.macros.iter() {
+                if matches!(
+                    m.kind,
+                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+                ) {
+                    for f in &m.prop_fields {
+                        prop_names.push(f.name.clone());
+                    }
+                }
+            }
+            // Fallback: template prop_definitions (if macros had no prop_fields)
+            if prop_names.is_empty() {
+                if let Some(tpl) = &analysis.template {
+                    for p in &tpl.prop_definitions {
+                        prop_names.push(p.name.clone());
+                        if p.is_required {
+                            required.push(p.name.clone());
                         }
                     }
                 }
-                // Fallback: template prop_definitions (if macros had no prop_fields)
-                if prop_names.is_empty() {
-                    if let Some(tpl) = &analysis.template {
-                        for p in &tpl.prop_definitions {
-                            prop_names.push(p.name.clone());
-                            if p.is_required {
-                                required.push(p.name.clone());
-                            }
-                        }
-                    }
-                }
-                if !prop_names.is_empty() {
-                    component_props.insert(comp_name.clone(), prop_names);
-                }
-                if !required.is_empty() {
-                    component_required.insert(comp_name, required);
-                }
+            }
+            if !prop_names.is_empty() {
+                component_props.insert(comp_name.clone(), prop_names);
+            }
+            if !required.is_empty() {
+                component_required.insert(comp_name, required);
             }
         }
 
@@ -1298,7 +1298,7 @@ impl VerterMcpServer {
         // Quality score
         let quality = scoring::compute_quality_score(
             Some(&script_snapshot),
-            analysis.template.as_ref(),
+            analysis.template.as_deref(),
             &analysis.styles,
             source.as_deref(),
         );
@@ -1306,13 +1306,13 @@ impl VerterMcpServer {
         // Template metrics
         let metrics = analysis
             .template
-            .as_ref()
+            .as_deref()
             .map(scoring::compute_template_metrics);
 
         // Diagnostics summary
         let diags = self.linter.lint_with_source(
             Some(&script_snapshot),
-            analysis.template.as_ref(),
+            analysis.template.as_deref(),
             &analysis.styles,
             source.as_deref(),
         );
@@ -1333,7 +1333,7 @@ impl VerterMcpServer {
             "slots": [],
             "models": [],
         });
-        for m in &analysis.macros {
+        for m in analysis.macros.iter() {
             match m.kind {
                 AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
                     api["props"] = serde_json::to_value(m).unwrap_or_default();
@@ -1443,7 +1443,7 @@ impl VerterMcpServer {
             "css_summary": css_summary,
             "dependencies": {
                 "imports": analysis.imports.len(),
-                "child_components": analysis.template.as_ref()
+                "child_components": analysis.template.as_deref()
                     .map(|t| t.components.iter().map(|c| &c.name).collect::<Vec<_>>())
                     .unwrap_or_default(),
             },
@@ -1481,61 +1481,60 @@ impl VerterMcpServer {
         let mut total_elements = 0usize;
         let mut total_bindings = 0usize;
 
-        for (id, _) in &vue_files {
-            let _ = ensure_template_analysis(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                let source = self.host.get_source(id);
-                let script_snapshot = build_script_snapshot(&analysis);
+        let ids: Vec<&str> = vue_files.iter().map(|(id, _)| id.as_str()).collect();
+        let analyses = batch_analysis_with_template(&self.host, &ids);
+        for (canonical, analysis) in &analyses {
+            let source = self.host.get_source(canonical);
+            let script_snapshot = build_script_snapshot(analysis);
 
-                let quality = scoring::compute_quality_score(
-                    Some(&script_snapshot),
-                    analysis.template.as_ref(),
-                    &analysis.styles,
-                    source.as_deref(),
-                );
-                quality_scores.push((id.to_string(), quality.score));
+            let quality = scoring::compute_quality_score(
+                Some(&script_snapshot),
+                analysis.template.as_deref(),
+                &analysis.styles,
+                source.as_deref(),
+            );
+            quality_scores.push((canonical.clone(), quality.score));
 
-                let diags = self.linter.lint_with_source(
-                    Some(&script_snapshot),
-                    analysis.template.as_ref(),
-                    &analysis.styles,
-                    source.as_deref(),
-                );
-                for d in diags.into_diagnostics() {
-                    match d.severity {
-                        Severity::Error => total_errors += 1,
-                        Severity::Warning => total_warnings += 1,
-                        _ => total_info += 1,
-                    }
-                    *by_category.entry(d.category.clone()).or_default() += 1;
+            let diags = self.linter.lint_with_source(
+                Some(&script_snapshot),
+                analysis.template.as_deref(),
+                &analysis.styles,
+                source.as_deref(),
+            );
+            for d in diags.into_diagnostics() {
+                match d.severity {
+                    Severity::Error => total_errors += 1,
+                    Severity::Warning => total_warnings += 1,
+                    _ => total_info += 1,
                 }
-
-                for call in &analysis.vue_api_calls {
-                    *vue_api_usage
-                        .entry(call.api.display_name().to_string())
-                        .or_default() += 1;
-                }
-
-                for m in &analysis.macros {
-                    *macro_usage.entry(format!("{:?}", m.kind)).or_default() += 1;
-                }
-
-                for style in &analysis.styles {
-                    if style.scoped {
-                        scoped_blocks += 1;
-                    } else {
-                        global_blocks += 1;
-                    }
-                    if let Some(css) = &style.css {
-                        total_selectors += css.selectors.len();
-                    }
-                }
-
-                if let Some(tpl) = &analysis.template {
-                    total_elements += tpl.elements.len();
-                }
-                total_bindings += analysis.bindings.len();
+                *by_category.entry(d.category.clone()).or_default() += 1;
             }
+
+            for call in analysis.vue_api_calls.iter() {
+                *vue_api_usage
+                    .entry(call.api.display_name().to_string())
+                    .or_default() += 1;
+            }
+
+            for m in analysis.macros.iter() {
+                *macro_usage.entry(format!("{:?}", m.kind)).or_default() += 1;
+            }
+
+            for style in analysis.styles.iter() {
+                if style.scoped {
+                    scoped_blocks += 1;
+                } else {
+                    global_blocks += 1;
+                }
+                if let Some(css) = &style.css {
+                    total_selectors += css.selectors.len();
+                }
+            }
+
+            if let Some(tpl) = &analysis.template {
+                total_elements += tpl.elements.len();
+            }
+            total_bindings += analysis.bindings.len();
         }
 
         quality_scores.sort_by(|a, b| a.1.cmp(&b.1));
@@ -1599,7 +1598,7 @@ impl VerterMcpServer {
 
         let quality = scoring::compute_quality_score(
             Some(&script_snapshot),
-            analysis.template.as_ref(),
+            analysis.template.as_deref(),
             &analysis.styles,
             source.as_deref(),
         );
@@ -1771,7 +1770,7 @@ impl VerterMcpServer {
 
         let mut effects: Vec<serde_json::Value> = Vec::new();
 
-        for call in &analysis.vue_api_calls {
+        for call in analysis.vue_api_calls.iter() {
             let category = if call.api.is_lifecycle() {
                 "lifecycle"
             } else if call.api.is_watcher() {
@@ -1792,7 +1791,7 @@ impl VerterMcpServer {
             }));
         }
 
-        for query in &analysis.dom_query_calls {
+        for query in analysis.dom_query_calls.iter() {
             effects.push(serde_json::json!({
                 "category": "dom_query",
                 "api": "querySelector/querySelectorAll",
@@ -1904,34 +1903,34 @@ impl VerterMcpServer {
         let mut component_passed_props: HashMap<String, Vec<(String, HashSet<String>)>> =
             HashMap::new();
 
-        for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
-                continue;
-            }
-            let _ = ensure_template_analysis(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                let comp_name = std::path::Path::new(id.as_str())
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+        for (canonical, analysis) in &analyses {
+            let comp_name = std::path::Path::new(canonical.as_str())
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
 
-                if let Some(tpl) = &analysis.template {
-                    let received: HashSet<String> = tpl
-                        .prop_definitions
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect();
-                    component_received_props.insert(comp_name.clone(), received);
+            if let Some(tpl) = &analysis.template {
+                let received: HashSet<String> = tpl
+                    .prop_definitions
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                component_received_props.insert(comp_name.clone(), received);
 
-                    for child in &tpl.components {
-                        let passed: HashSet<String> =
-                            child.props.iter().map(|p| p.name.clone()).collect();
-                        component_passed_props
-                            .entry(comp_name.clone())
-                            .or_default()
-                            .push((child.name.clone(), passed));
-                    }
+                for child in &tpl.components {
+                    let passed: HashSet<String> =
+                        child.props.iter().map(|p| p.name.clone()).collect();
+                    component_passed_props
+                        .entry(comp_name.clone())
+                        .or_default()
+                        .push((child.name.clone(), passed));
                 }
             }
         }
@@ -2217,7 +2216,7 @@ impl VerterMcpServer {
             }
         }
 
-        for dep in &analysis.macro_type_deps {
+        for dep in analysis.macro_type_deps.iter() {
             type_issues.push(serde_json::json!({
                 "kind": "type_dependency",
                 "type_name": dep.type_name,
@@ -2258,7 +2257,7 @@ impl VerterMcpServer {
         let docs = crate::tools::docs::generate_docs(
             &canonical,
             Some(&script_snapshot),
-            analysis.template.as_ref(),
+            analysis.template.as_deref(),
             &analysis.styles,
         );
 
@@ -2316,28 +2315,26 @@ impl VerterMcpServer {
         let mut baseline = crate::baseline::Baseline::new();
         baseline.created = chrono_now_iso();
 
-        for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
-                continue;
-            }
-            let _ = ensure_template_analysis(&self.host, id);
-            let analysis = match self.host.get_analysis(id) {
-                Some(a) => a,
-                None => continue,
-            };
-            let source = self.host.get_source(id);
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+        for (canonical, analysis) in &analyses {
+            let source = self.host.get_source(canonical);
             let source_str = source.as_deref();
 
-            let script_snapshot = build_script_snapshot(&analysis);
+            let script_snapshot = build_script_snapshot(analysis);
             let diags = linter.lint_with_source(
                 Some(&script_snapshot),
-                analysis.template.as_ref(),
+                analysis.template.as_deref(),
                 &analysis.styles,
                 source_str,
             );
 
             let diag_vec = diags.into_diagnostics();
-            let rel = crate::baseline::make_relative(id, &root);
+            let rel = crate::baseline::make_relative(canonical, &root);
 
             for d in &diag_vec {
                 let span_content = source_str
@@ -2385,24 +2382,24 @@ impl VerterMcpServer {
         let mut emitters: Vec<String> = Vec::new();
         let mut listeners: Vec<String> = Vec::new();
 
-        for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
-                continue;
-            }
-            let _ = ensure_template_analysis(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                if let Some(tpl) = &analysis.template {
-                    // Check if component declares this emit (defineEmits)
-                    for emit in &tpl.emit_definitions {
-                        if emit.event_name == params.event_name {
-                            emitters.push(id.clone());
-                        }
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+        for (canonical, analysis) in &analyses {
+            if let Some(tpl) = &analysis.template {
+                // Check if component declares this emit (defineEmits)
+                for emit in &tpl.emit_definitions {
+                    if emit.event_name == params.event_name {
+                        emitters.push(canonical.clone());
                     }
-                    // Check template for @event listeners
-                    for evt in &tpl.event_handlers {
-                        if evt.event_name == params.event_name {
-                            listeners.push(id.clone());
-                        }
+                }
+                // Check template for @event listeners
+                for evt in &tpl.event_handlers {
+                    if evt.event_name == params.event_name {
+                        listeners.push(canonical.clone());
                     }
                 }
             }
@@ -2437,26 +2434,32 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
 
-        for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
-                continue;
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+        for (canonical, analysis) in &analyses {
+            // Each import source is a dependency
+            for imp in &analysis.imports {
+                let source = &imp.source;
+                // Normalize: resolve relative imports
+                let resolved = self.resolve(source);
+                reverse_deps
+                    .entry(resolved)
+                    .or_default()
+                    .insert(canonical.clone());
             }
-            let _ = ensure_template_analysis(&self.host, id);
-            if let Some(analysis) = self.host.get_analysis(id) {
-                // Each import source is a dependency
-                for imp in &analysis.imports {
-                    let source = &imp.source;
-                    // Normalize: resolve relative imports
-                    let resolved = self.resolve(source);
-                    reverse_deps.entry(resolved).or_default().insert(id.clone());
-                }
-                // Component usages from template
-                if let Some(tpl) = &analysis.template {
-                    for comp in &tpl.components {
-                        if let Some(src) = &comp.import_source {
-                            let resolved = self.resolve(src);
-                            reverse_deps.entry(resolved).or_default().insert(id.clone());
-                        }
+            // Component usages from template
+            if let Some(tpl) = &analysis.template {
+                for comp in &tpl.components {
+                    if let Some(src) = &comp.import_source {
+                        let resolved = self.resolve(src);
+                        reverse_deps
+                            .entry(resolved)
+                            .or_default()
+                            .insert(canonical.clone());
                     }
                 }
             }
@@ -2671,7 +2674,7 @@ const props = defineProps<{ count: number; label: string }>()
             "slots": [],
             "models": [],
         });
-        for m in &analysis.macros {
+        for m in analysis.macros.iter() {
             match m.kind {
                 AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
                     api["props"] = serde_json::to_value(m).unwrap_or_default();
@@ -2713,7 +2716,7 @@ defineProps<{ title: string; visible: boolean }>()
 
         // Build component_props map the way check_component_props now does (from macros)
         let mut prop_names: Vec<String> = Vec::new();
-        for m in &analysis.macros {
+        for m in analysis.macros.iter() {
             if matches!(
                 m.kind,
                 AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
@@ -2755,7 +2758,7 @@ const count = ref(0)
         compile_analysis(&host, "/test/Comp.vue");
 
         let analysis = host.get_analysis("/test/Comp.vue").unwrap();
-        let tpl = analysis.template.as_ref().unwrap();
+        let tpl = analysis.template.as_deref().unwrap();
 
         let template_refs: HashSet<&str> = tpl
             .binding_occurrences
@@ -2844,6 +2847,7 @@ const count = ref(0)
             vue_api_calls: vec![],
             dom_query_calls: vec![],
             css_var_manipulations: vec![],
+            script_binding_occurrences: vec![],
             first_await_offset: None,
             type_enhancements: None,
         };

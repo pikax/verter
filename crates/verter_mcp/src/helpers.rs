@@ -61,6 +61,19 @@ pub fn ensure_template_analysis(host: &VerterHost, canonical_id: &str) -> Result
     Ok(())
 }
 
+/// Ensure template analysis for multiple files, then return all snapshots in batch.
+/// Phase 1: ensure all files are loaded and have template analysis.
+/// Phase 2: batch-fetch all analysis snapshots (single lock acquisition).
+pub fn batch_analysis_with_template(
+    host: &VerterHost,
+    canonical_ids: &[&str],
+) -> Vec<(String, verter_host::FileAnalysisSnapshot)> {
+    for id in canonical_ids {
+        let _ = ensure_template_analysis(host, id);
+    }
+    host.get_analysis_batch(canonical_ids)
+}
+
 /// Create an McpError from a string message.
 pub fn mcp_err(msg: impl Into<String>) -> McpError {
     McpError {

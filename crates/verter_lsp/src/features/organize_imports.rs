@@ -28,7 +28,7 @@ pub fn organize_imports_actions(
     let mut used_names: HashSet<&str> = HashSet::new();
 
     // 1. Template binding occurrences (used in <template>)
-    if let Some(template) = &analysis.template {
+    if let Some(template) = analysis.template.as_deref() {
         for occ in &template.binding_occurrences {
             used_names.insert(&occ.name);
         }
@@ -50,7 +50,7 @@ pub fn organize_imports_actions(
     }
 
     // 3. Vue API call sites
-    for call in &analysis.vue_api_calls {
+    for call in analysis.vue_api_calls.iter() {
         // The API name itself is from an import (e.g., "onMounted" from "vue")
         let api_name = format!("{:?}", call.api);
         // We can't easily match enum variant to import name, so mark all Vue API

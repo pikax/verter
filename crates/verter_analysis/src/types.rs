@@ -86,6 +86,11 @@ pub struct ScriptAnalysisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub css_var_manipulations: Vec<CssVarManipulation>,
 
+    /// Script-side binding usage occurrences with exact spans.
+    /// Populated when `AnalysisScope::SCRIPT_USAGES` is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub script_binding_occurrences: Vec<ScriptBindingOccurrence>,
+
     /// SFC-absolute byte offset of the first top-level `await` expression (if any).
     /// Used by lint rules to detect lifecycle hooks/watchers called after await.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1019,6 +1024,41 @@ pub struct ResolvedTypeInfo {
     /// When the resolved type is a finite string literal union, list its values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub string_literal_union: Option<Vec<String>>,
+}
+
+/// How a binding is used at a particular site in script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScriptUsageKind {
+    /// Value read: `x` in an expression position.
+    Read,
+    /// Assignment target: `x = 1`.
+    Write,
+    /// Read-modify-write: `x += 1`, `x++`.
+    ReadWrite,
+    /// Call expression callee: `x()`.
+    Call,
+    /// Member access: `x.foo`, `x[0]`.
+    MemberAccess,
+    /// Typeof operand: `typeof x`.
+    Typeof,
+    /// Destructure source: `{ a } = x`.
+    Destructure,
+}
+
+/// A single occurrence of a top-level binding in the script block body.
+///
+/// Tracks where each binding is referenced (excluding its own declaration).
+/// Populated as a second pass gated by `AnalysisScope::SCRIPT_USAGES`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptBindingOccurrence {
+    /// The binding name referenced.
+    pub name: String,
+    /// SFC-absolute byte span of the reference.
+    pub span: Span,
+    /// How the binding is used at this site.
+    pub usage_kind: ScriptUsageKind,
 }
 
 /// A CSS variable manipulation via DOM style APIs in script.

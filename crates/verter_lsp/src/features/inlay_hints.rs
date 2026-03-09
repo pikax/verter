@@ -29,17 +29,17 @@ pub fn verter_inlay_hints(
 ) -> Vec<InlayHint> {
     let mut hints = Vec::new();
 
-    let template = analysis.template.as_ref();
+    let template = analysis.template.as_deref();
 
     // DOM query inlay hints
-    for call in &analysis.dom_query_calls {
+    for call in analysis.dom_query_calls.iter() {
         if let Some(hint) = dom_query_hint(call, template, line_index) {
             hints.push(hint);
         }
     }
 
     // useTemplateRef inlay hints
-    for call in &analysis.vue_api_calls {
+    for call in analysis.vue_api_calls.iter() {
         if call.api == VueApiClassification::UseTemplateRef {
             if let Some(hint) = template_ref_hint(call, source, template, line_index) {
                 hints.push(hint);

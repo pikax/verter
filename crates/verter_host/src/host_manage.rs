@@ -3,6 +3,8 @@
 //! Contains [`VerterHost::remove`], [`VerterHost::get_analysis`],
 //! [`VerterHost::get_diagnostics`], and [`VerterHost::set_import_dependencies`].
 
+use std::sync::Arc;
+
 use crate::hash::compile_profile_hash;
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
@@ -38,7 +40,7 @@ impl VerterHost {
         {
             let source = entry.source.clone();
             let stored_script = entry.script_analysis.clone();
-            let stored_styles = entry.style_analyses.clone();
+            let stored_styles = Arc::clone(&entry.style_analyses);
             let template = entry.template_analysis.clone();
             let cached_parse = entry.cached_parse.clone();
             drop(files);
@@ -55,52 +57,118 @@ impl VerterHost {
             };
             let style_analyses = if !scope.needs_style_analysis() {
                 if let Some(parsed) = cached_parse.as_deref() {
-                    crate::parse::build_style_analyses_from_parsed(parsed, &source, &canonical)
+                    Arc::new(crate::parse::build_style_analyses_from_parsed(
+                        parsed, &source, &canonical,
+                    ))
                 } else {
-                    crate::parse::build_style_analyses_from_source(&source, &canonical)
+                    Arc::new(crate::parse::build_style_analyses_from_source(
+                        &source, &canonical,
+                    ))
                 }
             } else {
                 stored_styles
             };
-            let vue_api_calls = script_analysis.vue_api_calls.clone();
-            let dom_query_calls = script_analysis.dom_query_calls.clone();
-            let css_var_manipulations = script_analysis.css_var_manipulations.clone();
+            // On-demand path: build fresh Arcs (not cached, but avoids deep clone)
             let mut snapshot = FileAnalysisSnapshot {
                 imports: script_analysis.imports,
-                module_references: script_analysis.module_references,
+                module_references: Arc::new(script_analysis.module_references),
                 bindings: script_analysis.bindings,
-                macros: script_analysis.macros,
-                macro_type_deps: script_analysis.macro_type_deps,
+                macros: Arc::new(script_analysis.macros),
+                macro_type_deps: Arc::new(script_analysis.macro_type_deps),
                 script_flags: script_analysis.flags.bits(),
                 styles: style_analyses,
                 template,
-                vue_api_calls,
-                dom_query_calls,
-                css_var_manipulations,
+                vue_api_calls: Arc::new(script_analysis.vue_api_calls),
+                dom_query_calls: Arc::new(script_analysis.dom_query_calls),
+                css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
+                script_binding_occurrences: Arc::new(script_analysis.script_binding_occurrences),
             };
             self.resolve_snapshot_imports(&canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
             return Some(snapshot);
         }
 
-        let mut snapshot = FileAnalysisSnapshot {
-            imports: entry.script_analysis.imports.clone(),
-            module_references: entry.script_analysis.module_references.clone(),
-            bindings: entry.script_analysis.bindings.clone(),
-            macros: entry.script_analysis.macros.clone(),
-            macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
-            script_flags: entry.script_analysis.flags.bits(),
-            styles: entry.style_analyses.clone(),
-            template: entry.template_analysis.clone(),
-            vue_api_calls: entry.script_analysis.vue_api_calls.clone(),
-            dom_query_calls: entry.script_analysis.dom_query_calls.clone(),
-            css_var_manipulations: entry.script_analysis.css_var_manipulations.clone(),
-        };
+        // Fast path: Arc::clone for 9 immutable fields, deep clone only imports + bindings
+        let mut snapshot = Self::build_snapshot_from_entry(entry);
         // Drop the files lock before resolving (resolve_snapshot_imports acquires its own)
         drop(files);
         self.resolve_snapshot_imports(&canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
         Some(snapshot)
+    }
+
+    /// Returns analysis snapshots for multiple files in a single lock acquisition.
+    ///
+    /// More efficient than calling `get_analysis()` in a loop: acquires the
+    /// files read-lock once for all files instead of N separate acquisitions.
+    ///
+    /// Accepts canonical IDs, aliases, or `None` to return all files.
+    /// When `canonical_ids` is `None`, returns snapshots for every file in the host.
+    pub fn get_analysis_batch(
+        &self,
+        canonical_ids: &[&str],
+    ) -> Vec<(String, FileAnalysisSnapshot)> {
+        let files = read_lock(&self.files);
+        let mut results = Vec::with_capacity(canonical_ids.len());
+
+        for &id in canonical_ids {
+            let canonical = self.resolve_alias_or_canonical(id);
+            if let Some(entry) = files.get(&canonical) {
+                let snapshot = Self::build_snapshot_from_entry(entry);
+                results.push((canonical, snapshot));
+            }
+        }
+        drop(files);
+
+        // Post-process: resolve imports and enrich bindings for all
+        for (canonical, snapshot) in &mut results {
+            self.resolve_snapshot_imports(canonical, snapshot);
+            self.enrich_destructured_bindings(snapshot);
+        }
+        results
+    }
+
+    /// Returns analysis snapshots for all files in the host.
+    ///
+    /// Single lock acquisition for the entire file map. Use instead of
+    /// `list_files()` + loop when you need analysis for every file.
+    pub fn get_analysis_all(&self) -> Vec<(String, FileAnalysisSnapshot)> {
+        let files = read_lock(&self.files);
+        let mut results = Vec::with_capacity(files.len());
+
+        for (canonical, entry) in files.iter() {
+            let snapshot = Self::build_snapshot_from_entry(entry);
+            results.push((canonical.clone(), snapshot));
+        }
+        drop(files);
+
+        for (canonical, snapshot) in &mut results {
+            self.resolve_snapshot_imports(canonical, snapshot);
+            self.enrich_destructured_bindings(snapshot);
+        }
+        results
+    }
+
+    /// Build a `FileAnalysisSnapshot` from a `FileEntry` using Arc::clone
+    /// for immutable fields and deep clone for mutable fields (imports, bindings).
+    fn build_snapshot_from_entry(entry: &crate::FileEntry) -> FileAnalysisSnapshot {
+        FileAnalysisSnapshot {
+            imports: entry.script_analysis.imports.clone(),
+            bindings: entry.script_analysis.bindings.clone(),
+            // Arc::clone — cheap pointer bump, no deep copy
+            module_references: Arc::clone(&entry.arc_script_cache.module_references),
+            macros: Arc::clone(&entry.arc_script_cache.macros),
+            macro_type_deps: Arc::clone(&entry.arc_script_cache.macro_type_deps),
+            script_flags: entry.script_analysis.flags.bits(),
+            styles: Arc::clone(&entry.style_analyses),
+            template: entry.template_analysis.clone(),
+            vue_api_calls: Arc::clone(&entry.arc_script_cache.vue_api_calls),
+            dom_query_calls: Arc::clone(&entry.arc_script_cache.dom_query_calls),
+            css_var_manipulations: Arc::clone(&entry.arc_script_cache.css_var_manipulations),
+            script_binding_occurrences: Arc::clone(
+                &entry.arc_script_cache.script_binding_occurrences,
+            ),
+        }
     }
 
     /// Populate `resolved_canonical_id` on each import in the snapshot
@@ -332,7 +400,7 @@ impl VerterHost {
                 std::sync::Arc::from(std::path::Path::new(canonical_id.as_str()));
 
             // Check style blocks for definitions and var() references
-            for style in &entry.style_analyses {
+            for style in entry.style_analyses.iter() {
                 if let Some(ref css) = style.css {
                     let has_def = css.custom_properties.iter().any(|p| p.name == var_name);
                     if has_def {
@@ -1081,5 +1149,136 @@ const { x, y, reset } = useMouse()
             "local export should return same file"
         );
         assert!(start < end, "should have a valid span");
+    }
+
+    #[test]
+    fn arc_shared_fields_are_pointer_equal() {
+        let host = make_host();
+        upsert_vue(&host, "App.vue", LAZY_ANALYSIS_SFC);
+
+        let a1 = host.get_analysis("App.vue").unwrap();
+        let a2 = host.get_analysis("App.vue").unwrap();
+
+        // Arc-shared fields should be pointer-equal between two calls
+        // on the same unchanged file.
+        assert!(
+            Arc::ptr_eq(&a1.module_references, &a2.module_references),
+            "module_references should be Arc-shared (pointer equal)"
+        );
+        assert!(
+            Arc::ptr_eq(&a1.macros, &a2.macros),
+            "macros should be Arc-shared (pointer equal)"
+        );
+        assert!(
+            Arc::ptr_eq(&a1.styles, &a2.styles),
+            "styles should be Arc-shared (pointer equal)"
+        );
+        assert!(
+            Arc::ptr_eq(&a1.vue_api_calls, &a2.vue_api_calls),
+            "vue_api_calls should be Arc-shared (pointer equal)"
+        );
+    }
+
+    #[test]
+    fn enriched_imports_do_not_affect_stored_data() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "Child.vue",
+            "<script setup>\nconst x = 1\n</script>\n<template><div/></template>",
+        );
+        upsert_vue(
+            &host,
+            "Parent.vue",
+            "<script setup>\nimport Child from './Child.vue'\n</script>\n<template><Child/></template>",
+        );
+
+        // First call: enriches imports with resolved_canonical_id
+        let a1 = host.get_analysis("Parent.vue").unwrap();
+        assert!(
+            a1.imports[0].resolved_canonical_id.is_some(),
+            "enriched import should have resolved_canonical_id"
+        );
+
+        // Verify stored data is not mutated by checking that the
+        // internal FileEntry's imports still have None
+        {
+            let files = crate::shared::read_lock(&host.files);
+            let entry = files.get("Parent.vue").unwrap();
+            assert!(
+                entry.script_analysis.imports[0]
+                    .resolved_canonical_id
+                    .is_none(),
+                "stored import should NOT be mutated by get_analysis enrichment"
+            );
+        }
+    }
+
+    #[test]
+    fn get_analysis_batch_returns_all_existing() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "A.vue",
+            "<script setup>\nconst a = 1\n</script>\n<template><div/></template>",
+        );
+        upsert_vue(
+            &host,
+            "B.vue",
+            "<script setup>\nconst b = 2\n</script>\n<template><div/></template>",
+        );
+
+        let results = host.get_analysis_batch(&["A.vue", "B.vue", "NonExistent.vue"]);
+        assert_eq!(results.len(), 2, "should return only existing files");
+        assert!(
+            results.iter().any(|(id, _)| id == "A.vue"),
+            "should contain A.vue"
+        );
+        assert!(
+            results.iter().any(|(id, _)| id == "B.vue"),
+            "should contain B.vue"
+        );
+        // Negative: should NOT contain non-existent
+        assert!(
+            !results.iter().any(|(id, _)| id == "NonExistent.vue"),
+            "should not contain non-existent file"
+        );
+    }
+
+    #[test]
+    fn get_analysis_batch_matches_individual() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "A.vue",
+            "<script setup>\nimport { ref } from 'vue'\nconst x = ref(0)\n</script>\n<template><div/></template>",
+        );
+
+        let individual = host.get_analysis("A.vue").unwrap();
+        let batch = host.get_analysis_batch(&["A.vue"]);
+        assert_eq!(batch.len(), 1);
+        let (_, batch_snap) = &batch[0];
+
+        assert_eq!(
+            individual.bindings.len(),
+            batch_snap.bindings.len(),
+            "batch bindings count should match individual"
+        );
+        assert_eq!(
+            individual.imports.len(),
+            batch_snap.imports.len(),
+            "batch imports count should match individual"
+        );
+        assert_eq!(
+            individual.script_flags, batch_snap.script_flags,
+            "batch script_flags should match individual"
+        );
+    }
+
+    #[test]
+    fn get_analysis_batch_empty_returns_empty() {
+        let host = make_host();
+        let results = host.get_analysis_batch(&[]);
+        assert!(results.is_empty(), "empty batch should return empty vec");
     }
 }

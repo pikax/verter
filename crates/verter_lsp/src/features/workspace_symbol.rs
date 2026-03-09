@@ -51,7 +51,7 @@ pub fn workspace_symbols(host: &VerterHost, query: &str) -> Vec<SymbolInformatio
         }
 
         // Components used in template
-        if let Some(template) = &analysis.template {
+        if let Some(template) = analysis.template.as_deref() {
             for comp in &template.components {
                 if !query_lower.is_empty() && !comp.name.to_lowercase().contains(&query_lower) {
                     continue;
@@ -72,7 +72,7 @@ pub fn workspace_symbols(host: &VerterHost, query: &str) -> Vec<SymbolInformatio
         }
 
         // CSS classes
-        for style in &analysis.styles {
+        for style in analysis.styles.iter() {
             if let Some(css) = &style.css {
                 for class in &css.classes {
                     let display_name = format!(".{}", class.name);

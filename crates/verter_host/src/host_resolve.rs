@@ -320,7 +320,7 @@ impl VerterHost {
                 };
                 // Store template analysis on the FileEntry (latest wins).
                 if compiled_template_analysis.is_some() {
-                    entry.template_analysis = compiled_template_analysis.clone();
+                    entry.template_analysis = compiled_template_analysis.clone().map(Arc::new);
                 }
                 entry.compile_slots.insert(
                     profile_hash,

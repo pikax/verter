@@ -36,7 +36,7 @@ pub fn css_completions(
 
     // Offer custom properties and classes from analysis
     if let Some(analysis) = analysis {
-        for style in &analysis.styles {
+        for style in analysis.styles.iter() {
             if let Some(css) = &style.css {
                 for prop in &css.custom_properties {
                     items.push(CompletionItem {
@@ -93,7 +93,7 @@ pub fn css_completions(
 
         // Offer template class/ID completions when typing . or # in selector context
         if let Some(analysis) = analysis {
-            if let Some(template) = &analysis.template {
+            if let Some(template) = analysis.template.as_deref() {
                 let byte_before = if offset > 0 {
                     source.as_bytes().get(offset - 1).copied()
                 } else {
@@ -178,7 +178,7 @@ pub fn css_hover(
     let analysis = analysis?;
 
     // Check v-bind() expressions and special pseudos
-    for style in &analysis.styles {
+    for style in analysis.styles.iter() {
         for vb in &style.v_binds {
             if offset >= vb.start as usize && offset <= vb.end as usize {
                 let binding = analysis.bindings.iter().find(|b| b.name == vb.expression);
@@ -251,7 +251,7 @@ fn selector_hover(
         .iter()
         .find(|s| s.content_offset == content_start)?;
     let css = style.css.as_ref()?;
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     // Find selector at cursor position
     let selector = css

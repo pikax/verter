@@ -1410,6 +1410,7 @@ mod tests {
                 is_type_only: false,
                 bindings: vec!["ref".to_string(), "computed".to_string()],
             }],
+            module_references: Vec::new(),
             preprocessor_requests: Vec::new(),
             parse_duration_ms: 1.5,
         };

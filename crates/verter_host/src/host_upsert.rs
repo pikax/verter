@@ -161,8 +161,9 @@ impl VerterHost {
                     parse_diagnostics: DiagnosticsSnapshot::default(),
                     script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
                     export_signatures: Vec::new(),
-                    style_analyses: Vec::new(),
+                    style_analyses: Arc::new(Vec::new()),
                     template_analysis: None,
+                    arc_script_cache: ScriptAnalysisArcs::default(),
                     resolved_type_hashes: HashMap::new(),
                     style_overrides: HashMap::new(),
                     content_overrides: HashMap::new(),
@@ -183,8 +184,9 @@ impl VerterHost {
             entry.src_blocks = snapshot.src_blocks;
             entry.parse_diagnostics = snapshot.parse_diagnostics;
             entry.script_analysis = snapshot.script_analysis;
+            entry.arc_script_cache = ScriptAnalysisArcs::from_analysis(&entry.script_analysis);
             entry.export_signatures = new_export_signatures.clone();
-            entry.style_analyses = snapshot.style_analyses;
+            entry.style_analyses = Arc::new(snapshot.style_analyses);
             entry.cached_parse = cached_parse.map(Arc::new);
             entry.generation = entry.generation.saturating_add(1);
             entry.aliases = alias_set.clone();
@@ -294,6 +296,8 @@ impl VerterHost {
 
         // Re-analyze compiled CSS and remap spans for each override
         let source = entry.source.as_ref();
+        // Collect updates to apply to the Arc'd style_analyses
+        let mut style_updates: Vec<(usize, verter_analysis::StyleBlockAnalysis)> = Vec::new();
         for (&idx, ov) in &by_index {
             if idx < entry.style_analyses.len() {
                 let existing = &entry.style_analyses[idx];
@@ -341,7 +345,13 @@ impl VerterHost {
                 new_analysis.v_binds = existing.v_binds.clone();
                 new_analysis.special_pseudos = existing.special_pseudos.clone();
 
-                entry.style_analyses[idx] = new_analysis;
+                style_updates.push((idx, new_analysis));
+            }
+        }
+        if !style_updates.is_empty() {
+            let styles = Arc::make_mut(&mut entry.style_analyses);
+            for (idx, analysis) in style_updates {
+                styles[idx] = analysis;
             }
         }
 
@@ -499,7 +509,8 @@ impl VerterHost {
         entry.source = Arc::from(synthetic_source);
         entry.parse_diagnostics = new_snapshot.parse_diagnostics;
         entry.script_analysis = new_snapshot.script_analysis;
-        entry.style_analyses = new_snapshot.style_analyses;
+        entry.arc_script_cache = ScriptAnalysisArcs::from_analysis(&entry.script_analysis);
+        entry.style_analyses = Arc::new(new_snapshot.style_analyses);
         entry.cached_parse = Some(Arc::new(new_parsed));
 
         // Store content override layer

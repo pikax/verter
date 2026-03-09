@@ -398,37 +398,53 @@ impl HostUpdateResult {
 ///
 /// Returned by [`VerterHost::get_analysis`](crate::VerterHost::get_analysis).
 /// Contains the combined script, style, and template analysis for an SFC.
+///
+/// Most fields are `Arc`-wrapped for cheap cloning — the underlying data is
+/// shared between all snapshots of the same file version. Only `imports` and
+/// `bindings` are owned `Vec`s because [`VerterHost::get_analysis`] mutates
+/// them (import resolution and destructured binding enrichment).
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileAnalysisSnapshot {
     /// Import statements found in script blocks.
+    /// Owned because `resolve_snapshot_imports` mutates `resolved_canonical_id`.
     pub imports: Vec<verter_analysis::AnalyzedImport>,
     /// Module reference sites found in script blocks.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub module_references: Vec<verter_analysis::AnalyzedModuleReference>,
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub module_references: Arc<Vec<verter_analysis::AnalyzedModuleReference>>,
     /// Variable/function bindings declared in script blocks.
+    /// Owned because `enrich_destructured_bindings` mutates `reactivity_kind`.
     pub bindings: Vec<verter_analysis::AnalyzedBinding>,
     /// Vue compiler macros used (defineProps, defineEmits, etc.).
-    pub macros: Vec<verter_analysis::AnalyzedMacro>,
+    pub macros: Arc<Vec<verter_analysis::AnalyzedMacro>>,
     /// Type dependencies from macros that reference external files.
-    pub macro_type_deps: Vec<verter_analysis::MacroTypeDep>,
+    pub macro_type_deps: Arc<Vec<verter_analysis::MacroTypeDep>>,
     /// Bitflags representing script characteristics (see `verter_analysis::ScriptFlags`).
     pub script_flags: u32,
     /// Per-style-block analysis (scoped, modules, v-bind usage).
-    pub styles: Vec<verter_analysis::StyleBlockAnalysis>,
+    pub styles: Arc<Vec<verter_analysis::StyleBlockAnalysis>>,
     /// Template analysis (components, bindings, slots, refs, events).
     /// Present after compilation when template analysis scope flags are active.
-    pub template: Option<verter_analysis::template::TemplateAnalysisSnapshot>,
+    pub template: Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>>,
     /// Vue API call sites (lifecycle hooks, watchers, provide/inject, etc.).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub vue_api_calls: Vec<verter_analysis::types::VueApiCallSite>,
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub vue_api_calls: Arc<Vec<verter_analysis::types::VueApiCallSite>>,
     /// DOM query call sites (querySelector, getElementById, etc.).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dom_query_calls: Vec<verter_analysis::types::DomQueryCallSite>,
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub dom_query_calls: Arc<Vec<verter_analysis::types::DomQueryCallSite>>,
 
     /// CSS variable manipulations via DOM style APIs.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub css_var_manipulations: Vec<verter_analysis::types::CssVarManipulation>,
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub css_var_manipulations: Arc<Vec<verter_analysis::types::CssVarManipulation>>,
+
+    /// Script-side binding usage occurrences with exact spans.
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub script_binding_occurrences: Arc<Vec<verter_analysis::types::ScriptBindingOccurrence>>,
+}
+
+/// Helper for `skip_serializing_if` on `Arc<Vec<T>>`.
+fn arc_vec_is_empty<T>(v: &Arc<Vec<T>>) -> bool {
+    v.is_empty()
 }
 
 /// Result of [`VerterHost::resolve`](crate::VerterHost::resolve).
@@ -855,6 +871,37 @@ pub(crate) struct CompileInput {
     pub(crate) style_v_bind_vars: Vec<String>,
 }
 
+/// Cached Arc-wrapped views of immutable `ScriptAnalysisSnapshot` fields.
+///
+/// Built once during upsert and shared across all `get_analysis()` calls.
+/// These fields are never mutated after construction, so Arc sharing is safe.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ScriptAnalysisArcs {
+    pub(crate) module_references: Arc<Vec<verter_analysis::AnalyzedModuleReference>>,
+    pub(crate) macros: Arc<Vec<verter_analysis::AnalyzedMacro>>,
+    pub(crate) macro_type_deps: Arc<Vec<verter_analysis::MacroTypeDep>>,
+    pub(crate) vue_api_calls: Arc<Vec<verter_analysis::types::VueApiCallSite>>,
+    pub(crate) dom_query_calls: Arc<Vec<verter_analysis::types::DomQueryCallSite>>,
+    pub(crate) css_var_manipulations: Arc<Vec<verter_analysis::types::CssVarManipulation>>,
+    pub(crate) script_binding_occurrences:
+        Arc<Vec<verter_analysis::types::ScriptBindingOccurrence>>,
+}
+
+impl ScriptAnalysisArcs {
+    /// Build Arc-wrapped caches from a script analysis snapshot.
+    pub(crate) fn from_analysis(sa: &verter_analysis::ScriptAnalysisSnapshot) -> Self {
+        Self {
+            module_references: Arc::new(sa.module_references.clone()),
+            macros: Arc::new(sa.macros.clone()),
+            macro_type_deps: Arc::new(sa.macro_type_deps.clone()),
+            vue_api_calls: Arc::new(sa.vue_api_calls.clone()),
+            dom_query_calls: Arc::new(sa.dom_query_calls.clone()),
+            css_var_manipulations: Arc::new(sa.css_var_manipulations.clone()),
+            script_binding_occurrences: Arc::new(sa.script_binding_occurrences.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
     pub(crate) canonical_id: String,
@@ -872,10 +919,13 @@ pub(crate) struct FileEntry {
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
     pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
     pub(crate) export_signatures: Vec<verter_analysis::ExportSignature>,
-    pub(crate) style_analyses: Vec<verter_analysis::StyleBlockAnalysis>,
+    pub(crate) style_analyses: Arc<Vec<verter_analysis::StyleBlockAnalysis>>,
     /// Template analysis from the most recent compilation. Populated when
     /// the analysis scope includes template flags and the file has a template.
-    pub(crate) template_analysis: Option<verter_analysis::template::TemplateAnalysisSnapshot>,
+    pub(crate) template_analysis: Option<Arc<verter_analysis::template::TemplateAnalysisSnapshot>>,
+    /// Cached Arc-wrapped script analysis fields for cheap snapshot cloning.
+    /// Built once during upsert, shared across all `get_analysis()` calls.
+    pub(crate) arc_script_cache: ScriptAnalysisArcs,
     /// Per-dep, per-type resolved type shape hash for Tier 3 precision.
     /// Key: (dep_canonical_id, type_name). Value: hash of resolved prop shape.
     pub(crate) resolved_type_hashes: HashMap<(String, String), Hash16>,

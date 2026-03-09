@@ -394,7 +394,11 @@ impl WasmVerterHost {
                 let linter = Linter::new(lint_config);
                 let script = build_script_snapshot(&snapshot);
                 linter
-                    .lint(Some(&script), snapshot.template.as_ref(), &snapshot.styles)
+                    .lint(
+                        Some(&script),
+                        snapshot.template.as_deref(),
+                        &snapshot.styles,
+                    )
                     .into_diagnostics()
             }
             None => Vec::new(),
@@ -431,7 +435,7 @@ impl WasmVerterHost {
                 let linter = Linter::default();
                 let diag_set = linter.lint_with_source(
                     Some(&script),
-                    snapshot.template.as_ref(),
+                    snapshot.template.as_deref(),
                     &snapshot.styles,
                     Some(source),
                 );
@@ -441,7 +445,7 @@ impl WasmVerterHost {
                     source,
                     file_id: canonical_or_alias,
                     diagnostics: &diag_set,
-                    template: snapshot.template.as_ref(),
+                    template: snapshot.template.as_deref(),
                     script: Some(&script),
                     styles: &snapshot.styles,
                 };
@@ -540,15 +544,16 @@ fn build_script_snapshot(
 ) -> verter_analysis::types::ScriptAnalysisSnapshot {
     verter_analysis::types::ScriptAnalysisSnapshot {
         imports: snapshot.imports.clone(),
-        module_references: snapshot.module_references.clone(),
+        module_references: snapshot.module_references.to_vec(),
         bindings: snapshot.bindings.clone(),
-        macros: snapshot.macros.clone(),
-        macro_type_deps: snapshot.macro_type_deps.clone(),
+        macros: snapshot.macros.to_vec(),
+        macro_type_deps: snapshot.macro_type_deps.to_vec(),
         flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(snapshot.script_flags),
         exported_functions: Vec::new(),
-        vue_api_calls: snapshot.vue_api_calls.clone(),
-        dom_query_calls: snapshot.dom_query_calls.clone(),
-        css_var_manipulations: snapshot.css_var_manipulations.clone(),
+        vue_api_calls: snapshot.vue_api_calls.to_vec(),
+        dom_query_calls: snapshot.dom_query_calls.to_vec(),
+        css_var_manipulations: snapshot.css_var_manipulations.to_vec(),
+        script_binding_occurrences: snapshot.script_binding_occurrences.to_vec(),
         first_await_offset: None,
         type_enhancements: None,
     }
@@ -620,7 +625,7 @@ fn build_document_symbols_from_analysis(
             });
         }
 
-        for m in &snapshot.macros {
+        for m in snapshot.macros.iter() {
             children.push(FfiDocumentSymbol {
                 name: format!("{:?}", m.kind),
                 detail: if m.is_type_based {
@@ -741,7 +746,7 @@ fn build_selector_match_results(
 
     let mut results = Vec::new();
 
-    for style in &snapshot.styles {
+    for style in snapshot.styles.iter() {
         let css = match &style.css {
             Some(c) => c,
             None => continue,

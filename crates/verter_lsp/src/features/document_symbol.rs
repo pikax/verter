@@ -146,7 +146,7 @@ fn build_script_children(
     };
 
     // Add macros
-    for mac in &analysis.macros {
+    for mac in analysis.macros.iter() {
         let name = match &mac.binding_name {
             Some(binding) => format!("{binding} = {}()", macro_kind_display(&mac.kind)),
             None => format!("{}()", macro_kind_display(&mac.kind)),
@@ -289,7 +289,7 @@ fn build_template_children(
     block: &SfcBlock,
     line_index: &LineIndex,
 ) -> Option<Vec<DocumentSymbol>> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
     let mut children = Vec::new();
     let (content_start, content_end) = block.content_range();
     let fallback_range = Range {

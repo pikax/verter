@@ -687,7 +687,7 @@ fn class_attribute_completions(
     source: &str,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<CompletionResult> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     // Check if cursor is inside a class attribute value
     for element in &template.elements {
@@ -778,7 +778,7 @@ fn build_class_completions(
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
 
-    for style in &analysis.styles {
+    for style in analysis.styles.iter() {
         if let Some(css) = &style.css {
             for cls in &css.classes {
                 if seen.insert(cls.name.clone()) {
@@ -900,7 +900,7 @@ fn template_completions(
     }
 
     // Macro result bindings are available too
-    for mac in &analysis.macros {
+    for mac in analysis.macros.iter() {
         if let Some(ref name) = mac.binding_name {
             items.push(CompletionItem {
                 label: name.clone(),
@@ -1149,7 +1149,7 @@ fn component_prop_completions(
     analysis: &FileAnalysisSnapshot,
     resolve_component: Option<&dyn Fn(&str) -> Option<FileAnalysisSnapshot>>,
 ) -> Option<Vec<CompletionItem>> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     // Find which component's opening tag contains the cursor
     let component_name = find_component_at_cursor(offset, source, template)?;
@@ -1165,7 +1165,7 @@ fn component_prop_completions(
     // Resolve the component's analysis
     let resolve_fn = resolve_component?;
     let child_analysis = resolve_fn(import_source)?;
-    let child_template = child_analysis.template.as_ref()?;
+    let child_template = child_analysis.template.as_deref()?;
 
     let mut items = Vec::new();
 

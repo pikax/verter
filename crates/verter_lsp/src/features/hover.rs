@@ -208,7 +208,7 @@ fn hover_in_template(
 
 /// Check if the given offset falls on an attribute name or directive name in the template.
 fn is_on_attribute_name(offset: u32, analysis: &FileAnalysisSnapshot) -> bool {
-    if let Some(ref template) = analysis.template {
+    if let Some(template) = analysis.template.as_deref() {
         for el in &template.elements {
             for attr in &el.attributes {
                 if offset >= attr.span.start && offset < attr.name_end {
@@ -236,7 +236,7 @@ pub fn merged_attribute_redirect_offset(
     offset: u32,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<u32> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     for el in &template.elements {
         // Check if cursor is on a static `class` or `style` attribute
@@ -265,7 +265,7 @@ pub fn merged_attribute_redirect_offset(
 /// Check if the given SFC offset is on slot-related syntax (outlet or v-slot directive).
 /// The type provider returns unhelpful `() any`/`string` for these positions.
 pub fn is_on_slot_syntax(offset: u32, analysis: &FileAnalysisSnapshot) -> bool {
-    let Some(template) = analysis.template.as_ref() else {
+    let Some(template) = analysis.template.as_deref() else {
         return false;
     };
 
@@ -294,7 +294,7 @@ pub fn is_on_slot_syntax(offset: u32, analysis: &FileAnalysisSnapshot) -> bool {
 ///
 /// Uses `DefinedSlot` from template analysis for richer binding info.
 fn slot_outlet_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     // Find a <slot> element where the cursor is within the opening tag range.
     // span.start = `<`, tag_span_end = end of opening tag (after `>` or `/>`)
@@ -333,7 +333,7 @@ fn slot_outlet_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hov
 
 /// When hovering on a `v-slot` / `#name` directive, show slot content information.
 fn v_slot_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     for el in &template.elements {
         for dir in &el.directives {
@@ -371,7 +371,7 @@ fn v_slot_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
 
 /// When hovering on a template element tag name, show matching CSS rules with specificity.
 fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     // Find element at cursor position — match only the tag name, not the full element span.
     // Element span starts at '<', so tag name starts at span.start + 1.
@@ -384,7 +384,7 @@ fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hov
     // Collect matching selectors from all style blocks
     let mut matches: Vec<(&str, (u32, u32, u32), verter_analysis::MatchResult)> = Vec::new();
 
-    for style in &analysis.styles {
+    for style in analysis.styles.iter() {
         if let Some(css) = &style.css {
             for sel in &css.selectors {
                 if let Some(ref structure) = sel.structure {
@@ -453,7 +453,7 @@ fn component_prop_constness_hover(
     source: &str,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<Hover> {
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     // Find component usage at cursor position — match only the tag name.
     // c.name is PascalCase-normalized but the source tag may be kebab-case,
@@ -598,7 +598,7 @@ fn hover_for_word(word: &str, analysis: &FileAnalysisSnapshot) -> Option<VerterH
     }
 
     // Check macros
-    for mac in &analysis.macros {
+    for mac in analysis.macros.iter() {
         if mac.binding_name.as_ref().is_some_and(|name| name == word) {
             return Some(format_macro_hover(mac).into());
         }

@@ -72,7 +72,7 @@ pub fn references_at_position(
                 }
             }
         }
-        for mac in &analysis.macros {
+        for mac in analysis.macros.iter() {
             if mac.binding_name.as_ref().is_some_and(|n| n == &word)
                 && (mac.span.start > 0 || mac.span.end > 0)
             {
@@ -187,7 +187,7 @@ fn css_references_at_position(
         return None;
     }
 
-    let template = analysis.template.as_ref()?;
+    let template = analysis.template.as_deref()?;
 
     // Extract the CSS target (class or id name)
     let target = if in_template {
@@ -228,7 +228,7 @@ pub(crate) fn collect_css_ref_spans(
     let mut spans = Vec::new();
 
     // Collect template attribute references
-    if let Some(template) = &analysis.template {
+    if let Some(template) = analysis.template.as_deref() {
         for element in &template.elements {
             for attr in &element.attributes {
                 if attr.is_dynamic {
@@ -339,7 +339,7 @@ pub(crate) fn collect_css_ref_spans(
     }
 
     // Collect style block references
-    for style in &analysis.styles {
+    for style in analysis.styles.iter() {
         let css = match style.css.as_ref() {
             Some(c) => c,
             None => continue,
@@ -469,7 +469,7 @@ pub(crate) fn find_css_target_in_style_refs(
     source: &str,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<CssRefTarget> {
-    for style in &analysis.styles {
+    for style in analysis.styles.iter() {
         let css = match style.css.as_ref() {
             Some(c) => c,
             None => continue,

@@ -1305,3 +1305,202 @@ fn computed_in_var_decl_detected() {
         "computed in variable declaration should be detected"
     );
 }
+
+// ═══════════════════════════════════════════════════════════
+// Module reference collector: chain expression tests
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn chain_expression_optional_call_with_import() {
+    let result = analyze("foo?.bar?.(import('./lazy.vue'));");
+    assert!(
+        result
+            .module_references
+            .iter()
+            .any(|r| r.literal_specifier.as_deref() == Some("./lazy.vue")
+                && r.syntax == ModuleReferenceSyntax::DynamicImport),
+        "should find dynamic import inside optional chained call, got: {:?}",
+        result.module_references
+    );
+    assert!(
+        !result.module_references.is_empty(),
+        "should have at least one module reference"
+    );
+}
+
+#[test]
+fn chain_expression_deeply_nested_require() {
+    let result = analyze("a?.b?.c?.(require('./deep'));");
+    assert!(
+        result
+            .module_references
+            .iter()
+            .any(|r| r.literal_specifier.as_deref() == Some("./deep")
+                && r.syntax == ModuleReferenceSyntax::RequireCall),
+        "should find require inside deeply nested optional chain, got: {:?}",
+        result.module_references
+    );
+}
+
+#[test]
+fn chain_expression_computed_member_with_import() {
+    let result = analyze("obj?.[key]?.(import('./computed-target'));");
+    assert!(
+        result
+            .module_references
+            .iter()
+            .any(|r| r.literal_specifier.as_deref() == Some("./computed-target")),
+        "should find import inside chain with computed member access"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Script binding usage spans
+// ═══════════════════════════════════════════════════════════
+
+fn analyze_with_usages(code: &str) -> ScriptAnalysisSnapshot {
+    let alloc = Allocator::new();
+    build_script_analysis_with_scope(code, SourceType::ts(), &alloc, AnalysisScope::all())
+}
+
+#[test]
+fn script_usage_basic_read() {
+    let result = analyze_with_usages("const x = 1;\nconsole.log(x);");
+    let usages: Vec<_> = result
+        .script_binding_occurrences
+        .iter()
+        .filter(|o| o.name == "x")
+        .collect();
+    assert_eq!(usages.len(), 1, "should have one usage of x");
+    assert_eq!(usages[0].usage_kind, ScriptUsageKind::Read);
+}
+
+#[test]
+fn script_usage_write() {
+    let result = analyze_with_usages("let x = 1;\nx = 2;");
+    let usages: Vec<_> = result
+        .script_binding_occurrences
+        .iter()
+        .filter(|o| o.name == "x")
+        .collect();
+    assert_eq!(usages.len(), 1, "should have one write usage of x");
+    assert_eq!(usages[0].usage_kind, ScriptUsageKind::Write);
+}
+
+#[test]
+fn script_usage_read_write() {
+    let result = analyze_with_usages("let x = 1;\nx += 2;");
+    let usages: Vec<_> = result
+        .script_binding_occurrences
+        .iter()
+        .filter(|o| o.name == "x")
+        .collect();
+    assert_eq!(usages.len(), 1, "should have one read-write usage of x");
+    assert_eq!(usages[0].usage_kind, ScriptUsageKind::ReadWrite);
+}
+
+#[test]
+fn script_usage_call() {
+    let result = analyze_with_usages("function foo() {}\nfoo();");
+    let usages: Vec<_> = result
+        .script_binding_occurrences
+        .iter()
+        .filter(|o| o.name == "foo")
+        .collect();
+    assert_eq!(usages.len(), 1, "should have one call usage of foo");
+    assert_eq!(usages[0].usage_kind, ScriptUsageKind::Call);
+}
+
+#[test]
+fn script_usage_member_access() {
+    let result = analyze_with_usages("const obj = {};\nobj.x;");
+    let usages: Vec<_> = result
+        .script_binding_occurrences
+        .iter()
+        .filter(|o| o.name == "obj")
+        .collect();
+    assert_eq!(
+        usages.len(),
+        1,
+        "should have one member access usage of obj"
+    );
+    assert_eq!(usages[0].usage_kind, ScriptUsageKind::MemberAccess);
+}
+
+#[test]
+fn script_usage_shadowing_does_not_track_inner() {
+    let result =
+        analyze_with_usages("const x = 1;\n{ const x = 2; console.log(x); }\nconsole.log(x);");
+    let usages: Vec<_> = result
+        .script_binding_occurrences
+        .iter()
+        .filter(|o| o.name == "x")
+        .collect();
+    // Only the outer x reference should be tracked (the last console.log(x))
+    // The inner x is a different binding
+    assert_eq!(
+        usages.len(),
+        1,
+        "should track only outer x, not shadowed inner x"
+    );
+}
+
+#[test]
+fn script_usage_type_annotation_not_tracked() {
+    let result = analyze_with_usages("interface Foo {}\nconst x: Foo = {};");
+    let usages: Vec<_> = result
+        .script_binding_occurrences
+        .iter()
+        .filter(|o| o.name == "Foo")
+        .collect();
+    assert!(
+        usages.is_empty(),
+        "type annotations should not create binding occurrences"
+    );
+}
+
+#[test]
+fn script_usage_string_literal_not_tracked() {
+    let result = analyze_with_usages("const x = 1;\nconst y = \"x\";");
+    let usages: Vec<_> = result
+        .script_binding_occurrences
+        .iter()
+        .filter(|o| o.name == "x")
+        .collect();
+    assert!(
+        usages.is_empty(),
+        "string literal 'x' should not be a binding occurrence"
+    );
+}
+
+#[test]
+fn script_usage_destructure_source() {
+    let result = analyze_with_usages("const obj = { a: 1 };\nconst { a } = obj;");
+    let usages: Vec<_> = result
+        .script_binding_occurrences
+        .iter()
+        .filter(|o| o.name == "obj")
+        .collect();
+    assert_eq!(
+        usages.len(),
+        1,
+        "should have one usage of obj as destructure source"
+    );
+    assert_eq!(usages[0].usage_kind, ScriptUsageKind::Read);
+}
+
+#[test]
+fn script_usage_not_collected_without_scope_flag() {
+    let alloc = Allocator::new();
+    let scope = AnalysisScope::BUILD; // BUILD doesn't include SCRIPT_USAGES
+    let result = build_script_analysis_with_scope(
+        "const x = 1;\nconsole.log(x);",
+        SourceType::ts(),
+        &alloc,
+        scope,
+    );
+    assert!(
+        result.script_binding_occurrences.is_empty(),
+        "BUILD scope should not collect script usages"
+    );
+}

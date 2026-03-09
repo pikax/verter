@@ -49,7 +49,7 @@ pub fn prepare_call_hierarchy(
     }
 
     // Check if cursor is on a Vue API call
-    for call in &analysis.vue_api_calls {
+    for call in analysis.vue_api_calls.iter() {
         if offset >= call.span.start && offset <= call.span.end {
             let start = line_index.offset_to_position(call.span.start)?;
             let end = line_index.offset_to_position(call.span.end)?;
@@ -68,7 +68,7 @@ pub fn prepare_call_hierarchy(
     }
 
     // Check template components
-    if let Some(template) = &analysis.template {
+    if let Some(template) = analysis.template.as_deref() {
         let _template_block = blocks.iter().find(|b| {
             b.tag_name == "template" && {
                 let (cs, ce) = b.content_range();
@@ -117,7 +117,7 @@ pub fn incoming_calls(
     let mut calls = Vec::new();
 
     // For bindings: find template occurrences that reference this binding
-    if let Some(template) = &analysis.template {
+    if let Some(template) = analysis.template.as_deref() {
         for occ in &template.binding_occurrences {
             if occ.name == _item.name {
                 if let (Some(start), Some(end)) = (
@@ -166,7 +166,7 @@ pub fn outgoing_calls(
     let mut calls = Vec::new();
 
     // Show Vue API calls as outgoing
-    for call in &analysis.vue_api_calls {
+    for call in analysis.vue_api_calls.iter() {
         if let (Some(start), Some(end)) = (
             line_index.offset_to_position(call.span.start),
             line_index.offset_to_position(call.span.end),
@@ -188,7 +188,7 @@ pub fn outgoing_calls(
     }
 
     // Show child components as outgoing calls
-    if let Some(template) = &analysis.template {
+    if let Some(template) = analysis.template.as_deref() {
         for comp in &template.components {
             if let (Some(start), Some(end)) = (
                 line_index.offset_to_position(comp.span.start),

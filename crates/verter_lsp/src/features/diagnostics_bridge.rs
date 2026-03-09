@@ -22,7 +22,7 @@ pub fn run_linter(
     let script = script_from_host(analysis);
     let set = linter.lint_with_source(
         Some(&script),
-        analysis.template.as_ref(),
+        analysis.template.as_deref(),
         &analysis.styles,
         Some(source),
     );
@@ -35,10 +35,10 @@ fn script_from_host(analysis: &FileAnalysisSnapshot) -> ScriptAnalysisSnapshot {
     ScriptAnalysisSnapshot {
         imports: analysis.imports.clone(),
         bindings: analysis.bindings.clone(),
-        macros: analysis.macros.clone(),
-        macro_type_deps: analysis.macro_type_deps.clone(),
+        macros: analysis.macros.to_vec(),
+        macro_type_deps: analysis.macro_type_deps.to_vec(),
         flags: AnalysisFlags::from_bits_truncate(analysis.script_flags),
-        vue_api_calls: analysis.vue_api_calls.clone(),
+        vue_api_calls: analysis.vue_api_calls.to_vec(),
         ..Default::default()
     }
 }
@@ -103,7 +103,7 @@ pub fn action_engine_fixes(
     let script = script_from_host(analysis);
     let lint_set = linter.lint_with_source(
         Some(&script),
-        analysis.template.as_ref(),
+        analysis.template.as_deref(),
         &analysis.styles,
         Some(source),
     );
@@ -113,7 +113,7 @@ pub fn action_engine_fixes(
         source,
         file_id,
         diagnostics: &lint_set,
-        template: analysis.template.as_ref(),
+        template: analysis.template.as_deref(),
         script: Some(&script),
         styles: &analysis.styles,
     };
@@ -214,7 +214,7 @@ pub fn action_engine_refactorings(
     let script = script_from_host(analysis);
     let lint_set = linter.lint_with_source(
         Some(&script),
-        analysis.template.as_ref(),
+        analysis.template.as_deref(),
         &analysis.styles,
         Some(source),
     );
@@ -224,7 +224,7 @@ pub fn action_engine_refactorings(
         source,
         file_id,
         diagnostics: &lint_set,
-        template: analysis.template.as_ref(),
+        template: analysis.template.as_deref(),
         script: Some(&script),
         styles: &analysis.styles,
     };
