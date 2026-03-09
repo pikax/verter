@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import { TIMING_FILE, FIXTURE_NAME } from "./helpers";
+import { computeStartupSegments } from "../src/startupOptimizations";
 
 export interface HoverSample {
   target: string;
@@ -27,6 +28,9 @@ export interface TimingReport {
     activationToReadyMs: number | null;
     activationToFirstTypedCompletionMs: number | null;
     readyToFirstTypedCompletionMs: number | null;
+    activationToTypeProviderStartedMs: number | null;
+    typeProviderStartedToFirstTypedCompletionMs: number | null;
+    typeProviderStartedToReadyMs: number | null;
     typeProvider: string | null;
     providerKind: string | null;
   };
@@ -62,6 +66,9 @@ export class TestTimer {
         activationToReadyMs: null,
         activationToFirstTypedCompletionMs: null,
         readyToFirstTypedCompletionMs: null,
+        activationToTypeProviderStartedMs: null,
+        typeProviderStartedToFirstTypedCompletionMs: null,
+        typeProviderStartedToReadyMs: null,
         typeProvider: null,
         providerKind: null,
       },
@@ -91,17 +98,25 @@ export class TestTimer {
     this.report.startup.firstDiagnosticMs = record.firstDiagnosticMs;
     this.report.startup.typeProvider = record.providerKind;
     this.report.startup.providerKind = record.providerKind;
-
-    this.report.startup.activationToReadyMs =
-      record.lspReadyMs - record.activationStartMs;
-    this.report.startup.activationToFirstTypedCompletionMs =
-      record.firstTypedCompletionMs === null
-        ? null
-        : record.firstTypedCompletionMs - record.activationStartMs;
-    this.report.startup.readyToFirstTypedCompletionMs =
-      record.firstTypedCompletionMs === null
-        ? null
-        : record.firstTypedCompletionMs - record.lspReadyMs;
+    const segments = computeStartupSegments(record);
+    this.report.startup.activationToReadyMs = toNullable(
+      segments.activationToReadyMs,
+    );
+    this.report.startup.activationToFirstTypedCompletionMs = toNullable(
+      segments.activationToFirstTypedCompletionMs,
+    );
+    this.report.startup.readyToFirstTypedCompletionMs = toNullable(
+      segments.readyToFirstTypedCompletionMs,
+    );
+    this.report.startup.activationToTypeProviderStartedMs = toNullable(
+      segments.activationToTypeProviderStartedMs,
+    );
+    this.report.startup.typeProviderStartedToFirstTypedCompletionMs = toNullable(
+      segments.typeProviderStartedToFirstTypedCompletionMs,
+    );
+    this.report.startup.typeProviderStartedToReadyMs = toNullable(
+      segments.typeProviderStartedToReadyMs,
+    );
 
     if (record.firstDiagnosticMs !== null) {
       this.report.diagnostics.timeToFirstDiagnosticMs =
@@ -169,4 +184,8 @@ export function getTimer(): TestTimer {
     _timer = new TestTimer();
   }
   return _timer;
+}
+
+function toNullable(value: number | undefined): number | null {
+  return value ?? null;
 }

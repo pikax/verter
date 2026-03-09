@@ -187,6 +187,15 @@ function summarizeReports(reports) {
   const readyToFirstTypedCompletionMs = reports
     .map((report) => report.startup.readyToFirstTypedCompletionMs)
     .filter(isNumber);
+  const activationToTypeProviderStartedMs = reports
+    .map((report) => report.startup.activationToTypeProviderStartedMs)
+    .filter(isNumber);
+  const typeProviderStartedToFirstTypedCompletionMs = reports
+    .map((report) => report.startup.typeProviderStartedToFirstTypedCompletionMs)
+    .filter(isNumber);
+  const typeProviderStartedToReadyMs = reports
+    .map((report) => report.startup.typeProviderStartedToReadyMs)
+    .filter(isNumber);
 
   return {
     activationToReadyMs: summarizeMetric(activationToReadyMs),
@@ -194,6 +203,13 @@ function summarizeReports(reports) {
       activationToFirstTypedCompletionMs,
     ),
     readyToFirstTypedCompletionMs: summarizeMetric(readyToFirstTypedCompletionMs),
+    activationToTypeProviderStartedMs: summarizeMetric(
+      activationToTypeProviderStartedMs,
+    ),
+    typeProviderStartedToFirstTypedCompletionMs: summarizeMetric(
+      typeProviderStartedToFirstTypedCompletionMs,
+    ),
+    typeProviderStartedToReadyMs: summarizeMetric(typeProviderStartedToReadyMs),
   };
 }
 

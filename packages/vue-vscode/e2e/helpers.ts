@@ -3,6 +3,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import * as assert from "assert";
+import { computeStartupSegments } from "../src/startupOptimizations";
 
 // ── Environment ────────────────────────────────────────────────
 
@@ -20,6 +21,10 @@ export interface StartupTiming {
   providerKind?: "tsgo" | "tsserver" | "verter-only";
   activationToReadyMs?: number;
   activationToFirstTypedCompletionMs?: number;
+  readyToFirstTypedCompletionMs?: number;
+  activationToTypeProviderStartedMs?: number;
+  typeProviderStartedToFirstTypedCompletionMs?: number;
+  typeProviderStartedToReadyMs?: number;
 }
 
 /**
@@ -398,6 +403,13 @@ export function parseStartupTiming(): StartupTiming {
       ? "verter-only"
       : undefined;
 
+  const segments = computeStartupSegments({
+    activationStartMs,
+    typeProviderStartedMs,
+    lspReadyMs,
+    firstTypedCompletionMs,
+  });
+
   return {
     activationStartMs,
     typeProviderStartedMs,
@@ -405,14 +417,7 @@ export function parseStartupTiming(): StartupTiming {
     firstTypedCompletionMs,
     firstDiagnosticMs,
     providerKind,
-    activationToReadyMs:
-      activationStartMs !== undefined && lspReadyMs !== undefined
-        ? lspReadyMs - activationStartMs
-        : undefined,
-    activationToFirstTypedCompletionMs:
-      activationStartMs !== undefined && firstTypedCompletionMs !== undefined
-        ? firstTypedCompletionMs - activationStartMs
-        : undefined,
+    ...segments,
   };
 }
 

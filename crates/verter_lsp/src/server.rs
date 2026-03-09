@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
@@ -1858,6 +1858,47 @@ pub(crate) fn resolve_component_for(
     host.get_analysis(import_source)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DidOpenStartupPolicy {
+    sync_imported_vue_files: bool,
+    publish_diagnostics: bool,
+}
+
+fn did_open_startup_policy() -> DidOpenStartupPolicy {
+    DidOpenStartupPolicy {
+        sync_imported_vue_files: false,
+        publish_diagnostics: false,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn collect_imported_vue_priority_ids(
+    analysis: &verter_analysis::ScriptAnalysisSnapshot,
+) -> Vec<String> {
+    collect_imported_vue_priority_ids_from_imports(&analysis.imports)
+}
+
+fn collect_imported_vue_priority_ids_from_imports(
+    imports: &[verter_analysis::AnalyzedImport],
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+
+    for import in imports {
+        let Some(canonical_id) = import.resolved_canonical_id.as_ref() else {
+            continue;
+        };
+        if !canonical_id.ends_with(".vue") {
+            continue;
+        }
+        if seen.insert(canonical_id.clone()) {
+            ids.push(canonical_id.clone());
+        }
+    }
+
+    ids
+}
+
 /// Compute verter diagnostics (host errors + lint rules + component usage) for a document.
 ///
 /// Extracted as a free function so both `VerterLanguageServer::compute_verter_diagnostics()`
@@ -2677,36 +2718,24 @@ impl LanguageServer for VerterLanguageServer {
                 uri.as_str(),
             );
         }
+        let startup_policy = did_open_startup_policy();
+        let imported_vue_priority_ids = self
+            .documents
+            .get_analysis(uri)
+            .map(|analysis| collect_imported_vue_priority_ids_from_imports(&analysis.imports))
+            .unwrap_or_default();
         // Signal the background scanner to prioritize this file's directory
-        if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
-            if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
+        if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
+            if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
                 scanner.signal_priority(canonical_id);
+            }
+            for import_id in &imported_vue_priority_ids {
+                scanner.signal_priority(import_id.clone());
             }
         }
 
-        // Ensure imported .vue files are compiled + synced before this file's
-        // IDE output reaches the type provider. Prevents fallback stubs for
-        // components that the workspace scanner hasn't processed yet.
-        if let Some(analysis) = self.documents.get_analysis(uri) {
-            let vue_imports: Vec<String> = analysis
-                .imports
-                .iter()
-                .filter_map(|imp| {
-                    let cid = imp.resolved_canonical_id.as_ref()?;
-                    if cid.ends_with(".vue") {
-                        Some(cid.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            for import_id in &vue_imports {
-                // Signal scanner to prioritize this import
-                if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
-                    scanner.signal_priority(import_id.clone());
-                }
-                // If not already background-synced, compile + sync now
+        if startup_policy.sync_imported_vue_files {
+            for import_id in &imported_vue_priority_ids {
                 let base = import_id.strip_suffix(".vue").unwrap_or(import_id);
                 let dts_path = format!("{base}.vue.ts");
                 if !self.background_synced_files.contains_key(&dts_path) {
@@ -2719,7 +2748,9 @@ impl LanguageServer for VerterLanguageServer {
             self.sync_ide_to_provider(uri),
             self.sync_api_to_provider(uri),
         );
-        self.publish_full_diagnostics(uri).await;
+        if startup_policy.publish_diagnostics {
+            self.publish_full_diagnostics(uri).await;
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -5095,6 +5126,77 @@ mod tests {
         assert!(
             caps.diagnostic_provider.is_none(),
             "diagnostic_provider must be removed — we use push diagnostics only"
+        );
+    }
+
+    #[test]
+    fn did_open_startup_policy_skips_eager_import_sync_and_inline_diagnostics() {
+        let policy = did_open_startup_policy();
+        assert!(
+            !policy.sync_imported_vue_files,
+            "cold open should not eagerly resync imported Vue files"
+        );
+        assert!(
+            !policy.publish_diagnostics,
+            "cold open should not publish diagnostics inline"
+        );
+    }
+
+    #[test]
+    fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
+        let analysis = verter_analysis::ScriptAnalysisSnapshot {
+            imports: vec![
+                verter_analysis::AnalyzedImport {
+                    source: "./MyComp.vue".to_string(),
+                    is_type_only: false,
+                    bindings: Vec::new(),
+                    span: verter_span::Span::new(0, 0),
+                    resolved_canonical_id: Some("C:/project/src/MyComp.vue".to_string()),
+                },
+                verter_analysis::AnalyzedImport {
+                    source: "./utils".to_string(),
+                    is_type_only: false,
+                    bindings: Vec::new(),
+                    span: verter_span::Span::new(0, 0),
+                    resolved_canonical_id: Some("C:/project/src/utils.ts".to_string()),
+                },
+                verter_analysis::AnalyzedImport {
+                    source: "./Other.vue".to_string(),
+                    is_type_only: false,
+                    bindings: Vec::new(),
+                    span: verter_span::Span::new(0, 0),
+                    resolved_canonical_id: None,
+                },
+                verter_analysis::AnalyzedImport {
+                    source: "./MyComp.vue".to_string(),
+                    is_type_only: false,
+                    bindings: Vec::new(),
+                    span: verter_span::Span::new(0, 0),
+                    resolved_canonical_id: Some("C:/project/src/MyComp.vue".to_string()),
+                },
+            ],
+            bindings: Vec::new(),
+            macros: Vec::new(),
+            macro_type_deps: Vec::new(),
+            flags: verter_analysis::AnalysisFlags::empty(),
+            exported_functions: Vec::new(),
+            vue_api_calls: Vec::new(),
+            dom_query_calls: Vec::new(),
+            css_var_manipulations: Vec::new(),
+            first_await_offset: None,
+            type_enhancements: None,
+        };
+
+        let ids = collect_imported_vue_priority_ids(&analysis);
+
+        assert_eq!(
+            ids,
+            vec!["C:/project/src/MyComp.vue".to_string()],
+            "should keep one resolved .vue canonical id"
+        );
+        assert!(
+            !ids.iter().any(|id| id.ends_with(".ts")),
+            "non-Vue imports must be excluded"
         );
     }
 }

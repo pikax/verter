@@ -40,6 +40,18 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
       timing.firstTypedCompletionMs,
       "first_typed_completion marker should be present",
     ).to.be.a("number");
+    expect(
+      timing.activationToTypeProviderStartedMs,
+      "activationToTypeProviderStartedMs should be present",
+    ).to.be.a("number");
+    expect(
+      timing.typeProviderStartedToFirstTypedCompletionMs,
+      "typeProviderStartedToFirstTypedCompletionMs should be present",
+    ).to.be.a("number");
+    expect(
+      timing.typeProviderStartedToReadyMs,
+      "typeProviderStartedToReadyMs should be present",
+    ).to.be.a("number");
     expect(timing.providerKind, "provider kind should be detected").to.equal("tsserver");
 
     expect(
@@ -68,6 +80,15 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
     expect(report.startup.lspReadyMs).to.equal(timing.lspReadyMs);
     expect(report.startup.firstTypedCompletionMs).to.equal(
       timing.firstTypedCompletionMs,
+    );
+    expect(report.startup.activationToTypeProviderStartedMs).to.equal(
+      timing.activationToTypeProviderStartedMs,
+    );
+    expect(report.startup.typeProviderStartedToFirstTypedCompletionMs).to.equal(
+      timing.typeProviderStartedToFirstTypedCompletionMs,
+    );
+    expect(report.startup.typeProviderStartedToReadyMs).to.equal(
+      timing.typeProviderStartedToReadyMs,
     );
     expect(report.startup.providerKind).to.equal("tsserver");
     expect(report.startup.typeProvider).to.not.equal("verter-only");

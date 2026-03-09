@@ -28,7 +28,7 @@ export interface ParsedStartupTiming {
 }
 
 const DEFAULT_TIMEOUT_MS = 45_000;
-const DEFAULT_POLL_INTERVAL_MS = 150;
+const DEFAULT_POLL_INTERVAL_MS = 50;
 
 export function readStartupProbeConfig(): StartupProbeConfig | undefined {
   const raw = process.env.VERTER_E2E_STARTUP_PROBE;

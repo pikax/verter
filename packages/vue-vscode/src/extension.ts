@@ -46,9 +46,11 @@ import { PropConstnessDecorationProvider } from "./PropConstnessDecorationProvid
 import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
 import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
+import { findStyleBlockAt, scanStyleBlocks } from "./css/styleBlockScanner";
 import { restartLanguageServer } from "./restart";
 import { checkClaudeCodeAndNotify, setupMcpForClaudeCode, updateMcpPort } from "./claudeCodeDetection";
 import { createActivationGate } from "./activationGate";
+import { shouldConfigureBuiltInTypeScriptPlugin } from "./startupOptimizations";
 import {
   StartupProbe,
   readStartupProbeConfig,
@@ -129,7 +131,6 @@ async function activateExtension(context: ExtensionContext) {
   let configRestartTimer: ReturnType<typeof setTimeout> | undefined;
   let tsPluginConfigured = false;
   let tsPluginPromise: Promise<void> | undefined;
-  const blockOnTsPlugin = process.env.VERTER_E2E_BLOCK_ON_TS_PLUGIN === "1";
 
   const getStartedClient = () => {
     if (!server) {
@@ -149,16 +150,16 @@ async function activateExtension(context: ExtensionContext) {
     compiledCodeContentProvider,
   );
 
-  const ensureTypeScriptPluginConfigured = () => {
+  const ensureTypeScriptPluginConfigured = (document?: TextDocument) => {
     if (
       tsPluginConfigured ||
       tsPluginPromise ||
-      !workspace.textDocuments.some((doc) => doc.languageId === "vue") &&
-        window.activeTextEditor?.document.languageId !== "vue"
+      !shouldConfigureBuiltInTypeScriptPlugin(document?.languageId)
     ) {
       return tsPluginPromise;
     }
 
+    writeTimingMarker("ts_plugin_configure_start", Date.now());
     tsPluginPromise = Promise.resolve(
       commands.executeCommand(
         "_typescript.configurePlugin",
@@ -176,6 +177,11 @@ async function activateExtension(context: ExtensionContext) {
         log.warn("Failed to configure the Verter TypeScript plugin", error);
       })
       .finally(() => {
+        writeTimingMarker(
+          "ts_plugin_configure_end",
+          Date.now(),
+          tsPluginConfigured ? "configured" : "retry",
+        );
         if (!tsPluginConfigured) {
           tsPluginPromise = undefined;
         }
@@ -197,12 +203,6 @@ async function activateExtension(context: ExtensionContext) {
   };
 
   const ensureLanguageServerStarted = async () => {
-    if (blockOnTsPlugin) {
-      await ensureTypeScriptPluginConfigured();
-    } else {
-      void ensureTypeScriptPluginConfigured();
-    }
-
     if (server) {
       return server;
     }
@@ -233,15 +233,22 @@ async function activateExtension(context: ExtensionContext) {
     if (document?.languageId !== "vue") {
       return;
     }
-    void ensureTypeScriptPluginConfigured();
     void ensureLanguageServerStarted();
+  };
+
+  const ensureTypeScriptPluginConfiguredForDocument = (
+    document?: TextDocument,
+  ) => {
+    void ensureTypeScriptPluginConfigured(document);
   };
 
   context.subscriptions.push(
     workspace.onDidOpenTextDocument((document) => {
+      ensureTypeScriptPluginConfiguredForDocument(document);
       ensureStartedForVueDocument(document);
     }),
     window.onDidChangeActiveTextEditor((editor) => {
+      ensureTypeScriptPluginConfiguredForDocument(editor?.document);
       ensureStartedForVueDocument(editor?.document);
     }),
     workspace.onDidChangeConfiguration((e) => {
@@ -296,6 +303,7 @@ async function activateExtension(context: ExtensionContext) {
   ) {
     void ensureLanguageServerStarted();
   }
+  ensureTypeScriptPluginConfiguredForDocument(window.activeTextEditor?.document);
 
   return {
     getClient: getStartedClient,
@@ -388,8 +396,22 @@ export async function activateVueLanguageServer(
 
   // CSS intellisense service — created after client, referenced by middleware closures
   let cssService: CssService | undefined;
+  const getCssService = () => {
+    if (!cssService) {
+      writeTimingMarker("css_service_construct_start", Date.now());
+      cssService = new CssService(getClient, rootPath);
+      writeTimingMarker("css_service_construct_end", Date.now());
+    }
+    return cssService;
+  };
   const cssDiagnostics = languages.createDiagnosticCollection("verter-css");
   context.subscriptions.push(cssDiagnostics);
+  const hasStyleBlockAtPosition = (
+    source: string,
+    line: number,
+    character: number,
+  ) => findStyleBlockAt(scanStyleBlocks(source), source, line, character) !== undefined;
+  const hasStyleBlocks = (source: string) => scanStyleBlocks(source).length > 0;
 
   // Options to control the language client
   const clientOptions: LanguageClientOptions = {
@@ -433,15 +455,16 @@ export async function activateVueLanguageServer(
     revealOutputChannelOn: RevealOutputChannelOn.Never,
     middleware: {
       provideCompletionItem: async (document, position, context, token, next) => {
-        if (document.languageId !== "vue" || !cssService) {
+        if (document.languageId !== "vue") {
           return next(document, position, context, token);
         }
 
         const source = document.getText();
-        if (!cssService.isInStyleBlock(source, position.line, position.character)) {
+        if (!hasStyleBlockAtPosition(source, position.line, position.character)) {
           return next(document, position, context, token);
         }
 
+        const cssService = getCssService();
         const uri = document.uri.toString();
         const [cssResult, lspResult] = await Promise.all([
           cssService.doComplete(uri, source, document.version, position.line, position.character),
@@ -468,15 +491,16 @@ export async function activateVueLanguageServer(
       },
 
       provideHover: async (document, position, token, next) => {
-        if (document.languageId !== "vue" || !cssService) {
+        if (document.languageId !== "vue") {
           return next(document, position, token);
         }
 
         const source = document.getText();
-        if (!cssService.isInStyleBlock(source, position.line, position.character)) {
+        if (!hasStyleBlockAtPosition(source, position.line, position.character)) {
           return next(document, position, token);
         }
 
+        const cssService = getCssService();
         const uri = document.uri.toString();
         const [cssResult, lspResult] = await Promise.all([
           cssService.doHover(uri, source, document.version, position.line, position.character),
@@ -502,12 +526,17 @@ export async function activateVueLanguageServer(
       },
 
       provideDocumentColors: async (document, token, next) => {
-        if (document.languageId !== "vue" || !cssService) {
+        if (document.languageId !== "vue") {
           return next(document, token);
         }
 
         const source = document.getText();
+        if (!hasStyleBlocks(source)) {
+          return next(document, token);
+        }
+
         const uri = document.uri.toString();
+        const cssService = getCssService();
         const [cssResult, lspResult] = await Promise.all([
           cssService.findDocumentColors(uri, source, document.version),
           next(document, token),
@@ -525,15 +554,22 @@ export async function activateVueLanguageServer(
       },
 
       provideColorPresentations: async (color, context, token, next) => {
-        if (context.document.languageId !== "vue" || !cssService) {
+        if (context.document.languageId !== "vue") {
           return next(color, context, token);
         }
 
         const source = context.document.getText();
-        if (!cssService.isInStyleBlock(source, context.range.start.line, context.range.start.character)) {
+        if (
+          !hasStyleBlockAtPosition(
+            source,
+            context.range.start.line,
+            context.range.start.character,
+          )
+        ) {
           return next(color, context, token);
         }
 
+        const cssService = getCssService();
         const uri = context.document.uri.toString();
         const cssResult = await cssService.getColorPresentations(
           uri,
@@ -551,15 +587,16 @@ export async function activateVueLanguageServer(
       },
 
       provideDocumentHighlights: async (document, position, token, next) => {
-        if (document.languageId !== "vue" || !cssService) {
+        if (document.languageId !== "vue") {
           return next(document, position, token);
         }
 
         const source = document.getText();
-        if (!cssService.isInStyleBlock(source, position.line, position.character)) {
+        if (!hasStyleBlockAtPosition(source, position.line, position.character)) {
           return next(document, position, token);
         }
 
+        const cssService = getCssService();
         const uri = document.uri.toString();
         const [cssResult, lspResult] = await Promise.all([
           cssService.findDocumentHighlights(uri, source, document.version, position.line, position.character),
@@ -711,16 +748,18 @@ export async function activateVueLanguageServer(
 
   registerHeartbeatMonitor(client);
 
-  // Initialize CSS service now that getClient is available
-  cssService = new CssService(getClient, rootPath);
-
   // CSS validation diagnostics — update on document change (debounced per URI)
   const cssDiagTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const updateCssDiagnostics = async (document: TextDocument) => {
-    if (document.languageId !== "vue" || !cssService) return;
+    if (document.languageId !== "vue") return;
     try {
       const uri = document.uri.toString();
-      const results = await cssService.doValidation(uri, document.getText(), document.version);
+      const source = document.getText();
+      if (!hasStyleBlocks(source)) {
+        cssDiagnostics.delete(document.uri);
+        return;
+      }
+      const results = await getCssService().doValidation(uri, source, document.version);
       const allDiags: VDiagnostic[] = [];
       for (const { diagnostics } of results) {
         for (const d of diagnostics) {
@@ -813,7 +852,7 @@ export async function activateVueLanguageServer(
         killTrackedTypeProvider,
         resetServices: () => {
           cssService?.dispose();
-          cssService = new CssService(getClient, rootPath);
+          cssService = undefined;
           cssDiagnostics.clear();
         },
         log,
@@ -828,7 +867,9 @@ export async function activateVueLanguageServer(
 
   // Start the language server — must be after all notification handlers and
   // listeners are registered so they're ready when the server responds.
+  writeTimingMarker("client_start_begin", Date.now());
   await client.start();
+  writeTimingMarker("client_start_end", Date.now());
 
   return {
     getClient,
