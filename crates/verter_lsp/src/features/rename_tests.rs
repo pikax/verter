@@ -392,11 +392,8 @@ fn test_span_based_rename_no_false_positives() {
     // The interpolation {{ count }} — find the second "count" in template
     let first_count = source.find("count").unwrap(); // "count:" plain text
     let interp_count = source[first_count + 5..].find("count").unwrap() + first_count + 5;
-    // Use script-relative offset (OXC convention)
-    let script_block = blocks.iter().find(|b| b.tag_name == "script").unwrap();
-    let content_start = script_block.content_range().0;
+    // Host analysis spans are SFC-absolute (not script-relative)
     let count_decl_sfc = source.rfind("count").unwrap() as u32;
-    let count_decl_relative = count_decl_sfc - content_start;
 
     let analysis = FileAnalysisSnapshot {
         bindings: vec![AnalyzedBinding {
@@ -406,7 +403,7 @@ fn test_span_based_rename_no_false_positives() {
             reactivity_kind: ReactivityKind::Ref,
             type_annotation: None,
             initializer: None,
-            span: verter_span::Span::new(count_decl_relative, count_decl_relative + 5),
+            span: verter_span::Span::new(count_decl_sfc, count_decl_sfc + 5),
             used_in_script: false,
             used_in_style: false,
         }],

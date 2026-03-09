@@ -13,6 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
+use crate::documents::line_index::LineIndex;
 use crate::tsgo::protocol::*;
 use crate::tsgo::traits::{ProviderFuture, TypeProvider};
 #[cfg(test)]
@@ -445,8 +446,7 @@ async fn read_loop(
 /// Otherwise falls back to packed `(line<<16)|character` encoding, which only
 /// works for diagnostics on line 0.
 ///
-/// NOTE: `position_to_offset` treats `character` as a byte offset within the line.
-/// This is correct for ASCII content (true for generated TSX).
+/// `position_to_offset` interprets `character` as UTF-16 code units (LSP default).
 fn parse_lsp_diagnostic(d: &serde_json::Value, content: Option<&str>) -> Option<TypeDiagnostic> {
     let range = d.get("range")?;
     let start = range.get("start")?;
@@ -501,24 +501,15 @@ fn pack_position(line: u32, character: u32) -> u32 {
 
 /// Convert an LSP `(line, character)` position to a byte offset in content.
 ///
-/// NOTE: Treats `character` as a byte offset within the line.
-/// This is correct for ASCII content (true for generated TSX).
-/// For non-ASCII content, `character` would be UTF-16 code units, requiring proper conversion.
+/// `character` is interpreted as UTF-16 code units (LSP default encoding).
+/// TSGO uses UTF-16 because we send empty capabilities during initialize.
 fn position_to_offset(content: &str, line: u32, character: u32) -> u32 {
-    let mut current_line = 0u32;
-    let mut byte_offset = 0usize;
-    let bytes = content.as_bytes();
-
-    // Find the start of the target line
-    while current_line < line && byte_offset < bytes.len() {
-        if bytes[byte_offset] == b'\n' {
-            current_line += 1;
-        }
-        byte_offset += 1;
-    }
-
-    // Add character offset within the line
-    (byte_offset + character as usize).min(bytes.len()) as u32
+    let idx = LineIndex::new_utf16(content);
+    idx.position_to_offset(&tower_lsp_server::ls_types::Position { line, character })
+        .unwrap_or_else(|| {
+            // Fallback: clamp to content length
+            content.len() as u32
+        })
 }
 
 /// Parse an LSP Location JSON value into a `TypeLocation`, using content for offset resolution.
@@ -668,25 +659,20 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
 
 /// Convert a byte offset into an LSP `(line, character)` position.
 ///
-/// NOTE: Treats the byte offset within the line as the `character` value.
-/// This is correct for ASCII content (true for generated TSX).
-/// For non-ASCII content, `character` should be in UTF-16 code units per LSP spec.
+/// Returns `character` as UTF-16 code units (LSP default encoding).
+/// TSGO uses UTF-16 because we send empty capabilities during initialize.
 fn offset_to_position(content: &str, offset: u32) -> (u32, u32) {
-    let offset = offset as usize;
-    let bytes = content.as_bytes();
-    let mut line = 0u32;
-    let mut line_start = 0usize;
-    for (i, &b) in bytes.iter().enumerate() {
-        if i == offset {
-            return (line, (offset - line_start) as u32);
-        }
-        if b == b'\n' {
-            line += 1;
-            line_start = i + 1;
+    let idx = LineIndex::new_utf16(content);
+    match idx.offset_to_position(offset) {
+        Some(pos) => (pos.line, pos.character),
+        None => {
+            // Fallback: clamp to end of content
+            match idx.offset_to_position(content.len() as u32) {
+                Some(pos) => (pos.line, pos.character),
+                None => (0, 0),
+            }
         }
     }
-    // offset == content.len() or beyond
-    (line, (offset.min(bytes.len()) - line_start) as u32)
 }
 
 /// A `TypeProvider` backed by a real TSGO process (`tsgo --lsp --stdio`).
@@ -3389,6 +3375,35 @@ const props = withDefaults(defineProps({ bar: String }), {})
         assert_eq!(position_to_offset(content, 1, 0), 6);
         assert_eq!(position_to_offset(content, 1, 2), 8);
         assert_eq!(position_to_offset(content, 2, 0), 12);
+    }
+
+    #[test]
+    fn test_position_to_offset_utf16_bmp() {
+        // "café\nworld" — 'é' is 2 bytes UTF-8, 1 UTF-16 code unit
+        let content = "café\nworld";
+        // UTF-16 char 4 = end of "café" = byte 5
+        assert_eq!(position_to_offset(content, 0, 4), 5);
+        assert_eq!(position_to_offset(content, 1, 0), 6);
+    }
+
+    #[test]
+    fn test_position_to_offset_utf16_supplementary() {
+        // "a😀b" — '😀' is 4 bytes UTF-8, 2 UTF-16 code units
+        let content = "a😀b";
+        // UTF-16: 'a'=1, '😀'=2 (surrogate pair), 'b' at char 3 = byte 5
+        assert_eq!(position_to_offset(content, 0, 3), 5);
+    }
+
+    #[test]
+    fn test_offset_to_position_utf16_bmp() {
+        // byte 5 = end of "café" = UTF-16 char 4
+        assert_eq!(offset_to_position("café\nworld", 5), (0, 4));
+    }
+
+    #[test]
+    fn test_offset_to_position_utf16_supplementary() {
+        // 'b' at byte 5 = UTF-16 char 3
+        assert_eq!(offset_to_position("a😀b", 5), (0, 3));
     }
 
     /// @ai-generated — parse_completion_item parses a JSON completion item
