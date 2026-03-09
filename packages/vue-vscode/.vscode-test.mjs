@@ -8,6 +8,12 @@ import { execSync } from "child_process";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixture = process.env.E2E_FIXTURE || "single-project";
 const typeProvider = process.env.E2E_TYPE_PROVIDER || "";
+const onlyTest = process.env.VERTER_E2E_ONLY || "";
+const testFiles = onlyTest
+  ? onlyTest.includes("*")
+    ? onlyTest
+    : `out-test/e2e/suite/**/${onlyTest}`
+  : "out-test/e2e/suite/**/*.test.js";
 
 /**
  * Find and copy the LSP binary to a temp directory to prevent file locking.
@@ -98,12 +104,13 @@ if (fixture === "monorepo") {
 }
 
 export default defineConfig({
-  files: "out-test/e2e/suite/**/*.test.js",
+  files: testFiles,
   version: "stable",
   extensionDevelopmentPath: __dirname,
   workspaceFolder: path.join(__dirname, "e2e", "fixtures", fixture),
   launchArgs: ["--disable-extensions"],
   env: {
+    ...process.env,
     VERTER_E2E_TEST: "1",
     VERTER_E2E_LOG_FILE: path.join(os.tmpdir(), `verter-e2e-${fixture}${typeProvider ? `-${typeProvider}` : ""}.log`),
     VERTER_E2E_FIXTURE: fixture,

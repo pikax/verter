@@ -29,7 +29,7 @@ import {
 } from "vscode-languageclient/node";
 
 import { join, normalize } from "path";
-import { existsSync, appendFileSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, writeFileSync } from "fs";
 
 import type { PatchClient } from "@verter/language-shared";
 import { patchClient, NotificationType, RequestType } from "@verter/language-shared";
@@ -48,18 +48,36 @@ import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
 import { restartLanguageServer } from "./restart";
 import { checkClaudeCodeAndNotify, setupMcpForClaudeCode, updateMcpPort } from "./claudeCodeDetection";
+import { createActivationGate } from "./activationGate";
+import {
+  StartupProbe,
+  readStartupProbeConfig,
+  writeTimingMarker,
+} from "./startupProbe";
 
 type GetClient = () => PatchClient<LanguageClient>;
+type ActivationRuntime = Awaited<ReturnType<typeof activateExtension>>;
 
 let getClient: GetClient | undefined;
-
-let activated = false;
 let stopHeartbeat: (() => void) | undefined;
+let activationContext: ExtensionContext | undefined;
+const activationGate = createActivationGate<ActivationRuntime>(async () => {
+  if (!activationContext) {
+    throw new Error("Verter activation context was not initialized");
+  }
+
+  const runtime = await activateExtension(activationContext);
+  getClient = runtime.getClient;
+  stopHeartbeat = runtime.stopHeartbeatTimer;
+  return runtime;
+});
 
 export async function activate(context: ExtensionContext) {
-  if (activated) return;
-  activated = true;
+  activationContext = context;
+  await activationGate.run();
+}
 
+async function activateExtension(context: ExtensionContext) {
   const log = window.createOutputChannel("Verter", { log: true });
   context.subscriptions.push(log);
 
@@ -81,33 +99,224 @@ export async function activate(context: ExtensionContext) {
     log.error = ((msg: string, ...args: unknown[]) => { writeLog("ERROR", msg, ...args); origError(msg, ...args); }) as typeof log.error;
     log.debug = ((msg: string, ...args: unknown[]) => { writeLog("DEBUG", msg, ...args); origDebug(msg, ...args); }) as typeof log.debug;
     log.trace = ((msg: string, ...args: unknown[]) => { writeLog("TRACE", msg, ...args); origTrace(msg, ...args); }) as typeof log.trace;
-    writeLog("TIMING", `activation_start ${Date.now()}`);
   }
+  writeTimingMarker("activation_start", Date.now());
 
   log.info("Verter extension activating");
 
-  const server = await activateVueLanguageServer(context, log);
-  getClient = server.getClient;
-  stopHeartbeat = server.stopHeartbeatTimer;
-
-  if (workspace.textDocuments.some((doc) => doc.languageId === "vue")) {
-    commands.executeCommand(
-      "_typescript.configurePlugin",
-      require.resolve("@verter/typescript-plugin"),
-      {
-        enable: true,
-      },
-    );
+  const startupProbeConfig = readStartupProbeConfig();
+  const startupProbe = startupProbeConfig
+    ? new StartupProbe(startupProbeConfig, log)
+    : undefined;
+  if (startupProbe) {
+    context.subscriptions.push(startupProbe);
   }
+
+  let server:
+    | (Awaited<
+        ReturnType<typeof activateVueLanguageServer>
+      > & { restart(showMsg: boolean): Promise<void> })
+    | undefined;
+  let serverPromise:
+    | Promise<
+        Awaited<
+          ReturnType<typeof activateVueLanguageServer>
+        > & { restart(showMsg: boolean): Promise<void> }
+      >
+    | undefined;
+  let clientListenersRegistered = false;
+  let deferredFeaturesRegistered = false;
+  let configRestartTimer: ReturnType<typeof setTimeout> | undefined;
+  let tsPluginConfigured = false;
+  let tsPluginPromise: Promise<void> | undefined;
+  const blockOnTsPlugin = process.env.VERTER_E2E_BLOCK_ON_TS_PLUGIN === "1";
+
+  const getStartedClient = () => {
+    if (!server) {
+      throw new Error("Verter language server is not started");
+    }
+    return server.getClient();
+  };
+
+  const compiledCodeContentProvider = new CompiledCodeContentProvider(
+    getStartedClient,
+  );
+  context.subscriptions.push(
+    workspace.registerTextDocumentContentProvider(
+      CompiledCodeContentProvider.scheme,
+      compiledCodeContentProvider,
+    ),
+    compiledCodeContentProvider,
+  );
+
+  const ensureTypeScriptPluginConfigured = () => {
+    if (
+      tsPluginConfigured ||
+      tsPluginPromise ||
+      !workspace.textDocuments.some((doc) => doc.languageId === "vue") &&
+        window.activeTextEditor?.document.languageId !== "vue"
+    ) {
+      return tsPluginPromise;
+    }
+
+    tsPluginPromise = Promise.resolve(
+      commands.executeCommand(
+        "_typescript.configurePlugin",
+        require.resolve("@verter/typescript-plugin"),
+        {
+          enable: true,
+        },
+      ),
+    )
+      .then(() => {
+        tsPluginConfigured = true;
+      })
+      .catch((error: unknown) => {
+        tsPluginConfigured = false;
+        log.warn("Failed to configure the Verter TypeScript plugin", error);
+      })
+      .finally(() => {
+        if (!tsPluginConfigured) {
+          tsPluginPromise = undefined;
+        }
+      });
+
+    return tsPluginPromise;
+  };
+
+  const ensureDeferredFeaturesRegistered = () => {
+    if (deferredFeaturesRegistered) {
+      return;
+    }
+    deferredFeaturesRegistered = true;
+    context.subscriptions.push(addNodeModulesChangedListener(getStartedClient));
+    addVerterAnalysis(getStartedClient, context);
+    setTimeout(() => {
+      checkClaudeCodeAndNotify(context, log);
+    }, 0);
+  };
+
+  const ensureLanguageServerStarted = async () => {
+    if (blockOnTsPlugin) {
+      await ensureTypeScriptPluginConfigured();
+    } else {
+      void ensureTypeScriptPluginConfigured();
+    }
+
+    if (server) {
+      return server;
+    }
+    if (serverPromise) {
+      return serverPromise;
+    }
+
+    serverPromise = activateVueLanguageServer(context, log, startupProbe, {
+      onReady: ensureDeferredFeaturesRegistered,
+    })
+      .then((runtime) => {
+        server = runtime;
+        if (!clientListenersRegistered) {
+          context.subscriptions.push(addDidChangeTextDocumentListener(getStartedClient));
+          clientListenersRegistered = true;
+        }
+        return runtime;
+      })
+      .catch((error) => {
+        serverPromise = undefined;
+        throw error;
+      });
+
+    return serverPromise;
+  };
+
+  const ensureStartedForVueDocument = (document?: TextDocument) => {
+    if (document?.languageId !== "vue") {
+      return;
+    }
+    void ensureTypeScriptPluginConfigured();
+    void ensureLanguageServerStarted();
+  };
+
+  context.subscriptions.push(
+    workspace.onDidOpenTextDocument((document) => {
+      ensureStartedForVueDocument(document);
+    }),
+    window.onDidChangeActiveTextEditor((editor) => {
+      ensureStartedForVueDocument(editor?.document);
+    }),
+    workspace.onDidChangeConfiguration((e) => {
+      const needsRestart =
+        e.affectsConfiguration("verter.server.logLevel") ||
+        e.affectsConfiguration("verter.typeProvider") ||
+        e.affectsConfiguration("verter.typescript.tsdk") ||
+        e.affectsConfiguration("verter.mcp.enabled") ||
+        e.affectsConfiguration("verter.mcp.port") ||
+        e.affectsConfiguration("verter.inlayHints.enabled");
+      if (!needsRestart || !server) {
+        return;
+      }
+
+      if (configRestartTimer) {
+        clearTimeout(configRestartTimer);
+      }
+      configRestartTimer = setTimeout(async () => {
+        configRestartTimer = undefined;
+        log.info("Settings changed, restarting language server...");
+        await server?.restart(false);
+      }, 200);
+    }),
+  );
+
+  addCompilePreviewCommand(context, ensureLanguageServerStarted);
+  addWriteVirtualFilesCommand(context, ensureLanguageServerStarted);
+  addShowStatisticsCommand(
+    context,
+    log,
+    ensureLanguageServerStarted,
+    getStartedClient,
+  );
+
+  context.subscriptions.push(
+    commands.registerCommand("verter.restartLanguageServer", async () => {
+      if (!server) {
+        await ensureLanguageServerStarted();
+        window.showInformationMessage("Verter Language server started");
+        return;
+      }
+      await server.restart(true);
+    }),
+    commands.registerCommand("verter.setupMcpForClaudeCode", () =>
+      setupMcpForClaudeCode(context, log)
+    ),
+  );
+
+  if (
+    workspace.textDocuments.some((doc) => doc.languageId === "vue") ||
+    window.activeTextEditor?.document.languageId === "vue"
+  ) {
+    void ensureLanguageServerStarted();
+  }
+
+  return {
+    getClient: getStartedClient,
+    stopHeartbeatTimer: () => {
+      server?.stopHeartbeatTimer();
+    },
+  };
 }
 
 export function deactivate(): Thenable<void> | undefined {
   stopHeartbeat?.();
   stopHeartbeat = undefined;
-  activated = false;
-  const stop = getClient?.().stop();
-  getClient = undefined;
-  return stop;
+  activationContext = undefined;
+  activationGate.reset();
+  try {
+    return getClient?.().stop();
+  } catch {
+    return undefined;
+  } finally {
+    getClient = undefined;
+  }
 }
 
 /**
@@ -164,7 +373,14 @@ function findLspBinary(extensionPath: string, log: LogOutputChannel): string {
   return `verter-lsp${ext}`;
 }
 
-export async function activateVueLanguageServer(context: ExtensionContext, log: LogOutputChannel) {
+export async function activateVueLanguageServer(
+  context: ExtensionContext,
+  log: LogOutputChannel,
+  startupProbe?: StartupProbe,
+  options?: {
+    onReady?: () => void;
+  },
+) {
   const { workspaceFolders } = workspace;
   const rootPath = Array.isArray(workspaceFolders) ? workspaceFolders[0].uri.fsPath : undefined;
 
@@ -376,6 +592,7 @@ export async function activateVueLanguageServer(context: ExtensionContext, log: 
       (params: { pid: number; kind: "tsgo" | "tsserver" }) => {
         typeProviderPid = params.pid;
         log.info(`Type provider (${params.kind}) started with PID ${params.pid}`);
+        startupProbe?.markTypeProviderStarted(params.kind);
       },
     );
     // Legacy notification — only sent when TSGO is actually active
@@ -480,11 +697,8 @@ export async function activateVueLanguageServer(context: ExtensionContext, log: 
     });
     lc.onNotification(NotificationType.Ready, (params: { gen: number }) => {
       log.info(`Verter ready (init generation ${params.gen})`);
-      // E2E timing marker
-      const testLogFile = process.env.VERTER_E2E_LOG_FILE;
-      if (process.env.VERTER_E2E_TEST && testLogFile) {
-        try { appendFileSync(testLogFile, `[TIMING] ready ${Date.now()}\n`); } catch {}
-      }
+      startupProbe?.markReady();
+      options?.onReady?.();
     });
   }
 
@@ -548,17 +762,34 @@ export async function activateVueLanguageServer(context: ExtensionContext, log: 
     workspace.onDidChangeTextDocument((e) => {
       if (e.document.languageId === "vue") {
         debouncedCssDiag(e.document);
+        startupProbe?.maybeTrackDocument(e.document);
       }
     }),
-    workspace.onDidOpenTextDocument(updateCssDiagnostics),
+    workspace.onDidOpenTextDocument((document) => {
+      updateCssDiagnostics(document);
+      startupProbe?.maybeTrackDocument(document);
+    }),
     workspace.onDidCloseTextDocument((doc) => cssDiagnostics.delete(doc.uri)),
   );
 
-  context.subscriptions.push(
-    commands.registerCommand("verter.restartLanguageServer", async () => {
-      await restartLS(true);
-    }),
-  );
+  if (startupProbe) {
+    if (window.activeTextEditor) {
+      startupProbe.maybeTrackDocument(window.activeTextEditor.document);
+    }
+    workspace.textDocuments.forEach((document) => {
+      startupProbe?.maybeTrackDocument(document);
+    });
+    context.subscriptions.push(
+      window.onDidChangeActiveTextEditor((editor) => {
+        if (editor) {
+          startupProbe.maybeTrackDocument(editor.document);
+        }
+      }),
+      languages.onDidChangeDiagnostics((event) => {
+        event.uris.forEach((uri) => startupProbe.maybeTrackDiagnostics(uri));
+      }),
+    );
+  }
 
   let restarting = false;
   async function restartLS(showMsg: boolean) {
@@ -595,50 +826,6 @@ export async function activateVueLanguageServer(context: ExtensionContext, log: 
     }
   }
 
-  // Auto-restart on settings changes that require server restart (debounced)
-  let configRestartTimer: ReturnType<typeof setTimeout> | undefined;
-  context.subscriptions.push(
-    workspace.onDidChangeConfiguration((e) => {
-      const needsRestart =
-        e.affectsConfiguration("verter.server.logLevel") ||
-        e.affectsConfiguration("verter.typeProvider") ||
-        e.affectsConfiguration("verter.typescript.tsdk") ||
-        e.affectsConfiguration("verter.mcp.enabled") ||
-        e.affectsConfiguration("verter.mcp.port") ||
-        e.affectsConfiguration("verter.inlayHints.enabled");
-      if (needsRestart) {
-        // Debounce: VS Code may fire multiple config change events in rapid succession
-        if (configRestartTimer) clearTimeout(configRestartTimer);
-        configRestartTimer = setTimeout(async () => {
-          configRestartTimer = undefined;
-          log.info("Settings changed, restarting language server...");
-          await restartLS(false);
-        }, 200);
-      }
-    }),
-  );
-
-  addDidChangeTextDocumentListener(getClient);
-  addCompilePreviewCommand(getClient, context);
-
-  addWriteVirtualFilesCommand(getClient, context);
-
-  addShowStatisticsCommand(getClient, context, log);
-
-  addNodeModulesChangedListener(getClient);
-
-  addVerterAnalysis(getClient, context);
-
-  // Claude Code detection notification
-  checkClaudeCodeAndNotify(context, log);
-
-  // Setup MCP for Claude Code command
-  context.subscriptions.push(
-    commands.registerCommand("verter.setupMcpForClaudeCode", () =>
-      setupMcpForClaudeCode(context, log)
-    )
-  );
-
   // Start the language server — must be after all notification handlers and
   // listeners are registered so they're ready when the server responds.
   await client.start();
@@ -646,6 +833,7 @@ export async function activateVueLanguageServer(context: ExtensionContext, log: 
   return {
     getClient,
     stopHeartbeatTimer,
+    restart: restartLS,
   };
 }
 
@@ -724,8 +912,8 @@ function getStatisticsInitialization(rootPath: string | undefined) {
   };
 }
 
-function addDidChangeTextDocumentListener(getClient: GetClient) {
-  workspace.onDidChangeTextDocument((e) => {
+function addDidChangeTextDocumentListener(getClient: GetClient): Disposable {
+  return workspace.onDidChangeTextDocument((e) => {
     // Only forward TS/JS changes — .vue changes are handled by the LSP's own did_change.
     // Sending .vue here would cause redundant notifications and TSGO flooding.
     if (
@@ -752,18 +940,10 @@ function addDidChangeTextDocumentListener(getClient: GetClient) {
   });
 }
 
-function addCompilePreviewCommand(getClient: GetClient, context: ExtensionContext) {
-  const compiledCodeContentProvider = new CompiledCodeContentProvider(getClient);
-
-  context.subscriptions.push(
-    // Register the content provider for "vue-compiled://" files
-    workspace.registerTextDocumentContentProvider(
-      CompiledCodeContentProvider.scheme,
-      compiledCodeContentProvider,
-    ),
-    compiledCodeContentProvider,
-  );
-
+function addCompilePreviewCommand(
+  context: ExtensionContext,
+  ensureLanguageServerStarted: () => Promise<unknown>,
+) {
   context.subscriptions.push(
     commands.registerTextEditorCommand("verter.showCompiledCodeToSide", async (editor) => {
       if (editor?.document?.languageId !== "vue") {
@@ -774,6 +954,7 @@ function addCompilePreviewCommand(getClient: GetClient, context: ExtensionContex
       window.withProgress(
         { location: ProgressLocation.Window, title: "Compiling..." },
         async () => {
+          await ensureLanguageServerStarted();
           // Open a new preview window for the compiled code
           return await window.showTextDocument(CompiledCodeContentProvider.previewWindowUri, {
             preview: true,
@@ -784,18 +965,10 @@ function addCompilePreviewCommand(getClient: GetClient, context: ExtensionContex
     }),
   );
 }
-function addWriteVirtualFilesCommand(getClient: GetClient, context: ExtensionContext) {
-  const compiledCodeContentProvider = new CompiledCodeContentProvider(getClient);
-
-  context.subscriptions.push(
-    // Register the content provider for "vue-compiled://" files
-    workspace.registerTextDocumentContentProvider(
-      CompiledCodeContentProvider.scheme,
-      compiledCodeContentProvider,
-    ),
-    compiledCodeContentProvider,
-  );
-
+function addWriteVirtualFilesCommand(
+  context: ExtensionContext,
+  ensureLanguageServerStarted: () => Promise<unknown>,
+) {
   context.subscriptions.push(
     commands.registerTextEditorCommand("verter.writeVirtualFiles", async (editor) => {
       if (editor?.document?.languageId !== "vue") {
@@ -806,6 +979,7 @@ function addWriteVirtualFilesCommand(getClient: GetClient, context: ExtensionCon
       window.withProgress(
         { location: ProgressLocation.Window, title: "Compiling..." },
         async () => {
+          await ensureLanguageServerStarted();
           // Open a new preview window for the compiled code
           return await window.showTextDocument(CompiledCodeContentProvider.previewWindowUri, {
             preview: true,
@@ -817,13 +991,19 @@ function addWriteVirtualFilesCommand(getClient: GetClient, context: ExtensionCon
   );
 }
 
-function addShowStatisticsCommand(getClient: GetClient, context: ExtensionContext, log: LogOutputChannel) {
+function addShowStatisticsCommand(
+  context: ExtensionContext,
+  log: LogOutputChannel,
+  ensureLanguageServerStarted: () => Promise<unknown>,
+  getClient: GetClient,
+) {
   const channel = window.createOutputChannel("Verter Statistics");
 
   context.subscriptions.push(
     channel,
     commands.registerCommand("verter.showStatistics", async () => {
       try {
+        await ensureLanguageServerStarted();
         const snapshot = await getClient().sendRequest(RequestType.GetStatistics, {
           includeEvents: false,
           scope: "all",
@@ -1045,7 +1225,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
   });
 }
 
-function addNodeModulesChangedListener(getClient: GetClient) {
+function addNodeModulesChangedListener(getClient: GetClient): Disposable {
   const watchers = new Map<string, FileSystemWatcher>();
   function watchFolder(folder: WorkspaceFolder) {
     const fp = normalize(join(folder.uri.fsPath, "node_modules/**/*"));
@@ -1074,11 +1254,19 @@ function addNodeModulesChangedListener(getClient: GetClient) {
   if (workspace.workspaceFolders) {
     workspace.workspaceFolders.forEach(watchFolder);
   }
-  workspace.onDidChangeWorkspaceFolders((e) => {
+  const workspaceFoldersListener = workspace.onDidChangeWorkspaceFolders((e) => {
     e.removed.forEach((folder) => {
       watchers.get(folder.uri.fsPath)?.dispose();
       watchers.delete(folder.uri.fsPath);
     });
     e.added.forEach(watchFolder);
   });
+
+  return {
+    dispose() {
+      workspaceFoldersListener.dispose();
+      watchers.forEach((watcher) => watcher.dispose());
+      watchers.clear();
+    },
+  };
 }

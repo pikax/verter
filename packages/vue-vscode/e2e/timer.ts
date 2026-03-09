@@ -6,13 +6,29 @@ export interface HoverSample {
   latencyMs: number;
 }
 
+export interface StartupTimingRecord {
+  activationStartMs: number;
+  typeProviderStartedMs: number | null;
+  lspReadyMs: number;
+  firstTypedCompletionMs: number | null;
+  firstDiagnosticMs: number | null;
+  providerKind: string;
+}
+
 export interface TimingReport {
   fixture: string;
   timestamp: string;
   startup: {
+    activationStartMs: number | null;
+    typeProviderStartedMs: number | null;
+    lspReadyMs: number | null;
+    firstTypedCompletionMs: number | null;
+    firstDiagnosticMs: number | null;
     activationToReadyMs: number | null;
+    activationToFirstTypedCompletionMs: number | null;
+    readyToFirstTypedCompletionMs: number | null;
     typeProvider: string | null;
-    typeProviderStartMs: number | null;
+    providerKind: string | null;
   };
   hover: {
     samples: HoverSample[];
@@ -38,9 +54,16 @@ export class TestTimer {
       fixture: FIXTURE_NAME,
       timestamp: new Date().toISOString(),
       startup: {
+        activationStartMs: null,
+        typeProviderStartedMs: null,
+        lspReadyMs: null,
+        firstTypedCompletionMs: null,
+        firstDiagnosticMs: null,
         activationToReadyMs: null,
+        activationToFirstTypedCompletionMs: null,
+        readyToFirstTypedCompletionMs: null,
         typeProvider: null,
-        typeProviderStartMs: null,
+        providerKind: null,
       },
       hover: {
         samples: [],
@@ -60,10 +83,37 @@ export class TestTimer {
     this.report.startup.activationToReadyMs = activationToReadyMs;
   }
 
+  recordStartupTiming(record: StartupTimingRecord): void {
+    this.report.startup.activationStartMs = record.activationStartMs;
+    this.report.startup.typeProviderStartedMs = record.typeProviderStartedMs;
+    this.report.startup.lspReadyMs = record.lspReadyMs;
+    this.report.startup.firstTypedCompletionMs = record.firstTypedCompletionMs;
+    this.report.startup.firstDiagnosticMs = record.firstDiagnosticMs;
+    this.report.startup.typeProvider = record.providerKind;
+    this.report.startup.providerKind = record.providerKind;
+
+    this.report.startup.activationToReadyMs =
+      record.lspReadyMs - record.activationStartMs;
+    this.report.startup.activationToFirstTypedCompletionMs =
+      record.firstTypedCompletionMs === null
+        ? null
+        : record.firstTypedCompletionMs - record.activationStartMs;
+    this.report.startup.readyToFirstTypedCompletionMs =
+      record.firstTypedCompletionMs === null
+        ? null
+        : record.firstTypedCompletionMs - record.lspReadyMs;
+
+    if (record.firstDiagnosticMs !== null) {
+      this.report.diagnostics.timeToFirstDiagnosticMs =
+        record.firstDiagnosticMs - record.activationStartMs;
+    }
+  }
+
   recordTypeProvider(provider: string, startMs?: number): void {
     this.report.startup.typeProvider = provider;
+    this.report.startup.providerKind = provider;
     if (startMs !== undefined) {
-      this.report.startup.typeProviderStartMs = startMs;
+      this.report.startup.typeProviderStartedMs = startMs;
     }
   }
 

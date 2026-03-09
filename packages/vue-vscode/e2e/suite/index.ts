@@ -25,7 +25,10 @@ export async function run(): Promise<void> {
   });
 
   const testsRoot = path.resolve(__dirname);
-  const files = findTestFiles(testsRoot);
+  const onlyPattern = process.env.VERTER_E2E_ONLY;
+  const files = findTestFiles(testsRoot).filter((file) =>
+    onlyPattern ? file.includes(onlyPattern) : true,
+  );
 
   for (const f of files) {
     mocha.addFile(f);

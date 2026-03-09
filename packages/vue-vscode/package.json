@@ -29,6 +29,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "pretest:e2e": "tsc -p tsconfig.test.json",
     "test:e2e": "vscode-test",
+    "benchmark:startup": "node e2e/startupBenchmark.mjs",
     "package": "node package.mjs",
     "package:win32-x64": "node package.mjs --target win32-x64",
     "package:linux-x64": "node package.mjs --target linux-x64",

@@ -1,0 +1,27 @@
+{
+  "fixture": "single-project",
+  "timestamp": "2026-03-09T18:56:46.905Z",
+  "startup": {
+    "activationStartMs": 1773082603536,
+    "typeProviderStartedMs": 1773082603973,
+    "lspReadyMs": 1773082606690,
+    "firstTypedCompletionMs": 1773082604512,
+    "firstDiagnosticMs": 1773082606664,
+    "activationToReadyMs": 3154,
+    "activationToFirstTypedCompletionMs": 976,
+    "readyToFirstTypedCompletionMs": -2178,
+    "typeProvider": "tsserver",
+    "providerKind": "tsserver"
+  },
+  "hover": {
+    "samples": [],
+    "avgMs": null,
+    "p95Ms": null,
+    "maxMs": null
+  },
+  "diagnostics": {
+    "timeToFirstDiagnosticMs": 3128,
+    "totalDiagnostics": 0,
+    "sources": []
+  }
+}

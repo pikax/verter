@@ -15,18 +15,17 @@ suite(`Startup Timing [${FIXTURE_NAME}]`, function () {
     await waitForExtensionReady();
   });
 
-  test("measures activation → ready time", function () {
+  test("measures activation to ready time", function () {
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     const timing = parseStartupTiming();
 
-    if (timing.deltaMs !== undefined) {
-      getTimer().recordStartup(timing.deltaMs);
-      console.log(`    Startup time: ${timing.deltaMs}ms`);
+    if (timing.activationToReadyMs !== undefined) {
+      getTimer().recordStartup(timing.activationToReadyMs);
+      console.log(`    Startup time: ${timing.activationToReadyMs}ms`);
 
-      // Generous bound — LSP startup includes binary launch, workspace scan, type provider init
       expect(
-        timing.deltaMs,
+        timing.activationToReadyMs,
         "Startup should complete within 60s",
       ).to.be.lessThan(60_000);
     } else {
@@ -38,28 +37,16 @@ suite(`Startup Timing [${FIXTURE_NAME}]`, function () {
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     const log = readTestLog();
-
-    const hasTypeProvider = log.includes("Type provider");
-    const hasVerterOnly = log.includes("verter-only mode");
-    const hasTsgo = log.includes("TSGO");
-    const hasTsserver = log.includes("tsserver");
+    const timing = parseStartupTiming();
 
     expect(
-      hasTypeProvider || hasVerterOnly || hasTsgo || hasTsserver,
+      log.includes("Type provider") || timing.providerKind === "verter-only",
       "Log should indicate type provider status",
     ).to.be.true;
 
-    // Record which provider was used
-    if (hasTsserver) {
-      getTimer().recordTypeProvider("tsserver");
-    } else if (hasTsgo) {
-      getTimer().recordTypeProvider("tsgo");
-    } else {
-      getTimer().recordTypeProvider("verter-only");
-    }
+    const providerKind = timing.providerKind ?? "verter-only";
+    getTimer().recordTypeProvider(providerKind, timing.typeProviderStartedMs);
 
-    console.log(
-      `    Type provider: ${hasTsserver ? "tsserver" : hasTsgo ? "tsgo" : "verter-only"}`,
-    );
+    console.log(`    Type provider: ${providerKind}`);
   });
 });

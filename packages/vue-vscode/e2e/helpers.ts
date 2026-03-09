@@ -11,6 +11,17 @@ export const TYPE_PROVIDER = process.env.VERTER_E2E_TYPE_PROVIDER;
 export const LOG_FILE = process.env.VERTER_E2E_LOG_FILE || path.join(os.tmpdir(), "verter-e2e.log");
 export const TIMING_FILE = process.env.VERTER_E2E_TIMING_FILE || path.join(os.tmpdir(), "verter-e2e-timing.json");
 
+export interface StartupTiming {
+  activationStartMs?: number;
+  typeProviderStartedMs?: number;
+  lspReadyMs?: number;
+  firstTypedCompletionMs?: number;
+  firstDiagnosticMs?: number;
+  providerKind?: "tsgo" | "tsserver" | "verter-only";
+  activationToReadyMs?: number;
+  activationToFirstTypedCompletionMs?: number;
+}
+
 /**
  * Check whether the LSP reached the "ready" state by looking for the
  * ready notification in the log file.
@@ -356,16 +367,53 @@ export function assertLogNotContains(needle: string, message?: string): void {
  * Parse startup timing from the log file.
  * Looks for [TIMING] markers written by the extension in test mode.
  */
-export function parseStartupTiming(): { activationMs?: number; readyMs?: number; deltaMs?: number } {
+export function parseStartupTiming(): StartupTiming {
   const log = readTestLog();
   const activationMatch = log.match(/\[TIMING\] activation_start (\d+)/);
+  const typeProviderMatch = log.match(
+    /\[TIMING\] type_provider_started (\d+) (tsgo|tsserver)/,
+  );
   const readyMatch = log.match(/\[TIMING\] ready (\d+)/);
+  const typedCompletionMatch = log.match(
+    /\[TIMING\] first_typed_completion (\d+) [^\s]+ [^\s]+/,
+  );
+  const firstDiagnosticMatch = log.match(/\[TIMING\] first_diagnostic (\d+)/);
 
-  const activationMs = activationMatch ? parseInt(activationMatch[1], 10) : undefined;
-  const readyMs = readyMatch ? parseInt(readyMatch[1], 10) : undefined;
-  const deltaMs = activationMs && readyMs ? readyMs - activationMs : undefined;
+  const activationStartMs = activationMatch
+    ? parseInt(activationMatch[1], 10)
+    : undefined;
+  const typeProviderStartedMs = typeProviderMatch
+    ? parseInt(typeProviderMatch[1], 10)
+    : undefined;
+  const lspReadyMs = readyMatch ? parseInt(readyMatch[1], 10) : undefined;
+  const firstTypedCompletionMs = typedCompletionMatch
+    ? parseInt(typedCompletionMatch[1], 10)
+    : undefined;
+  const firstDiagnosticMs = firstDiagnosticMatch
+    ? parseInt(firstDiagnosticMatch[1], 10)
+    : undefined;
+  const providerKind = typeProviderMatch
+    ? (typeProviderMatch[2] as StartupTiming["providerKind"])
+    : log.includes("verter-only mode")
+      ? "verter-only"
+      : undefined;
 
-  return { activationMs, readyMs, deltaMs };
+  return {
+    activationStartMs,
+    typeProviderStartedMs,
+    lspReadyMs,
+    firstTypedCompletionMs,
+    firstDiagnosticMs,
+    providerKind,
+    activationToReadyMs:
+      activationStartMs !== undefined && lspReadyMs !== undefined
+        ? lspReadyMs - activationStartMs
+        : undefined,
+    activationToFirstTypedCompletionMs:
+      activationStartMs !== undefined && firstTypedCompletionMs !== undefined
+        ? firstTypedCompletionMs - activationStartMs
+        : undefined,
+  };
 }
 
 // ── IDE Feature Helpers ────────────────────────────────────────

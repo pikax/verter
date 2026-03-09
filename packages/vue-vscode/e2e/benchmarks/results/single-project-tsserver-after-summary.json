@@ -1,0 +1,165 @@
+{
+  "fixture": "single-project",
+  "providerKind": "tsserver",
+  "scenario": "after",
+  "runs": 5,
+  "generatedAt": "2026-03-09T18:57:01.653Z",
+  "summary": {
+    "activationToReadyMs": {
+      "median": 3220,
+      "p95": 4466,
+      "min": 3141,
+      "max": 4466
+    },
+    "activationToFirstTypedCompletionMs": {
+      "median": 1263,
+      "p95": 2415,
+      "min": 976,
+      "max": 2415
+    },
+    "readyToFirstTypedCompletionMs": {
+      "median": -2051,
+      "p95": -1799,
+      "min": -2178,
+      "max": -1799
+    }
+  },
+  "baselineComparison": null,
+  "reports": [
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T18:56:34.777Z",
+      "startup": {
+        "activationStartMs": 1773082591267,
+        "typeProviderStartedMs": 1773082592061,
+        "lspReadyMs": 1773082594632,
+        "firstTypedCompletionMs": 1773082592833,
+        "firstDiagnosticMs": 1773082594689,
+        "activationToReadyMs": 3365,
+        "activationToFirstTypedCompletionMs": 1566,
+        "readyToFirstTypedCompletionMs": -1799,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": 3422,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    },
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T18:56:40.705Z",
+      "startup": {
+        "activationStartMs": 1773082597483,
+        "typeProviderStartedMs": 1773082597999,
+        "lspReadyMs": 1773082600624,
+        "firstTypedCompletionMs": 1773082598746,
+        "firstDiagnosticMs": 1773082600681,
+        "activationToReadyMs": 3141,
+        "activationToFirstTypedCompletionMs": 1263,
+        "readyToFirstTypedCompletionMs": -1878,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": 3198,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    },
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T18:56:46.905Z",
+      "startup": {
+        "activationStartMs": 1773082603536,
+        "typeProviderStartedMs": 1773082603973,
+        "lspReadyMs": 1773082606690,
+        "firstTypedCompletionMs": 1773082604512,
+        "firstDiagnosticMs": 1773082606664,
+        "activationToReadyMs": 3154,
+        "activationToFirstTypedCompletionMs": 976,
+        "readyToFirstTypedCompletionMs": -2178,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": 3128,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    },
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T18:56:55.265Z",
+      "startup": {
+        "activationStartMs": 1773082610655,
+        "typeProviderStartedMs": 1773082612528,
+        "lspReadyMs": 1773082615121,
+        "firstTypedCompletionMs": 1773082613070,
+        "firstDiagnosticMs": 1773082615117,
+        "activationToReadyMs": 4466,
+        "activationToFirstTypedCompletionMs": 2415,
+        "readyToFirstTypedCompletionMs": -2051,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": 4462,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    },
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T18:57:01.460Z",
+      "startup": {
+        "activationStartMs": 1773082618132,
+        "typeProviderStartedMs": 1773082618599,
+        "lspReadyMs": 1773082621352,
+        "firstTypedCompletionMs": 1773082619209,
+        "firstDiagnosticMs": 1773082621403,
+        "activationToReadyMs": 3220,
+        "activationToFirstTypedCompletionMs": 1077,
+        "readyToFirstTypedCompletionMs": -2143,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": 3271,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    }
+  ]
+}

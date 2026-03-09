@@ -183,6 +183,7 @@ async function main() {
         extensionTestsPath,
         launchArgs: ["--disable-extensions", fixtureDir],
         extensionTestsEnv: {
+          ...process.env,
           VERTER_E2E_TEST: "1",
           VERTER_E2E_LOG_FILE: path.join(
             os.tmpdir(),
