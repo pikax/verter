@@ -79,6 +79,8 @@ mod tests {
                 type_annotation: None,
                 initializer: None,
                 span: Span::new(10, 15),
+                used_in_script: false,
+                used_in_style: false,
             }],
             ..Default::default()
         };
@@ -111,6 +113,8 @@ mod tests {
                 type_annotation: None,
                 initializer: None,
                 span: Span::new(10, 15),
+                used_in_script: false,
+                used_in_style: false,
             }],
             ..Default::default()
         };

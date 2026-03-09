@@ -497,6 +497,8 @@ mod tests {
                     vue_api: Some(VueApiClassification::Ref),
                 }),
                 span: verter_span::Span::new(0, 0),
+                used_in_script: false,
+                used_in_style: false,
             }],
             vec![AnalyzedImport {
                 source: "vue".to_string(),

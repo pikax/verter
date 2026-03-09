@@ -12,7 +12,9 @@ use crate::ast::types::{ChildrenMode, ElementNode, TemplateAst};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::vapor::find_prop_oxc_exp;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
-use crate::template::oxc::types::{ExpressionFlag, OxcParsedElement, OxcParsedExpression};
+use crate::template::oxc::types::{
+    Dynamism, ExpressionFlag, OxcParsedElement, OxcParsedExpression,
+};
 
 use super::super::shared::helpers::{self, is_member_expression, VdomHelper};
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput};
@@ -1011,10 +1013,16 @@ pub(crate) fn build_props_object_into(
                             // - A pure literal (no bindings at all, e.g., :value="200")
                             // - All const props (proven constant across call sites)
                             let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
-                            let expr_bindings = oxc_exp.and_then(|e| e.bindings.as_ref());
-                            let is_pure_literal = expr_bindings
-                                .is_some_and(|b| b.non_ignored_binding_names().is_empty());
-                            if !is_pure_literal && !resolver.all_bindings_const_props(expr_bindings)
+                            let is_pure_literal = oxc_exp.is_some_and(|e| {
+                                e.dynamism == Dynamism::Static
+                                    && e.bindings
+                                        .as_ref()
+                                        .is_some_and(|b| b.non_ignored_binding_names().is_empty())
+                            });
+                            if !is_pure_literal
+                                && !resolver.all_bindings_const_props(
+                                    oxc_exp.and_then(|e| e.bindings.as_ref()),
+                                )
                             {
                                 dynamic_props.push(key.to_string());
                             }
@@ -1617,6 +1625,7 @@ pub fn process_element_leave<'alloc>(
     mut hoisted_constants: Option<&mut Vec<String>>,
     cache_index: Option<usize>,
     resolved_components: Option<&mut Vec<(String, String)>>,
+    slot_cached: bool,
 ) -> ChildRecord {
     let tag_open = &element.tag_open;
     debug_assert!((tag_open.start as usize + 1) <= source.len());
@@ -1640,37 +1649,50 @@ pub fn process_element_leave<'alloc>(
     let mut patch_flag =
         props::compute_patch_flags(element.prop_flag, expr_flag, element.children_mode);
 
-    // Cached static elements use -1 (CACHED) patch flag, bypassing all diffing
-    let is_cached = cache_index.is_some();
+    // Cached static elements use -1 (CACHED) patch flag, bypassing all diffing.
+    // `cache_index` = individual element caching (adds wrapper + flag).
+    // `slot_cached` = slot-level grouped caching (flag only, wrapper handled by slot code).
+    let has_cached_patchflag = cache_index.is_some() || slot_cached;
+    let has_cache_wrapper = cache_index.is_some();
 
     // Pre-scan: detect directives needing _withDirectives() wrapping.
-    // v-model on native elements, v-show, and custom directives all need wrapping.
-    let has_directives_wrap = !element.tag_type.is_component()
-        && element.props.iter().any(|p| {
-            if !p.is_directive {
-                return false;
-            }
-            let dname = &source[p.start as usize..p.name_end as usize];
-            dname == "v-model"
-                || dname == "v-show"
-                || (!matches!(
-                    dname,
-                    ":" | "v-bind"
-                        | "@"
-                        | "v-on"
-                        | "v-if"
-                        | "v-else-if"
-                        | "v-else"
-                        | "v-for"
-                        | "v-slot"
-                        | "v-once"
-                        | "v-text"
-                        | "v-html"
-                        | "v-cloak"
-                        | "v-memo"
-                        | "v-pre"
-                ) && dname.starts_with("v-"))
-        });
+    // - Native elements: v-model, v-show, and custom directives all need wrapping.
+    // - Components: v-show and custom directives need wrapping. v-model on components
+    //   is handled differently (transformed to modelValue prop + onUpdate:modelValue event),
+    //   NOT via _withDirectives.
+    let is_component = element.tag_type.is_component();
+    let has_directives_wrap = element.props.iter().any(|p| {
+        if !p.is_directive {
+            return false;
+        }
+        let dname = &source[p.start as usize..p.name_end as usize];
+        // v-model: only wraps native elements (component v-model becomes props)
+        if dname == "v-model" {
+            return !is_component;
+        }
+        // v-show always wraps
+        if dname == "v-show" {
+            return true;
+        }
+        // Custom directives (v-*) wrap both native elements and components
+        !matches!(
+            dname,
+            ":" | "v-bind"
+                | "@"
+                | "v-on"
+                | "v-if"
+                | "v-else-if"
+                | "v-else"
+                | "v-for"
+                | "v-slot"
+                | "v-once"
+                | "v-text"
+                | "v-html"
+                | "v-cloak"
+                | "v-memo"
+                | "v-pre"
+        ) && dname.starts_with("v-")
+    });
 
     // Step 3: Build open tag overwrite (reusing caller's buffer)
     buf.clear();
@@ -1760,7 +1782,7 @@ pub fn process_element_leave<'alloc>(
         // - not a component (components have variable tag resolution)
         // - not already cached (redundant)
         let can_hoist_props = options.hoist_static
-            && !is_cached
+            && !has_cached_patchflag
             && !element.tag_type.is_component()
             && props_result.dynamic_props.is_empty()
             && !props_result.uses_merge
@@ -1860,7 +1882,7 @@ pub fn process_element_leave<'alloc>(
 
     // Pre-build patch flag suffix (flag + dynamic props array) once, reuse in both
     // self-closing and close-tag paths.
-    let patch_suffix: &str = if is_cached {
+    let patch_suffix: &str = if has_cached_patchflag {
         // Cached elements always use -1 /* CACHED */ regardless of actual flags
         if options.is_production {
             ", -1"
@@ -1891,7 +1913,7 @@ pub fn process_element_leave<'alloc>(
     // Self-closing or no close tag: single overwrite for entire tag
     if element.is_self_closing || element.tag_close.is_none() {
         // Emit PatchFlags for self-closing elements (before closing paren)
-        if is_cached || patch_flag != 0 {
+        if has_cached_patchflag || patch_flag != 0 {
             // Need null children placeholder before patch flags
             if !has_children {
                 buf.push_str(", null");
@@ -1904,7 +1926,7 @@ pub fn process_element_leave<'alloc>(
             buf.push(')');
         }
         // Close cache wrapper: `_cache[N] = ...)`
-        if is_cached {
+        if has_cache_wrapper {
             buf.push(')');
         }
         // Close _withDirectives() wrapper for v-model, v-show, custom directives
@@ -1985,7 +2007,7 @@ pub fn process_element_leave<'alloc>(
     }
 
     // Patch flag (only if non-zero or cached) — reuse pre-built suffix
-    if is_cached || patch_flag != 0 {
+    if has_cached_patchflag || patch_flag != 0 {
         buf.push_str(patch_suffix);
     }
 
@@ -1995,7 +2017,7 @@ pub fn process_element_leave<'alloc>(
         buf.push(')');
     }
     // Close cache wrapper: `_cache[N] = ...)`
-    if is_cached {
+    if has_cache_wrapper {
         buf.push(')');
     }
     // Close _withDirectives() wrapper for v-model, v-show, custom directives

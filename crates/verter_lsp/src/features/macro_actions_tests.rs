@@ -641,6 +641,8 @@ fn make_binding(name: &str, type_annotation: Option<&str>) -> AnalyzedBinding {
         type_annotation: type_annotation.map(|s| s.into()),
         initializer: None,
         span: verter_span::Span::new(0, 0),
+        used_in_script: false,
+        used_in_style: false,
     }
 }
 

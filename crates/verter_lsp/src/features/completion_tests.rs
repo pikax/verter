@@ -31,6 +31,8 @@ fn test_template_completions_include_bindings() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
         vec![],
@@ -115,6 +117,8 @@ fn test_filters_internal_symbols() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
         vec![],
@@ -1112,6 +1116,8 @@ fn test_tag_name_no_script_bindings() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
     );
@@ -1200,6 +1206,8 @@ fn test_tag_name_includes_components() {
             dynamic_classes: vec![],
             v_models: vec![],
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
     );
 
@@ -1292,6 +1300,8 @@ fn test_attr_name_no_script_bindings() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
     );
@@ -1387,6 +1397,8 @@ fn test_text_content_no_bindings() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
     );
@@ -1431,6 +1443,8 @@ fn test_mustache_shows_bindings() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
     );
@@ -1486,6 +1500,8 @@ fn test_attr_value_shows_bindings() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         template: Some(verter_analysis::TemplateAnalysisSnapshot {
             elements: vec![verter_analysis::TemplateElement {
@@ -1704,6 +1720,8 @@ fn test_script_completions_have_sort_text() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![AnalyzedImport {
             source: "vue".to_string(),
@@ -1994,6 +2012,8 @@ fn test_template_completions_include_vfor_variables() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         template: Some(TemplateAnalysisSnapshot {
             elements: vec![TemplateElement {

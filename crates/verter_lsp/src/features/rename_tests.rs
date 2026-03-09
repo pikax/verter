@@ -36,6 +36,8 @@ fn test_rename_binding_across_blocks() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(count_decl_relative, count_decl_relative + 5),
+            used_in_script: false,
+            used_in_style: false,
         }],
         template: Some(template::TemplateAnalysisSnapshot {
             binding_occurrences: vec![template::TemplateBindingOccurrence {
@@ -93,6 +95,8 @@ fn test_prepare_rename_returns_range() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(count_relative, count_relative + 5),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
     );
@@ -403,6 +407,8 @@ fn test_span_based_rename_no_false_positives() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(count_decl_relative, count_decl_relative + 5),
+            used_in_script: false,
+            used_in_style: false,
         }],
         template: Some(template::TemplateAnalysisSnapshot {
             binding_occurrences: vec![template::TemplateBindingOccurrence {
@@ -538,6 +544,8 @@ fn test_rename_with_dual_script_blocks() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(count_combined_offset, count_combined_offset + 5),
+            used_in_script: false,
+            used_in_style: false,
         }],
         template: Some(template::TemplateAnalysisSnapshot {
             binding_occurrences: vec![template::TemplateBindingOccurrence {

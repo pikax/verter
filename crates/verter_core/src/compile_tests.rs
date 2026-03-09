@@ -13273,3 +13273,157 @@ const leftList = computed(() => props.list.filter((v, index) => index % 2 === 0)
         tsx.code
     );
 }
+
+/// Regression: slot cache wrapping must not insert `, -1` flags inside
+/// `_createTextVNode(...)` content when text children are grouped in a text run.
+#[test]
+fn test_slot_cache_text_run_flags_not_inside_text_content() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        is_production: true,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        r#"<script setup>
+import Header from './Header.vue'
+import Layout from './Layout.vue'
+import RedEnvelope from './RedEnvelope.vue'
+import Top from './Top.vue'
+import PageContent from './PageContent.vue'
+</script>
+<template>
+  <PageContent class="bg-theme-black" :back-router="false">
+    <Header ref="headerRef" class="fixed-dom fixed top-0 z-[11] w-full" />
+    <div class="fixed-dom-placeholder h-[50px]"></div>
+
+    <!-- comment1 -->
+    <Layout class="min-h-screen" />
+
+    <!-- comment2 -->
+    <RedEnvelope />
+
+    <Top />
+  </PageContent>
+</template>"#,
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+
+    let code = &result.template.unwrap().code;
+
+    // Must not have `, -1` inside text node content
+    assert!(
+        !code.contains(r#"_createTextVNode(", -1"#),
+        "cache flags must not leak into _createTextVNode content: {}",
+        code
+    );
+    assert!(
+        !code.contains(r#"_createTextVNode("..."#),
+        "cache spread syntax must not leak into _createTextVNode content: {}",
+        code
+    );
+
+    // Must produce valid cache patterns
+    assert!(
+        code.contains("_cache["),
+        "should have slot cache wrapping: {}",
+        code
+    );
+
+    // The code must be syntactically valid — no `, -1]))_createVNode` without a comma
+    assert!(
+        !code.contains("]))_create"),
+        "cache close must be followed by comma separator, not immediately by _create: {}",
+        code
+    );
+}
+
+/// Vue's official compiler adds `-1 /* CACHED */` patchFlag to each VNode inside
+/// cached slot content. This tells the runtime the VNode is hoisted/stable and
+/// should skip diffing. Verter must match this behavior.
+#[test]
+fn test_slot_cached_elements_get_hoisted_patch_flag() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        r#"<script setup>
+import MyComp from './MyComp.vue'
+</script>
+<template>
+  <MyComp>
+    <div class="static-child">hello</div>
+    <span>world</span>
+  </MyComp>
+</template>"#,
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+
+    let code = &result.template.unwrap().code;
+
+    // Cached element VNodes must have -1 /* CACHED */ patchFlag
+    // Vue compiler output: _createElementVNode("div", { class: "static-child" }, "hello", -1 /* CACHED */)
+    assert!(
+        code.contains("-1 /* CACHED */"),
+        "cached slot child elements must have -1 /* CACHED */ patchFlag: {}",
+        code
+    );
+
+    // The cache wrapper should still be present
+    assert!(
+        code.contains("_cache["),
+        "should have slot cache wrapping: {}",
+        code
+    );
+}
+
+/// Production mode: cached elements get just `, -1` (no comment)
+#[test]
+fn test_slot_cached_elements_hoisted_flag_production() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        is_production: true,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        r#"<script setup>
+import MyComp from './MyComp.vue'
+</script>
+<template>
+  <MyComp>
+    <div class="static-child">hello</div>
+  </MyComp>
+</template>"#,
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+
+    let code = &result.template.unwrap().code;
+
+    // Production mode: just -1, no comment
+    assert!(
+        code.contains(", -1)"),
+        "cached slot child elements must have -1 patchFlag in production: {}",
+        code
+    );
+}

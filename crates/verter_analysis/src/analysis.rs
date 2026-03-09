@@ -167,6 +167,8 @@ pub fn build_script_analysis_with_scope(
                             type_annotation,
                             initializer,
                             span: id.span.into(),
+                            used_in_script: false,
+                            used_in_style: false,
                         });
                     } else {
                         // Destructured binding: ObjectPattern, ArrayPattern, etc.
@@ -211,6 +213,8 @@ pub fn build_script_analysis_with_scope(
                         type_annotation: None,
                         initializer: None,
                         span: id.span.into(),
+                        used_in_script: false,
+                        used_in_style: false,
                     });
                 }
             }
@@ -225,6 +229,8 @@ pub fn build_script_analysis_with_scope(
                         type_annotation: None,
                         initializer: None,
                         span: id.span.into(),
+                        used_in_script: false,
+                        used_in_style: false,
                     });
                 }
             }
@@ -358,6 +364,8 @@ fn extract_destructured_bindings(
                 type_annotation: None,
                 initializer: initializer.clone(),
                 span: id.span.into(),
+                used_in_script: false,
+                used_in_style: false,
             });
         }
         BindingPattern::ObjectPattern(obj) => {

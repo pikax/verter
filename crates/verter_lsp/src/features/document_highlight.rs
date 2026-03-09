@@ -242,6 +242,8 @@ mod tests {
                 type_annotation: None,
                 initializer: None,
                 span: verter_span::Span::new(count_decl, count_decl + 5),
+                used_in_script: false,
+                used_in_style: false,
             }],
             vec![],
         );

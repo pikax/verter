@@ -131,36 +131,49 @@ pub fn emit_static_style_object(buf: &mut String, style: &str) {
         return;
     }
 
-    buf.push_str("{ ");
-    let mut first = true;
+    // Collect declarations into a Vec, deduplicating keys (last wins, matching CSS cascade).
+    // This matches Vue's parseStringStyle which uses a plain JS object for the same effect.
+    let mut entries: Vec<(&str, &str)> = Vec::new();
     for decl in trimmed.split(';') {
         let decl = decl.trim();
         if decl.is_empty() {
             continue;
         }
-        // Split at the first colon — property name vs value
         if let Some(colon_pos) = decl.find(':') {
             let prop = decl[..colon_pos].trim();
             let val = decl[colon_pos + 1..].trim();
             if prop.is_empty() || val.is_empty() {
                 continue;
             }
-            if !first {
-                buf.push_str(", ");
-            }
-            first = false;
-            // Quote the property key if it contains hyphens (CSS properties)
-            if needs_quoted_key(prop) {
-                buf.push('"');
-                helpers::escape_js_string_into(buf, prop);
-                buf.push('"');
+            // Overwrite existing entry with same key (last wins)
+            if let Some(existing) = entries.iter_mut().find(|(k, _)| *k == prop) {
+                existing.1 = val;
             } else {
-                buf.push_str(prop);
+                entries.push((prop, val));
             }
-            buf.push_str(": \"");
-            helpers::escape_js_string_into(buf, val);
-            buf.push('"');
         }
+    }
+
+    if entries.is_empty() {
+        buf.push_str("{}");
+        return;
+    }
+
+    buf.push_str("{ ");
+    for (i, (prop, val)) in entries.iter().enumerate() {
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        if needs_quoted_key(prop) {
+            buf.push('"');
+            helpers::escape_js_string_into(buf, prop);
+            buf.push('"');
+        } else {
+            buf.push_str(prop);
+        }
+        buf.push_str(": \"");
+        helpers::escape_js_string_into(buf, val);
+        buf.push('"');
     }
     buf.push_str(" }");
 }
@@ -449,6 +462,24 @@ mod tests {
         assert!(
             !result.contains('\n'),
             "output must not contain literal newlines in value: {result:?}"
+        );
+    }
+
+    #[test]
+    fn style_obj_duplicate_keys_last_wins() {
+        // CSS cascade: last declaration wins. Matches Vue's parseStringStyle (plain object).
+        assert_eq!(
+            style_to_obj("position: absolute; position: relative; width: 100%"),
+            r#"{ position: "relative", width: "100%" }"#
+        );
+    }
+
+    #[test]
+    fn style_obj_duplicate_keys_three_values() {
+        // Three declarations of same key → last wins
+        assert_eq!(
+            style_to_obj("color: red; color: blue; color: green"),
+            r#"{ color: "green" }"#
         );
     }
 

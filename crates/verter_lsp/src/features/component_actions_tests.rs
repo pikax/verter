@@ -418,6 +418,8 @@ fn make_binding(name: &str) -> verter_analysis::AnalyzedBinding {
         type_annotation: None,
         initializer: None,
         span: verter_span::Span::new(0, 0),
+        used_in_script: false,
+        used_in_style: false,
     }
 }
 

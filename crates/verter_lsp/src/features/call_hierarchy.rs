@@ -236,6 +236,8 @@ mod tests {
                 type_annotation: None,
                 initializer: None,
                 span: verter_span::Span::new(21, 24),
+                used_in_script: false,
+                used_in_style: false,
             }],
             ..Default::default()
         };

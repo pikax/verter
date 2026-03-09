@@ -4239,10 +4239,7 @@ fn kebab_event_with_dollar_event_wraps_with_event_param() {
         "should preserve kebab-case event name: {result}"
     );
     // Negative: should NOT have bare () => (no $event)
-    let spread_part = result
-        .split(r#""onClick-overlay""#)
-        .nth(1)
-        .unwrap_or("");
+    let spread_part = result.split(r#""onClick-overlay""#).nth(1).unwrap_or("");
     assert!(
         !spread_part.starts_with(": () =>"),
         "should NOT use () => (without $event) when $event is used: {result}"

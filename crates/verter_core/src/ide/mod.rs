@@ -68,6 +68,9 @@ pub struct IdeScriptOptions<'a> {
     /// When a root v-if references a prop, the component's type signature
     /// narrows based on the prop value passed by the parent.
     pub conditional_root_narrowing: bool,
+    /// Binding names referenced in style `v-bind()` expressions.
+    /// Used to emit `void(name)` and prevent false unused diagnostics.
+    pub style_v_bind_vars: Vec<String>,
 }
 
 /// Options for IDE template generation.

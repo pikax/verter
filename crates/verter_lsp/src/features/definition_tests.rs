@@ -35,6 +35,8 @@ fn test_go_to_definition_from_template_to_script_via_span() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(script_count_offset, script_count_end),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
         vec![],
@@ -292,6 +294,8 @@ fn test_no_definition_for_unknown_binding() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
         vec![],
@@ -327,6 +331,8 @@ fn test_no_definition_inside_html_comment() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![AnalyzedImport {
             source: "./MyComponent.vue".to_string(),
@@ -1615,6 +1621,8 @@ fn test_go_to_definition_event_handler_click() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(handler_offset as u32, (handler_offset + 11) as u32),
+            used_in_script: false,
+            used_in_style: false,
         }],
         template: Some(TemplateAnalysisSnapshot {
             elements: vec![TemplateElement {
@@ -1724,6 +1732,8 @@ fn test_go_to_definition_inline_event_no_binding() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
         }],
         template: Some(TemplateAnalysisSnapshot {
             elements: vec![TemplateElement {
@@ -2108,6 +2118,8 @@ fn definition_binding_takes_precedence_over_prop_field() {
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(script_count_offset, script_count_end),
+            used_in_script: false,
+            used_in_style: false,
         }],
         vec![],
         vec![AnalyzedMacro {

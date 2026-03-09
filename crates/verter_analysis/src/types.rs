@@ -550,12 +550,17 @@ pub struct AnalyzedBinding {
     pub initializer: Option<BindingInitializer>,
     /// SFC-absolute byte span of the binding name.
     pub span: Span,
+    /// Whether this binding is referenced elsewhere in the script body
+    /// (not counting its own declaration).
+    pub used_in_script: bool,
+    /// Whether this binding is referenced in a style block's `v-bind()`.
+    pub used_in_style: bool,
 }
 
 impl serde::Serialize for AnalyzedBinding {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let count = 7 + usize::from(self.type_annotation.is_some());
+        let count = 9 + usize::from(self.type_annotation.is_some());
         let mut s = serializer.serialize_struct("AnalyzedBinding", count)?;
         s.serialize_field("name", &self.name)?;
         s.serialize_field("kind", &self.kind)?;
@@ -567,6 +572,8 @@ impl serde::Serialize for AnalyzedBinding {
         s.serialize_field("initializer", &self.initializer)?;
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
+        s.serialize_field("usedInScript", &self.used_in_script)?;
+        s.serialize_field("usedInStyle", &self.used_in_style)?;
         s.end()
     }
 }
@@ -588,6 +595,10 @@ impl<'de> serde::Deserialize<'de> for AnalyzedBinding {
             span_start: u32,
             #[serde(default)]
             span_end: u32,
+            #[serde(default)]
+            used_in_script: bool,
+            #[serde(default)]
+            used_in_style: bool,
         }
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
@@ -598,6 +609,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedBinding {
             type_annotation: w.type_annotation,
             initializer: w.initializer,
             span: Span::new(w.span_start, w.span_end),
+            used_in_script: w.used_in_script,
+            used_in_style: w.used_in_style,
         })
     }
 }

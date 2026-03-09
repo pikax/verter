@@ -2645,3 +2645,124 @@ fn test_v_for_iterable_source_offset() {
         "iterable should appear in output"
     );
 }
+
+// =========================================================================
+// Hoisting scope-variable regression tests
+// =========================================================================
+
+/// Props referencing v-for loop variables must NOT be hoisted to module scope.
+#[test]
+fn v_for_key_not_hoisted() {
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("test.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        r#"<template><div v-for="(item, i) in items" :key="i" class="card">{{ item }}</div></template>"#,
+        &options,
+        &verter_opts,
+        &allocator,
+    );
+    let template = result.template.as_ref().expect("should have template");
+    assert!(
+        template.code.contains("_renderList"),
+        "should use _renderList, got:\n{}",
+        template.code
+    );
+    // Props object with v-for locals must NOT be hoisted (would cause ReferenceError)
+    assert!(
+        !template.code.contains("_hoisted_1 = { key:"),
+        "props object referencing v-for locals must not be hoisted, got:\n{}",
+        template.code
+    );
+    assert!(
+        template.code.contains("key: i"),
+        "key should reference loop variable, got:\n{}",
+        template.code
+    );
+}
+
+/// Child element props referencing v-for locals must NOT be hoisted.
+#[test]
+fn v_for_child_props_not_hoisted() {
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("test.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        r#"<template><ul><li v-for="item in items" :key="item.id"><span :title="item.name">text</span></li></ul></template>"#,
+        &options,
+        &verter_opts,
+        &allocator,
+    );
+    let template = result.template.as_ref().expect("should have template");
+    // Props objects with v-for locals must NOT be hoisted
+    assert!(
+        !template.code.contains("_hoisted_1 = { title:"),
+        "child props object referencing v-for locals must not be hoisted, got:\n{}",
+        template.code
+    );
+    assert!(
+        !template.code.contains("_hoisted_2 = { key:"),
+        "key props object referencing v-for locals must not be hoisted, got:\n{}",
+        template.code
+    );
+    // Inline props objects should appear inside the render callback
+    assert!(
+        template.code.contains("{ title: item.name }")
+            || template.code.contains("title: item.name"),
+        "title prop should reference loop variable inline, got:\n{}",
+        template.code
+    );
+}
+
+/// Props referencing v-slot destructured variables must NOT be hoisted.
+#[test]
+fn v_slot_props_not_hoisted() {
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("test.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        r#"<template><Comp v-slot="{ item }"><div :class="item.cls">text</div></Comp></template>"#,
+        &options,
+        &verter_opts,
+        &allocator,
+    );
+    let template = result.template.as_ref().expect("should have template");
+    assert!(
+        !template.code.contains("_hoisted_"),
+        "props referencing v-slot locals must not be hoisted, got:\n{}",
+        template.code
+    );
+}
+
+/// Truly static props (no scope locals) should still be hoisted.
+#[test]
+fn static_props_still_hoisted() {
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("test.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    // Use dynamic child ({{ msg }}) so the parent isn't cache-wrapped
+    let result = compile(
+        r#"<template><div class="app">{{ msg }}</div></template>"#,
+        &options,
+        &verter_opts,
+        &allocator,
+    );
+    let template = result.template.as_ref().expect("should have template");
+    assert!(
+        template.code.contains("_hoisted_"),
+        "truly static props should still be hoisted, got:\n{}",
+        template.code
+    );
+}

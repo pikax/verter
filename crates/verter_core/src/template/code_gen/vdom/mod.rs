@@ -822,6 +822,30 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             None
         };
 
+        // When inside a slot context, static elements don't get individual cache
+        // wrapping (that's handled by emit_slot_children_with_cache), but they still
+        // need the -1 CACHED patchFlag to match Vue's official compiler output.
+        // Skip nested static children whose parent is also fully static — the parent's
+        // -1 flag covers them (Vue only flags direct slot children, not nested ones).
+        let slot_cached = cache_idx.is_none()
+            && self.options.hoist_static
+            && el.is_fully_static
+            && !is_block_root
+            && el.v_condition.is_none()
+            && el.v_for.is_none()
+            && self.in_slot_context_stack.last().copied().unwrap_or(false)
+            && !self.ast.nodes[_id.0]
+                .parent
+                .and_then(|pid| {
+                    let pnode = &self.ast.nodes[pid.0];
+                    if let AstNodeKind::Element(ref pel) = pnode.kind {
+                        Some(pel.is_fully_static && !pel.tag_type.is_component())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false);
+
         let record = element::process_element_leave(
             el,
             oxc,
@@ -837,6 +861,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             Some(&mut self.hoisted_constants),
             cache_idx,
             Some(&mut self.resolved_components),
+            slot_cached,
         );
         buf.clear();
         self.buf = buf;
@@ -2079,6 +2104,7 @@ const cls = ref('foo')
     #[test]
     fn slot_single_static_text_cached() {
         // Static text inside a slot should be cached with _cache[N]
+        // and wrapped in _createTextVNode()
         let code = gen_vdom_template(
             r#"<template><CList>Cras justo odio</CList></template>
 <script setup>
@@ -2090,8 +2116,8 @@ import CList from './CList.vue'
             "Static text in slot should be cached, got:\n{code}"
         );
         assert!(
-            code.contains("-1 /* CACHED */") || code.contains(", -1"),
-            "Cached slot content should have CACHED flag, got:\n{code}"
+            code.contains("_createTextVNode("),
+            "Static text in slot should be wrapped in _createTextVNode, got:\n{code}"
         );
     }
 
@@ -2147,6 +2173,77 @@ const cls = ref('foo')
         assert!(
             !code.contains("_cache["),
             "Dynamic-only slot should NOT use cache, got:\n{code}"
+        );
+    }
+
+    // ==================== Dot-notation component names ====================
+
+    #[test]
+    fn dot_notation_component_setup_binding() {
+        // <Swiper.Item> where Swiper is a setup binding → $setup["Swiper"].Item
+        // Vue treats dot-notation as property access on the namespace binding.
+        let code = gen_vdom_template(
+            r#"<template><Swiper.Item>hello</Swiper.Item></template>
+<script setup>
+import Swiper from './Swiper'
+</script>"#,
+        );
+        // The prefix format depends on the resolver — may use $setup["Swiper"] or $setup.Swiper
+        assert!(
+            code.contains("$setup[\"Swiper\"].Item") || code.contains("$setup.Swiper.Item"),
+            "Dot-notation component should resolve namespace from setup binding, got:\n{code}"
+        );
+        // Must NOT generate _resolveComponent or invalid variable names
+        assert!(
+            !code.contains("_resolveComponent"),
+            "Should not use _resolveComponent for dot-notation with setup binding, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_component_Swiper.Item"),
+            "Must not generate invalid variable name with dot, got:\n{code}"
+        );
+    }
+
+    #[test]
+    fn dot_notation_component_fallback() {
+        // <Swiper.Item> where Swiper is NOT in setup bindings → _resolveComponent fallback.
+        // Vue uses toValidAssetId which replaces dots with char codes.
+        // The variable name must be a valid JS identifier (no dots).
+        let code = gen_vdom_template(r#"<template><Swiper.Item>hello</Swiper.Item></template>"#);
+        // Must not contain dots in variable name
+        assert!(
+            !code.contains("_component_Swiper.Item"),
+            "Fallback must not generate variable name with dot, got:\n{code}"
+        );
+        // Should use _resolveComponent with the full tag name
+        assert!(
+            code.contains(r#"_resolveComponent("Swiper.Item")"#),
+            "Fallback should use _resolveComponent with full tag name, got:\n{code}"
+        );
+    }
+
+    // ==================== Duplicate static style keys ====================
+
+    #[test]
+    fn static_style_duplicate_keys_last_wins() {
+        // CSS cascade: last value wins. The JS object should deduplicate.
+        // Matches Vue official compiler behavior (parseStringStyle uses plain object).
+        let code = gen_vdom_template(
+            r#"<template><div style="position: absolute; position: relative; width: 100%">x</div></template>"#,
+        );
+        // "position" should appear only once with last value
+        let position_count = code.matches("position").count();
+        assert_eq!(
+            position_count, 1,
+            "Duplicate style key 'position' should be deduplicated (last wins), got:\n{code}"
+        );
+        assert!(
+            code.contains(r#"position: "relative""#),
+            "Last value 'relative' should win over 'absolute', got:\n{code}"
+        );
+        assert!(
+            !code.contains(r#"position: "absolute""#),
+            "First value 'absolute' should be overwritten, got:\n{code}"
         );
     }
 }

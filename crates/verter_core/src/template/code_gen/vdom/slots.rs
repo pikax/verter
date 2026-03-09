@@ -236,18 +236,12 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 }
             }
 
-            // Add child separators
-            children::add_children_separators_array(
-                &children,
-                out,
-                &self.options,
-                source,
-                self.ast,
-                el_children,
-            );
-
-            // Wrap static children in slot cache groups
-            self.emit_slot_cache_wrapping(&children, out, el_children);
+            // Add child separators + wrap static children in slot cache groups.
+            // These must be a single combined pass because text-run wrapping
+            // and cache wrapping both prepend at child boundary positions —
+            // two separate passes cause position collisions where cache
+            // prefixes/suffixes appear inside _createTextVNode() content.
+            self.emit_slot_children_with_cache(&children, out, source, el_children);
 
             // Close: `])`
             buf.clear();
@@ -671,18 +665,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     // Order matters for prepend stacking at the same position:
                     // 1. Outer wrapper open FIRST (appears before inner wrappers)
                     out.prepend_static(group[0].start, "default: _withCtx(() => [");
-                    // 2. Inner text wrapping (adds _createTextVNode etc.)
-                    children::add_children_separators_array(
-                        group,
-                        out,
-                        &self.options,
-                        source,
-                        self.ast,
-                        el_children,
-                    );
-                    // 3. Slot cache wrapping for static children
-                    self.emit_slot_cache_wrapping(group, out, el_children);
-                    // 4. Outer wrapper close LAST (appears after inner closings)
+                    // 2. Combined text wrapping + slot cache wrapping
+                    self.emit_slot_children_with_cache(group, out, source, el_children);
+                    // 3. Outer wrapper close LAST (appears after inner closings)
                     out.prepend_static(group.last().unwrap().end, "])");
                 }
             }
@@ -799,18 +784,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     // Order matters for prepend stacking:
                     // 1. Outer wrapper open FIRST
                     out.prepend_static(group[0].start, "{ name: \"default\", fn: _withCtx(() => [");
-                    // 2. Inner text wrapping
-                    children::add_children_separators_array(
-                        group,
-                        out,
-                        &self.options,
-                        source,
-                        self.ast,
-                        el_children,
-                    );
-                    // 3. Slot cache wrapping for static children
-                    self.emit_slot_cache_wrapping(group, out, el_children);
-                    // 4. Outer wrapper close LAST
+                    // 2. Combined text wrapping + slot cache wrapping
+                    self.emit_slot_children_with_cache(group, out, source, el_children);
+                    // 3. Outer wrapper close LAST
                     out.prepend_static(group.last().unwrap().end, "]) }");
                 }
             }
@@ -1000,17 +976,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
         }
 
-        children::add_children_separators_array(
-            &children,
-            out,
-            &self.options,
-            source,
-            self.ast,
-            el_children,
-        );
-
-        // Wrap static children in slot cache groups
-        self.emit_slot_cache_wrapping(&children, out, el_children);
+        // Combined text wrapping + slot cache wrapping
+        self.emit_slot_children_with_cache(&children, out, source, el_children);
 
         buf.clear();
         buf.push_str("]), _: 1 /* STABLE */}");
@@ -1063,6 +1030,284 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     }
 
     /// Check if a child record represents a static item for slot caching purposes.
+    /// Combined pass that emits array-mode separators, text-run wrapping,
+    /// and slot cache wrapping for `<template v-slot>` children.
+    ///
+    /// This MUST be a single pass because text-run wrapping (`_createTextVNode`)
+    /// and cache wrapping (`_cache[N] || ...`) both prepend at child boundary
+    /// positions. Two separate passes cause position collisions where cache
+    /// wrappers appear inside `_createTextVNode("...")` content or vice versa.
+    ///
+    /// The pass walks children left-to-right, identifying:
+    /// - **Cache groups**: consecutive static children, wrapped in `_cache[N]`
+    /// - **Dynamic text runs**: consecutive Text/Interpolation, wrapped in
+    ///   `_createTextVNode(...)`
+    /// - **Dynamic elements**: standalone elements with condition chain support
+    ///
+    /// Within a cache group, items get inner separators and text wrapping.
+    fn emit_slot_children_with_cache(
+        &mut self,
+        children: &[ChildRecord],
+        out: &mut CodeGenOutput<'alloc>,
+        source: &'alloc str,
+        el_children: &[NodeId],
+    ) {
+        if children.is_empty() {
+            return;
+        }
+
+        // Pre-compute static flags for cache grouping
+        let static_flags: Vec<bool> = if self.options.hoist_static {
+            children
+                .iter()
+                .map(|c| self.is_slot_child_static(c, el_children))
+                .collect()
+        } else {
+            vec![false; children.len()]
+        };
+
+        let mut i = 0;
+        let mut is_first_item = true;
+        let mut prev_item_end: u32 = 0;
+
+        while i < children.len() {
+            if static_flags[i] {
+                // === Cache group: consecutive static children ===
+                let run_start = i;
+                while i < children.len() && static_flags[i] {
+                    i += 1;
+                }
+                let run_end = i;
+                let run_len = run_end - run_start;
+
+                let cache_idx = self.cache_index;
+                self.cache_index += 1;
+
+                // Comma separator before the cache group
+                if !is_first_item {
+                    out.prepend_static(prev_item_end, ", ");
+                }
+
+                if run_len == 1 {
+                    // Single static child: _cache[N] || (_cache[N] = <child>)
+                    let child = &children[run_start];
+                    if child.kind == ChildKind::Text {
+                        // Single static text: wrap in _createTextVNode inside cache
+                        out.add_vdom_import(VdomHelper::CreateTextVNode);
+                        let prefix = format!(
+                            "_cache[{cache_idx}] || (_cache[{cache_idx}] = _createTextVNode(\""
+                        );
+                        out.prepend_alloc(child.start, &prefix);
+                        out.prepend_static(child.end, "\"))");
+                    } else {
+                        let prefix = format!("_cache[{cache_idx}] || (_cache[{cache_idx}] = ");
+                        out.prepend_alloc(child.start, &prefix);
+                        out.prepend_static(child.end, ")");
+                    }
+                } else {
+                    // Multiple static children: ...(_cache[N] || (_cache[N] = [...]))
+                    let first = &children[run_start];
+                    let last = &children[run_end - 1];
+
+                    let prefix = format!("...(_cache[{cache_idx}] || (_cache[{cache_idx}] = [");
+                    out.prepend_alloc(first.start, &prefix);
+
+                    // Emit inner items: separators + text wrapping within the cache group.
+                    // All items are static, so no v-if/interpolation to handle.
+                    self.emit_cache_group_inner(&children[run_start..run_end], out, source);
+
+                    out.prepend_static(last.end, "]))");
+                }
+
+                prev_item_end = children[run_end - 1].end;
+                is_first_item = false;
+            } else if children[i].kind == ChildKind::Text
+                || children[i].kind == ChildKind::Interpolation
+            {
+                // === Dynamic text run ===
+                let run_start = i;
+                let mut has_dynamic = children[i].kind == ChildKind::Interpolation;
+                i += 1;
+                while i < children.len()
+                    && !static_flags[i]
+                    && matches!(children[i].kind, ChildKind::Text | ChildKind::Interpolation)
+                {
+                    if children[i].kind == ChildKind::Interpolation {
+                        has_dynamic = true;
+                    }
+                    i += 1;
+                }
+                let run_end = i;
+
+                // Comma separator
+                if !is_first_item {
+                    out.prepend_static(prev_item_end, ", ");
+                }
+
+                // _createTextVNode( prefix
+                out.add_vdom_import(VdomHelper::CreateTextVNode);
+                let mut prefix = String::new();
+                prefix.push_str("_createTextVNode(");
+                if children[run_start].kind == ChildKind::Text {
+                    prefix.push('"');
+                } else {
+                    prefix.push_str("_toDisplayString");
+                    out.add_vdom_import(VdomHelper::ToDisplayString);
+                }
+                out.prepend_alloc(children[run_start].start, &prefix);
+
+                // Inner separators within the text run
+                for j in (run_start + 1)..run_end {
+                    let sep = children::text_separator(children[j - 1].kind, children[j].kind);
+                    if !sep.is_empty() {
+                        out.prepend_static(children[j].start, sep);
+                    }
+                    if children[j].kind == ChildKind::Interpolation {
+                        out.add_vdom_import(VdomHelper::ToDisplayString);
+                    }
+                }
+
+                // Close: closing quote + patch flag + )
+                let last = &children[run_end - 1];
+                let mut suffix = String::new();
+                if last.kind == ChildKind::Text {
+                    suffix.push('"');
+                }
+                if has_dynamic {
+                    if self.options.is_production {
+                        suffix.push_str(", 1");
+                    } else {
+                        suffix.push_str(", 1 /* TEXT */");
+                    }
+                }
+                suffix.push(')');
+                out.prepend_alloc(last.end, &suffix);
+
+                prev_item_end = last.end;
+                is_first_item = false;
+            } else if matches!(children[i].kind, ChildKind::StaticVNode { .. }) {
+                // === Static VNode ===
+                if !is_first_item {
+                    out.prepend_static(prev_item_end, ", ");
+                }
+                children::emit_static_vnode(
+                    &children[i],
+                    source,
+                    out,
+                    &self.options,
+                    self.ast,
+                    el_children,
+                );
+                prev_item_end = children[i].end;
+                i += 1;
+                is_first_item = false;
+            } else {
+                // === Dynamic element ===
+                let is_continuation =
+                    children[i].condition == Some(ConditionChainRole::Continuation);
+                let needs_comma = !is_first_item && !is_continuation;
+                let has_prefix = children[i].condition_prefix.is_some();
+
+                if needs_comma && has_prefix {
+                    let cond = children[i].condition_prefix.as_ref().unwrap();
+                    if let Some(expr_start) = children[i].condition_expr_start {
+                        out.prepend_static(children[i].start, ", ");
+                        children::emit_condition_prefix_mapped(
+                            out,
+                            children[i].start,
+                            expr_start,
+                            cond,
+                            children[i].condition_binding_prefix_len,
+                        );
+                    } else {
+                        let mut sep = String::with_capacity(4 + cond.len());
+                        sep.push_str(", ");
+                        sep.push_str(cond);
+                        out.prepend_alloc(children[i].start, &sep);
+                    }
+                } else if needs_comma {
+                    out.prepend_static(prev_item_end, ", ");
+                } else if has_prefix {
+                    let cond = children[i].condition_prefix.as_ref().unwrap();
+                    if let Some(expr_start) = children[i].condition_expr_start {
+                        children::emit_condition_prefix_mapped(
+                            out,
+                            children[i].start,
+                            expr_start,
+                            cond,
+                            children[i].condition_binding_prefix_len,
+                        );
+                    } else {
+                        out.prepend_alloc(children[i].start, cond);
+                    }
+                }
+
+                prev_item_end = children[i].end;
+                i += 1;
+                if !is_continuation {
+                    is_first_item = false;
+                }
+            }
+        }
+    }
+
+    /// Emit separators and text wrapping for items WITHIN a cache group.
+    ///
+    /// All items are static (pure text or fully-static elements).
+    /// No interpolation, v-if, or StaticVNode to handle.
+    fn emit_cache_group_inner(
+        &mut self,
+        items: &[ChildRecord],
+        out: &mut CodeGenOutput<'alloc>,
+        _source: &'alloc str,
+    ) {
+        let mut is_first = true;
+        let mut prev_end: u32 = 0;
+        let mut i = 0;
+
+        while i < items.len() {
+            if items[i].kind == ChildKind::Text {
+                // Text run within cache group (all static, no interpolation)
+                let run_start = i;
+                while i < items.len() && items[i].kind == ChildKind::Text {
+                    i += 1;
+                }
+                let run_end = i;
+
+                // Comma separator
+                if !is_first {
+                    out.prepend_static(prev_end, ", ");
+                }
+
+                // Wrap in _createTextVNode("...")
+                out.add_vdom_import(VdomHelper::CreateTextVNode);
+                out.prepend_static(items[run_start].start, "_createTextVNode(\"");
+
+                // Inner separators for multi-text runs
+                for j in (run_start + 1)..run_end {
+                    let sep = children::text_separator(items[j - 1].kind, items[j].kind);
+                    if !sep.is_empty() {
+                        out.prepend_static(items[j].start, sep);
+                    }
+                }
+
+                // Close: ")
+                out.prepend_static(items[run_end - 1].end, "\")");
+
+                prev_end = items[run_end - 1].end;
+                is_first = false;
+            } else {
+                // Static element — already codegen'd, just add separator
+                if !is_first {
+                    out.prepend_static(prev_end, ", ");
+                }
+                prev_end = items[i].end;
+                i += 1;
+                is_first = false;
+            }
+        }
+    }
+
     fn is_slot_child_static(&self, record: &ChildRecord, el_children: &[NodeId]) -> bool {
         match record.kind {
             ChildKind::Text => true,
@@ -1078,89 +1323,6 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 })
             }
             _ => false,
-        }
-    }
-
-    /// Emit cache wrapping for static children inside a slot function body.
-    ///
-    /// Groups consecutive static children into cache slots:
-    /// - Single static child: `_cache[N] || (_cache[N] = <child_with_cached_flag>)`
-    /// - Multiple consecutive static children: `...(_cache[N] || (_cache[N] = [children_with_cached_flags]))`
-    ///
-    /// Each static child (element or text) gets `-1 /* CACHED */` appended.
-    /// Dynamic children are left unchanged.
-    pub(super) fn emit_slot_cache_wrapping(
-        &mut self,
-        children: &[ChildRecord],
-        out: &mut CodeGenOutput<'alloc>,
-        el_children: &[NodeId],
-    ) {
-        if !self.options.hoist_static || children.is_empty() {
-            return;
-        }
-
-        // Classify each child as static or dynamic
-        let static_flags: Vec<bool> = children
-            .iter()
-            .map(|c| self.is_slot_child_static(c, el_children))
-            .collect();
-
-        // Find runs of consecutive static children
-        let mut i = 0;
-        while i < children.len() {
-            if !static_flags[i] {
-                i += 1;
-                continue;
-            }
-
-            // Found start of a static run
-            let run_start = i;
-            while i < children.len() && static_flags[i] {
-                i += 1;
-            }
-            let run_end = i;
-            let run_len = run_end - run_start;
-
-            let cache_idx = self.cache_index;
-            self.cache_index += 1;
-
-            let cached_suffix = if self.options.is_production {
-                ", -1"
-            } else {
-                ", -1 /* CACHED */"
-            };
-
-            if run_len == 1 {
-                // Single static child: _cache[N] || (_cache[N] = <child>)
-                let child = &children[run_start];
-                let prefix = format!("_cache[{cache_idx}] || (_cache[{cache_idx}] = ");
-                out.prepend_alloc(child.start, &prefix);
-
-                // Add -1 CACHED flag to the child
-                // For text nodes wrapped in _createTextVNode(...), the flag goes before the closing )
-                // For elements, the flag is already part of the _createElementVNode call (via patch_suffix)
-                // We append after the child's end position
-                let suffix = format!("{cached_suffix})");
-                out.prepend_alloc(child.end, &suffix);
-            } else {
-                // Multiple static children: ...(_cache[N] || (_cache[N] = [children]))
-                let first = &children[run_start];
-                let last = &children[run_end - 1];
-
-                // Spread prefix at the start of the first child.
-                // This needs to be BEFORE any existing comma separator.
-                // We use prepend at the first child's start (stacks before element content).
-                let prefix = format!("...(_cache[{cache_idx}] || (_cache[{cache_idx}] = [");
-                out.prepend_alloc(first.start, &prefix);
-
-                // Add -1 CACHED flag to each child in the run
-                for child in &children[run_start..run_end] {
-                    out.prepend_alloc(child.end, cached_suffix);
-                }
-
-                // Close the spread: ]))
-                out.prepend_static(last.end, "]))");
-            }
         }
     }
 }

@@ -37,8 +37,9 @@ pub(super) fn vnode_helper(element: &ElementNode, is_block_root: bool) -> VdomHe
 ///
 /// Checks the resolver for:
 /// 1. Exact match (e.g., `Header` -> `$setup["Header"]`)
-/// 2. PascalCase conversion (e.g., `my-header` -> `$setup["MyHeader"]`)
-/// 3. Fallback: `_resolveComponent("TagName")`, with `maybeSelfReference=true`
+/// 2. Dot-notation namespace (e.g., `Swiper.Item` → `$setup["Swiper"].Item`)
+/// 3. PascalCase conversion (e.g., `my-header` -> `$setup["MyHeader"]`)
+/// 4. Fallback: `_resolveComponent("TagName")`, with `maybeSelfReference=true`
 ///    when the PascalCase tag matches `self_name` (recursive self-reference).
 ///
 /// When `hoisted_resolves` is provided, the `_resolveComponent()` call is hoisted
@@ -59,6 +60,41 @@ pub(super) fn resolve_component_tag(
         s.push_str(tag_name);
         s.push_str(suffix);
         return s;
+    }
+
+    // Check dot-notation namespace (e.g., Swiper.Item → resolve "Swiper" + ".Item").
+    // Vue splits at the first dot, resolves the prefix from setup bindings,
+    // and appends the rest as property access.
+    if let Some(dot_pos) = tag_name.find('.') {
+        let ns = &tag_name[..dot_pos];
+        let member_access = &tag_name[dot_pos..]; // includes the leading dot
+
+        if resolver.get(ns).is_some() {
+            let prefix = resolver.resolve_prefix(ns);
+            let suffix = resolver.resolve_suffix(ns);
+            let mut s =
+                String::with_capacity(ns.len() + prefix.len() + suffix.len() + member_access.len());
+            s.push_str(prefix);
+            s.push_str(ns);
+            s.push_str(suffix);
+            s.push_str(member_access);
+            return s;
+        }
+
+        // Also try PascalCase on the namespace prefix
+        let pascal_ns = to_pascal_case(ns);
+        if resolver.get(&pascal_ns).is_some() {
+            let prefix = resolver.resolve_prefix(&pascal_ns);
+            let suffix = resolver.resolve_suffix(&pascal_ns);
+            let mut s = String::with_capacity(
+                pascal_ns.len() + prefix.len() + suffix.len() + member_access.len(),
+            );
+            s.push_str(prefix);
+            s.push_str(&pascal_ns);
+            s.push_str(suffix);
+            s.push_str(member_access);
+            return s;
+        }
     }
 
     // Check PascalCase conversion (for kebab-case tags like <my-header>)
@@ -93,8 +129,10 @@ pub(super) fn resolve_component_tag(
 
     // Hoist to const variable if hoisted_resolves is provided
     if let Some(hoisted) = hoisted_resolves {
-        // Generate variable name: _component_el_button (hyphens → underscores)
-        let var_name = format!("_component_{}", tag_name.replace('-', "_"));
+        // Generate variable name: replace hyphens and dots with underscores
+        // to produce a valid JS identifier (Vue uses toValidAssetId with char codes,
+        // but underscores are simpler and equally valid).
+        let var_name = format!("_component_{}", tag_name.replace(['-', '.'], "_"));
 
         // Check if already hoisted
         if !hoisted.iter().any(|(t, _)| t == tag_name) {
