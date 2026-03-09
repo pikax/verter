@@ -6,10 +6,10 @@ use tracing_subscriber::EnvFilter;
 use verter_host::{HostConfig, VerterHost};
 use verter_lsp::server::VerterLanguageServer;
 use verter_lsp::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
-use verter_lsp::tsgo::resilient::ResilientTypeProvider;
+use verter_lsp::tsgo::resilient as tsgo_resilient;
 use verter_lsp::tsgo::traits::TypeProvider;
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
-use verter_lsp::tsserver::resilient::ResilientTsserverProvider;
+use verter_lsp::tsserver::resilient as tsserver_resilient;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind};
 
 #[tokio::main]
@@ -316,7 +316,7 @@ async fn try_spawn_tsgo(
     {
         Ok(tp) => {
             tracing::info!("TSGO type provider started (resilient mode)");
-            let resilient = ResilientTypeProvider::new(
+            let resilient = tsgo_resilient::new(
                 tp,
                 crash_notify,
                 tsgo_bin,
@@ -363,7 +363,7 @@ async fn try_spawn_tsserver(
     {
         Ok(tp) => {
             tracing::info!("tsserver type provider started (resilient mode)");
-            let resilient = ResilientTsserverProvider::new(
+            let resilient = tsserver_resilient::new(
                 tp,
                 crash_notify,
                 node_path,

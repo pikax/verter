@@ -71,7 +71,6 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_analysis::types::*;
 
     fn run_script(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
         let rules: Vec<Box<dyn LintRule>> = vec![Box::new(OrderInComponents)];

@@ -47,3 +47,6 @@ pub use diagnostic_set::DiagnosticSet;
 pub use linter::Linter;
 pub use rules::{FileContext, LintRule};
 pub use visitor::LintVisitor;
+
+#[cfg(test)]
+pub(crate) mod test_support;

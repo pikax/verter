@@ -12,6 +12,9 @@ pub mod tsserver;
 pub mod utils;
 pub mod workspace_scanner;
 
+mod resilient_provider;
+mod uri;
+
 #[cfg(test)]
 mod integration_tests;
 

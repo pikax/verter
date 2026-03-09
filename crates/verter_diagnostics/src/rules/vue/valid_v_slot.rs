@@ -68,18 +68,12 @@ impl LintRule for ValidVSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LintConfig;
-    use crate::visitor::LintVisitor;
+
     use verter_analysis::template::*;
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
-        let rules: Vec<Box<dyn LintRule>> = vec![Box::new(ValidVSlot)];
-        let visitor = LintVisitor::new(&rules);
-        let config = LintConfig::default();
-        let mut ctx = LintContext::new(&config);
-        visitor.visit_template(template, &mut ctx);
-        ctx.into_diagnostics()
+        crate::test_support::run_template_rule(ValidVSlot, template)
     }
 
     #[test]

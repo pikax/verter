@@ -75,6 +75,18 @@ mod inner {
             start_offset: u32,
             end_offset: u32,
         },
+        ResolveCompletion {
+            path: String,
+            data: serde_json::Value,
+        },
+        ConfigurePaths {
+            base_url: String,
+            paths: serde_json::Value,
+        },
+        UpdateWorkspaceFolders {
+            added: Vec<serde_json::Value>,
+            removed: Vec<serde_json::Value>,
+        },
     }
 
     /// Shared state for the mock provider.
@@ -92,6 +104,8 @@ mod inner {
         code_action_responses: Vec<(String, u32, u32, Vec<TypeCodeAction>)>,
         semantic_token_responses: Vec<(String, Vec<SemanticToken>)>,
         inlay_hint_responses: Vec<(String, u32, u32, Vec<InlayHint>)>,
+        resolve_completion_responses:
+            Vec<(String, serde_json::Value, Option<CompletionResolveResult>)>,
     }
 
     /// A mock `TypeProvider` for testing.
@@ -209,6 +223,19 @@ mod inner {
             state
                 .inlay_hint_responses
                 .push((path.to_string(), start_offset, end_offset, hints));
+        }
+
+        /// Configure completion resolution for a specific path and data payload.
+        pub fn set_resolve_completion(
+            &self,
+            path: &str,
+            data: serde_json::Value,
+            result: Option<CompletionResolveResult>,
+        ) {
+            let mut state = self.state.lock().unwrap();
+            state
+                .resolve_completion_responses
+                .push((path.to_string(), data, result));
         }
 
         /// Get all recorded calls.
@@ -356,6 +383,33 @@ mod inner {
             _start_offset: u32,
             _end_offset: u32,
         ) -> ProviderFuture<'_, Vec<InlayHint>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn resolve_completion(
+            &self,
+            _path: &str,
+            _data: serde_json::Value,
+        ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn configure_paths(
+            &self,
+            _base_url: &str,
+            _paths: serde_json::Value,
+        ) -> ProviderFuture<'_, ()> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn update_workspace_folders(
+            &self,
+            _added: Vec<serde_json::Value>,
+            _removed: Vec<serde_json::Value>,
+        ) -> ProviderFuture<'_, ()> {
             let msg = self.error_message.clone();
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
@@ -590,6 +644,49 @@ mod inner {
                 .map(|(_, _, _, hints)| hints.clone())
                 .unwrap_or_default();
             Box::pin(async move { Ok(result) })
+        }
+
+        fn resolve_completion(
+            &self,
+            path: &str,
+            data: serde_json::Value,
+        ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::ResolveCompletion {
+                path: path.to_string(),
+                data: data.clone(),
+            });
+            let result = state
+                .resolve_completion_responses
+                .iter()
+                .find(|(p, candidate, _)| p == path && *candidate == data)
+                .and_then(|(_, _, resolved)| resolved.clone());
+            Box::pin(async move { Ok(result) })
+        }
+
+        fn configure_paths(
+            &self,
+            base_url: &str,
+            paths: serde_json::Value,
+        ) -> ProviderFuture<'_, ()> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::ConfigurePaths {
+                base_url: base_url.to_string(),
+                paths,
+            });
+            Box::pin(async { Ok(()) })
+        }
+
+        fn update_workspace_folders(
+            &self,
+            added: Vec<serde_json::Value>,
+            removed: Vec<serde_json::Value>,
+        ) -> ProviderFuture<'_, ()> {
+            let mut state = self.state.lock().unwrap();
+            state
+                .calls
+                .push(MockCall::UpdateWorkspaceFolders { added, removed });
+            Box::pin(async { Ok(()) })
         }
     }
 }

@@ -128,9 +128,9 @@ impl LintRule for UndefinedCssClass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LintConfig;
+
     use crate::rules::FileContext;
-    use crate::visitor::LintVisitor;
+
     use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
     use verter_analysis::{style, ElementNamespace, StyleBlockAnalysis, TemplateAttribute};
     use verter_span::Span;
@@ -165,12 +165,7 @@ mod tests {
     }
 
     fn run_rule(file: &FileContext<'_>) -> Vec<crate::diagnostic::LintDiagnostic> {
-        let rules: Vec<Box<dyn LintRule>> = vec![Box::new(UndefinedCssClass)];
-        let visitor = LintVisitor::new(&rules);
-        let config = LintConfig::default();
-        let mut ctx = LintContext::new(&config);
-        visitor.visit_file(file, &mut ctx);
-        ctx.into_diagnostics()
+        crate::test_support::run_file_rule(UndefinedCssClass, file)
     }
 
     #[test]

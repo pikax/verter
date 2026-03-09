@@ -15,6 +15,7 @@ use crate::tsgo::protocol::{
     TypeCodeAction, TypeDiagnostic, TypeDiagnosticSeverity, TypeDocumentHighlight,
     TypeDocumentHighlightKind, TypeLocation,
 };
+use crate::uri::path_to_file_uri;
 
 /// External IDE context for resolving positions in a foreign `.vue.tsx` file.
 ///
@@ -699,17 +700,7 @@ pub fn file_path_to_uri(path: &str) -> Option<Uri> {
 
 /// Convert a file path to a `file://` URI (internal).
 fn path_to_uri(path: &str) -> Option<Uri> {
-    // Normalize path separators
-    let normalized = path.replace('\\', "/");
-
-    let uri_str = if normalized.starts_with('/') {
-        format!("file://{normalized}")
-    } else {
-        // Windows path (e.g., "C:/Users/...")
-        format!("file:///{normalized}")
-    };
-
-    uri_str.parse().ok()
+    path_to_file_uri(path)
 }
 
 // ── References merge ────────────────────────────────────────────────

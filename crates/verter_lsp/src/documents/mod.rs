@@ -14,6 +14,7 @@ use verter_host::{
 };
 
 use crate::server::{CodeBlock, VirtualFileEntry, VirtualFilesResponse};
+use crate::uri::{file_uri_to_path, percent_decode};
 
 use line_index::LineIndex;
 use position_map::PositionMapper;
@@ -614,59 +615,8 @@ pub fn uri_to_canonical_id(uri: &Uri) -> String {
 /// Handles percent-encoded characters (e.g., `%3A` → `:` on Windows),
 /// normalises separators to `/`, and restores the leading `/` on Unix.
 pub fn uri_to_canonical_id_from_str(s: &str) -> String {
-    // Handle file:// URIs by extracting the path
-    if let Some(rest) = s.strip_prefix("file:///") {
-        let decoded = percent_decode(rest);
-        let path = decoded.replace('\\', "/");
-        // On Windows, paths look like "C:/Users/..." (drive letter after file:///)
-        // On Unix, paths look like "home/user/..." (need leading /)
-        if path.chars().nth(1) == Some(':') {
-            // Windows drive letter (e.g., "C:/Users/...")
-            return path;
-        }
-        // Unix: restore leading /
-        return format!("/{path}");
-    }
-    if let Some(rest) = s.strip_prefix("file://") {
-        let path = percent_decode(rest);
-        return path.replace('\\', "/");
-    }
-
-    // Fallback: use the full URI string
-    s.to_string()
+    file_uri_to_path(s)
 }
-
-/// Minimal percent-decoding for URI paths (handles %20 for spaces, etc.).
-///
-/// Collects decoded bytes and converts the final result via UTF-8 to properly
-/// handle multi-byte sequences like `%C3%A9` → "é".
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut decoded = Vec::with_capacity(s.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
-                decoded.push(hi << 4 | lo);
-                i += 3;
-                continue;
-            }
-        }
-        decoded.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(decoded).unwrap_or_else(|_| s.to_string())
-}
-
-fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
 /// Parse a `verter-virtual://` URI and extract the source .vue file URI.
 ///
 /// URI format: `verter-virtual:///kind.lang?sourceUri=<encoded-source-uri>`

@@ -102,20 +102,14 @@ impl LintRule for NoLeakedEventListeners {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LintConfig;
-    use crate::visitor::LintVisitor;
+
     use verter_analysis::types::{
         DomQueryCallSite, DomQueryKind, VueApiCallSite, VueApiClassification,
     };
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
-        let rules: Vec<Box<dyn LintRule>> = vec![Box::new(NoLeakedEventListeners)];
-        let visitor = LintVisitor::new(&rules);
-        let config = LintConfig::default();
-        let mut ctx = LintContext::new(&config);
-        visitor.visit_script(script, &mut ctx);
-        ctx.into_diagnostics()
+        crate::test_support::run_script_rule(NoLeakedEventListeners, script)
     }
 
     fn make_dom_query() -> DomQueryCallSite {

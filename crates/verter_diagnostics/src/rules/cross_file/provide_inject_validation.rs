@@ -72,18 +72,13 @@ impl LintRule for ProvideInjectValidation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LintConfig;
+
     use crate::cross_file::{MissingProviderEntry, UnusedProvideEntry};
-    use crate::visitor::LintVisitor;
+
     use std::path::PathBuf;
 
     fn run_rule(snapshot: &CrossFileSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
-        let rules: Vec<Box<dyn LintRule>> = vec![Box::new(ProvideInjectValidation)];
-        let visitor = LintVisitor::new(&rules);
-        let config = LintConfig::default();
-        let mut ctx = LintContext::new(&config);
-        visitor.visit_cross_file(snapshot, &mut ctx);
-        ctx.into_diagnostics()
+        crate::test_support::run_cross_file_rule(ProvideInjectValidation, snapshot)
     }
 
     #[test]

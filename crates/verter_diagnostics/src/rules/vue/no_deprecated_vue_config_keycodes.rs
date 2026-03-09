@@ -48,18 +48,12 @@ impl LintRule for NoDeprecatedVueConfigKeycodes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LintConfig;
-    use crate::visitor::LintVisitor;
+
     use verter_analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
-        let rules: Vec<Box<dyn LintRule>> = vec![Box::new(NoDeprecatedVueConfigKeycodes)];
-        let visitor = LintVisitor::new(&rules);
-        let config = LintConfig::default();
-        let mut ctx = LintContext::new(&config);
-        visitor.visit_script(script, &mut ctx);
-        ctx.into_diagnostics()
+        crate::test_support::run_script_rule(NoDeprecatedVueConfigKeycodes, script)
     }
 
     #[test]

@@ -15,6 +15,9 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::tsgo::protocol::*;
 use crate::tsgo::traits::{ProviderFuture, TypeProvider};
+#[cfg(test)]
+use crate::uri::percent_decode;
+use crate::uri::{file_uri_to_path, normalize_file_uri_for_cache, path_to_file_uri_string};
 
 /// Message sent to the dedicated stdin writer task.
 enum StdinMessage {
@@ -565,57 +568,13 @@ fn parse_lsp_location(loc: &serde_json::Value, content: Option<&str>) -> Option<
 /// Also handles percent-encoded URIs from TSGO (e.g., `file:///c%3A/...`).
 /// Falls back to returning the input unchanged if it's not a `file://` URI.
 fn uri_to_file_path(uri: &str) -> String {
-    // Percent-decode first so `c%3A` becomes `c:` before path extraction.
-    let decoded = percent_decode_uri(uri);
-    if let Some(rest) = decoded.strip_prefix("file:///") {
-        // Windows: "file:///C:/Users/..." → "C:/Users/..."
-        // Unix:    "file:///home/user/..." → "/home/user/..."
-        if rest.len() >= 2 && rest.as_bytes()[1] == b':' {
-            return rest.to_string();
-        }
-        return format!("/{rest}");
-    }
-    if let Some(rest) = decoded.strip_prefix("file://") {
-        return rest.to_string();
-    }
-    decoded
+    file_uri_to_path(uri)
 }
 
 /// Percent-decode a URI string. Handles standard `%XX` encoding.
+#[cfg(test)]
 fn percent_decode_uri(uri: &str) -> String {
-    let bytes = uri.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = match bytes[i + 1] {
-                b'0'..=b'9' => bytes[i + 1] - b'0',
-                b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
-                b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
-                _ => {
-                    result.push(bytes[i]);
-                    i += 1;
-                    continue;
-                }
-            };
-            let lo = match bytes[i + 2] {
-                b'0'..=b'9' => bytes[i + 2] - b'0',
-                b'a'..=b'f' => bytes[i + 2] - b'a' + 10,
-                b'A'..=b'F' => bytes[i + 2] - b'A' + 10,
-                _ => {
-                    result.push(bytes[i]);
-                    i += 1;
-                    continue;
-                }
-            };
-            result.push(hi * 16 + lo);
-            i += 3;
-        } else {
-            result.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(result).unwrap_or_else(|_| uri.to_string())
+    percent_decode(uri)
 }
 
 /// Normalize a `file://` URI for use as a cache key.
@@ -628,15 +587,7 @@ fn percent_decode_uri(uri: &str) -> String {
 /// 1. Percent-decodes the URI (so `%3A` → `:`)
 /// 2. On Windows, lowercases the entire URI for case-insensitive matching
 fn normalize_file_uri(uri: &str) -> String {
-    let decoded = percent_decode_uri(uri);
-    #[cfg(windows)]
-    {
-        decoded.to_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        decoded
-    }
+    normalize_file_uri_for_cache(uri)
 }
 
 /// Parse an LSP CompletionItem JSON value into a `Completion`.
@@ -895,12 +846,7 @@ impl TsgoTypeProvider {
 
     /// Convert a file path to a `file://` URI.
     fn path_to_uri(path: &str) -> String {
-        let normalized = path.replace('\\', "/");
-        if normalized.starts_with('/') {
-            format!("file://{normalized}")
-        } else {
-            format!("file:///{normalized}")
-        }
+        path_to_file_uri_string(path)
     }
 }
 
