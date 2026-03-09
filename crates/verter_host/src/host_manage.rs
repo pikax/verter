@@ -38,17 +38,30 @@ impl VerterHost {
         {
             let source = entry.source.clone();
             let stored_script = entry.script_analysis.clone();
+            let stored_styles = entry.style_analyses.clone();
             let template = entry.template_analysis.clone();
+            let cached_parse = entry.cached_parse.clone();
             drop(files);
 
             let script_analysis = if !scope.needs_script_analysis() {
-                crate::parse::build_script_analysis_from_source(&source)
+                if let Some(parsed) = cached_parse.as_deref() {
+                    crate::parse::build_script_analysis_from_parsed(parsed, &source)
+                } else {
+                    crate::parse::build_script_analysis_from_source(&source)
+                }
             } else {
                 // Script analysis was already computed during upsert
                 stored_script
             };
-            let style_analyses =
-                crate::parse::build_style_analyses_from_source(&source, &canonical);
+            let style_analyses = if !scope.needs_style_analysis() {
+                if let Some(parsed) = cached_parse.as_deref() {
+                    crate::parse::build_style_analyses_from_parsed(parsed, &source, &canonical)
+                } else {
+                    crate::parse::build_style_analyses_from_source(&source, &canonical)
+                }
+            } else {
+                stored_styles
+            };
             let vue_api_calls = script_analysis.vue_api_calls.clone();
             let dom_query_calls = script_analysis.dom_query_calls.clone();
             let css_var_manipulations = script_analysis.css_var_manipulations.clone();
@@ -547,8 +560,24 @@ mod tests {
     use crate::*;
     use std::sync::Arc;
 
+    const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
+<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+<style>
+.foo { color: red; }
+</style>"#;
+
     fn make_host() -> VerterHost {
         VerterHost::new(HostConfig::default())
+    }
+
+    fn make_lazy_host() -> VerterHost {
+        VerterHost::new(HostConfig {
+            analysis_level: AnalysisLevel::None,
+            ..HostConfig::default()
+        })
     }
 
     fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
@@ -560,6 +589,24 @@ mod tests {
             aliases: Vec::new(),
         })
         .unwrap();
+    }
+
+    fn mutate_lazy_analysis_source(host: &VerterHost) {
+        let mut files = crate::shared::write_lock(&host.files);
+        let entry = files.get_mut("App.vue").expect("App.vue should exist");
+        let broken = entry
+            .source
+            .replace("<script", "<scripx")
+            .replace("</script>", "</scripx>")
+            .replace("<style", "<styla")
+            .replace("</style>", "</styla>");
+        entry.source = Arc::from(broken);
+    }
+
+    fn clear_cached_parse(host: &VerterHost) {
+        let mut files = crate::shared::write_lock(&host.files);
+        let entry = files.get_mut("App.vue").expect("App.vue should exist");
+        entry.cached_parse = None;
     }
 
     /// @ai-generated - get_analysis populates resolved_canonical_id for relative imports
@@ -691,6 +738,74 @@ mod tests {
         assert!(
             missing_import.resolved_canonical_id.is_none(),
             "import of unregistered file should not resolve"
+        );
+    }
+
+    #[test]
+    fn get_analysis_uses_cached_parse_for_lazy_analysis() {
+        let host = make_lazy_host();
+        upsert_vue(&host, "App.vue", LAZY_ANALYSIS_SFC);
+        mutate_lazy_analysis_source(&host);
+
+        let analysis = host.get_analysis("App.vue").unwrap();
+
+        assert!(
+            analysis.bindings.iter().any(|b| b.name == "msg"),
+            "lazy script analysis should reuse cached parse for bindings"
+        );
+        assert_eq!(
+            analysis.styles.len(),
+            1,
+            "lazy style analysis should reuse cached parse for style blocks"
+        );
+        let css = analysis.styles[0]
+            .css
+            .as_ref()
+            .expect("CSS analysis should exist for cached style block");
+        assert!(
+            css.classes.iter().any(|class| class.name == "foo"),
+            "lazy style analysis should preserve CSS classes"
+        );
+        assert!(
+            analysis
+                .module_references
+                .iter()
+                .any(|reference| reference.literal_specifier.as_deref() == Some("vue")),
+            "lazy script analysis should preserve module references"
+        );
+    }
+
+    #[test]
+    fn get_analysis_falls_back_when_cached_parse_missing() {
+        let host = make_lazy_host();
+        upsert_vue(&host, "App.vue", LAZY_ANALYSIS_SFC);
+        clear_cached_parse(&host);
+
+        let analysis = host.get_analysis("App.vue").unwrap();
+
+        assert!(
+            analysis.bindings.iter().any(|b| b.name == "msg"),
+            "source fallback should still recover bindings"
+        );
+        assert_eq!(
+            analysis.styles.len(),
+            1,
+            "source fallback should still recover style blocks"
+        );
+        let css = analysis.styles[0]
+            .css
+            .as_ref()
+            .expect("CSS analysis should exist for fallback style block");
+        assert!(
+            css.classes.iter().any(|class| class.name == "foo"),
+            "source fallback should preserve CSS classes"
+        );
+        assert!(
+            analysis
+                .module_references
+                .iter()
+                .any(|reference| reference.literal_specifier.as_deref() == Some("vue")),
+            "source fallback should preserve module references"
         );
     }
 

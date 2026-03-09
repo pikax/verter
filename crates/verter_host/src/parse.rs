@@ -345,18 +345,14 @@ pub(crate) fn parse_vue_snapshot(
     // Build style analyses for each style block (when style analysis flags are set)
     let style_analyses: Vec<verter_analysis::StyleBlockAnalysis> =
         if analysis_scope.needs_style_analysis() {
-            parsed
-                .style_nodes()
-                .iter()
-                .map(|style| build_single_style_analysis(style, source, canonical_id))
-                .collect()
+            build_style_analyses_from_parsed(&parsed, source, canonical_id)
         } else {
             Vec::new()
         };
 
     // Build script analysis from script block contents (when script analysis flags are set)
     let (script_analysis, script_panic_diag) = if analysis_scope.needs_script_analysis() {
-        build_script_analysis_from_parsed(&parsed, source)
+        build_script_analysis_from_parsed_with_diagnostic(&parsed, source)
     } else {
         (verter_analysis::ScriptAnalysisSnapshot::default(), None)
     };
@@ -608,12 +604,12 @@ fn catch_analysis_panic<T: Default>(
 
 /// Build script analysis from an already-parsed SFC. Concatenates script block
 /// contents and runs OXC analysis with catch_unwind for panic safety.
-/// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_source()` (on-demand).
+/// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_parsed()`.
 ///
 /// After OXC analysis, adjusts all span fields from script-content-relative offsets
 /// to SFC-absolute byte offsets so downstream consumers (LSP features) can use them
 /// directly with `LineIndex::offset_to_position()`.
-fn build_script_analysis_from_parsed(
+fn build_script_analysis_from_parsed_with_diagnostic(
     parsed: &ParsedSfc,
     source: &str,
 ) -> (
@@ -690,6 +686,12 @@ fn adjust_analysis_spans(
             binding.span.end = map(binding.span.end);
         }
     }
+    for reference in &mut analysis.module_references {
+        reference.span.start = map(reference.span.start);
+        reference.span.end = map(reference.span.end);
+        reference.expr_span.start = map(reference.expr_span.start);
+        reference.expr_span.end = map(reference.expr_span.end);
+    }
     for binding in &mut analysis.bindings {
         binding.span.start = map(binding.span.start);
         binding.span.end = map(binding.span.end);
@@ -731,7 +733,14 @@ pub(crate) fn build_script_analysis_from_source(
     source: &str,
 ) -> verter_analysis::ScriptAnalysisSnapshot {
     let parsed = parse_sfc(source, None, None);
-    let (analysis, _diag) = build_script_analysis_from_parsed(&parsed, source);
+    build_script_analysis_from_parsed(&parsed, source)
+}
+
+pub(crate) fn build_script_analysis_from_parsed(
+    parsed: &ParsedSfc,
+    source: &str,
+) -> verter_analysis::ScriptAnalysisSnapshot {
+    let (analysis, _diag) = build_script_analysis_from_parsed_with_diagnostic(parsed, source);
     analysis
 }
 
@@ -742,6 +751,14 @@ pub(crate) fn build_style_analyses_from_source(
     canonical_id: &str,
 ) -> Vec<verter_analysis::StyleBlockAnalysis> {
     let parsed = parse_sfc(source, None, None);
+    build_style_analyses_from_parsed(&parsed, source, canonical_id)
+}
+
+pub(crate) fn build_style_analyses_from_parsed(
+    parsed: &ParsedSfc,
+    source: &str,
+    canonical_id: &str,
+) -> Vec<verter_analysis::StyleBlockAnalysis> {
     parsed
         .style_nodes()
         .iter()
