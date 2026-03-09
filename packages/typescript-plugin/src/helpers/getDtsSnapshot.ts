@@ -1,11 +1,123 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
+import { SourceMap } from "node:module";
 import type { VerterHost } from "@verter/native";
 
 export const FALLBACK_STUB = "export default {} as any";
 
+export interface CachedVirtualPublicApi {
+  code: string;
+  sourceMap: SourceMap | null;
+}
+
 let host: VerterHost | null = null;
 let loadFailed = false;
 let loadError: string | null = null;
+const virtualPublicApiCache = new Map<string, CachedVirtualPublicApi>();
+
+function normalizePath(fileName: string): string {
+  return fileName.replace(/\\/g, "/");
+}
+
+function setCachedVirtualPublicApi(
+  fileName: string,
+  code: string,
+  rawSourceMap: string | undefined,
+): void {
+  const normalized = normalizePath(fileName);
+  const parsedSourceMap = rawSourceMap ? tryCreateSourceMap(rawSourceMap) : null;
+  const entry: CachedVirtualPublicApi = {
+    code,
+    sourceMap: parsedSourceMap,
+  };
+
+  virtualPublicApiCache.set(normalized + ".ts", entry);
+  virtualPublicApiCache.set(normalized + ".d.ts", entry);
+}
+
+function clearCachedVirtualPublicApi(fileName: string): void {
+  const normalized = normalizePath(fileName);
+  virtualPublicApiCache.delete(normalized + ".ts");
+  virtualPublicApiCache.delete(normalized + ".d.ts");
+}
+
+function tryCreateSourceMap(rawSourceMap: string): SourceMap | null {
+  try {
+    return new SourceMap(JSON.parse(rawSourceMap));
+  } catch {
+    return null;
+  }
+}
+
+function offsetToLineColumn(text: string, offset: number): { line: number; column: number } {
+  const prefix = text.slice(0, offset);
+  const lines = prefix.split("\n");
+  return {
+    line: lines.length,
+    column: (lines.at(-1)?.length ?? 0) + 1,
+  };
+}
+
+function lineColumnToOffset(text: string, line: number, column: number): number | null {
+  if (line < 1 || column < 1) return null;
+  const lines = text.split("\n");
+  if (line > lines.length) return null;
+
+  let offset = 0;
+  for (let i = 0; i < line - 1; i += 1) {
+    offset += lines[i].length + 1;
+  }
+  const lineText = lines[line - 1];
+  if (column - 1 > lineText.length) return null;
+  return offset + column - 1;
+}
+
+export function getCachedVirtualPublicApi(
+  fileName: string,
+): CachedVirtualPublicApi | undefined {
+  return virtualPublicApiCache.get(normalizePath(fileName));
+}
+
+export function clearVirtualPublicApiCache(): void {
+  virtualPublicApiCache.clear();
+}
+
+export function remapVirtualSpan(
+  fileName: string,
+  span: { start: number; length: number },
+  readOriginal: (fileName: string) => string | undefined,
+): { fileName: string; textSpan: { start: number; length: number } } | null {
+  const cached = getCachedVirtualPublicApi(fileName);
+  if (!cached?.sourceMap) return null;
+
+  const { line, column } = offsetToLineColumn(cached.code, span.start);
+  const origin = cached.sourceMap.findOrigin(line, column);
+  if (!("fileName" in origin) || !origin.fileName) {
+    return null;
+  }
+
+  const originalFileName = normalizePath(origin.fileName);
+  const originalText = readOriginal(originalFileName);
+  if (!originalText) {
+    return null;
+  }
+
+  const originalOffset = lineColumnToOffset(
+    originalText,
+    origin.lineNumber,
+    origin.columnNumber,
+  );
+  if (originalOffset == null) {
+    return null;
+  }
+
+  return {
+    fileName: originalFileName,
+    textSpan: {
+      start: originalOffset,
+      length: 1,
+    },
+  };
+}
 
 function getHost(): VerterHost | null {
   if (host) return host;
@@ -31,6 +143,7 @@ export const parseFile = (
 
   const h = getHost();
   if (!h) {
+    clearCachedVirtualPublicApi(fileName);
     logger.info(`[Verter] native binary not available, returning stub${loadError ? ` (error: ${loadError})` : ""}`);
     return FALLBACK_STUB;
   }
@@ -43,14 +156,17 @@ export const parseFile = (
     const tsc = h.getPublicApi(fileName);
     if (!tsc) {
       logger.info(`[Verter] getPublicApi returned null for ${fileName}, no script block`);
+      clearCachedVirtualPublicApi(fileName);
       return FALLBACK_STUB;
     }
 
+    setCachedVirtualPublicApi(fileName, tsc.code, tsc.sourceMap);
     logger.info(`[Verter] compiled ${fileName} (${tsc.code.length} chars)`);
     return tsc.code;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     logger.info(`[Verter] compilation error for ${fileName}: ${msg}`);
+    clearCachedVirtualPublicApi(fileName);
     return FALLBACK_STUB;
   }
 };

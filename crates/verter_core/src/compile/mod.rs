@@ -28,6 +28,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use oxc_allocator::Allocator;
+use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 
@@ -48,6 +49,10 @@ use crate::template::oxc::parse_template_expressions;
 use crate::template::oxc::types::OxcParsedAst;
 use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
+use crate::utils::oxc::vue::{
+    extract_companion_types, parse_script_with_companion, MacroTypeParams, ResolvedElements,
+    RuntimeType, ScriptItem, ScriptMacro, ScriptMode,
+};
 
 use helpers::{extract_attrs, extract_block_ranges};
 
@@ -98,6 +103,216 @@ pub fn parse_sfc(
     }
 
     syntax.into_parsed_sfc()
+}
+
+fn is_simple_type_reference(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
+fn collect_imported_type_names<'a>(items: &'a [ScriptItem<'a>]) -> FxHashSet<&'a str> {
+    let mut imported = FxHashSet::default();
+    for item in items {
+        let ScriptItem::Import(import) = item else {
+            continue;
+        };
+        for binding in &import.bindings {
+            if import.is_type_only || binding.is_type_only {
+                imported.insert(binding.name);
+            }
+        }
+    }
+    imported
+}
+
+fn props_type_is_object_like(type_params: &MacroTypeParams) -> bool {
+    !type_params.resolved.props.is_empty()
+        || type_params
+            .resolved
+            .root_runtime_types
+            .iter()
+            .any(|ty| matches!(ty, RuntimeType::Object))
+}
+
+fn push_invalid_macro_type_diagnostic(
+    diagnostics: &mut Vec<Diagnostic>,
+    message: String,
+    type_params: &MacroTypeParams,
+) {
+    diagnostics.push(
+        Diagnostic::error_with_message("script", CompilerErrorCode::XInvalidMacroType, message)
+            .with_span(type_params.type_span),
+    );
+}
+
+fn validate_imported_macro_type(
+    macro_name: &str,
+    type_params: &MacroTypeParams,
+    type_text: &str,
+    imported_type_names: &FxHashSet<&str>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !is_simple_type_reference(type_text) || !imported_type_names.contains(type_text) {
+        return;
+    }
+
+    if type_params.unresolved_type_ref {
+        push_invalid_macro_type_diagnostic(
+            diagnostics,
+            format!(
+                "{}() type argument '{}' could not be resolved.",
+                macro_name, type_text
+            ),
+            type_params,
+        );
+        return;
+    }
+
+    match macro_name {
+        "defineProps" => {
+            if !props_type_is_object_like(type_params) {
+                push_invalid_macro_type_diagnostic(
+                    diagnostics,
+                    format!(
+                        "defineProps() type argument '{}' must resolve to an object-like props type.",
+                        type_text
+                    ),
+                    type_params,
+                );
+            }
+        }
+        "defineEmits" => {
+            if type_params.resolved.emits.is_empty() {
+                push_invalid_macro_type_diagnostic(
+                    diagnostics,
+                    format!(
+                        "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
+                        type_text
+                    ),
+                    type_params,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_invalid_macro_type_diagnostics(
+    input: &str,
+    parsed: &ParsedSfc,
+    external_types: Option<&rustc_hash::FxHashMap<String, ResolvedElements>>,
+) -> Vec<Diagnostic> {
+    let Some(script_setup) = parsed.script_setup() else {
+        return Vec::new();
+    };
+    let Some(content_span) = script_setup.content else {
+        return Vec::new();
+    };
+
+    let content_str = &input[content_span.start as usize..content_span.end as usize];
+    let companion_types = if let Some(script) = parsed.script() {
+        if let Some(script_content) = script.content {
+            let script_source = &input[script_content.start as usize..script_content.end as usize];
+            let alloc = Allocator::default();
+            let parse_result = Parser::new(&alloc, script_source, SourceType::ts()).parse();
+            Some(extract_companion_types(
+                &parse_result.program,
+                script_source.as_bytes(),
+                script_content.start,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let companion_types = match (companion_types, external_types) {
+        (Some(mut companion), Some(external)) => {
+            for (key, value) in external {
+                companion.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+            Some(companion)
+        }
+        (Some(companion), None) => Some(companion),
+        (None, Some(external)) => Some(external.clone()),
+        (None, None) => None,
+    };
+
+    let alloc = Allocator::default();
+    let parse_result = Parser::new(&alloc, content_str, SourceType::ts()).parse();
+    let parsed_script = parse_script_with_companion(
+        &parse_result.program,
+        ScriptMode::Setup,
+        0,
+        content_str,
+        companion_types,
+    );
+    let imported_type_names = collect_imported_type_names(&parsed_script.items);
+    let mut diagnostics = Vec::new();
+
+    for item in &parsed_script.items {
+        let ScriptItem::Macro(mac) = item else {
+            continue;
+        };
+
+        match mac {
+            ScriptMacro::DefineProps { type_params, .. } => {
+                if let Some(type_params) = type_params {
+                    let type_text =
+                        content_str[type_params.type_span.start as usize..type_params.type_span.end as usize]
+                            .trim();
+                    validate_imported_macro_type(
+                        "defineProps",
+                        type_params,
+                        type_text,
+                        &imported_type_names,
+                        &mut diagnostics,
+                    );
+                }
+            }
+            ScriptMacro::WithDefaults {
+                define_props_type_params,
+                ..
+            } => {
+                if let Some(type_params) = define_props_type_params {
+                    let type_text =
+                        content_str[type_params.type_span.start as usize..type_params.type_span.end as usize]
+                            .trim();
+                    validate_imported_macro_type(
+                        "defineProps",
+                        type_params,
+                        type_text,
+                        &imported_type_names,
+                        &mut diagnostics,
+                    );
+                }
+            }
+            ScriptMacro::DefineEmits { type_params, .. } => {
+                if let Some(type_params) = type_params {
+                    let type_text =
+                        content_str[type_params.type_span.start as usize..type_params.type_span.end as usize]
+                            .trim();
+                    validate_imported_macro_type(
+                        "defineEmits",
+                        type_params,
+                        type_text,
+                        &imported_type_names,
+                        &mut diagnostics,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    diagnostics
 }
 
 /// Compile a Vue SFC source string into script, template, and style outputs.
@@ -179,6 +394,11 @@ fn compile_inner(
     // Clone diagnostics — this is the only clone needed from ParsedSfc.
     let mut all_diagnostics = parsed.clone_diagnostics();
     let has_parse_errors = parsed.has_errors();
+    all_diagnostics.extend(collect_invalid_macro_type_diagnostics(
+        input,
+        parsed,
+        verter_options.external_types.as_ref(),
+    ));
 
     // ── 2. Extract metadata ───────────────────────────────────────
     let component_name = options
@@ -967,6 +1187,8 @@ fn compile_inner(
             &component_name,
             &tsc::TscGenOptions {
                 conditional_root_narrowing: options.conditional_root_narrowing,
+                filename: options.filename.clone(),
+                external_types: verter_options.external_types.clone(),
             },
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;

@@ -22,7 +22,7 @@ use oxc_allocator::Allocator;
 use rayon::prelude::*;
 use tempfile::TempDir;
 use verter_core::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
-use verter_core::tsc::generate_tsc_output;
+use verter_host::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 use crate::error_map::map_tsc_position;
 use crate::reporter::{self, Diagnostic, TscDiagnostic};
@@ -123,24 +123,45 @@ fn generate_all_tsx(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, Str
 
 /// Phase B: Generate minimal TSC declaration output for every `.vue` file in parallel.
 ///
-/// Uses `generate_tsc_output()` (macro extraction only) for declaration generation.
+/// Uses the host-backed public API path so imported macro types resolve the same
+/// way they do in the IDE.
 /// Returns `(vue_path, tsc_code, tsc_tsx_path)` tuples written to `temp_dir`.
 fn generate_all_tsc(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, String, PathBuf)> {
-    vue_files
-        .par_iter()
-        .map(|vue_path| {
-            let source = match fs::read_to_string(vue_path) {
-                Ok(s) => s,
-                Err(_) => return None,
-            };
+    let host = VerterHost::new(HostConfig::default());
+    let mut queued = Vec::new();
 
-            let raw_name = vue_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Component");
-            let component_name = sanitize_component_name(raw_name);
+    for vue_path in vue_files {
+        let source = match fs::read_to_string(vue_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
 
-            let tsc_out = generate_tsc_output(&source, &component_name);
+        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+        if host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id.clone(),
+                source: std::sync::Arc::<str>::from(source),
+                file_kind: FileKind::VueSfc,
+                aliases: Vec::new(),
+            })
+            .is_err()
+        {
+            continue;
+        }
+
+        let raw_name = vue_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Component");
+        let component_name = sanitize_component_name(raw_name);
+        queued.push((vue_path.clone(), canonical_id, component_name));
+    }
+
+    queued
+        .into_iter()
+        .filter_map(|(vue_path, canonical_id, component_name)| {
+            let tsc_out = host.get_public_api(&canonical_id)?;
 
             // Rewrite relative import() paths in the generated code to absolute paths.
             // The .tsc.tsx files live in a temp dir, so relative imports like
@@ -148,8 +169,6 @@ fn generate_all_tsc(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, Str
             let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
             let code = rewrite_relative_imports(&tsc_out.code, vue_dir);
 
-            // Write as <stem>.tsc.tsx in temp_dir.
-            // Use a hash of the path to avoid collisions.
             let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
             let tsc_tsx_name = format!("{component_name}_{hash:016x}.tsc.tsx");
             let tsc_tsx_path = temp_dir.join(&tsc_tsx_name);
@@ -158,9 +177,8 @@ fn generate_all_tsc(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, Str
                 return None;
             }
 
-            Some((vue_path.clone(), code, tsc_tsx_path))
+            Some((vue_path, code, tsc_tsx_path))
         })
-        .flatten()
         .collect()
 }
 

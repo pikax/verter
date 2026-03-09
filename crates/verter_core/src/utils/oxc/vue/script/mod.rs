@@ -31,8 +31,8 @@ pub use macros::{
 pub use resolve_type::{
     build_type_context, extract_companion_types, format_runtime_types, resolve_type_elements,
     resolve_type_elements_with_ctx, resolve_type_elements_with_ctx_ref, DiagnosticLocation,
-    ResolutionDiagnostic, ResolutionDiagnosticKind, ResolvedElements, ResolvedEmit, RuntimeType,
-    TypeResolutionContext,
+    ResolutionDiagnostic, ResolutionDiagnosticKind, ResolvedElements, ResolvedEmit,
+    ResolvedEmitSignature, RuntimeType, TypeResolutionContext,
 };
 pub use shared::ScriptParseContext;
 pub use types::*;

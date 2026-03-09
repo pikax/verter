@@ -36,15 +36,18 @@ use oxc_ast::ast::{Expression, Statement};
 use oxc_ast::{Comment, CommentContent};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
+use oxc_sourcemap::SourceMapBuilder;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::common::Span;
+use crate::cursor::position::PositionResolver;
 use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use crate::parser::Syntax;
 use crate::tokenizer::byte::tokenize_sfc;
 use crate::utils::oxc::vue::{
-    parse_script, MacroArrayArg, MacroObjectArg, MacroTypeParams, RuntimeType, ScriptItem,
-    ScriptMacro, ScriptMode,
+    extract_companion_types, parse_script_with_companion, MacroArrayArg, MacroObjectArg,
+    MacroTypeParams, ResolvedElements, ResolvedEmitSignature, RuntimeType, ScriptItem, ScriptMacro,
+    ScriptMode,
 };
 
 /// Output from the tsc codegen.
@@ -60,6 +63,10 @@ pub struct TscOutput {
 pub struct TscGenOptions {
     /// Experimental: Enable conditional root generic narrowing.
     pub conditional_root_narrowing: bool,
+    /// Source filename used in source maps and cross-file type resolution.
+    pub filename: Option<String>,
+    /// Pre-resolved external macro types, keyed by imported type name.
+    pub external_types: Option<rustc_hash::FxHashMap<String, ResolvedElements>>,
 }
 
 // ── Internal state ───────────────────────────────────────────────────────────
@@ -80,21 +87,114 @@ struct InlinePropEntry {
     optional: bool,
     ts_type: String,
     comment: Option<String>,
+    map_span: Option<Span>,
 }
 
 struct EmitEntry {
     name: String,
-    params_ts: String,
+    payload: EmitPayload,
+    map_span: Option<Span>,
+}
+
+enum EmitPayload {
+    Unknown,
+    Call { params_text: String },
+    Tuple { tuple_text: String },
 }
 
 struct ModelEntry {
     name: String,
     ts_type: String,
+    map_span: Option<Span>,
 }
 
 struct LocalTypeDecl<'a> {
     name: &'a str,
     text: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct GeneratedMapping {
+    generated_offset: usize,
+    source_span: Span,
+}
+
+#[derive(Default)]
+struct RenderedText {
+    text: String,
+    mappings: Vec<GeneratedMapping>,
+}
+
+impl RenderedText {
+    fn push_str(&mut self, text: &str) {
+        self.text.push_str(text);
+    }
+
+    fn push_mapped(&mut self, text: &str, source_span: Span) {
+        self.mappings.push(GeneratedMapping {
+            generated_offset: self.text.len(),
+            source_span,
+        });
+        self.text.push_str(text);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    fn append_rendered(&mut self, rendered: RenderedText) {
+        let base = self.text.len();
+        self.text.push_str(&rendered.text);
+        self.mappings
+            .extend(rendered.mappings.into_iter().map(|mapping| GeneratedMapping {
+                generated_offset: mapping.generated_offset + base,
+                source_span: mapping.source_span,
+            }));
+    }
+}
+
+struct TscWriter {
+    text: String,
+    mappings: Vec<GeneratedMapping>,
+}
+
+impl TscWriter {
+    fn new(capacity: usize) -> Self {
+        Self {
+            text: String::with_capacity(capacity),
+            mappings: Vec::new(),
+        }
+    }
+
+    fn push_str(&mut self, text: &str) {
+        self.text.push_str(text);
+    }
+
+    fn push(&mut self, ch: char) {
+        self.text.push(ch);
+    }
+
+    fn push_mapped(&mut self, text: &str, source_span: Span) {
+        self.mappings.push(GeneratedMapping {
+            generated_offset: self.text.len(),
+            source_span,
+        });
+        self.text.push_str(text);
+    }
+
+    fn append_rendered(&mut self, rendered: RenderedText) {
+        let base = self.text.len();
+        self.text.push_str(&rendered.text);
+        self.mappings
+            .extend(rendered.mappings.into_iter().map(|mapping| GeneratedMapping {
+                generated_offset: mapping.generated_offset + base,
+                source_span: mapping.source_span,
+            }));
+    }
+
+    fn into_parts(self) -> (String, Vec<GeneratedMapping>) {
+        (self.text, self.mappings)
+    }
 }
 
 #[derive(Default)]
@@ -115,14 +215,6 @@ struct TscMacroState {
     emits_names: Vec<String>,
     // defineEmits — TypeScript emit entries
     emits_ts: Vec<EmitEntry>,
-    // defineEmits — raw type parameter text (for type-based defineEmits only)
-    // When present, $props uses an inline mapped type that infers handler types
-    // from the original type rather than generating (...args: unknown[]) => void.
-    emits_type_param_text: Option<String>,
-    // defineEmits — raw object argument text (for object-arg defineEmits only)
-    // e.g. `{ change: (v: string) => true, submit: null }`
-    emits_object_text: Option<String>,
-
     // defineModel — each model binding
     models: Vec<ModelEntry>,
 
@@ -176,6 +268,25 @@ pub fn generate_tsc_output_with_options(
 
     let content_str = &sfc_source[content_span.start as usize..content_span.end as usize];
 
+    // Collect companion <script> types for same-SFC cross-block resolution.
+    let companion_types = if let Some(script) = syntax.script() {
+        if let Some(script_content) = script.content {
+            let script_source =
+                &sfc_source[script_content.start as usize..script_content.end as usize];
+            let alloc = Allocator::default();
+            let parse_result = Parser::new(&alloc, script_source, SourceType::ts()).parse();
+            Some(extract_companion_types(
+                &parse_result.program,
+                script_source.as_bytes(),
+                script_content.start,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // ── 2. OXC-parse script content ───────────────────────────────────
     let alloc = Allocator::default();
     let parse_result = Parser::new(&alloc, content_str, SourceType::ts()).parse();
@@ -183,7 +294,19 @@ pub fn generate_tsc_output_with_options(
 
     // ── 3. Extract script items (macros + imports) ────────────────────
     // content_offset = 0: all spans are relative to content_str
-    let parsed = parse_script(&program, ScriptMode::Setup, 0, content_str);
+    let companion_types = match (companion_types, tsc_options.external_types.as_ref()) {
+        (Some(mut ct), Some(ext)) => {
+            for (k, v) in ext {
+                ct.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            Some(ct)
+        }
+        (Some(ct), None) => Some(ct),
+        (None, Some(ext)) => Some(ext.clone()),
+        (None, None) => None,
+    };
+    let parsed =
+        parse_script_with_companion(&program, ScriptMode::Setup, 0, content_str, companion_types);
 
     // ── 4. Collect type-only imports ──────────────────────────────────
     let type_imports = collect_type_imports(&parsed.items);
@@ -193,6 +316,7 @@ pub fn generate_tsc_output_with_options(
     let mut state = build_macro_state(
         &parsed.items,
         content_str,
+        content_span.start,
         &type_imports,
         &program.comments,
         &mut type_usage_tracker,
@@ -240,6 +364,8 @@ pub fn generate_tsc_output_with_options(
     generate_code(
         component_name,
         &state,
+        sfc_source,
+        tsc_options.filename.as_deref(),
         generic_params,
         attrs_type,
         narrowing.as_ref(),
@@ -431,6 +557,7 @@ fn is_ident_continue(byte: u8) -> bool {
 fn build_macro_state<'a>(
     items: &[ScriptItem<'a>],
     content_str: &'a str,
+    content_offset: u32,
     type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
     comments: &[Comment],
     type_usage_tracker: &mut TypeUsageTracker<'a>,
@@ -460,6 +587,7 @@ fn build_macro_state<'a>(
                     object_arg.as_ref(),
                     array_arg.as_ref(),
                     content_str,
+                    content_offset,
                     type_imports,
                     comments,
                     type_usage_tracker,
@@ -477,19 +605,23 @@ fn build_macro_state<'a>(
                     object_arg.as_ref(),
                     array_arg.as_ref(),
                     content_str,
+                    content_offset,
                     type_usage_tracker,
                     &mut state,
                 );
             }
             ScriptMacro::DefineModel {
+                span,
                 type_params,
                 name_span,
                 ..
             } => {
                 process_model(
                     type_params.as_ref(),
+                    *span,
                     *name_span,
                     content_str,
+                    content_offset,
                     type_usage_tracker,
                     &mut state,
                 );
@@ -505,6 +637,7 @@ fn build_macro_state<'a>(
                     None,
                     None,
                     content_str,
+                    content_offset,
                     type_imports,
                     comments,
                     type_usage_tracker,
@@ -585,11 +718,27 @@ fn process_options(obj: &MacroObjectArg<'_>, content_str: &str, state: &mut TscM
     }
 }
 
+fn local_to_sfc_span(span: Span, content_offset: u32) -> Span {
+    Span::new(
+        span.start.saturating_add(content_offset),
+        span.end.saturating_add(content_offset),
+    )
+}
+
+fn normalize_resolved_span(span: Span, span_is_absolute: bool, content_offset: u32) -> Span {
+    if span_is_absolute {
+        span
+    } else {
+        local_to_sfc_span(span, content_offset)
+    }
+}
+
 fn process_props<'a>(
     type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
     _array_arg: Option<&MacroArrayArg>,
     content_str: &'a str,
+    content_offset: u32,
     type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
     comments: &[Comment],
     type_usage_tracker: &mut TypeUsageTracker<'a>,
@@ -631,6 +780,11 @@ fn process_props<'a>(
                         optional: prop.optional,
                         ts_type,
                         comment,
+                        map_span: Some(if prop.map_local {
+                            normalize_resolved_span(prop.key, prop.span_is_absolute, content_offset)
+                        } else {
+                            local_to_sfc_span(tp.type_span, content_offset)
+                        }),
                     }
                 })
                 .collect();
@@ -671,6 +825,7 @@ fn process_props<'a>(
                 optional,
                 ts_type,
                 comment: None,
+                map_span: Some(local_to_sfc_span(prop.name_span, content_offset)),
             });
         }
         state.props_ts = Some(PropsTs::Inline(entries));
@@ -751,20 +906,30 @@ fn process_emits<'a>(
     object_arg: Option<&MacroObjectArg<'a>>,
     array_arg: Option<&MacroArrayArg>,
     content_str: &str,
+    content_offset: u32,
     type_usage_tracker: &mut TypeUsageTracker<'a>,
     state: &mut TscMacroState,
 ) {
     if let Some(tp) = type_params {
-        // Store the raw type parameter text for $props inference
         let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-        state.emits_type_param_text = Some(type_text.to_string());
         type_usage_tracker.mark_type_text(type_text);
 
         for emit in &tp.resolved.emits {
             state.emits_names.push(emit.name.clone());
+            let payload = resolved_emit_payload(&emit.signature);
+            mark_emit_payload_types(type_usage_tracker, &payload);
             state.emits_ts.push(EmitEntry {
                 name: emit.name.clone(),
-                params_ts: String::new(),
+                payload,
+                map_span: Some(if emit.map_local {
+                    normalize_resolved_span(
+                        emit.name_span.unwrap_or(emit.span),
+                        emit.span_is_absolute,
+                        content_offset,
+                    )
+                } else {
+                    local_to_sfc_span(tp.type_span, content_offset)
+                }),
             });
         }
     } else if let Some(arr) = array_arg {
@@ -776,33 +941,102 @@ fn process_emits<'a>(
             state.emits_names.push(name.clone());
             state.emits_ts.push(EmitEntry {
                 name,
-                params_ts: String::new(),
+                payload: EmitPayload::Unknown,
+                map_span: Some(local_to_sfc_span(*elem_span, content_offset)),
             });
         }
     } else if let Some(obj) = object_arg {
-        // Store raw object text for __EmitToProps/__EmitFn type inference
-        let obj_text = content_str[obj.span.start as usize..obj.span.end as usize].trim();
-        state.emits_object_text = Some(obj_text.to_string());
-        type_usage_tracker.mark_type_text(obj_text);
-
         for prop in &obj.properties {
             let name = prop
                 .name
                 .trim_matches(|c: char| c == '\'' || c == '"')
                 .to_string();
+            let payload = prop
+                .value_span
+                .map(|span| content_str[span.start as usize..span.end as usize].trim())
+                .map(extract_object_emit_payload)
+                .unwrap_or(EmitPayload::Unknown);
+            mark_emit_payload_types(type_usage_tracker, &payload);
             state.emits_names.push(name.clone());
             state.emits_ts.push(EmitEntry {
                 name,
-                params_ts: String::new(),
+                payload,
+                map_span: Some(local_to_sfc_span(prop.name_span, content_offset)),
             });
         }
     }
 }
 
+fn resolved_emit_payload(signature: &ResolvedEmitSignature) -> EmitPayload {
+    match signature {
+        ResolvedEmitSignature::Call { params_text } => EmitPayload::Call {
+            params_text: params_text.clone(),
+        },
+        ResolvedEmitSignature::Tuple { tuple_text } => EmitPayload::Tuple {
+            tuple_text: tuple_text.clone(),
+        },
+    }
+}
+
+fn mark_emit_payload_types(type_usage_tracker: &mut TypeUsageTracker<'_>, payload: &EmitPayload) {
+    match payload {
+        EmitPayload::Unknown => {}
+        EmitPayload::Call { params_text } => {
+            if !params_text.is_empty() {
+                type_usage_tracker.mark_type_text(params_text);
+            }
+        }
+        EmitPayload::Tuple { tuple_text } => type_usage_tracker.mark_type_text(tuple_text),
+    }
+}
+
+fn extract_object_emit_payload(value_text: &str) -> EmitPayload {
+    let trimmed = value_text.trim();
+    if trimmed == "null" {
+        return EmitPayload::Unknown;
+    }
+
+    if let Some(params_text) = extract_callable_params_text(trimmed) {
+        return EmitPayload::Call { params_text };
+    }
+
+    EmitPayload::Unknown
+}
+
+fn extract_callable_params_text(value_text: &str) -> Option<String> {
+    let trimmed = value_text.trim();
+    if let Some(open_idx) = trimmed.find('(') {
+        let close_idx = find_matching_paren(trimmed, open_idx)?;
+        return Some(trimmed[open_idx + 1..close_idx].trim().to_string());
+    }
+
+    let arrow_idx = trimmed.find("=>")?;
+    Some(trimmed[..arrow_idx].trim().to_string())
+}
+
+fn find_matching_paren(text: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0u32;
+    for (idx, ch) in text.char_indices().skip(open_idx) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn process_model(
     type_params: Option<&MacroTypeParams>,
+    macro_span: Span,
     name_span: Option<Span>,
     content_str: &str,
+    content_offset: u32,
     type_usage_tracker: &mut TypeUsageTracker<'_>,
     state: &mut TscMacroState,
 ) {
@@ -825,6 +1059,10 @@ fn process_model(
     state.models.push(ModelEntry {
         name: model_name,
         ts_type,
+        map_span: Some(local_to_sfc_span(
+            name_span.unwrap_or(macro_span),
+            content_offset,
+        )),
     });
 }
 
@@ -1005,12 +1243,14 @@ fn extract_tsc_narrowing(
 fn generate_code(
     component_name: &str,
     state: &TscMacroState,
+    sfc_source: &str,
+    filename: Option<&str>,
     generic_params: Option<&str>,
     attrs_type: Option<&str>,
     narrowing: Option<&TscNarrowingInfo>,
     root_element_tag: Option<&str>,
 ) -> TscOutput {
-    let mut out = String::with_capacity(512);
+    let mut out = TscWriter::new(512);
 
     // ── Import ────────────────────────────────────────────────────────
     out.push_str("import { defineComponent } from \"vue\"\n");
@@ -1023,21 +1263,6 @@ fn generate_code(
     // via a mapped type leaves only the static members (props, emits options)
     // so there is exactly one `new()` — ours — with the correct $props.
     out.push_str("type __OmitNew<T> = { [K in keyof T]: T[K] }\n");
-
-    // ── Utility type: camelize kebab-case strings ────────────────────
-    // Used by __EmitToProps to produce both kebab and camelized prop keys.
-    out.push_str("type __Cam<T extends string> = T extends `${infer L}-${infer R}` ? R extends `${infer C}${infer Rest}` ? `${L}${Uppercase<C>}${__Cam<Rest>}` : L : T\n");
-
-    // ── Utility type: emit function → event handler props ────────────
-    // Recursively extracts call signatures from an emit function type
-    // and produces optional `onEventName` props with both capitalize-only
-    // and camelized keys. Falls back to object/shorthand form handling.
-    out.push_str("type __EmitToProps<F> = F extends { (e: infer K, ...args: infer A): any } & infer R ? { [P in (K & string) as `on${Capitalize<P>}` | `on${Capitalize<__Cam<P>>}`]?: (...args: A) => void } & __EmitToProps<R> : { [K in string & keyof F as `on${Capitalize<K>}` | `on${Capitalize<__Cam<K>>}`]?: F[K] extends any[] ? (...args: F[K]) => void : F[K] extends (...args: infer A) => any ? (...args: A) => void : (...args: unknown[]) => void }\n");
-
-    // ── Utility type: emit function type for $emit ─────────────────
-    // For function-form types, recursively extracts call signatures.
-    // For object/shorthand forms, delegates to Vue's EmitFn + ShortEmitsToObject.
-    out.push_str("type __EmitFn<T> = T extends { (e: infer K, ...args: infer A): any } & infer R ? ((event: K, ...args: A) => void) & __EmitFn<R> : import(\"vue\").EmitFn<import(\"vue\").ShortEmitsToObject<T>>\n");
 
     // ── Type import statements ────────────────────────────────────────
     for stmt in &state.type_import_stmts {
@@ -1095,35 +1320,10 @@ fn generate_code(
     // DefineComponent, then provides a single `new()` that returns the
     // intersection of ComponentPublicInstance and the typed instance shape.
     // This ensures barrel re-exports preserve the correct $props/$emit types.
-    let props_type = build_props_type(&state.props_ts, &state.models, &state.defaulted_prop_names);
-
     out.push_str(&format!(
         "declare const {name}: __OmitNew<typeof __comp> & {{\n",
         name = component_name,
     ));
-    // For type-based or object-arg emits, use __EmitFn<RawType> to preserve
-    // argument types. For array-only or no-emit cases, fall back to manual overloads.
-    let emit_fn_type = if let Some(ref type_text) = state.emits_type_param_text {
-        // Type-based defineEmits: __EmitFn extracts from the raw type
-        let base = format!("__EmitFn<{}>", type_text);
-        let model_overloads = build_model_emit_overloads(&state.models);
-        if model_overloads.is_empty() {
-            base
-        } else {
-            format!("{} & {}", base, model_overloads)
-        }
-    } else if let Some(ref obj_text) = state.emits_object_text {
-        // Object-arg defineEmits: __EmitFn extracts from the raw object
-        let base = format!("__EmitFn<{}>", obj_text);
-        let model_overloads = build_model_emit_overloads(&state.models);
-        if model_overloads.is_empty() {
-            base
-        } else {
-            format!("{} & {}", base, model_overloads)
-        }
-    } else {
-        build_emit_fn_type(&state.emits_ts, &state.models)
-    };
 
     // Build generic params for new(), appending narrowing generics if present
     let full_gp = if let Some(nr) = narrowing {
@@ -1152,27 +1352,13 @@ fn generate_code(
     } else {
         generic_params.map(|s| s.to_string())
     };
-
-    // $props — substitute generic types for narrowing props
-    let narrowing_props_type = if let Some(nr) = narrowing {
-        build_narrowing_props_type(&state.props_ts, &state.models, &nr.narrowing)
-    } else {
-        None
-    };
-    // For type-based or object-arg defineEmits, use __EmitToProps<RawType> to
-    // infer correct handler types. For array-only syntax, fall back to manual fields.
-    let emits_props = if let Some(ref type_text) = state.emits_type_param_text {
-        Some(format!("__EmitToProps<{}>", type_text))
-    } else if let Some(ref obj_text) = state.emits_object_text {
-        Some(format!("__EmitToProps<{}>", obj_text))
-    } else {
-        build_emits_to_props_type(&state.emits_ts)
-    };
-    let props_base = narrowing_props_type.as_deref().unwrap_or(&props_type);
-    let full_props = match &emits_props {
-        Some(ep) => format!("{} & {}", props_base, ep),
-        None => props_base.to_string(),
-    };
+    let full_props = render_full_props_type(
+        &state.props_ts,
+        &state.emits_ts,
+        &state.models,
+        &state.defaulted_prop_names,
+        narrowing,
+    );
 
     // Generate simplified constructor: `new(props?: PublicProps & Props): { $props, $emit, ... }`
     // Does NOT include ComponentPublicInstance in the return type — CPI has many
@@ -1180,20 +1366,39 @@ fn generate_code(
     // excessively deep" with self-referential prop types (e.g. Action → callback(Action)).
     // The explicit $props/$emit/$slots/$data/$attrs/$refs fields cover instance access.
     match &full_gp {
-        Some(gp) => out.push_str(&format!(
-            "  new<{gp}>(props?: import(\"vue\").PublicProps & {full_props}): {{\n",
-        )),
-        None => out.push_str(&format!(
-            "  new(props?: import(\"vue\").PublicProps & {full_props}): {{\n",
-        )),
+        Some(gp) => {
+            out.push_str(&format!(
+                "  new<{gp}>(props?: import(\"vue\").PublicProps & "
+            ));
+            out.append_rendered(render_full_props_type(
+                &state.props_ts,
+                &state.emits_ts,
+                &state.models,
+                &state.defaulted_prop_names,
+                narrowing,
+            ));
+            out.push_str("): {\n");
+        }
+        None => {
+            out.push_str("  new(props?: import(\"vue\").PublicProps & ");
+            out.append_rendered(full_props);
+            out.push_str("): {\n");
+        }
     }
 
-    out.push_str(&format!(
-        "    $props: import(\"vue\").PublicProps & {},\n",
-        full_props
+    out.push_str("    $props: import(\"vue\").PublicProps & ");
+    out.append_rendered(render_full_props_type(
+        &state.props_ts,
+        &state.emits_ts,
+        &state.models,
+        &state.defaulted_prop_names,
+        narrowing,
     ));
+    out.push_str(",\n");
 
-    out.push_str(&format!("    $emit: {},\n", emit_fn_type));
+    out.push_str("    $emit: ");
+    out.append_rendered(render_emit_fn_type(&state.emits_ts, &state.models));
+    out.push_str(",\n");
     if let Some(ref slots) = state.slots_ts {
         out.push_str(&format!("    $slots: {},\n", slots));
     }
@@ -1254,15 +1459,16 @@ fn generate_code(
     out.push_str(&format!("export default {}\n", component_name));
 
     // ── Inline source map ─────────────────────────────────────────────
-    let source_map = minimal_source_map();
+    let (mut code, mappings) = out.into_parts();
+    let source_map = build_tsc_source_map(&code, sfc_source, filename, &mappings);
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
-    out.push_str(&format!(
+    code.push_str(&format!(
         "//# sourceMappingURL=data:application/json;base64,{}\n",
         encoded
     ));
 
     TscOutput {
-        code: out,
+        code,
         source_map,
     }
 }
@@ -1280,16 +1486,7 @@ fn build_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> String {
     if emits.is_empty() && models.is_empty() {
         return "(event: string, ...args: unknown[]) => void".to_string();
     }
-    let mut overloads: Vec<String> = emits
-        .iter()
-        .map(|e| {
-            if e.params_ts.is_empty() {
-                format!("((event: '{}', ...args: unknown[]) => void)", e.name)
-            } else {
-                format!("((event: '{}', {}) => void)", e.name, e.params_ts)
-            }
-        })
-        .collect();
+    let mut overloads: Vec<String> = emits.iter().map(emit_overload_type).collect();
     for model in models {
         overloads.push(format!(
             "((event: 'update:{}', v: {}) => void)",
@@ -1299,20 +1496,68 @@ fn build_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> String {
     overloads.join(" & ")
 }
 
-/// Build model-only emit overloads (for combining with __EmitFn).
-fn build_model_emit_overloads(models: &[ModelEntry]) -> String {
-    let overloads: Vec<String> = models
-        .iter()
-        .map(|m| format!("((event: 'update:{}', v: {}) => void)", m.name, m.ts_type))
-        .collect();
-    overloads.join(" & ")
+fn render_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> RenderedText {
+    let mut rendered = RenderedText::default();
+    if emits.is_empty() && models.is_empty() {
+        rendered.push_str("(event: string, ...args: unknown[]) => void");
+        return rendered;
+    }
+
+    let mut needs_join = false;
+    for emit in emits {
+        if needs_join {
+            rendered.push_str(" & ");
+        }
+        rendered.push_str("((event: ");
+        if let Some(map_span) = emit.map_span {
+            rendered.push_mapped(&format!("'{}'", emit.name), map_span);
+        } else {
+            rendered.push_str(&format!("'{}'", emit.name));
+        }
+        match &emit.payload {
+            EmitPayload::Unknown => rendered.push_str(", ...args: unknown[]) => void)"),
+            EmitPayload::Call { params_text } => {
+                if params_text.is_empty() {
+                    rendered.push_str(") => void)");
+                } else {
+                    rendered.push_str(", ");
+                    rendered.push_str(params_text);
+                    rendered.push_str(") => void)");
+                }
+            }
+            EmitPayload::Tuple { tuple_text } => {
+                rendered.push_str(", ...args: ");
+                rendered.push_str(tuple_text);
+                rendered.push_str(") => void)");
+            }
+        }
+        needs_join = true;
+    }
+
+    for model in models {
+        if needs_join {
+            rendered.push_str(" & ");
+        }
+        rendered.push_str("((event: ");
+        if let Some(map_span) = model.map_span {
+            rendered.push_mapped(&format!("'update:{}'", model.name), map_span);
+        } else {
+            rendered.push_str(&format!("'update:{}'", model.name));
+        }
+        rendered.push_str(", v: ");
+        rendered.push_str(&model.ts_type);
+        rendered.push_str(") => void)");
+        needs_join = true;
+    }
+
+    rendered
 }
 
 /// Convert emit entries to event handler props for the `$props` type.
 ///
-/// Each emit becomes an optional `onCapitalizedName` prop:
+/// Each emit becomes one or two optional `onEventName` props:
 /// ```text
-/// EmitEntry { name: "clickOverlay", params_ts: "event: MouseEvent" }
+/// EmitEntry { name: "clickOverlay", payload: Call { params_text: "event: MouseEvent" } }
 ///   → "onClickOverlay"?: (event: MouseEvent) => void
 /// ```
 fn build_emits_to_props_type(emits: &[EmitEntry]) -> Option<String> {
@@ -1321,22 +1566,208 @@ fn build_emits_to_props_type(emits: &[EmitEntry]) -> Option<String> {
     }
     let mut fields: Vec<String> = Vec::new();
     for e in emits {
-        let cap_name = capitalize_first(&e.name);
-        let handler = if e.params_ts.is_empty() {
-            "(...args: unknown[]) => void".to_string()
-        } else {
-            format!("({}) => void", e.params_ts)
-        };
-        fields.push(format!("\"on{}\"?: {}", cap_name, handler));
-
-        // If name has hyphens, also emit camelized form as a separate prop
-        if e.name.contains('-') {
-            let camelized = camelize_event_name(&e.name);
-            let camel_cap = capitalize_first(&camelized);
-            fields.push(format!("\"on{}\"?: {}", camel_cap, handler));
+        let handler = emit_handler_type(e);
+        for key in emit_handler_keys(&e.name) {
+            fields.push(format!("\"{}\"?: {}", key, handler));
         }
     }
     Some(format!("{{ {} }}", fields.join("; ")))
+}
+
+fn render_emits_to_props_type(emits: &[EmitEntry]) -> RenderedText {
+    let mut rendered = RenderedText::default();
+    if emits.is_empty() {
+        return rendered;
+    }
+
+    rendered.push_str("{ ");
+    let mut first = true;
+    for emit in emits {
+        let handler = emit_handler_type(emit);
+        for key in emit_handler_keys(&emit.name) {
+            if !first {
+                rendered.push_str("; ");
+            }
+            if let Some(map_span) = emit.map_span {
+                rendered.push_mapped(&format!("\"{}\"", key), map_span);
+            } else {
+                rendered.push_str(&format!("\"{}\"", key));
+            }
+            rendered.push_str("?: ");
+            rendered.push_str(&handler);
+            first = false;
+        }
+    }
+    rendered.push_str(" }");
+    rendered
+}
+
+fn render_props_shape_type(
+    props_ts: &Option<PropsTs>,
+    defaulted_prop_names: &[String],
+    generic_props: Option<&FxHashSet<&str>>,
+) -> RenderedText {
+    let mut rendered = RenderedText::default();
+
+    match props_ts {
+        Some(PropsTs::TypeRef(name)) => rendered.push_str(&wrap_defaulted_props(name, defaulted_prop_names)),
+        Some(PropsTs::TypeText(text)) => {
+            rendered.push_str(&wrap_defaulted_props(text, defaulted_prop_names))
+        }
+        Some(PropsTs::Inline(entries)) if !entries.is_empty() => {
+            rendered.push_str("{ ");
+            let mut first = true;
+            for entry in entries {
+                if !first {
+                    rendered.push_str("; ");
+                }
+                if let Some(comment) = &entry.comment {
+                    rendered.push_str(comment);
+                    rendered.push_str(" ");
+                }
+                if let Some(map_span) = entry.map_span {
+                    rendered.push_mapped(&entry.name, map_span);
+                } else {
+                    rendered.push_str(&entry.name);
+                }
+                rendered.push_str(if entry.optional { "?: " } else { ": " });
+                if generic_props.is_some_and(|set| set.contains(entry.name.as_str())) {
+                    rendered.push_str(&format!("T_{}", entry.name));
+                } else {
+                    rendered.push_str(&entry.ts_type);
+                }
+                first = false;
+            }
+            rendered.push_str(" }");
+        }
+        _ => {}
+    }
+
+    rendered
+}
+
+fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
+    models
+        .iter()
+        .map(|model| {
+            let mut rendered = RenderedText::default();
+            rendered.push_str("{ ");
+            if let Some(map_span) = model.map_span {
+                rendered.push_mapped(&model.name, map_span);
+            } else {
+                rendered.push_str(&model.name);
+            }
+            rendered.push_str("?: ");
+            rendered.push_str(&model.ts_type);
+            rendered.push_str("; ");
+            if let Some(map_span) = model.map_span {
+                rendered.push_mapped(&format!("\"onUpdate:{}\"", model.name), map_span);
+            } else {
+                rendered.push_str(&format!("\"onUpdate:{}\"", model.name));
+            }
+            rendered.push_str("?: (v: ");
+            rendered.push_str(&model.ts_type);
+            rendered.push_str(") => void }");
+            rendered
+        })
+        .collect()
+}
+
+fn render_full_props_type(
+    props_ts: &Option<PropsTs>,
+    emits: &[EmitEntry],
+    models: &[ModelEntry],
+    defaulted_prop_names: &[String],
+    narrowing: Option<&TscNarrowingInfo>,
+) -> RenderedText {
+    let generic_props = narrowing.map(|nr| {
+        nr.narrowing
+            .generics
+            .iter()
+            .map(|g| g.prop_name.as_str())
+            .collect::<FxHashSet<_>>()
+    });
+    let mut parts = Vec::new();
+
+    let props_part = render_props_shape_type(props_ts, defaulted_prop_names, generic_props.as_ref());
+    if !props_part.is_empty() {
+        parts.push(props_part);
+    }
+    parts.extend(render_model_props_type(models));
+    let emits_part = render_emits_to_props_type(emits);
+    if !emits_part.is_empty() {
+        parts.push(emits_part);
+    }
+
+    if parts.is_empty() {
+        let mut rendered = RenderedText::default();
+        rendered.push_str("{}");
+        return rendered;
+    }
+
+    let mut rendered = RenderedText::default();
+    let mut first = true;
+    for part in parts {
+        if !first {
+            rendered.push_str(" & ");
+        }
+        rendered.append_rendered(part);
+        first = false;
+    }
+    rendered
+}
+
+fn emit_handler_type(emit: &EmitEntry) -> String {
+    match &emit.payload {
+        EmitPayload::Unknown => "(...args: unknown[]) => void".to_string(),
+        EmitPayload::Call { params_text } => {
+            if params_text.is_empty() {
+                "() => void".to_string()
+            } else {
+                format!("({}) => void", params_text)
+            }
+        }
+        EmitPayload::Tuple { tuple_text } => format!("(...args: {}) => void", tuple_text),
+    }
+}
+
+fn emit_overload_type(emit: &EmitEntry) -> String {
+    match &emit.payload {
+        EmitPayload::Unknown => format!("((event: '{}', ...args: unknown[]) => void)", emit.name),
+        EmitPayload::Call { params_text } => {
+            if params_text.is_empty() {
+                format!("((event: '{}') => void)", emit.name)
+            } else {
+                format!("((event: '{}', {}) => void)", emit.name, params_text)
+            }
+        }
+        EmitPayload::Tuple { tuple_text } => {
+            format!(
+                "((event: '{}', ...args: {}) => void)",
+                emit.name, tuple_text
+            )
+        }
+    }
+}
+
+fn emit_handler_keys(name: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let canonical = format!("on{}", capitalize_first(name));
+    keys.push(canonical.clone());
+
+    if !name.contains(':') {
+        let camel = format!("on{}", capitalize_first(&camelize_event_name(name)));
+        if camel != canonical {
+            keys.push(camel);
+        }
+
+        let kebab = format!("on{}", capitalize_first(&hyphenate_event_name(name)));
+        if kebab != canonical && !keys.iter().any(|key| key == &kebab) {
+            keys.push(kebab);
+        }
+    }
+
+    keys
 }
 
 fn capitalize_first(s: &str) -> String {
@@ -1361,6 +1792,21 @@ fn camelize_event_name(s: &str) -> String {
                 result.push(upper);
             }
             capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn hyphenate_event_name(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for (idx, ch) in s.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if idx > 0 {
+                result.push('-');
+            }
+            result.push(ch.to_ascii_lowercase());
         } else {
             result.push(ch);
         }
@@ -1617,6 +2063,39 @@ fn find_leading_jsdoc(
 
 fn minimal_source_map() -> String {
     r#"{"version":3,"file":"","sourceRoot":"","sources":[],"names":[],"mappings":""}"#.to_string()
+}
+
+fn build_tsc_source_map(
+    code: &str,
+    sfc_source: &str,
+    filename: Option<&str>,
+    mappings: &[GeneratedMapping],
+) -> String {
+    let mut builder = SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content(filename.unwrap_or("source.vue"), sfc_source);
+
+    let generated_resolver = PositionResolver::new_for_sourcemap(code);
+    let source_resolver = PositionResolver::new_for_sourcemap(sfc_source);
+
+    for mapping in mappings {
+        if mapping.generated_offset > code.len() || mapping.source_span.start as usize > sfc_source.len() {
+            continue;
+        }
+        let (generated_line, generated_col) =
+            generated_resolver.offset_to_line_and_col(mapping.generated_offset);
+        let (source_line, source_col) =
+            source_resolver.offset_to_line_and_col(mapping.source_span.start as usize);
+        builder.add_token(
+            (generated_line - 1) as u32,
+            (generated_col - 1) as u32,
+            (source_line - 1) as u32,
+            (source_col - 1) as u32,
+            Some(source_id),
+            None,
+        );
+    }
+
+    builder.into_sourcemap().to_json_string()
 }
 
 /// Detect `useAttrs<T>()` calls in the script setup body and return the type parameter text.

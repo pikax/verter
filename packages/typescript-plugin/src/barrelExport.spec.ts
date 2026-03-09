@@ -460,13 +460,12 @@ defineProps<{
       () => {
         // Positive: output has expected markers
         expect(generatedDecl).toContain("defineComponent");
-        expect(generatedDecl).toContain("ComponentPublicInstance");
+        expect(generatedDecl).toContain("__OmitNew");
+        expect(generatedDecl).toContain('import("vue").PublicProps');
         expect(generatedDecl).toContain("export default");
         expect(generatedDecl).toContain("$props");
         expect(generatedDecl).toContain("zIndex");
         expect(generatedDecl).toContain("lockScroll");
-        // Positive: uses __OmitNew for barrel safety
-        expect(generatedDecl).toContain("__OmitNew");
         // Negative: not the fallback stub
         expect(generatedDecl).not.toBe(FALLBACK_STUB);
         expect(generatedDecl).not.toContain("as any");

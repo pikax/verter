@@ -182,11 +182,25 @@ pub struct ResolvedProp {
     /// Set for property signatures with explicit type annotations; `None` for
     /// method signatures and companion-script props.
     pub type_span: Option<Span>,
+    /// Whether this span points into the current SFC source and can be used
+    /// directly for local source maps.
+    pub map_local: bool,
+    /// Whether spans on this prop are already SFC-absolute.
+    pub span_is_absolute: bool,
 }
 
 /// A resolved emit event from defineEmits type parameter.
 /// Supports both call signature style `{ (e: 'change', id: number): void }`
 /// and shorthand style `{ change: [id: number] }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedEmitSignature {
+    /// Call signature payload params after the event name parameter.
+    /// Empty string means the event carries no extra payload.
+    Call { params_text: String },
+    /// Shorthand tuple payload, including the surrounding `[...]`.
+    Tuple { tuple_text: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedEmit {
     /// Span of the entire emit signature
@@ -195,6 +209,14 @@ pub struct ResolvedEmit {
     pub name: String,
     /// Span of the event name in source (if available, for string literal params)
     pub name_span: Option<Span>,
+    /// The resolved payload signature, preserved as text so consumers can
+    /// inline exact handler / `$emit` types even for cross-file imports.
+    pub signature: ResolvedEmitSignature,
+    /// Whether this span points into the current SFC source and can be used
+    /// directly for local source maps.
+    pub map_local: bool,
+    /// Whether spans on this emit are already SFC-absolute.
+    pub span_is_absolute: bool,
 }
 
 /// Result of resolving type elements from a type annotation.
@@ -206,6 +228,10 @@ pub struct ResolvedElements {
     pub emits: Vec<ResolvedEmit>,
     /// Whether this type has call signatures (is callable)
     pub has_call_signature: bool,
+    /// Runtime type inferred from the root type annotation being resolved.
+    /// Used to distinguish valid empty object-like macro types from invalid
+    /// primitives when cross-file resolution returns no concrete members.
+    pub root_runtime_types: Vec<RuntimeType>,
 }
 
 impl ResolvedElements {
@@ -521,7 +547,8 @@ pub fn extract_companion_types(
 /// * `base_offset` - The document offset to apply to all spans
 pub fn resolve_type_elements(node: &TSType, base_offset: u32) -> ResolvedElements {
     let mut result = ResolvedElements::default();
-    resolve_type_elements_inner(node, base_offset, &mut result);
+    resolve_type_elements_inner(node, base_offset, &mut result, b"");
+    result.root_runtime_types = infer_runtime_type(node);
     result
 }
 
@@ -539,6 +566,7 @@ pub fn resolve_type_elements_with_ctx<'ctx, 'a: 'ctx>(
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner_with_ctx(node, base_offset, &mut result, ctx);
+    result.root_runtime_types = infer_runtime_type(node);
     result
 }
 
@@ -557,25 +585,31 @@ pub fn resolve_type_elements_with_ctx_ref<'ctx, 'a: 'ctx>(
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner_with_ctx_ref(node, base_offset, &mut result, ctx);
+    result.root_runtime_types = infer_runtime_type(node);
     result
 }
 
-fn resolve_type_elements_inner(node: &TSType, base_offset: u32, result: &mut ResolvedElements) {
+fn resolve_type_elements_inner(
+    node: &TSType,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    source: &[u8],
+) {
     match node {
         // { prop: Type }
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(&lit.members, base_offset, result);
+            resolve_type_literal_members(&lit.members, base_offset, result, source);
         }
 
         // Parenthesized: (Type)
         TSType::TSParenthesizedType(paren) => {
-            resolve_type_elements_inner(&paren.type_annotation, base_offset, result);
+            resolve_type_elements_inner(&paren.type_annotation, base_offset, result, source);
         }
 
         // Union: Type1 | Type2
         TSType::TSUnionType(union) => {
             for ty in &union.types {
-                resolve_type_elements_inner(ty, base_offset, result);
+                resolve_type_elements_inner(ty, base_offset, result, source);
             }
             result.dedup_props();
         }
@@ -583,7 +617,7 @@ fn resolve_type_elements_inner(node: &TSType, base_offset: u32, result: &mut Res
         // Intersection: Type1 & Type2
         TSType::TSIntersectionType(intersection) => {
             for ty in &intersection.types {
-                resolve_type_elements_inner(ty, base_offset, result);
+                resolve_type_elements_inner(ty, base_offset, result, source);
             }
             result.dedup_props();
         }
@@ -615,7 +649,7 @@ fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
     recursion_guard: &mut Vec<String>,
 ) {
     // Resolve own members
-    resolve_type_literal_members(members, base_offset, result);
+    resolve_type_literal_members(members, base_offset, result, ctx.source);
 
     // Resolve extends
     for base_name in extends {
@@ -665,7 +699,7 @@ fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
     recursion_guard: &mut Vec<String>,
 ) {
     // Resolve own members
-    resolve_type_literal_members(members, base_offset, result);
+    resolve_type_literal_members(members, base_offset, result, ctx.source);
 
     // Resolve extends
     for base_name in extends {
@@ -710,7 +744,7 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
     match node {
         // { prop: Type }
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(&lit.members, base_offset, result);
+            resolve_type_literal_members(&lit.members, base_offset, result, ctx.source);
         }
 
         // Parenthesized: (Type)
@@ -822,7 +856,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
     match node {
         // { prop: Type }
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(&lit.members, base_offset, result);
+            resolve_type_literal_members(&lit.members, base_offset, result, ctx.source);
         }
 
         // Parenthesized: (Type)
@@ -924,13 +958,14 @@ fn resolve_type_literal_members(
     members: &[TSSignature],
     base_offset: u32,
     result: &mut ResolvedElements,
+    source: &[u8],
 ) {
     for member in members {
         match member {
             TSSignature::TSPropertySignature(prop) => {
                 // Check if this is a shorthand emit: { change: [id: number] }
                 // Properties with tuple/array type values are treated as emits
-                if let Some(emit) = resolve_property_as_emit(prop, base_offset) {
+                if let Some(emit) = resolve_property_as_emit(prop, base_offset, source) {
                     result.emits.push(emit);
                 } else if let Some(resolved) = resolve_property_signature(prop, base_offset) {
                     result.props.push(resolved);
@@ -944,7 +979,7 @@ fn resolve_type_literal_members(
             TSSignature::TSCallSignatureDeclaration(call_sig) => {
                 result.has_call_signature = true;
                 // Extract emit from call signature: (e: 'change', id: number): void
-                if let Some(emit) = resolve_call_signature_as_emit(call_sig, base_offset) {
+                if let Some(emit) = resolve_call_signature_as_emit(call_sig, base_offset, source) {
                     result.emits.push(emit);
                 }
             }
@@ -955,7 +990,11 @@ fn resolve_type_literal_members(
 
 /// Try to resolve a property signature as an emit (shorthand style).
 /// Shorthand style: `{ change: [id: number] }` or `{ update: [] }`
-fn resolve_property_as_emit(prop: &TSPropertySignature, base_offset: u32) -> Option<ResolvedEmit> {
+fn resolve_property_as_emit(
+    prop: &TSPropertySignature,
+    base_offset: u32,
+    source: &[u8],
+) -> Option<ResolvedEmit> {
     // Get the property key as the event name
     let name = get_property_key_name(&prop.key)?;
     let key_span = get_property_key_span(&prop.key, base_offset)?;
@@ -965,6 +1004,11 @@ fn resolve_property_as_emit(prop: &TSPropertySignature, base_offset: u32) -> Opt
     // TSArrayType (e.g., `string[]`) is a regular array prop type.
     if let Some(ann) = &prop.type_annotation {
         if let TSType::TSTupleType(_) = &ann.type_annotation {
+            let tuple_text = slice_source_span(
+                source,
+                ann.type_annotation.span().start,
+                ann.type_annotation.span().end,
+            )?;
             return Some(ResolvedEmit {
                 span: Span {
                     start: prop.span.start + base_offset,
@@ -972,6 +1016,9 @@ fn resolve_property_as_emit(prop: &TSPropertySignature, base_offset: u32) -> Opt
                 },
                 name,
                 name_span: Some(key_span),
+                signature: ResolvedEmitSignature::Tuple { tuple_text },
+                map_local: true,
+                span_is_absolute: base_offset != 0,
             });
         }
     }
@@ -985,6 +1032,7 @@ fn resolve_property_as_emit(prop: &TSPropertySignature, base_offset: u32) -> Opt
 fn resolve_call_signature_as_emit(
     call_sig: &TSCallSignatureDeclaration,
     base_offset: u32,
+    source: &[u8],
 ) -> Option<ResolvedEmit> {
     // Get the first parameter - should be like `e: 'eventName'`
     let first_param = call_sig.params.items.first()?;
@@ -995,6 +1043,23 @@ fn resolve_call_signature_as_emit(
     // Extract event name from string literal type
     if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
         if let TSLiteral::StringLiteral(s) = &lit.literal {
+            let mut params_text = String::new();
+            for param in call_sig.params.items.iter().skip(1) {
+                if !params_text.is_empty() {
+                    params_text.push_str(", ");
+                }
+                params_text.push_str(&slice_source_span(
+                    source,
+                    param.span().start,
+                    param.span().end,
+                )?);
+            }
+            if let Some(rest) = &call_sig.params.rest {
+                if !params_text.is_empty() {
+                    params_text.push_str(", ");
+                }
+                params_text.push_str(&slice_source_span(source, rest.span.start, rest.span.end)?);
+            }
             return Some(ResolvedEmit {
                 span: Span {
                     start: call_sig.span.start + base_offset,
@@ -1005,6 +1070,9 @@ fn resolve_call_signature_as_emit(
                     start: s.span.start + base_offset,
                     end: s.span.end + base_offset,
                 }),
+                signature: ResolvedEmitSignature::Call { params_text },
+                map_local: true,
+                span_is_absolute: base_offset != 0,
             });
         }
     }
@@ -1020,6 +1088,17 @@ fn get_property_key_name(key: &PropertyKey) -> Option<String> {
         PropertyKey::NumericLiteral(n) => n.raw.as_ref().map(|r| r.to_string()),
         _ => None,
     }
+}
+
+fn slice_source_span(source: &[u8], start: u32, end: u32) -> Option<String> {
+    let start = start as usize;
+    let end = end as usize;
+    if end > source.len() || start > end {
+        return None;
+    }
+    std::str::from_utf8(&source[start..end])
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// Resolve a property signature to a ResolvedProp.
@@ -1054,6 +1133,8 @@ fn resolve_property_signature(
         optional,
         types,
         type_span,
+        map_local: true,
+        span_is_absolute: base_offset != 0,
     })
 }
 
@@ -1075,6 +1156,8 @@ fn resolve_method_signature(method: &TSMethodSignature, base_offset: u32) -> Opt
         optional,
         types: vec![RuntimeType::Function],
         type_span: None,
+        map_local: true,
+        span_is_absolute: base_offset != 0,
     })
 }
 
@@ -1393,7 +1476,10 @@ fn infer_props_from_object_literal(
     obj: &oxc_ast::ast::ObjectExpression<'_>,
     _source_bytes: &[u8],
 ) -> ResolvedElements {
-    let mut result = ResolvedElements::default();
+    let mut result = ResolvedElements {
+        root_runtime_types: vec![RuntimeType::Object],
+        ..ResolvedElements::default()
+    };
 
     for prop in &obj.properties {
         let ObjectPropertyKind::ObjectProperty(p) = prop else {
@@ -1419,6 +1505,8 @@ fn infer_props_from_object_literal(
             types: runtime_type,
             optional: false,
             type_span: None,
+            map_local: true,
+            span_is_absolute: false,
         });
     }
 
@@ -1490,6 +1578,12 @@ pub fn resolve_external_type(
                     prop.key_name = Some(name.to_string());
                 }
             }
+            prop.map_local = false;
+            prop.span_is_absolute = false;
+        }
+        for emit in &mut resolved.emits {
+            emit.map_local = false;
+            emit.span_is_absolute = false;
         }
     }
 
@@ -2240,6 +2334,8 @@ type Test = Local;"#;
             optional: false,
             types: vec![RuntimeType::String],
             type_span: None,
+            map_local: true,
+            span_is_absolute: false,
         });
         ctx.companion_types
             .insert("Base".to_string(), base_resolved);

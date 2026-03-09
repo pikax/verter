@@ -814,7 +814,10 @@ fn extract_type_params<'a>(
         .params
         .first()
         .is_some_and(|ts_type| matches!(ts_type, TSType::TSTypeReference(_)));
-    let unresolved_type_ref = is_type_reference && resolved.props.is_empty();
+    let unresolved_type_ref = is_type_reference
+        && resolved.props.is_empty()
+        && resolved.emits.is_empty()
+        && !resolved.has_call_signature;
 
     // Infer runtime types from the root type (for simple types like `string`, `number`)
     let runtime_types = tp

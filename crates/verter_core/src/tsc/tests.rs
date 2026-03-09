@@ -1,7 +1,47 @@
-use super::script::{generate_tsc_output, generate_tsc_output_with_options, TscGenOptions};
+use super::script::{generate_tsc_output_with_options, TscGenOptions};
+use crate::utils::oxc::vue::resolve_type::resolve_external_type;
+use oxc_allocator::Allocator;
+use oxc_sourcemap::SourceMap;
+use rustc_hash::FxHashMap;
 
 fn gen_tsc(sfc: &str) -> String {
-    generate_tsc_output(sfc, "TestComp").code
+    gen_tsc_output(sfc).code
+}
+
+fn gen_tsc_output(sfc: &str) -> super::script::TscOutput {
+    generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+fn gen_tsc_with_external_type(sfc: &str, type_name: &str, dep_source: &str) -> String {
+    gen_tsc_output_with_external_type(sfc, type_name, dep_source).code
+}
+
+fn gen_tsc_output_with_external_type(
+    sfc: &str,
+    type_name: &str,
+    dep_source: &str,
+) -> super::script::TscOutput {
+    let alloc = Allocator::default();
+    let resolved =
+        resolve_external_type(type_name, dep_source, &alloc).expect("failed to resolve external type");
+    let mut external_types = FxHashMap::default();
+    external_types.insert(type_name.to_string(), resolved);
+    generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+            external_types: Some(external_types),
+            ..Default::default()
+        },
+    )
 }
 
 fn gen_tsc_narrowing(sfc: &str) -> String {
@@ -10,9 +50,24 @@ fn gen_tsc_narrowing(sfc: &str) -> String {
         "TestComp",
         &TscGenOptions {
             conditional_root_narrowing: true,
+            ..Default::default()
         },
     )
     .code
+}
+
+fn offset_to_zero_based_line_col(text: &str, offset: usize) -> (u32, u32) {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    for ch in text[..offset].chars() {
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 // ── defineProps<ImportedType>() — type-only, no runtime props ────────────────
@@ -956,11 +1011,13 @@ defineProps<MyProps>()
 
 #[test]
 fn tsc_codegen_define_emits_imported_type_emits_import_statement() {
-    let r = gen_tsc(
+    let r = gen_tsc_with_external_type(
         r#"<script setup lang="ts">
 import type { Emits } from './types'
 defineEmits<Emits>()
 </script><template/>"#,
+        "Emits",
+        "export interface Emits { (e: 'submit', payload: string): void; confirm: [id: number] }",
     );
 
     assert!(
@@ -968,12 +1025,20 @@ defineEmits<Emits>()
         "defineEmits imported type should emit import type statement: {r}"
     );
     assert!(
-        r.contains("__EmitFn<Emits>"),
-        "defineEmits imported type should be preserved in $emit: {r}"
+        r.contains("((event: 'submit', payload: string) => void)"),
+        "defineEmits imported type should inline call-signature overloads in $emit: {r}"
     );
     assert!(
-        r.contains("__EmitToProps<Emits>"),
-        "defineEmits imported type should be preserved in $props: {r}"
+        r.contains("((event: 'confirm', ...args: [id: number]) => void)"),
+        "defineEmits imported type should inline shorthand overloads in $emit: {r}"
+    );
+    assert!(
+        r.contains(r#""onSubmit"?: (payload: string) => void"#),
+        "defineEmits imported type should inline submit handler props: {r}"
+    );
+    assert!(
+        r.contains(r#""onConfirm"?: (...args: [id: number]) => void"#),
+        "defineEmits imported type should inline confirm handler props: {r}"
     );
 }
 
@@ -1918,15 +1983,13 @@ defineEmits<{ (e: 'click', event: MouseEvent): void }>()
 </script><template/>"#,
     );
 
-    // Type-based emits use __EmitToProps with original type (preserves handler types)
     assert!(
-        r.contains("__EmitToProps<{ (e: 'click', event: MouseEvent): void }>"),
-        "should use __EmitToProps with original type in $props: {r}"
+        r.contains(r#""onClick"?: (event: MouseEvent) => void"#),
+        "type-based emits should inline handler props with preserved payload types: {r}"
     );
-    // The event is at least registered so @click on this component won't error
     assert!(
-        r.contains("'click'"),
-        "should have click event in emits: {r}"
+        r.contains("((event: 'click', event: MouseEvent) => void)"),
+        "type-based emits should inline $emit overloads: {r}"
     );
 }
 
@@ -1939,12 +2002,10 @@ const model = defineModel<string>()
 </script><template/>"#,
     );
 
-    // Type-based emits use __EmitToProps with original type
     assert!(
-        r.contains("__EmitToProps<{ (e: 'submit', data: string): void }>"),
-        "should use __EmitToProps for type-based emits in $props: {r}"
+        r.contains(r#""onSubmit"?: (data: string) => void"#),
+        "type-based emits should contribute inline handler props: {r}"
     );
-    // Models produce value prop + onUpdate handler (separate from __EmitToProps)
     assert!(
         r.contains("modelValue?:"),
         "should have modelValue prop: {r}"
@@ -1967,24 +2028,17 @@ defineEmits<{ (e: 'my-event', value: string): void }>()
 </script><template/>"#,
     );
 
-    // Should use __EmitToProps with the original type text (preserves handler types)
     assert!(
-        r.contains("__EmitToProps<{ (e: 'my-event', value: string): void }>"),
-        "should use __EmitToProps with original type in $props: {r}"
-    );
-    // Should NOT have manual handler fields with generic args
-    assert!(
-        !r.contains(r#""onMy-event"?:"#),
-        "should NOT have manually generated prop fields — uses __EmitToProps instead: {r}"
-    );
-    // The __EmitToProps and __Cam helper types must be present
-    assert!(
-        r.contains("type __EmitToProps<"),
-        "should define __EmitToProps helper type: {r}"
+        r.contains(r#""onMy-event"?: (value: string) => void"#),
+        "kebab emits should generate the kebab handler key inline: {r}"
     );
     assert!(
-        r.contains("type __Cam<"),
-        "should define __Cam helper type: {r}"
+        r.contains(r#""onMyEvent"?: (value: string) => void"#),
+        "kebab emits should also generate the camel handler key inline: {r}"
+    );
+    assert!(
+        !r.contains("__EmitToProps<") && !r.contains("type __Cam<"),
+        "inline emits should not rely on helper aliases anymore: {r}"
     );
 }
 
@@ -1998,8 +2052,12 @@ defineEmits<{ (e: 'my-custom-event'): void }>()
     );
 
     assert!(
-        r.contains("__EmitToProps<{ (e: 'my-custom-event'): void }>"),
-        "should use __EmitToProps with original type: {r}"
+        r.contains(r#""onMy-custom-event"?: () => void"#),
+        "multi-segment kebab emits should keep the kebab alias: {r}"
+    );
+    assert!(
+        r.contains(r#""onMyCustomEvent"?: () => void"#),
+        "multi-segment kebab emits should also generate the camel alias: {r}"
     );
 }
 
@@ -2015,25 +2073,17 @@ defineEmits({
 </script><template/>"#,
     );
 
-    // Object-arg emits now use __EmitToProps<raw_obj> — prop resolution
-    // (both kebab + camelized keys) happens at the TypeScript type level.
     assert!(
-        r.contains("__EmitToProps<"),
-        "should use __EmitToProps for object-arg emits: {r}"
-    );
-    // Raw object text should be embedded
-    assert!(
-        r.contains("'my-event'"),
-        "should preserve raw object with my-event: {r}"
+        r.contains(r#""onMy-event"?: (value: string) => void"#),
+        "object emits should inline the kebab handler key: {r}"
     );
     assert!(
-        r.contains("'click'"),
-        "should preserve raw object with click: {r}"
+        r.contains(r#""onMyEvent"?: (value: string) => void"#),
+        "object emits should inline the camel handler key: {r}"
     );
-    // Should NOT have manually-built prop fields
     assert!(
-        !r.contains(r#""onMy-event"?:"#),
-        "should NOT have manually-built onMy-event prop (delegated to __EmitToProps): {r}"
+        r.contains("((event: 'my-event', value: string) => void)"),
+        "object emits should inline $emit overloads from validator params: {r}"
     );
 }
 
@@ -2067,7 +2117,7 @@ defineEmits(['my-event', 'click'])
     );
 }
 
-// camelCase emit (type-based) → uses __EmitToProps
+// camelCase emit (type-based) → camel + kebab handler aliases
 #[test]
 fn tsc_codegen_camel_emit_no_duplicate_prop() {
     let r = gen_tsc(
@@ -2077,12 +2127,16 @@ defineEmits<{ (e: 'myEvent'): void }>()
     );
 
     assert!(
-        r.contains("__EmitToProps<{ (e: 'myEvent'): void }>"),
-        "should use __EmitToProps with original type: {r}"
+        r.contains(r#""onMyEvent"?: () => void"#),
+        "camel emits should keep the camel handler key: {r}"
+    );
+    assert!(
+        r.contains(r#""onMy-event"?: () => void"#),
+        "camel emits should also generate the kebab handler key: {r}"
     );
 }
 
-// Simple emit (type-based) → uses __EmitToProps
+// Simple emit (type-based) → single deduped handler key per props block
 #[test]
 fn tsc_codegen_simple_emit_no_duplicate_prop() {
     let r = gen_tsc(
@@ -2091,13 +2145,14 @@ defineEmits<{ (e: 'click'): void }>()
 </script><template/>"#,
     );
 
-    assert!(
-        r.contains("__EmitToProps<{ (e: 'click'): void }>"),
-        "should use __EmitToProps with original type: {r}"
+    let count = r.matches(r#""onClick"?: () => void"#).count();
+    assert_eq!(
+        count, 2,
+        "simple emits should only produce one deduped handler key in new() and $props: {r}"
     );
 }
 
-// update: prefix (type-based) → uses __EmitToProps
+// update: prefix (type-based) → colon form only
 #[test]
 fn tsc_codegen_update_prefix_emit_no_camelize() {
     let r = gen_tsc(
@@ -2107,8 +2162,12 @@ defineEmits<{ (e: 'update:modelValue'): void }>()
     );
 
     assert!(
-        r.contains("__EmitToProps<{ (e: 'update:modelValue'): void }>"),
-        "should use __EmitToProps with original type: {r}"
+        r.contains(r#""onUpdate:modelValue"?: () => void"#),
+        "colon emits should keep the colon handler key: {r}"
+    );
+    assert!(
+        !r.contains("onUpdateModelValue"),
+        "colon emits should not generate camelized aliases: {r}"
     );
 }
 
@@ -2125,17 +2184,15 @@ defineEmits<{
 </script><template/>"#,
     );
 
-    // $emit should use __EmitFn with original type — NOT (event: '...', ...args: unknown[])
     assert!(
-        r.contains("__EmitFn<"),
-        "should use __EmitFn for $emit: {r}"
+        r.contains("((event: 'change', ...args: [value: string]) => void)"),
+        "shorthand emits should inline tuple overloads in $emit: {r}"
     );
-    // The $emit line itself should NOT have manually-built unknown[] overloads
-    let emit_line = r.lines().find(|l| l.contains("$emit:")).unwrap();
     assert!(
-        !emit_line.contains("unknown[]"),
-        "should NOT have unknown[] args in $emit line for typed emits: {emit_line}"
+        r.contains("((event: 'update', ...args: [id: number, data: { name: string }]) => void)"),
+        "shorthand emits should preserve tuple payload text in $emit: {r}"
     );
+    assert!(!r.contains("__EmitFn<"), "helper emit aliases should be gone: {r}");
 }
 
 #[test]
@@ -2148,14 +2205,13 @@ defineEmits<{
 </script><template/>"#,
     );
 
-    // $props should use __EmitToProps with original type
     assert!(
-        r.contains("__EmitToProps<"),
-        "should use __EmitToProps in $props: {r}"
+        r.contains(r#""onChange"?: (...args: [value: string]) => void"#),
+        "shorthand emits should inline tuple handler props: {r}"
     );
 }
 
-// Function-form type-based: $emit should also use __EmitFn
+// Function-form type-based: $emit should also inline overloads
 #[test]
 fn tsc_codegen_function_form_emits_emit_type_uses_emit_fn() {
     let r = gen_tsc(
@@ -2164,16 +2220,11 @@ defineEmits<{ (e: 'click', event: MouseEvent): void }>()
 </script><template/>"#,
     );
 
-    // $emit should use __EmitFn for function-form too
     assert!(
-        r.contains("__EmitFn<"),
-        "should use __EmitFn for $emit with function-form: {r}"
+        r.contains("((event: 'click', event: MouseEvent) => void)"),
+        "function-form emits should inline $emit overloads: {r}"
     );
-    let emit_line = r.lines().find(|l| l.contains("$emit:")).unwrap();
-    assert!(
-        !emit_line.contains("unknown[]"),
-        "should NOT have unknown[] args in $emit line for function-form typed emits: {emit_line}"
-    );
+    assert!(!r.contains("__EmitFn<"), "helper emit aliases should be gone: {r}");
 }
 
 // ── Object-arg defineEmits: $emit + $props typing ────────────────────────────
@@ -2189,14 +2240,85 @@ defineEmits({
 </script><template/>"#,
     );
 
-    // Object-arg emits should use __EmitToProps with raw object for $props
     assert!(
-        r.contains("__EmitToProps<"),
-        "should use __EmitToProps for object-arg emits $props: {r}"
+        r.contains(r#""onChange"?: (value: string) => void"#),
+        "object-arg emits should inline handler props: {r}"
     );
-    // $emit should use __EmitFn with the raw object
     assert!(
-        r.contains("__EmitFn<"),
-        "should use __EmitFn for object-arg emits $emit: {r}"
+        r.contains("((event: 'submit', ...args: unknown[]) => void)"),
+        "null validators should fall back to unknown[] in $emit: {r}"
     );
+    assert!(
+        !r.contains("__EmitToProps<") && !r.contains("__EmitFn<"),
+        "object-arg emits should no longer use helper aliases: {r}"
+    );
+}
+
+#[test]
+fn tsc_sourcemap_emit_handler_prop_maps_to_event_name() {
+    let sfc = r#"<script setup lang="ts">
+defineEmits<{ (e: 'my-event', value: string): void }>()
+</script><template/>"#;
+    let out = gen_tsc_output(sfc);
+    let sourcemap = SourceMap::from_json_string(&out.source_map).expect("valid source map");
+    let lookup = sourcemap.generate_lookup_table();
+    let generated_offset = out
+        .code
+        .find(r#""onMyEvent""#)
+        .expect("generated handler prop");
+    let (generated_line, generated_col) = offset_to_zero_based_line_col(&out.code, generated_offset);
+    let token = sourcemap
+        .lookup_source_view_token(&lookup, generated_line, generated_col)
+        .expect("mapped handler prop token");
+    let expected_offset = sfc.find("'my-event'").expect("source event literal");
+    let (expected_line, expected_col) = offset_to_zero_based_line_col(sfc, expected_offset);
+
+    assert_eq!(token.get_source().map(|s| s.as_ref()), Some("/test/TestComp.vue"));
+    assert_eq!(token.get_src_line(), expected_line);
+    assert_eq!(token.get_src_col(), expected_col);
+}
+
+#[test]
+fn tsc_sourcemap_prop_key_maps_to_prop_name() {
+    let sfc = r#"<script setup lang="ts">
+defineProps<{ title: string; count?: number }>()
+</script><template/>"#;
+    let out = gen_tsc_output(sfc);
+    let sourcemap = SourceMap::from_json_string(&out.source_map).expect("valid source map");
+    let lookup = sourcemap.generate_lookup_table();
+    let generated_offset = out.code.find("title: string").expect("generated prop");
+    let (generated_line, generated_col) = offset_to_zero_based_line_col(&out.code, generated_offset);
+    let token = sourcemap
+        .lookup_source_view_token(&lookup, generated_line, generated_col)
+        .expect("mapped prop token");
+    let expected_offset = sfc.find("title: string").expect("source prop");
+    let (expected_line, expected_col) = offset_to_zero_based_line_col(sfc, expected_offset);
+
+    assert_eq!(token.get_source().map(|s| s.as_ref()), Some("/test/TestComp.vue"));
+    assert_eq!(token.get_src_line(), expected_line);
+    assert_eq!(token.get_src_col(), expected_col);
+}
+
+#[test]
+fn tsc_sourcemap_model_members_map_to_model_name() {
+    let sfc = r#"<script setup lang="ts">
+const title = defineModel<string>('title')
+</script><template/>"#;
+    let out = gen_tsc_output(sfc);
+    let sourcemap = SourceMap::from_json_string(&out.source_map).expect("valid source map");
+    let lookup = sourcemap.generate_lookup_table();
+    let generated_offset = out
+        .code
+        .find(r#""onUpdate:title""#)
+        .expect("generated model handler");
+    let (generated_line, generated_col) = offset_to_zero_based_line_col(&out.code, generated_offset);
+    let token = sourcemap
+        .lookup_source_view_token(&lookup, generated_line, generated_col)
+        .expect("mapped model token");
+    let expected_offset = sfc.find("'title'").expect("source model name");
+    let (expected_line, expected_col) = offset_to_zero_based_line_col(sfc, expected_offset);
+
+    assert_eq!(token.get_source().map(|s| s.as_ref()), Some("/test/TestComp.vue"));
+    assert_eq!(token.get_src_line(), expected_line);
+    assert_eq!(token.get_src_col(), expected_col);
 }

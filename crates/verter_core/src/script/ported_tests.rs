@@ -6,6 +6,20 @@
 
 use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
 use oxc_allocator::Allocator;
+use rustc_hash::FxHashMap;
+
+fn make_external_types(
+    type_name: &str,
+    dep_source: &str,
+) -> FxHashMap<String, crate::utils::oxc::vue::ResolvedElements> {
+    let alloc = Allocator::default();
+    let resolved =
+        crate::utils::oxc::vue::resolve_type::resolve_external_type(type_name, dep_source, &alloc)
+            .expect("failed to resolve external type");
+    let mut map = FxHashMap::default();
+    map.insert(type_name.to_string(), resolved);
+    map
+}
 
 // =========================================================================
 // Multi-script: <script setup> + <script> is valid Vue
@@ -407,10 +421,7 @@ fn test_define_props_empty_type_literal() {
 }
 
 #[test]
-fn test_define_props_unresolvable_type_no_panic() {
-    // The new pipeline silently handles unresolvable type references
-    // (e.g., types imported from external modules) without emitting diagnostics.
-    // It strips the macro call and compiles successfully.
+fn test_define_props_unresolvable_type_reports_error() {
     let input = "<script setup lang=\"ts\">\nimport type { ExternalProps } from './types'\ndefineProps<ExternalProps>()\n</script>\n<template><div>x</div></template>";
     let allocator = Allocator::new();
     let options = CodegenOptions::new().with_filename("test.vue");
@@ -419,16 +430,64 @@ fn test_define_props_unresolvable_type_no_panic() {
         ..Default::default()
     };
     let result = compile(input, &options, &verter_opts, &allocator);
-    let script = result.script.as_ref().expect("should have script block");
-    // Should compile without panicking and produce valid output
     assert!(
-        !script.code.is_empty(),
-        "Should produce non-empty script output"
+        result.errors.iter().any(|error| error.code == "XInvalidMacroType"),
+        "unresolvable imported props type should surface a compiler error, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn test_define_emits_invalid_imported_type_reports_error() {
+    let input = "<script setup lang=\"ts\">\nimport type { ExternalEmits } from './types'\ndefineEmits<ExternalEmits>()\n</script>\n<template><div>x</div></template>";
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("test.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        external_types: Some(make_external_types("ExternalEmits", "export type ExternalEmits = string")),
+        ..Default::default()
+    };
+    let result = compile(input, &options, &verter_opts, &allocator);
+
+    assert!(
+        result.errors.iter().any(|error| error.code == "XInvalidMacroType"),
+        "invalid imported emits type should surface a compiler error, got: {:?}",
+        result.errors
     );
     assert!(
-        !script.code.contains("defineProps"),
-        "Should strip defineProps call, got:\n{}",
-        script.code
+        result
+            .errors
+            .iter()
+            .any(|error| error.message.contains("defineEmits() type argument 'ExternalEmits'")),
+        "diagnostic should mention the invalid defineEmits import, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn test_define_props_invalid_imported_type_reports_error() {
+    let input = "<script setup lang=\"ts\">\nimport type { ExternalProps } from './types'\ndefineProps<ExternalProps>()\n</script>\n<template><div>x</div></template>";
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("test.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        external_types: Some(make_external_types("ExternalProps", "export type ExternalProps = string")),
+        ..Default::default()
+    };
+    let result = compile(input, &options, &verter_opts, &allocator);
+
+    assert!(
+        result.errors.iter().any(|error| error.code == "XInvalidMacroType"),
+        "invalid imported props type should surface a compiler error, got: {:?}",
+        result.errors
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.message.contains("defineProps() type argument 'ExternalProps'")),
+        "diagnostic should mention the invalid defineProps import, got: {:?}",
+        result.errors
     );
 }
 

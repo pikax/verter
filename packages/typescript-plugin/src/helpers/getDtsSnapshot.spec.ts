@@ -2,7 +2,13 @@
  * @ai-generated - Tests for getDtsSnapshot using VerterHost (Rust-backed SFC compilation).
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { parseFile } from "./getDtsSnapshot";
+import {
+  clearVirtualPublicApiCache,
+  FALLBACK_STUB,
+  getCachedVirtualPublicApi,
+  parseFile,
+  remapVirtualSpan,
+} from "./getDtsSnapshot";
 
 const mockLogger = {
   info: vi.fn(),
@@ -11,7 +17,11 @@ const mockLogger = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearVirtualPublicApiCache();
 });
+
+const hasNativeBinary =
+  parseFile("/probe.vue", "<template><div /></template>", mockLogger) !== FALLBACK_STUB;
 
 describe("parseFile", () => {
   it("compiles a simple SFC with script setup", () => {
@@ -104,8 +114,8 @@ const emit = defineEmits<{ change: [value: string] }>();
     expect(result).toContain("emit");
   });
 
-  // @ai-generated - Verifies generated TSX uses Vue's ComponentPublicInstance for the type declaration
-  it("generated TSX uses ComponentPublicInstance from vue", () => {
+  // @ai-generated - Verifies generated public API uses Vue public prop types.
+  it("generated public API uses Vue public prop types", () => {
     const sfc = `
 <script setup lang="ts">
 const props = defineProps<{ title: string }>();
@@ -117,10 +127,99 @@ const props = defineProps<{ title: string }>();
 `;
     const result = parseFile("/test/VerterTypes.vue", sfc, mockLogger);
 
-    // getPublicApi() generates a type declaration using Vue's ComponentPublicInstance
-    expect(result).toContain('ComponentPublicInstance');
+    expect(result).toContain('__OmitNew');
+    expect(result).toContain('import("vue").PublicProps');
     expect(result).toContain('import("vue")');
     // Props should be present in the $props type
     expect(result).toContain('title');
+  });
+
+  it.skipIf(!hasNativeBinary)("caches generated public API for both virtual file suffixes", () => {
+    const sfc = `
+<script setup lang="ts">
+defineProps<{ title: string }>()
+</script>
+<template><div>{{ title }}</div></template>
+`;
+    parseFile("/test/Cached.vue", sfc, mockLogger);
+
+    const tsEntry = getCachedVirtualPublicApi("/test/Cached.vue.ts");
+    const dtsEntry = getCachedVirtualPublicApi("/test/Cached.vue.d.ts");
+
+    expect(tsEntry).toBeDefined();
+    expect(dtsEntry).toBeDefined();
+    expect(tsEntry?.code).toContain("title");
+    expect(dtsEntry?.code).toContain("title");
+    expect(tsEntry?.sourceMap).toBeTruthy();
+    expect(dtsEntry?.sourceMap).toBeTruthy();
+  });
+
+  it.skipIf(!hasNativeBinary)("remaps virtual definition spans back to the local .vue file", () => {
+    const sfc = `
+<script setup lang="ts">
+defineProps<{ title: string }>()
+</script>
+<template><div>{{ title }}</div></template>
+`;
+    parseFile("/test/Remap.vue", sfc, mockLogger);
+    const cached = getCachedVirtualPublicApi("/test/Remap.vue.ts");
+
+    expect(cached).toBeDefined();
+    const generatedStart = cached!.code.indexOf("title: string");
+    expect(generatedStart).toBeGreaterThanOrEqual(0);
+
+    const remapped = remapVirtualSpan(
+      "/test/Remap.vue.ts",
+      { start: generatedStart, length: "title".length },
+      (fileName) => (fileName === "/test/Remap.vue" ? sfc : undefined),
+    );
+
+    expect(remapped).toEqual({
+      fileName: "/test/Remap.vue",
+      textSpan: {
+        start: sfc.indexOf("title: string"),
+        length: 1,
+      },
+    });
+  });
+
+  it.skipIf(!hasNativeBinary)("refreshes the cached source map when the SFC changes", () => {
+    const original = `
+<script setup lang="ts">
+defineProps<{ title: string }>()
+</script>
+<template><div>{{ title }}</div></template>
+`;
+    const updated = `
+<script setup lang="ts">
+defineProps<{ label: string }>()
+</script>
+<template><div>{{ label }}</div></template>
+`;
+
+    parseFile("/test/Refresh.vue", original, mockLogger);
+    parseFile("/test/Refresh.vue", updated, mockLogger);
+
+    const cached = getCachedVirtualPublicApi("/test/Refresh.vue.ts");
+    expect(cached).toBeDefined();
+    expect(cached?.code).toContain("label");
+    expect(cached?.code).not.toContain("title: string");
+
+    const generatedStart = cached!.code.indexOf("label: string");
+    expect(generatedStart).toBeGreaterThanOrEqual(0);
+
+    const remapped = remapVirtualSpan(
+      "/test/Refresh.vue.ts",
+      { start: generatedStart, length: "label".length },
+      (fileName) => (fileName === "/test/Refresh.vue" ? updated : undefined),
+    );
+
+    expect(remapped).toEqual({
+      fileName: "/test/Refresh.vue",
+      textSpan: {
+        start: updated.indexOf("label: string"),
+        length: 1,
+      },
+    });
   });
 });

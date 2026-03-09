@@ -400,10 +400,14 @@ impl VerterHost {
     /// Returns `None` if the file is not in the host or not a Vue SFC.
     pub fn get_public_api(&self, canonical_id: &str) -> Option<TscResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
-        let (source, file_kind) = {
+        let (source, file_kind, macro_type_deps) = {
             let files = read_lock(&self.files);
             let entry = files.get(&canonical)?;
-            (entry.source.clone(), entry.file_kind)
+            (
+                entry.source.clone(),
+                entry.file_kind,
+                entry.script_analysis.macro_type_deps.clone(),
+            )
         };
         if file_kind != FileKind::VueSfc {
             return None;
@@ -415,7 +419,48 @@ impl VerterHost {
             .unwrap_or(&canonical)
             .trim_end_matches(".vue")
             .to_string();
-        let tsc_out = verter_core::tsc::generate_tsc_output(&source, &component_name);
+        let external_types = {
+            let files = read_lock(&self.files);
+            let mut resolved = rustc_hash::FxHashMap::default();
+            for dep in &macro_type_deps {
+                let dep_canonical = crate::id::resolve_external(&canonical, &dep.import_source);
+                let dep_source: Option<std::sync::Arc<str>> = files
+                    .get(&*dep_canonical)
+                    .map(|e| e.source.clone())
+                    .or_else(|| {
+                        self.config.resolve_extensions.iter().find_map(|ext| {
+                            let with_ext = format!("{}{}", dep_canonical, ext);
+                            files.get(with_ext.as_str()).map(|e| e.source.clone())
+                        })
+                    });
+                if let Some(dep_source) = dep_source {
+                    let resolve_alloc = oxc_allocator::Allocator::new();
+                    if let Some(elements) =
+                        verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
+                            &dep.type_name,
+                            &dep_source,
+                            &resolve_alloc,
+                        )
+                    {
+                        resolved.insert(dep.type_name.clone(), elements);
+                    }
+                }
+            }
+            if resolved.is_empty() {
+                None
+            } else {
+                Some(resolved)
+            }
+        };
+        let tsc_out = verter_core::tsc::generate_tsc_output_with_options(
+            &source,
+            &component_name,
+            &verter_core::tsc::TscGenOptions {
+                conditional_root_narrowing: false,
+                filename: Some(canonical.clone()),
+                external_types,
+            },
+        );
         Some(TscResponse {
             code: Arc::from(tsc_out.code),
             source_map: if tsc_out.source_map.is_empty() {

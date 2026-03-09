@@ -2,7 +2,11 @@ import type tsModule from "typescript/lib/tsserverlibrary";
 import path from "node:path";
 import fs from "node:fs";
 import { isRelativeVue, isVue, isRelativeVueTs } from "./helpers/utils";
-import { parseFile, FALLBACK_STUB } from "./helpers/getDtsSnapshot";
+import {
+  parseFile,
+  FALLBACK_STUB,
+  remapVirtualSpan,
+} from "./helpers/getDtsSnapshot";
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
 
 function normalizePath(p: string): string {
@@ -210,6 +214,38 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       return p;
     }
 
+    function remapDefinitionLike<
+      T extends {
+        fileName: string;
+        textSpan: tsModule.TextSpan;
+        contextSpan?: tsModule.TextSpan;
+        originalTextSpan?: tsModule.TextSpan;
+      },
+    >(definition: T): T {
+      if (definition.fileName.endsWith(".vue")) {
+        return definition;
+      }
+
+      const remapped = remapVirtualSpan(definition.fileName, definition.textSpan, (target) =>
+        _readFile(target),
+      );
+
+      if (!remapped) {
+        definition.fileName = fixVuePath(definition.fileName);
+        return definition;
+      }
+
+      definition.fileName = remapped.fileName;
+      definition.textSpan = remapped.textSpan;
+      if (definition.contextSpan) {
+        definition.contextSpan = remapped.textSpan;
+      }
+      if (definition.originalTextSpan) {
+        definition.originalTextSpan = remapped.textSpan;
+      }
+      return definition;
+    }
+
     // Fix go-to-definition: .vue.d.ts/.vue.ts → .vue so Ctrl+Click opens the real .vue file
     const _getDefinitionAndBoundSpan =
       languageService.getDefinitionAndBoundSpan.bind(languageService);
@@ -217,7 +253,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const result = _getDefinitionAndBoundSpan(fileName, position);
       if (result?.definitions) {
         for (const def of result.definitions) {
-          def.fileName = fixVuePath(def.fileName);
+          remapDefinitionLike(def);
         }
       }
       return result;
@@ -229,7 +265,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const result = _getDefinitionAtPosition(fileName, position);
       if (result) {
         for (const def of result) {
-          def.fileName = fixVuePath(def.fileName);
+          remapDefinitionLike(def);
         }
       }
       return result;
@@ -241,7 +277,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const result = _getTypeDefinitionAtPosition(fileName, position);
       if (result) {
         for (const def of result) {
-          def.fileName = fixVuePath(def.fileName);
+          remapDefinitionLike(def);
         }
       }
       return result;

@@ -74,6 +74,8 @@ pub enum CompilerErrorCode {
     // -- Expression errors --
     /// Error parsing JavaScript expression.
     XInvalidExpression,
+    /// Invalid TypeScript type argument passed to a Vue compiler macro.
+    XInvalidMacroType,
 
     // -- Style errors --
     /// Error parsing or processing CSS in a `<style>` block.
@@ -119,6 +121,7 @@ impl CompilerErrorCode {
             }
             Self::XDuplicateDirective => "Duplicate built-in directive on the same element.",
             Self::XInvalidExpression => "Error parsing JavaScript expression.",
+            Self::XInvalidMacroType => "Invalid macro type argument.",
             Self::XCssParseError => "Error parsing or processing CSS.",
         }
     }
