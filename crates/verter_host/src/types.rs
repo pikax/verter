@@ -302,6 +302,31 @@ pub struct ScriptImportInfo {
     pub bindings: Vec<String>,
 }
 
+/// Summary of a single module reference found in a script block.
+#[derive(Debug, Clone)]
+pub struct ScriptModuleReference {
+    /// Syntax form that introduced the reference.
+    pub syntax: verter_analysis::ModuleReferenceSyntax,
+    /// Import vs require semantics.
+    pub semantics: verter_analysis::ModuleReferenceSemantics,
+    /// Whether the site is declaration-level type-only.
+    pub is_type_only: bool,
+    /// Raw source text for the specifier expression.
+    pub raw_text: String,
+    /// Exact literal when statically known.
+    pub literal_specifier: Option<String>,
+    /// Finite set of literals when narrowed to a union.
+    pub finite_specifiers: Vec<String>,
+    /// Static prefix for dynamic expressions, if any.
+    pub static_prefix: Option<String>,
+    /// Static analyzability classification.
+    pub analyzability: verter_analysis::ModuleReferenceAnalyzability,
+    /// Span of the containing statement or call expression.
+    pub span: verter_span::Span,
+    /// Span of the specifier expression.
+    pub expr_span: verter_span::Span,
+}
+
 /// Result of [`VerterHost::upsert`](crate::VerterHost::upsert) or
 /// [`VerterHost::apply_style_overrides`](crate::VerterHost::apply_style_overrides).
 ///
@@ -334,6 +359,8 @@ pub struct HostUpdateResult {
     pub external_source_requests: Vec<ExternalSourceRequest>,
     /// Import specifiers found in script blocks, for caller-side resolution.
     pub import_specifiers: Vec<ScriptImportInfo>,
+    /// Module reference sites found in script blocks.
+    pub module_references: Vec<ScriptModuleReference>,
     /// Blocks that need external preprocessing before compilation.
     ///
     /// Non-empty when the SFC uses non-native languages (e.g., `<template lang="pug">`).
@@ -360,6 +387,7 @@ impl HostUpdateResult {
             diagnostics: DiagnosticsSnapshot::default(),
             external_source_requests: Vec::new(),
             import_specifiers: Vec::new(),
+            module_references: Vec::new(),
             preprocessor_requests: Vec::new(),
             parse_duration_ms: 0.0,
         }
@@ -375,6 +403,9 @@ impl HostUpdateResult {
 pub struct FileAnalysisSnapshot {
     /// Import statements found in script blocks.
     pub imports: Vec<verter_analysis::AnalyzedImport>,
+    /// Module reference sites found in script blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_references: Vec<verter_analysis::AnalyzedModuleReference>,
     /// Variable/function bindings declared in script blocks.
     pub bindings: Vec<verter_analysis::AnalyzedBinding>,
     /// Vue compiler macros used (defineProps, defineEmits, etc.).

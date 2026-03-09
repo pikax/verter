@@ -113,6 +113,7 @@ impl VerterHost {
                     diagnostics: DiagnosticsSnapshot::default(),
                     external_source_requests: Vec::new(),
                     import_specifiers: Vec::new(),
+                    module_references: Vec::new(),
                     preprocessor_requests: Vec::new(),
                     parse_duration_ms,
                 });
@@ -133,6 +134,7 @@ impl VerterHost {
                 new_meta: snapshot.meta.clone(),
                 parse_diagnostics: snapshot.parse_diagnostics.clone(),
                 imports: snapshot.script_analysis.imports.clone(),
+                module_references: snapshot.script_analysis.module_references.clone(),
                 external_requests: snapshot.external_requests.clone(),
                 preprocessor_requests: snapshot.preprocessor_requests.clone(),
             };
@@ -375,6 +377,7 @@ impl VerterHost {
             diagnostics: DiagnosticsSnapshot::default(),
             external_source_requests: entry.external_requests.clone(),
             import_specifiers: Vec::new(),
+            module_references: Vec::new(),
             preprocessor_requests: Vec::new(),
             parse_duration_ms: 0.0,
         })
@@ -544,6 +547,7 @@ impl VerterHost {
             diagnostics: DiagnosticsSnapshot::default(),
             external_source_requests: entry.external_requests.clone(),
             import_specifiers: Vec::new(),
+            module_references: Vec::new(),
             preprocessor_requests: Vec::new(),
             parse_duration_ms: 0.0,
         })

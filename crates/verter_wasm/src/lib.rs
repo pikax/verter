@@ -540,6 +540,7 @@ fn build_script_snapshot(
 ) -> verter_analysis::types::ScriptAnalysisSnapshot {
     verter_analysis::types::ScriptAnalysisSnapshot {
         imports: snapshot.imports.clone(),
+        module_references: snapshot.module_references.clone(),
         bindings: snapshot.bindings.clone(),
         macros: snapshot.macros.clone(),
         macro_type_deps: snapshot.macro_type_deps.clone(),

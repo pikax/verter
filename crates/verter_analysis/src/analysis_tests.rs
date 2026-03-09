@@ -148,6 +148,75 @@ defineProps<{foo: PropType<string>}>();
 }
 
 #[test]
+fn collects_static_module_references() {
+    let result = analyze(
+        "import Foo from './Foo.vue';\nexport { Bar } from './bar';\nexport * from './baz';",
+    );
+    assert_eq!(result.module_references.len(), 3);
+
+    assert_eq!(
+        result.module_references[0].syntax,
+        ModuleReferenceSyntax::StaticImport
+    );
+    assert_eq!(
+        result.module_references[0].analyzability,
+        ModuleReferenceAnalyzability::Exact
+    );
+    assert_eq!(
+        result.module_references[0].literal_specifier.as_deref(),
+        Some("./Foo.vue")
+    );
+
+    assert_eq!(
+        result.module_references[1].syntax,
+        ModuleReferenceSyntax::ExportFrom
+    );
+    assert_eq!(
+        result.module_references[2].literal_specifier.as_deref(),
+        Some("./baz")
+    );
+}
+
+#[test]
+fn collects_dynamic_module_references() {
+    let result = analyze(
+        "const target = './Foo.vue';\nconst branch = cond ? './a' : './b';\nimport(target);\nimport(branch);\nrequire(`./widgets/${name}`);",
+    );
+    assert_eq!(result.module_references.len(), 3);
+
+    assert_eq!(
+        result.module_references[0].literal_specifier.as_deref(),
+        Some("./Foo.vue")
+    );
+    assert_eq!(
+        result.module_references[0].analyzability,
+        ModuleReferenceAnalyzability::Exact
+    );
+
+    assert_eq!(
+        result.module_references[1].finite_specifiers,
+        vec!["./a".to_string(), "./b".to_string()]
+    );
+    assert_eq!(
+        result.module_references[1].analyzability,
+        ModuleReferenceAnalyzability::FiniteSet
+    );
+
+    assert_eq!(
+        result.module_references[2].syntax,
+        ModuleReferenceSyntax::RequireCall
+    );
+    assert_eq!(
+        result.module_references[2].analyzability,
+        ModuleReferenceAnalyzability::UnknownDynamic
+    );
+    assert_eq!(
+        result.module_references[2].static_prefix.as_deref(),
+        Some("./widgets/")
+    );
+}
+
+#[test]
 fn define_model_type_based() {
     let result = analyze("const model = defineModel<string>();");
     assert!(result.flags.contains(AnalysisFlags::HAS_DEFINE_MODEL));

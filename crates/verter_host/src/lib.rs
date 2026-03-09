@@ -403,6 +403,7 @@ mod tests {
             new_meta: snapshot.meta,
             parse_diagnostics: snapshot.parse_diagnostics,
             imports: snapshot.script_analysis.imports,
+            module_references: snapshot.script_analysis.module_references,
             external_requests: snapshot.external_requests,
             preprocessor_requests: snapshot.preprocessor_requests,
         };
@@ -450,6 +451,7 @@ mod tests {
             new_meta: snapshot.meta,
             parse_diagnostics: snapshot.parse_diagnostics,
             imports: snapshot.script_analysis.imports,
+            module_references: snapshot.script_analysis.module_references,
             external_requests: snapshot.external_requests,
             preprocessor_requests: snapshot.preprocessor_requests,
         };

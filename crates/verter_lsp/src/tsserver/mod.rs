@@ -1,7 +1,7 @@
 //! TypeScript language service provider via tsserver.
 //!
 //! Uses the standard `tsserver.js` protocol (newline-delimited JSON over stdio)
-//! with the `@verter/typescript-plugin` for `.vue` file resolution.
+//! with resolver-managed provider files supplied by the LSP.
 //!
 //! This is an alternative to TSGO for users who don't have the Go-based
 //! TypeScript server available. It uses the workspace TypeScript version.

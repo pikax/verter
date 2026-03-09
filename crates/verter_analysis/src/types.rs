@@ -49,6 +49,10 @@ pub struct ScriptAnalysisSnapshot {
     /// All import declarations found in the script block(s).
     pub imports: Vec<AnalyzedImport>,
 
+    /// All module reference sites found in the script block(s).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_references: Vec<AnalyzedModuleReference>,
+
     /// Top-level bindings (variables, functions, classes).
     pub bindings: Vec<AnalyzedBinding>,
 
@@ -106,6 +110,59 @@ pub struct AnalyzedImport {
     /// Canonical file ID resolved by the host (None during standalone analysis).
     /// Populated by verter_host after path resolution for cross-file go-to-definition.
     pub resolved_canonical_id: Option<String>,
+}
+
+/// Syntax form that introduced a module reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ModuleReferenceSyntax {
+    StaticImport,
+    ExportFrom,
+    DynamicImport,
+    RequireCall,
+}
+
+/// Runtime resolution semantics for a module reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ModuleReferenceSemantics {
+    Import,
+    Require,
+}
+
+/// Whether the module reference can be resolved statically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ModuleReferenceAnalyzability {
+    Exact,
+    FiniteSet,
+    UnknownDynamic,
+}
+
+/// A module reference extracted from script content.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedModuleReference {
+    /// Syntax form that introduced the reference.
+    pub syntax: ModuleReferenceSyntax,
+    /// Runtime resolution semantics (`import` vs `require`).
+    pub semantics: ModuleReferenceSemantics,
+    /// Whether the site was declaration-level type-only.
+    pub is_type_only: bool,
+    /// SFC-absolute span of the containing statement or call expression.
+    pub span: Span,
+    /// SFC-absolute span of the module specifier expression.
+    pub expr_span: Span,
+    /// Raw source text for the specifier expression.
+    pub raw_text: String,
+    /// Exact resolved literal when statically known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub literal_specifier: Option<String>,
+    /// Finite set of candidate literals when the site can be narrowed to a union.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finite_specifiers: Vec<String>,
+    /// Static prefix, if any, for dynamic sites such as ``import(`foo-${bar}`)``.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_prefix: Option<String>,
+    /// Static analyzability classification.
+    pub analyzability: ModuleReferenceAnalyzability,
 }
 
 impl serde::Serialize for AnalyzedImport {
@@ -959,6 +1016,9 @@ pub struct ResolvedTypeInfo {
     /// For object types: member name → type string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members: Option<Vec<(String, String)>>,
+    /// When the resolved type is a finite string literal union, list its values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub string_literal_union: Option<Vec<String>>,
 }
 
 /// A CSS variable manipulation via DOM style APIs in script.

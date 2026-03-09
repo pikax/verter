@@ -80,6 +80,7 @@ pub(crate) struct UpsertResultData {
     pub(crate) new_meta: FileMeta,
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
     pub(crate) imports: Vec<verter_analysis::AnalyzedImport>,
+    pub(crate) module_references: Vec<verter_analysis::AnalyzedModuleReference>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
 }
@@ -141,6 +142,22 @@ pub(crate) fn build_upsert_result(
             source: imp.source,
         })
         .collect();
+    let module_references = data
+        .module_references
+        .into_iter()
+        .map(|reference| ScriptModuleReference {
+            syntax: reference.syntax,
+            semantics: reference.semantics,
+            is_type_only: reference.is_type_only,
+            raw_text: reference.raw_text,
+            literal_specifier: reference.literal_specifier,
+            finite_specifiers: reference.finite_specifiers,
+            static_prefix: reference.static_prefix,
+            analyzability: reference.analyzability,
+            span: reference.span,
+            expr_span: reference.expr_span,
+        })
+        .collect();
 
     Ok(HostUpdateResult {
         canonical_id,
@@ -155,6 +172,7 @@ pub(crate) fn build_upsert_result(
         diagnostics,
         external_source_requests: data.external_requests,
         import_specifiers,
+        module_references,
         preprocessor_requests: data.preprocessor_requests,
         parse_duration_ms,
     })

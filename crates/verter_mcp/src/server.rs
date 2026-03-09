@@ -192,6 +192,7 @@ fn build_script_snapshot(
 ) -> verter_analysis::types::ScriptAnalysisSnapshot {
     verter_analysis::types::ScriptAnalysisSnapshot {
         imports: analysis.imports.clone(),
+        module_references: analysis.module_references.clone(),
         bindings: analysis.bindings.clone(),
         macros: analysis.macros.clone(),
         macro_type_deps: analysis.macro_type_deps.clone(),
@@ -2797,6 +2798,7 @@ const count = ref(0)
     fn scoring_uses_prop_fields_not_type_references() {
         // Construct a script snapshot with many type_references but few prop_fields
         let script = verter_analysis::types::ScriptAnalysisSnapshot {
+            module_references: Vec::new(),
             macros: vec![verter_analysis::types::AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
                 is_type_based: true,

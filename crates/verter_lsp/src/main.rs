@@ -86,7 +86,7 @@ async fn main() {
     let config = LspConfig {
         host,
         type_provider,
-        project_sync_mode: ProjectSyncMode::TsxOnly,
+        project_sync_mode: ProjectSyncMode::FullProject,
         type_provider_kind: provider_kind,
         suggest_tsgo,
         mcp_port: mcp_actual_port,

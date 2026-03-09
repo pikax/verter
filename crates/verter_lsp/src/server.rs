@@ -704,6 +704,36 @@ impl VerterLanguageServer {
         }
     }
 
+    async fn sync_vue_public_api_by_canonical_id(&self, canonical_id: &str) {
+        if let Some(uri) = self.documents.canonical_id_to_uri(canonical_id) {
+            self.sync_api_to_provider(&uri).await;
+        } else {
+            self.resync_background_vue_file(canonical_id).await;
+        }
+    }
+
+    fn sync_api_to_provider_in_background(&self, uri: Uri) {
+        let Some(sync) = self.project_sync.clone() else {
+            return;
+        };
+        let Some(canonical_id) = self.documents.get_canonical_id(&uri) else {
+            return;
+        };
+        let Some(base) = canonical_id.strip_suffix(".vue") else {
+            return;
+        };
+        let dts_path = format!("{base}.vue.ts");
+        let host = self.documents.host_arc();
+        tokio::spawn(async move {
+            let api = tokio::task::block_in_place(|| host.get_public_api(&canonical_id));
+            if let Some(api) = api {
+                if let Err(e) = sync.sync_dts(&dts_path, &api.code).await {
+                    tracing::warn!("sync_api(background): failed for {dts_path}: {e}");
+                }
+            }
+        });
+    }
+
     /// If the file has pending changes, sync the IDE TSX + API DTS to the type provider NOW.
     /// Called by interactive handlers (hover, completion, etc.) to ensure the provider is up-to-date
     /// before making a query. Uses a tight timeout to avoid blocking interactive requests.
@@ -1049,22 +1079,56 @@ impl VerterLanguageServer {
             return;
         }
 
-        // For non-Vue files tracked by the extension (TS/JS), we notify the
-        // type provider so it can update its view of the project.
-        if let Some(tp) = &self.type_provider {
-            // Reconstruct the full text from the last change (full sync).
-            if let Some(last) = params.changes.last() {
-                // Convert file:// URI to filesystem path — update_file() calls
-                // path_to_uri() internally, so passing a URI would double-wrap it
-                // (e.g., file:///file:///...).
-                let path = if let Ok(uri) = params.uri.parse::<Uri>() {
-                    uri_to_canonical_id(&uri)
-                } else {
-                    params.uri.clone()
-                };
-                if let Err(e) = tp.update_file(&path, &last.text).await {
-                    tracing::warn!("failed to update file in type provider: {e}");
+        // For non-Vue files tracked by the extension (TS/JS), keep the host and
+        // provider in sync. Exact `.vue` imports are rewritten to `.vue.ts`
+        // before syncing so the provider resolves through Verter-managed files.
+        if let Some(last) = params.changes.last() {
+            // Convert file:// URI to filesystem path — update_file() calls
+            // path_to_uri() internally, so passing a URI would double-wrap it
+            // (e.g., file:///file:///...).
+            let path = if let Ok(uri) = params.uri.parse::<Uri>() {
+                uri_to_canonical_id(&uri)
+            } else {
+                params.uri.clone()
+            };
+
+            let module_references = self
+                .documents
+                .host
+                .upsert(verter_host::UpsertRequest {
+                    canonical_id: Some(path.clone()),
+                    input_id: path.clone(),
+                    source: Arc::from(last.text.as_str()),
+                    file_kind: verter_host::FileKind::NonSfc,
+                    aliases: Vec::new(),
+                })
+                .map(|result| result.module_references)
+                .unwrap_or_default();
+
+            let rewritten = rewrite_non_vue_source_for_provider(&last.text, &module_references);
+
+            if let Some(sync) = &self.project_sync {
+                if let Err(e) = sync.sync_file(&path, &rewritten).await {
+                    tracing::warn!("failed to sync file in type provider: {e}");
                 }
+            }
+
+            let vue_targets: Vec<String> =
+                collect_exact_and_finite_vue_specifiers(&module_references)
+                    .into_iter()
+                    .filter_map(|specifier| {
+                        resolve_vue_specifier_target(&self.project_registry, &path, &specifier)
+                    })
+                    .collect();
+
+            if !vue_targets.is_empty() {
+                self.documents
+                    .host
+                    .set_import_dependencies(&path, vue_targets.clone());
+            }
+
+            for vue_target in vue_targets {
+                self.sync_vue_public_api_by_canonical_id(&vue_target).await;
             }
         }
     }
@@ -1791,6 +1855,97 @@ fn compute_relative_path(from_dir: &str, to_file: &str) -> String {
     }
 }
 
+fn quote_wrapped_specifier(raw_text: &str, specifier: &str) -> String {
+    let quote = match raw_text.chars().next() {
+        Some('\'') => '\'',
+        Some('"') => '"',
+        Some('`') => '`',
+        _ => '\'',
+    };
+    format!("{quote}{specifier}{quote}")
+}
+
+fn rewrite_non_vue_source_for_provider(
+    source: &str,
+    module_references: &[verter_host::ScriptModuleReference],
+) -> String {
+    let mut rewritten = source.to_string();
+    let mut replacements: Vec<(usize, usize, String)> = module_references
+        .iter()
+        .filter_map(|reference| {
+            if reference.analyzability != verter_analysis::ModuleReferenceAnalyzability::Exact {
+                return None;
+            }
+
+            let literal = reference.literal_specifier.as_ref()?;
+            if !literal.ends_with(".vue") {
+                return None;
+            }
+
+            let start = reference.expr_span.start as usize;
+            let end = reference.expr_span.end as usize;
+            source.get(start..end)?;
+
+            Some((
+                start,
+                end,
+                quote_wrapped_specifier(&reference.raw_text, &format!("{literal}.ts")),
+            ))
+        })
+        .collect();
+
+    replacements.sort_by(|a, b| b.0.cmp(&a.0));
+    for (start, end, replacement) in replacements {
+        rewritten.replace_range(start..end, &replacement);
+    }
+
+    rewritten
+}
+
+fn collect_exact_and_finite_vue_specifiers(
+    module_references: &[verter_host::ScriptModuleReference],
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut specifiers = Vec::new();
+
+    for reference in module_references {
+        if reference.analyzability == verter_analysis::ModuleReferenceAnalyzability::Exact {
+            if let Some(specifier) = &reference.literal_specifier {
+                if specifier.ends_with(".vue") && seen.insert(specifier.clone()) {
+                    specifiers.push(specifier.clone());
+                }
+            }
+        }
+
+        if reference.analyzability == verter_analysis::ModuleReferenceAnalyzability::FiniteSet {
+            for specifier in &reference.finite_specifiers {
+                if specifier.ends_with(".vue") && seen.insert(specifier.clone()) {
+                    specifiers.push(specifier.clone());
+                }
+            }
+        }
+    }
+
+    specifiers
+}
+
+fn resolve_vue_specifier_target(
+    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
+    importer_path: &str,
+    specifier: &str,
+) -> Option<String> {
+    if specifier.starts_with('.') || specifier.starts_with('/') {
+        let resolved = verter_host::resolve_external(importer_path, specifier);
+        return resolved.ends_with(".vue").then_some(resolved);
+    }
+
+    let registry = project_registry.read();
+    registry
+        .as_ref()
+        .and_then(|projects| projects.resolve_alias(importer_path, specifier))
+        .filter(|resolved| resolved.ends_with(".vue"))
+}
+
 /// Check if a resolved import path matches a target file path.
 ///
 /// Handles cases where the import source omits the `.vue` extension:
@@ -1864,10 +2019,37 @@ struct DidOpenStartupPolicy {
     publish_diagnostics: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DidOpenProviderSyncPolicy {
+    await_ide_sync: bool,
+    await_api_sync: bool,
+    background_api_sync: bool,
+}
+
 fn did_open_startup_policy() -> DidOpenStartupPolicy {
     DidOpenStartupPolicy {
         sync_imported_vue_files: false,
         publish_diagnostics: false,
+    }
+}
+
+fn did_open_provider_sync_policy(kind: crate::TypeProviderKind) -> DidOpenProviderSyncPolicy {
+    match kind {
+        crate::TypeProviderKind::Tsgo => DidOpenProviderSyncPolicy {
+            await_ide_sync: true,
+            await_api_sync: true,
+            background_api_sync: false,
+        },
+        crate::TypeProviderKind::Tsserver => DidOpenProviderSyncPolicy {
+            await_ide_sync: true,
+            await_api_sync: false,
+            background_api_sync: true,
+        },
+        crate::TypeProviderKind::None => DidOpenProviderSyncPolicy {
+            await_ide_sync: true,
+            await_api_sync: false,
+            background_api_sync: false,
+        },
     }
 }
 
@@ -2182,8 +2364,9 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // Log discovered projects
     for project in registry.projects() {
         tracing::info!(
-            "project config: root={}, aliases={}, lint_explicit={}",
+            "project config: root={}, tsconfig={:?}, aliases={}, lint_explicit={}",
             project.root,
+            project.tsconfig_path,
             !project.path_resolver.is_empty(),
             project.lint_explicitly_configured,
         );
@@ -2203,27 +2386,21 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let _ = tp.update_workspace_folders(added, vec![]).await;
 
         for project in registry.projects() {
-            let project_root_path = std::path::PathBuf::from(&project.root);
-            let mut discovery = crate::config::TsConfigDiscovery::new();
-            discovery.discover(&project_root_path);
-
-            let candidates = [
-                discovery.find_config_for(&project_root_path.join("src/dummy.ts")),
-                discovery.configs().first(),
-            ];
-            for candidate in candidates.into_iter().flatten() {
-                if let Some((base_url, paths)) =
-                    crate::config::TsConfigPathResolver::raw_paths_json(&candidate.config_path)
-                {
-                    tracing::info!(
-                        "configuring tsserver paths for {} (baseUrl: {})",
-                        project.root,
-                        base_url,
-                    );
-                    if let Err(e) = tp.configure_paths(&base_url, paths).await {
-                        tracing::warn!("failed to configure tsserver paths: {e}");
-                    }
-                    break;
+            let Some(tsconfig_path) = project.tsconfig_path.as_deref() else {
+                continue;
+            };
+            let tsconfig_path = std::path::PathBuf::from(tsconfig_path);
+            if let Some((base_url, paths)) =
+                crate::config::TsConfigPathResolver::raw_paths_json(&tsconfig_path)
+            {
+                tracing::info!(
+                    "configuring tsserver paths for {} via {} (baseUrl: {})",
+                    project.root,
+                    tsconfig_path.display(),
+                    base_url,
+                );
+                if let Err(e) = tp.configure_paths(&base_url, paths).await {
+                    tracing::warn!("failed to configure tsserver paths: {e}");
                 }
             }
         }
@@ -2632,34 +2809,6 @@ impl LanguageServer for VerterLanguageServer {
         // background_init. Without this, there's a race: did_open() syncs files
         // to tsserver before configure_paths() runs, creating inferred projects
         // without path aliases (causing "Cannot find module '@/...'" errors).
-        if let Some(tp) = &self.type_provider {
-            let roots_for_paths = roots.clone();
-            for root_uri in &roots_for_paths {
-                let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
-                let root_path = std::path::PathBuf::from(&canonical);
-                let mut discovery = crate::config::TsConfigDiscovery::new();
-                discovery.discover(&root_path);
-
-                let candidates = [
-                    discovery.find_config_for(&root_path.join("src/dummy.ts")),
-                    discovery.configs().first(),
-                ];
-                for candidate in candidates.into_iter().flatten() {
-                    if let Some((base_url, paths)) =
-                        crate::config::TsConfigPathResolver::raw_paths_json(&candidate.config_path)
-                    {
-                        tracing::info!(
-                            "early path config: baseUrl={} from {}",
-                            base_url,
-                            candidate.config_path.display(),
-                        );
-                        let _ = tp.configure_paths(&base_url, paths).await;
-                        break;
-                    }
-                }
-            }
-        }
-
         // D. Clone Arcs for background task
         let args = BackgroundInitArgs {
             roots,
@@ -2744,10 +2893,15 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
-        tokio::join!(
-            self.sync_ide_to_provider(uri),
-            self.sync_api_to_provider(uri),
-        );
+        let provider_sync_policy = did_open_provider_sync_policy(self.type_provider_kind);
+        if provider_sync_policy.await_ide_sync {
+            self.sync_ide_to_provider(uri).await;
+        }
+        if provider_sync_policy.await_api_sync {
+            self.sync_api_to_provider(uri).await;
+        } else if provider_sync_policy.background_api_sync {
+            self.sync_api_to_provider_in_background(uri.clone());
+        }
         if startup_policy.publish_diagnostics {
             self.publish_full_diagnostics(uri).await;
         }
@@ -4969,6 +5123,131 @@ fn debug_snippet(content: &str, offset: usize) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures_util::StreamExt;
+    use verter_host::{HostConfig, VerterHost};
+
+    use crate::tsgo::protocol::{
+        CompletionResult, HoverInfo, InlayHint, RenameLocation, SemanticToken, SignatureHelp,
+        TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation,
+    };
+    use crate::tsgo::traits::{ProviderFuture, TypeProvider};
+
+    #[derive(Default)]
+    struct SlowConfigurePathsProvider {
+        configure_paths_started: AtomicUsize,
+    }
+
+    impl TypeProvider for SlowConfigurePathsProvider {
+        fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close_file(&self, _path: &str) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn get_completions(
+            &self,
+            _path: &str,
+            _offset: u32,
+            _trigger_character: Option<&str>,
+        ) -> ProviderFuture<'_, CompletionResult> {
+            Box::pin(async {
+                Ok(CompletionResult {
+                    items: Vec::new(),
+                    is_incomplete: false,
+                })
+            })
+        }
+
+        fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_references(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_rename_locations(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_signature_help(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_code_actions(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_document_highlights(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_inlay_hints(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<InlayHint>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn configure_paths(
+            &self,
+            _base_url: &str,
+            _paths: serde_json::Value,
+        ) -> ProviderFuture<'_, ()> {
+            self.configure_paths_started.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok(())
+            })
+        }
+    }
 
     #[test]
     fn debug_snippet_ascii() {
@@ -5068,6 +5347,108 @@ mod tests {
         // causing component parents to always be empty for alias-based imports.
     }
 
+    fn test_module_reference(
+        raw_text: &str,
+        literal_specifier: Option<&str>,
+        finite_specifiers: &[&str],
+        analyzability: verter_analysis::ModuleReferenceAnalyzability,
+        expr_start: usize,
+        expr_end: usize,
+    ) -> verter_host::ScriptModuleReference {
+        verter_host::ScriptModuleReference {
+            syntax: verter_analysis::ModuleReferenceSyntax::StaticImport,
+            semantics: verter_analysis::ModuleReferenceSemantics::Import,
+            is_type_only: false,
+            raw_text: raw_text.to_string(),
+            literal_specifier: literal_specifier.map(str::to_string),
+            finite_specifiers: finite_specifiers
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            static_prefix: None,
+            analyzability,
+            span: verter_span::Span::new(expr_start as u32, expr_end as u32),
+            expr_span: verter_span::Span::new(expr_start as u32, expr_end as u32),
+        }
+    }
+
+    #[test]
+    fn rewrite_non_vue_source_for_provider_rewrites_exact_vue_specifiers() {
+        let source = "import Foo from './Foo.vue';\nconst load = () => import(\"./Bar.vue\");\nconst keep = import(`./${name}.vue`);\n";
+        let foo_expr = "'./Foo.vue'";
+        let bar_expr = "\"./Bar.vue\"";
+        let dynamic_expr = "`./${name}.vue`";
+        let foo_start = source.find(foo_expr).unwrap();
+        let bar_start = source.find(bar_expr).unwrap();
+        let dynamic_start = source.find(dynamic_expr).unwrap();
+
+        let rewritten = rewrite_non_vue_source_for_provider(
+            source,
+            &[
+                test_module_reference(
+                    foo_expr,
+                    Some("./Foo.vue"),
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::Exact,
+                    foo_start,
+                    foo_start + foo_expr.len(),
+                ),
+                test_module_reference(
+                    bar_expr,
+                    Some("./Bar.vue"),
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::Exact,
+                    bar_start,
+                    bar_start + bar_expr.len(),
+                ),
+                test_module_reference(
+                    dynamic_expr,
+                    None,
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic,
+                    dynamic_start,
+                    dynamic_start + dynamic_expr.len(),
+                ),
+            ],
+        );
+
+        assert!(rewritten.contains("'./Foo.vue.ts'"));
+        assert!(rewritten.contains("\"./Bar.vue.ts\""));
+        assert!(rewritten.contains("import(`./${name}.vue`)"));
+    }
+
+    #[test]
+    fn collect_exact_and_finite_vue_specifiers_dedupes_and_filters() {
+        let collected = collect_exact_and_finite_vue_specifiers(&[
+            test_module_reference(
+                "'./Foo.vue'",
+                Some("./Foo.vue"),
+                &[],
+                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                0,
+                11,
+            ),
+            test_module_reference(
+                "'ignored'",
+                Some("./not-vue.ts"),
+                &[],
+                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                0,
+                9,
+            ),
+            test_module_reference(
+                "expr",
+                None,
+                &["./Foo.vue", "@/Bar.vue", "./not-vue.ts"],
+                verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                0,
+                4,
+            ),
+        ]);
+
+        assert_eq!(collected, vec!["./Foo.vue", "@/Bar.vue"]);
+    }
+
     #[test]
     fn import_resolved_matches_target_exact() {
         assert!(import_resolved_matches_target(
@@ -5143,6 +5524,111 @@ mod tests {
     }
 
     #[test]
+    fn did_open_provider_sync_policy_skips_api_sync_for_tsserver_but_not_tsgo() {
+        let tsserver = did_open_provider_sync_policy(crate::TypeProviderKind::Tsserver);
+        assert!(
+            tsserver.await_ide_sync,
+            "tsserver cold open should still await current-file TSX sync"
+        );
+        assert!(
+            !tsserver.await_api_sync,
+            "tsserver cold open should not await current-file .vue.ts sync"
+        );
+
+        let tsgo = did_open_provider_sync_policy(crate::TypeProviderKind::Tsgo);
+        assert!(
+            tsgo.await_api_sync,
+            "TSGO cold open should continue awaiting API sync"
+        );
+
+        let no_provider = did_open_provider_sync_policy(crate::TypeProviderKind::None);
+        assert!(
+            no_provider.await_ide_sync,
+            "the cold-open policy should keep TSX sync enabled regardless of provider kind"
+        );
+        assert!(
+            !no_provider.await_api_sync,
+            "verter-only mode should not await API sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialized_returns_before_background_configure_paths_completes() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "verter-lsp-init-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(temp_root.join("src")).expect("temp project should be created");
+        std::fs::write(
+            temp_root.join("tsconfig.json"),
+            r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}"#,
+        )
+        .expect("tsconfig should be written");
+
+        let provider = Arc::new(SlowConfigurePathsProvider::default());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                },
+            )
+        });
+        let drain_handle = tokio::spawn(async move {
+            let mut socket = socket;
+            while socket.next().await.is_some() {}
+        });
+
+        let server = service.inner();
+        server
+            .vite_config_enabled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        *server.workspace_roots.lock().await = vec![format!(
+            "file:///{}",
+            temp_root.to_string_lossy().replace('\\', "/")
+        )];
+
+        let start = std::time::Instant::now();
+        server.initialized(InitializedParams {}).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "initialized() should not wait for configure_paths/background discovery (elapsed {elapsed:?})"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while provider.configure_paths_started.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("background init should still configure paths after initialized() returns");
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[test]
     fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
         let analysis = verter_analysis::ScriptAnalysisSnapshot {
             imports: vec![
@@ -5175,6 +5661,7 @@ mod tests {
                     resolved_canonical_id: Some("C:/project/src/MyComp.vue".to_string()),
                 },
             ],
+            module_references: Vec::new(),
             bindings: Vec::new(),
             macros: Vec::new(),
             macro_type_deps: Vec::new(),

@@ -3129,7 +3129,7 @@ async fn debounced_sync_only_syncs_latest() {
     use dashmap::{DashMap, DashSet};
 
     let mock = MockTypeProvider::new();
-    let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::TsxOnly);
+    let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::FullProject);
     let needs_sync = Arc::new(DashSet::new());
     let sync_gen: Arc<DashMap<String, u64>> = Arc::new(DashMap::new());
     let canonical_id = "C:/project/src/App.vue".to_string();
@@ -3190,7 +3190,7 @@ async fn debounced_sync_skipped_when_superseded() {
     use dashmap::{DashMap, DashSet};
 
     let mock = MockTypeProvider::new();
-    let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::TsxOnly);
+    let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::FullProject);
     let needs_sync = Arc::new(DashSet::new());
     let sync_gen: Arc<DashMap<String, u64>> = Arc::new(DashMap::new());
     let canonical_id = "C:/project/src/App.vue".to_string();
@@ -3242,7 +3242,7 @@ async fn ensure_provider_synced_triggers_sync_when_dirty() {
     use dashmap::DashSet;
 
     let mock = MockTypeProvider::new();
-    let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::TsxOnly);
+    let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::FullProject);
     let needs_sync = DashSet::new();
     let canonical_id = "C:/project/src/App.vue".to_string();
     let tsx_path = "C:/project/src/App.vue.tsx".to_string();
@@ -3272,7 +3272,7 @@ async fn ensure_provider_synced_noop_when_clean() {
     use dashmap::DashSet;
 
     let mock = MockTypeProvider::new();
-    let _sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::TsxOnly);
+    let _sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::FullProject);
     let needs_sync: DashSet<String> = DashSet::new();
     let canonical_id = "C:/project/src/App.vue".to_string();
 
@@ -3295,7 +3295,7 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
     use dashmap::{DashMap, DashSet};
 
     let mock = MockTypeProvider::new();
-    let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::TsxOnly);
+    let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::FullProject);
     let needs_sync = Arc::new(DashSet::new());
     let sync_gen: Arc<DashMap<String, u64>> = Arc::new(DashMap::new());
     let canonical_id = "C:/project/src/App.vue".to_string();

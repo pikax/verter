@@ -4,6 +4,7 @@ use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_span::Span;
 
 use crate::classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};
 use crate::exports::extract_export_signatures_from_program;
@@ -90,6 +91,7 @@ pub fn build_script_analysis_with_scope(
     // Imports always precede declarations in valid ESM, so the import list is
     // complete when we encounter variable/function/class declarations.
     let mut imports = Vec::new();
+    let mut module_references = Vec::new();
     let mut import_map = ImportBindingMap::new();
     let mut macros = Vec::new();
     let mut bindings = Vec::new();
@@ -97,6 +99,7 @@ pub fn build_script_analysis_with_scope(
     let mut dom_query_calls = Vec::new();
     let mut css_var_manipulations = Vec::new();
     let mut first_await_offset: Option<u32> = None;
+    let mut const_string_values: FxHashMap<String, Vec<String>> = FxHashMap::default();
     // Track local type → referenced type names (from extends and intersection)
     // e.g., `interface Local extends Base {}` → { "Local": ["Base"] }
     // e.g., `type Local = Base & { own: string }` → { "Local": ["Base"] }
@@ -107,7 +110,65 @@ pub fn build_script_analysis_with_scope(
             Statement::ImportDeclaration(decl) => {
                 let analyzed = analyze_import_declaration(decl);
                 import_map.register(imports.len(), &analyzed);
+                module_references.push(build_static_module_reference(
+                    ModuleReferenceSyntax::StaticImport,
+                    ModuleReferenceSemantics::Import,
+                    decl.import_kind.is_type(),
+                    decl.span.into(),
+                    decl.source.span.into(),
+                    content,
+                    decl.source.value.as_str(),
+                ));
                 imports.push(analyzed);
+            }
+
+            Statement::ExportNamedDeclaration(decl) => {
+                if let Some(source) = &decl.source {
+                    module_references.push(build_static_module_reference(
+                        ModuleReferenceSyntax::ExportFrom,
+                        ModuleReferenceSemantics::Import,
+                        decl.export_kind.is_type(),
+                        decl.span.into(),
+                        source.span.into(),
+                        content,
+                        source.value.as_str(),
+                    ));
+                }
+
+                if let Some(decl) = &decl.declaration {
+                    match decl {
+                        Declaration::TSInterfaceDeclaration(iface) => {
+                            let mut bases = Vec::new();
+                            for heritage in &iface.extends {
+                                if let Expression::Identifier(id) = &heritage.expression {
+                                    bases.push(id.name.to_string());
+                                }
+                            }
+                            if !bases.is_empty() {
+                                local_type_deps.insert(iface.id.name.to_string(), bases);
+                            }
+                        }
+                        Declaration::TSTypeAliasDeclaration(alias) => {
+                            let refs = collect_type_references(&alias.type_annotation);
+                            if !refs.is_empty() {
+                                local_type_deps.insert(alias.id.name.to_string(), refs);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            Statement::ExportAllDeclaration(decl) => {
+                module_references.push(build_static_module_reference(
+                    ModuleReferenceSyntax::ExportFrom,
+                    ModuleReferenceSemantics::Import,
+                    false,
+                    decl.span.into(),
+                    decl.source.span.into(),
+                    content,
+                    decl.source.value.as_str(),
+                ));
             }
 
             Statement::ExpressionStatement(expr_stmt) => {
@@ -127,6 +188,12 @@ pub fn build_script_analysis_with_scope(
                         first_await_offset = Some(offset);
                     }
                 }
+                collect_module_references_from_expression(
+                    &expr_stmt.expression,
+                    content,
+                    &const_string_values,
+                    &mut module_references,
+                );
             }
 
             Statement::VariableDeclaration(var_decl) => {
@@ -170,6 +237,15 @@ pub fn build_script_analysis_with_scope(
                             used_in_script: false,
                             used_in_style: false,
                         });
+                        if matches!(var_decl.kind, VariableDeclarationKind::Const) {
+                            if let Some(init) = &decl.init {
+                                if let Some(values) =
+                                    evaluate_string_candidates(init, &const_string_values)
+                                {
+                                    const_string_values.insert(id.name.to_string(), values);
+                                }
+                            }
+                        }
                     } else {
                         // Destructured binding: ObjectPattern, ArrayPattern, etc.
                         extract_destructured_bindings(
@@ -187,6 +263,12 @@ pub fn build_script_analysis_with_scope(
                         try_extract_vue_api_call(init, &import_map, &mut vue_api_calls);
                         try_extract_dom_query(init, &mut dom_query_calls);
                         try_extract_css_var_manipulation(init, content, &mut css_var_manipulations);
+                        collect_module_references_from_expression(
+                            init,
+                            content,
+                            &const_string_values,
+                            &mut module_references,
+                        );
                     }
 
                     if first_await_offset.is_none() {
@@ -253,33 +335,6 @@ pub fn build_script_analysis_with_scope(
                     local_type_deps.insert(alias.id.name.to_string(), refs);
                 }
             }
-
-            // Handle exported type declarations too
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(decl) = &export.declaration {
-                    match decl {
-                        Declaration::TSInterfaceDeclaration(iface) => {
-                            let mut bases = Vec::new();
-                            for heritage in &iface.extends {
-                                if let Expression::Identifier(id) = &heritage.expression {
-                                    bases.push(id.name.to_string());
-                                }
-                            }
-                            if !bases.is_empty() {
-                                local_type_deps.insert(iface.id.name.to_string(), bases);
-                            }
-                        }
-                        Declaration::TSTypeAliasDeclaration(alias) => {
-                            let refs = collect_type_references(&alias.type_annotation);
-                            if !refs.is_empty() {
-                                local_type_deps.insert(alias.id.name.to_string(), refs);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
             Statement::ForOfStatement(for_of) if for_of.r#await => {
                 if first_await_offset.is_none() {
                     first_await_offset = Some(for_of.span.start);
@@ -308,6 +363,7 @@ pub fn build_script_analysis_with_scope(
 
     ScriptAnalysisSnapshot {
         imports,
+        module_references,
         bindings,
         macros,
         macro_type_deps,
@@ -337,6 +393,515 @@ pub fn build_export_signatures(
     }
 
     extract_export_signatures_from_program(content, &result.program)
+}
+
+fn build_static_module_reference(
+    syntax: ModuleReferenceSyntax,
+    semantics: ModuleReferenceSemantics,
+    is_type_only: bool,
+    span: Span,
+    expr_span: Span,
+    content: &str,
+    specifier: &str,
+) -> AnalyzedModuleReference {
+    let raw_text = expr_span.slice(content).to_string();
+    AnalyzedModuleReference {
+        syntax,
+        semantics,
+        is_type_only,
+        span,
+        expr_span,
+        raw_text,
+        literal_specifier: Some(specifier.to_string()),
+        finite_specifiers: Vec::new(),
+        static_prefix: Some(specifier.to_string()),
+        analyzability: ModuleReferenceAnalyzability::Exact,
+    }
+}
+
+fn build_dynamic_module_reference(
+    syntax: ModuleReferenceSyntax,
+    semantics: ModuleReferenceSemantics,
+    span: Span,
+    expr_span: Span,
+    expr: &Expression<'_>,
+    content: &str,
+    const_string_values: &FxHashMap<String, Vec<String>>,
+) -> AnalyzedModuleReference {
+    let raw_text = expr_span.slice(content).to_string();
+    let candidates = evaluate_string_candidates(expr, const_string_values);
+    let static_prefix =
+        static_prefix_from_expression(expr, const_string_values, candidates.as_ref());
+
+    match candidates {
+        Some(mut values) if values.len() == 1 => AnalyzedModuleReference {
+            syntax,
+            semantics,
+            is_type_only: false,
+            span,
+            expr_span,
+            raw_text,
+            literal_specifier: Some(values.remove(0)),
+            finite_specifiers: Vec::new(),
+            static_prefix,
+            analyzability: ModuleReferenceAnalyzability::Exact,
+        },
+        Some(values) if !values.is_empty() => AnalyzedModuleReference {
+            syntax,
+            semantics,
+            is_type_only: false,
+            span,
+            expr_span,
+            raw_text,
+            literal_specifier: None,
+            finite_specifiers: values,
+            static_prefix,
+            analyzability: ModuleReferenceAnalyzability::FiniteSet,
+        },
+        _ => AnalyzedModuleReference {
+            syntax,
+            semantics,
+            is_type_only: false,
+            span,
+            expr_span,
+            raw_text,
+            literal_specifier: None,
+            finite_specifiers: Vec::new(),
+            static_prefix,
+            analyzability: ModuleReferenceAnalyzability::UnknownDynamic,
+        },
+    }
+}
+
+fn collect_module_references_from_expression(
+    expr: &Expression<'_>,
+    content: &str,
+    const_string_values: &FxHashMap<String, Vec<String>>,
+    module_references: &mut Vec<AnalyzedModuleReference>,
+) {
+    match expr {
+        Expression::ImportExpression(import) => {
+            module_references.push(build_dynamic_module_reference(
+                ModuleReferenceSyntax::DynamicImport,
+                ModuleReferenceSemantics::Import,
+                import.span.into(),
+                import.source.span().into(),
+                &import.source,
+                content,
+                const_string_values,
+            ));
+            collect_module_references_from_expression(
+                &import.source,
+                content,
+                const_string_values,
+                module_references,
+            );
+        }
+        Expression::CallExpression(call) => {
+            if let Expression::Identifier(id) = &call.callee {
+                if id.name.as_str() == "require" {
+                    if let Some(source) = call.arguments.first().and_then(|arg| arg.as_expression())
+                    {
+                        module_references.push(build_dynamic_module_reference(
+                            ModuleReferenceSyntax::RequireCall,
+                            ModuleReferenceSemantics::Require,
+                            call.span.into(),
+                            source.span().into(),
+                            source,
+                            content,
+                            const_string_values,
+                        ));
+                    }
+                }
+            }
+
+            collect_module_references_from_expression(
+                &call.callee,
+                content,
+                const_string_values,
+                module_references,
+            );
+            for arg in &call.arguments {
+                if let Some(arg_expr) = arg.as_expression() {
+                    collect_module_references_from_expression(
+                        arg_expr,
+                        content,
+                        const_string_values,
+                        module_references,
+                    );
+                }
+            }
+        }
+        Expression::AwaitExpression(aw) => collect_module_references_from_expression(
+            &aw.argument,
+            content,
+            const_string_values,
+            module_references,
+        ),
+        Expression::ParenthesizedExpression(paren) => collect_module_references_from_expression(
+            &paren.expression,
+            content,
+            const_string_values,
+            module_references,
+        ),
+        Expression::TSAsExpression(expr) => collect_module_references_from_expression(
+            &expr.expression,
+            content,
+            const_string_values,
+            module_references,
+        ),
+        Expression::TSSatisfiesExpression(expr) => collect_module_references_from_expression(
+            &expr.expression,
+            content,
+            const_string_values,
+            module_references,
+        ),
+        Expression::TSTypeAssertion(expr) => collect_module_references_from_expression(
+            &expr.expression,
+            content,
+            const_string_values,
+            module_references,
+        ),
+        Expression::BinaryExpression(bin) => {
+            collect_module_references_from_expression(
+                &bin.left,
+                content,
+                const_string_values,
+                module_references,
+            );
+            collect_module_references_from_expression(
+                &bin.right,
+                content,
+                const_string_values,
+                module_references,
+            );
+        }
+        Expression::LogicalExpression(log) => {
+            collect_module_references_from_expression(
+                &log.left,
+                content,
+                const_string_values,
+                module_references,
+            );
+            collect_module_references_from_expression(
+                &log.right,
+                content,
+                const_string_values,
+                module_references,
+            );
+        }
+        Expression::ConditionalExpression(cond) => {
+            collect_module_references_from_expression(
+                &cond.test,
+                content,
+                const_string_values,
+                module_references,
+            );
+            collect_module_references_from_expression(
+                &cond.consequent,
+                content,
+                const_string_values,
+                module_references,
+            );
+            collect_module_references_from_expression(
+                &cond.alternate,
+                content,
+                const_string_values,
+                module_references,
+            );
+        }
+        Expression::ArrayExpression(arr) => {
+            for elem in &arr.elements {
+                if let Some(elem_expr) = elem.as_expression() {
+                    collect_module_references_from_expression(
+                        elem_expr,
+                        content,
+                        const_string_values,
+                        module_references,
+                    );
+                }
+            }
+        }
+        Expression::ObjectExpression(obj) => {
+            for prop in &obj.properties {
+                match prop {
+                    ObjectPropertyKind::ObjectProperty(prop) => {
+                        collect_module_references_from_expression(
+                            &prop.value,
+                            content,
+                            const_string_values,
+                            module_references,
+                        );
+                    }
+                    ObjectPropertyKind::SpreadProperty(prop) => {
+                        collect_module_references_from_expression(
+                            &prop.argument,
+                            content,
+                            const_string_values,
+                            module_references,
+                        );
+                    }
+                }
+            }
+        }
+        Expression::TemplateLiteral(tpl) => {
+            for expr in &tpl.expressions {
+                collect_module_references_from_expression(
+                    expr,
+                    content,
+                    const_string_values,
+                    module_references,
+                );
+            }
+        }
+        Expression::TaggedTemplateExpression(tagged) => {
+            collect_module_references_from_expression(
+                &tagged.tag,
+                content,
+                const_string_values,
+                module_references,
+            );
+            for expr in &tagged.quasi.expressions {
+                collect_module_references_from_expression(
+                    expr,
+                    content,
+                    const_string_values,
+                    module_references,
+                );
+            }
+        }
+        Expression::StaticMemberExpression(member) => collect_module_references_from_expression(
+            &member.object,
+            content,
+            const_string_values,
+            module_references,
+        ),
+        Expression::ComputedMemberExpression(member) => {
+            collect_module_references_from_expression(
+                &member.object,
+                content,
+                const_string_values,
+                module_references,
+            );
+            collect_module_references_from_expression(
+                &member.expression,
+                content,
+                const_string_values,
+                module_references,
+            );
+        }
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(call) => {
+                collect_module_references_from_expression(
+                    &call.callee,
+                    content,
+                    const_string_values,
+                    module_references,
+                );
+                for arg in &call.arguments {
+                    if let Some(arg_expr) = arg.as_expression() {
+                        collect_module_references_from_expression(
+                            arg_expr,
+                            content,
+                            const_string_values,
+                            module_references,
+                        );
+                    }
+                }
+            }
+            ChainElement::ComputedMemberExpression(member) => {
+                collect_module_references_from_expression(
+                    &member.object,
+                    content,
+                    const_string_values,
+                    module_references,
+                );
+                collect_module_references_from_expression(
+                    &member.expression,
+                    content,
+                    const_string_values,
+                    module_references,
+                );
+            }
+            ChainElement::StaticMemberExpression(member) => {
+                collect_module_references_from_expression(
+                    &member.object,
+                    content,
+                    const_string_values,
+                    module_references,
+                )
+            }
+            ChainElement::TSNonNullExpression(non_null) => {
+                collect_module_references_from_expression(
+                    &non_null.expression,
+                    content,
+                    const_string_values,
+                    module_references,
+                )
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn evaluate_string_candidates(
+    expr: &Expression<'_>,
+    const_string_values: &FxHashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    match expr {
+        Expression::StringLiteral(lit) => Some(vec![lit.value.to_string()]),
+        Expression::TemplateLiteral(tpl) => {
+            if tpl.quasis.is_empty() {
+                return Some(Vec::new());
+            }
+
+            let mut values = vec![String::new()];
+            for (idx, quasi) in tpl.quasis.iter().enumerate() {
+                for value in &mut values {
+                    value.push_str(quasi.value.raw.as_str());
+                }
+                if let Some(expr) = tpl.expressions.get(idx) {
+                    let expr_values = evaluate_string_candidates(expr, const_string_values)?;
+                    values = combine_string_candidates(&values, &expr_values)?;
+                }
+            }
+            dedupe_string_candidates(values)
+        }
+        Expression::BinaryExpression(bin) => {
+            if bin.operator.as_str() != "+" {
+                return None;
+            }
+            let left = evaluate_string_candidates(&bin.left, const_string_values)?;
+            let right = evaluate_string_candidates(&bin.right, const_string_values)?;
+            dedupe_string_candidates(combine_string_candidates(&left, &right)?)
+        }
+        Expression::ConditionalExpression(cond) => {
+            let mut values = evaluate_string_candidates(&cond.consequent, const_string_values)?;
+            values.extend(evaluate_string_candidates(
+                &cond.alternate,
+                const_string_values,
+            )?);
+            dedupe_string_candidates(values)
+        }
+        Expression::Identifier(id) => const_string_values.get(id.name.as_str()).cloned(),
+        Expression::ParenthesizedExpression(paren) => {
+            evaluate_string_candidates(&paren.expression, const_string_values)
+        }
+        Expression::TSAsExpression(expr) => {
+            evaluate_string_candidates(&expr.expression, const_string_values)
+        }
+        Expression::TSSatisfiesExpression(expr) => {
+            evaluate_string_candidates(&expr.expression, const_string_values)
+        }
+        Expression::TSTypeAssertion(expr) => {
+            evaluate_string_candidates(&expr.expression, const_string_values)
+        }
+        Expression::SequenceExpression(seq) => seq
+            .expressions
+            .last()
+            .and_then(|expr| evaluate_string_candidates(expr, const_string_values)),
+        _ => None,
+    }
+}
+
+fn combine_string_candidates(left: &[String], right: &[String]) -> Option<Vec<String>> {
+    const MAX_CANDIDATES: usize = 16;
+    let mut out = Vec::with_capacity(left.len().saturating_mul(right.len()));
+    for lhs in left {
+        for rhs in right {
+            if out.len() >= MAX_CANDIDATES {
+                return None;
+            }
+            out.push(format!("{lhs}{rhs}"));
+        }
+    }
+    Some(out)
+}
+
+fn dedupe_string_candidates(values: Vec<String>) -> Option<Vec<String>> {
+    let mut seen = FxHashSet::default();
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn static_prefix_from_expression(
+    expr: &Expression<'_>,
+    const_string_values: &FxHashMap<String, Vec<String>>,
+    candidates: Option<&Vec<String>>,
+) -> Option<String> {
+    if let Some(values) = candidates {
+        if !values.is_empty() {
+            let prefix = common_prefix(values);
+            if !prefix.is_empty() {
+                return Some(prefix);
+            }
+        }
+    }
+
+    match expr {
+        Expression::TemplateLiteral(tpl) => tpl
+            .quasis
+            .first()
+            .map(|quasi| quasi.value.raw.as_str().to_string())
+            .filter(|prefix| !prefix.is_empty()),
+        Expression::BinaryExpression(bin) if bin.operator.as_str() == "+" => {
+            static_prefix_from_expression(&bin.left, const_string_values, None)
+        }
+        Expression::Identifier(id) => {
+            const_string_values
+                .get(id.name.as_str())
+                .and_then(|values| {
+                    let prefix = common_prefix(values);
+                    if prefix.is_empty() {
+                        None
+                    } else {
+                        Some(prefix)
+                    }
+                })
+        }
+        Expression::ParenthesizedExpression(paren) => {
+            static_prefix_from_expression(&paren.expression, const_string_values, None)
+        }
+        Expression::TSAsExpression(expr) => {
+            static_prefix_from_expression(&expr.expression, const_string_values, None)
+        }
+        Expression::TSSatisfiesExpression(expr) => {
+            static_prefix_from_expression(&expr.expression, const_string_values, None)
+        }
+        Expression::TSTypeAssertion(expr) => {
+            static_prefix_from_expression(&expr.expression, const_string_values, None)
+        }
+        _ => None,
+    }
+}
+
+fn common_prefix(values: &[String]) -> String {
+    let Some(first) = values.first() else {
+        return String::new();
+    };
+    let mut prefix = first.clone();
+    for value in &values[1..] {
+        while !value.starts_with(&prefix) {
+            if prefix.is_empty() {
+                break;
+            }
+            prefix.pop();
+        }
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    prefix
 }
 
 /// Classify an initializer expression.

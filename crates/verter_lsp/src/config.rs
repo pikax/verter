@@ -962,6 +962,8 @@ impl DiagnosticSeverityConfig {
 pub struct ProjectConfig {
     /// Directory this project covers (e.g., `packages/ui/`). Always forward slashes.
     pub root: String,
+    /// Canonical tsconfig path when this project is backed by a discovered config.
+    pub tsconfig_path: Option<String>,
     /// Path alias resolver (from tsconfig + vite.config, merged).
     pub path_resolver: TsConfigPathResolver,
     /// Lint configuration for this project.
@@ -1006,36 +1008,19 @@ impl ProjectRegistry {
             // Discover tsconfigs under this root
             let mut discovery = TsConfigDiscovery::new();
             discovery.discover(&root_path);
-
-            // Group tsconfigs by project root (directory containing tsconfig)
-            let mut project_roots_seen = std::collections::HashSet::new();
-            // Always include the workspace root itself
-            project_roots_seen.insert(canonical.clone());
+            let mut has_root_tsconfig = false;
 
             for entry in discovery.configs() {
-                if let Some(dir) = entry.config_path.parent() {
-                    let dir_str = dir.to_string_lossy().replace('\\', "/");
-                    project_roots_seen.insert(dir_str);
-                }
-            }
-
-            for project_root in &project_roots_seen {
-                let project_root_path = PathBuf::from(project_root);
-
-                // Find the best tsconfig for this project root
-                let mut resolver = if let Some(entry) =
-                    discovery.find_config_for(&project_root_path.join("src/dummy.ts"))
-                {
-                    TsConfigPathResolver::from_tsconfig(&entry.config_path)
-                } else if let Some(entry) =
-                    discovery.find_config_for(&project_root_path.join("dummy.ts"))
-                {
-                    TsConfigPathResolver::from_tsconfig(&entry.config_path)
-                } else {
-                    TsConfigPathResolver::default()
+                let Some(dir) = entry.config_path.parent() else {
+                    continue;
                 };
+                let project_root = dir.to_string_lossy().replace('\\', "/");
+                if project_root == canonical {
+                    has_root_tsconfig = true;
+                }
+                let project_root_path = PathBuf::from(&project_root);
+                let mut resolver = TsConfigPathResolver::from_tsconfig(&entry.config_path);
 
-                // Merge vite config aliases (takes precedence over tsconfig)
                 if vite_config_enabled {
                     if let Some(np) = node_path {
                         let vite_aliases = discover_vite_aliases(&project_root_path, np);
@@ -1050,13 +1035,26 @@ impl ProjectRegistry {
                     }
                 }
 
-                // Discover lint config for this project root
                 let lint = discover_lint_config(&project_root_path);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());
 
                 projects.push(ProjectConfig {
-                    root: project_root.clone(),
+                    root: project_root,
+                    tsconfig_path: Some(entry.config_path.to_string_lossy().replace('\\', "/")),
                     path_resolver: resolver,
+                    lint_config: lint.clone(),
+                    linter,
+                    lint_explicitly_configured: lint.explicitly_configured,
+                });
+            }
+
+            if !has_root_tsconfig {
+                let lint = discover_lint_config(&root_path);
+                let linter = verter_diagnostics::Linter::new(lint.config.clone());
+                projects.push(ProjectConfig {
+                    root: canonical,
+                    tsconfig_path: None,
+                    path_resolver: TsConfigPathResolver::default(),
                     lint_config: lint.clone(),
                     linter,
                     lint_explicitly_configured: lint.explicitly_configured,
@@ -1064,8 +1062,7 @@ impl ProjectRegistry {
             }
         }
 
-        // Sort by root length descending (longest prefix first for most-specific match)
-        projects.sort_by(|a, b| b.root.len().cmp(&a.root.len()));
+        sort_projects(&mut projects);
 
         Self { projects }
     }
@@ -1079,38 +1076,38 @@ impl ProjectRegistry {
 
             let mut discovery = TsConfigDiscovery::new();
             discovery.discover(&root_path);
-
-            let mut project_roots_seen = std::collections::HashSet::new();
-            project_roots_seen.insert(root.to_string());
+            let mut has_root_tsconfig = false;
 
             for entry in discovery.configs() {
-                if let Some(dir) = entry.config_path.parent() {
-                    let dir_str = dir.to_string_lossy().replace('\\', "/");
-                    project_roots_seen.insert(dir_str);
-                }
-            }
-
-            for project_root in &project_roots_seen {
-                let project_root_path = PathBuf::from(project_root);
-
-                let resolver = if let Some(entry) =
-                    discovery.find_config_for(&project_root_path.join("src/dummy.ts"))
-                {
-                    TsConfigPathResolver::from_tsconfig(&entry.config_path)
-                } else if let Some(entry) =
-                    discovery.find_config_for(&project_root_path.join("dummy.ts"))
-                {
-                    TsConfigPathResolver::from_tsconfig(&entry.config_path)
-                } else {
-                    TsConfigPathResolver::default()
+                let Some(dir) = entry.config_path.parent() else {
+                    continue;
                 };
-
+                let project_root = dir.to_string_lossy().replace('\\', "/");
+                if project_root == root {
+                    has_root_tsconfig = true;
+                }
+                let project_root_path = PathBuf::from(&project_root);
+                let resolver = TsConfigPathResolver::from_tsconfig(&entry.config_path);
                 let lint = discover_lint_config(&project_root_path);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());
 
                 projects.push(ProjectConfig {
-                    root: project_root.clone(),
+                    root: project_root,
+                    tsconfig_path: Some(entry.config_path.to_string_lossy().replace('\\', "/")),
                     path_resolver: resolver,
+                    lint_config: lint.clone(),
+                    linter,
+                    lint_explicitly_configured: lint.explicitly_configured,
+                });
+            }
+
+            if !has_root_tsconfig {
+                let lint = discover_lint_config(&root_path);
+                let linter = verter_diagnostics::Linter::new(lint.config.clone());
+                projects.push(ProjectConfig {
+                    root: root.to_string(),
+                    tsconfig_path: None,
+                    path_resolver: TsConfigPathResolver::default(),
                     lint_config: lint.clone(),
                     linter,
                     lint_explicitly_configured: lint.explicitly_configured,
@@ -1118,7 +1115,7 @@ impl ProjectRegistry {
             }
         }
 
-        projects.sort_by(|a, b| b.root.len().cmp(&a.root.len()));
+        sort_projects(&mut projects);
         Self { projects }
     }
 
@@ -1197,6 +1194,25 @@ impl ProjectRegistry {
             }
         }
         patterns
+    }
+}
+
+fn sort_projects(projects: &mut [ProjectConfig]) {
+    projects.sort_by(|a, b| {
+        b.root
+            .len()
+            .cmp(&a.root.len())
+            .then_with(|| project_rank(a).cmp(&project_rank(b)))
+            .then_with(|| a.tsconfig_path.cmp(&b.tsconfig_path))
+            .then_with(|| a.root.cmp(&b.root))
+    });
+}
+
+fn project_rank(project: &ProjectConfig) -> u8 {
+    match project.tsconfig_path.as_deref() {
+        Some(path) if path.ends_with("/tsconfig.json") => 0,
+        Some(_) => 1,
+        None => 2,
     }
 }
 
@@ -2197,6 +2213,7 @@ export default {{
         let registry = ProjectRegistry {
             projects: vec![ProjectConfig {
                 root: "/workspace/app".to_string(),
+                tsconfig_path: None,
                 path_resolver: TsConfigPathResolver::default(),
                 lint_config: ResolvedLintConfig::default(),
                 linter: verter_diagnostics::Linter::default(),
@@ -2222,6 +2239,7 @@ export default {{
             projects: vec![
                 ProjectConfig {
                     root: "/workspace/explicit/".to_string(),
+                    tsconfig_path: None,
                     path_resolver: TsConfigPathResolver::default(),
                     lint_config: ResolvedLintConfig {
                         config: verter_diagnostics::LintConfig {
@@ -2235,6 +2253,7 @@ export default {{
                 },
                 ProjectConfig {
                     root: "/workspace/default/".to_string(),
+                    tsconfig_path: None,
                     path_resolver: TsConfigPathResolver::default(),
                     lint_config: ResolvedLintConfig::default(),
                     linter: verter_diagnostics::Linter::default(),

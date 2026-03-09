@@ -54,6 +54,7 @@ impl VerterHost {
             let css_var_manipulations = script_analysis.css_var_manipulations.clone();
             let mut snapshot = FileAnalysisSnapshot {
                 imports: script_analysis.imports,
+                module_references: script_analysis.module_references,
                 bindings: script_analysis.bindings,
                 macros: script_analysis.macros,
                 macro_type_deps: script_analysis.macro_type_deps,
@@ -71,6 +72,7 @@ impl VerterHost {
 
         let mut snapshot = FileAnalysisSnapshot {
             imports: entry.script_analysis.imports.clone(),
+            module_references: entry.script_analysis.module_references.clone(),
             bindings: entry.script_analysis.bindings.clone(),
             macros: entry.script_analysis.macros.clone(),
             macro_type_deps: entry.script_analysis.macro_type_deps.clone(),

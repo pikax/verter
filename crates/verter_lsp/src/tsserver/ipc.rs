@@ -395,31 +395,80 @@ impl Drop for TsserverTypeProvider {
     }
 }
 
+async fn configure_tsserver_session(
+    transport: Arc<TsserverTransport>,
+    workspace_root: &str,
+) -> Result<String, TypeProviderError> {
+    let ws_root = workspace_root.replace('\\', "/");
+    transport
+        .request(
+            "configure",
+            serde_json::json!({
+                "hostInfo": "verter-lsp",
+                "preferences": {
+                    "providePrefixAndSuffixTextForRename": true,
+                    "includeCompletionsForModuleExports": true,
+                    "includeCompletionsWithInsertText": true,
+                    "includeCompletionsWithSnippetText": false,
+                    "includeAutomaticOptionalChainCompletions": true,
+                    "allowRenameOfImportPath": true,
+                    "includeInlayVariableTypeHints": true,
+                    "includeInlayVariableTypeHintsWhenTypeMatchesName": false,
+                    "includeInlayFunctionLikeReturnTypeHints": true,
+                    "includeInlayParameterNameHints": "literals",
+                }
+            }),
+        )
+        .await?;
+
+    let inferred_transport = Arc::clone(&transport);
+    let inferred_ws_root = ws_root.clone();
+    tokio::spawn(async move {
+        if let Err(error) = inferred_transport
+            .request(
+                "compilerOptionsForInferredProjects",
+                serde_json::json!({
+                    "options": {
+                        "module": "esnext",
+                        "target": "esnext",
+                        "moduleResolution": "bundler",
+                        "jsx": "preserve",
+                        "jsxImportSource": "vue",
+                        "allowJs": true,
+                        "strict": true,
+                        "allowArbitraryExtensions": true,
+                        "baseUrl": inferred_ws_root,
+                    }
+                }),
+            )
+            .await
+        {
+            tracing::warn!("failed to configure inferred tsserver project options: {error}");
+        }
+    });
+
+    Ok(ws_root)
+}
+
 impl TsserverTypeProvider {
     /// Spawn a tsserver process and initialize it.
     ///
     /// `node_path`: path to the `node` executable.
     /// `tsserver_path`: path to `tsserver.js`.
     /// `workspace_root`: filesystem path to the workspace root.
-    /// `plugin_path`: path to the directory containing `@verter/typescript-plugin`.
+    /// `_plugin_path`: retained for call-site compatibility; tsserver no longer
+    /// loads the Verter TypeScript plugin in resolver-managed IDE mode.
     pub async fn spawn(
         node_path: &str,
         tsserver_path: &str,
         workspace_root: &str,
-        plugin_path: Option<&str>,
+        _plugin_path: Option<&str>,
         crash_notify: Option<Arc<Notify>>,
     ) -> Result<Self, TypeProviderError> {
         let mut cmd = tokio::process::Command::new(node_path);
         cmd.arg(tsserver_path)
             .arg("--useSyntaxServer=false")
             .arg("--disableAutomaticTypingAcquisition");
-
-        if let Some(pp) = plugin_path {
-            cmd.arg("--globalPlugins")
-                .arg("@verter/typescript-plugin")
-                .arg("--pluginProbeLocations")
-                .arg(pp);
-        }
 
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -488,49 +537,7 @@ impl TsserverTypeProvider {
             });
         }
 
-        // Send configure request
-        let ws_root = workspace_root.replace('\\', "/");
-        transport
-            .request(
-                "configure",
-                serde_json::json!({
-                    "hostInfo": "verter-lsp",
-                    "preferences": {
-                        "providePrefixAndSuffixTextForRename": true,
-                        "includeCompletionsForModuleExports": true,
-                        "includeCompletionsWithInsertText": true,
-                        "includeCompletionsWithSnippetText": false,
-                        "includeAutomaticOptionalChainCompletions": true,
-                        "allowRenameOfImportPath": true,
-                        "includeInlayVariableTypeHints": true,
-                        "includeInlayVariableTypeHintsWhenTypeMatchesName": false,
-                        "includeInlayFunctionLikeReturnTypeHints": true,
-                        "includeInlayParameterNameHints": "literals",
-                    }
-                }),
-            )
-            .await?;
-
-        // Send compilerOptions for inferred projects (fallback when no tsconfig.json matches).
-        // These should be generous enough to handle Vue TSX without errors.
-        let _ = transport
-            .request(
-                "compilerOptionsForInferredProjects",
-                serde_json::json!({
-                    "options": {
-                        "module": "esnext",
-                        "target": "esnext",
-                        "moduleResolution": "bundler",
-                        "jsx": "preserve",
-                        "jsxImportSource": "vue",
-                        "allowJs": true,
-                        "strict": true,
-                        "allowArbitraryExtensions": true,
-                        "baseUrl": ws_root,
-                    }
-                }),
-            )
-            .await;
+        let ws_root = configure_tsserver_session(Arc::clone(&transport), workspace_root).await?;
 
         Ok(Self {
             transport,
@@ -598,9 +605,9 @@ impl TypeProvider for TsserverTypeProvider {
         // For tsserver, load_file only caches the content locally — it does NOT
         // send an `open` command. Sending 500+ `open` commands during background
         // sync overwhelms tsserver and blocks user requests for 15-20 seconds.
-        // The TypeScript plugin (@verter/typescript-plugin) handles .vue import
-        // resolution lazily inside tsserver's process. When the user actually opens
-        // a file, `open_file` will be called and tsserver will receive the content.
+        // Resolver-managed provider files are pushed on demand when the user
+        // actually opens or edits a file, so background sync only needs the
+        // local cache here.
         let file = Self::normalize_path(path);
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
@@ -1937,6 +1944,96 @@ mod tests {
         let result = format_quickinfo_hover("const", "const x: string", "A string variable");
         assert!(result.contains("(const) const x: string"));
         assert!(result.contains("A string variable"));
+    }
+
+    async fn send_success_response(
+        pending: &Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+        seq: i64,
+        command: &str,
+    ) {
+        if let Some(tx) = pending.lock().await.remove(&seq) {
+            let _ = tx.send(serde_json::json!({
+                "type": "response",
+                "request_seq": seq,
+                "success": true,
+                "command": command,
+                "body": {}
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_configure_tsserver_session_does_not_wait_for_inferred_project_options() {
+        let (client_reader, server_writer) = tokio::io::duplex(65536);
+        let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+        tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+
+        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let transport = Arc::new(TsserverTransport {
+            stdin_tx: stdin_tx.clone(),
+            pending: Arc::clone(&pending),
+            next_seq: AtomicI64::new(1),
+        });
+
+        let seen_commands = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_commands_task = Arc::clone(&seen_commands);
+        let pending_task = Arc::clone(&pending);
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(client_reader);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let msg: serde_json::Value =
+                            serde_json::from_str(line.trim()).expect("valid tsserver request");
+                        let seq = msg["seq"].as_i64().expect("request seq");
+                        let command = msg["command"]
+                            .as_str()
+                            .expect("request command")
+                            .to_string();
+                        seen_commands_task.lock().await.push(command.clone());
+                        if command == "configure" {
+                            send_success_response(&pending_task, seq, &command).await;
+                        } else if command == "compilerOptionsForInferredProjects" {
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                            send_success_response(&pending_task, seq, &command).await;
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let ws_root = configure_tsserver_session(Arc::clone(&transport), "C:\\project")
+            .await
+            .expect("configuration should succeed");
+        let elapsed = start.elapsed();
+
+        assert_eq!(ws_root, "C:/project");
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "tsserver startup should not wait for inferred project options (elapsed {:?})",
+            elapsed
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let commands = seen_commands.lock().await.clone();
+        assert_eq!(
+            commands.first().map(String::as_str),
+            Some("configure"),
+            "configure must still be sent first"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| command == "compilerOptionsForInferredProjects"),
+            "inferred project options should still be requested in the background"
+        );
+
+        let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
     }
 
     // ── update_file end-line tests ──────────────────────────────────

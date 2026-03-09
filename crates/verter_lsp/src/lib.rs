@@ -67,12 +67,9 @@ pub struct LspConfig {
 /// Controls what data `verter_lsp` sends to the type provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProjectSyncMode {
-    /// Legacy mode: only send `.vue` -> TSX replacements.
-    /// The type provider still reads `.ts`, `node_modules/`, and `tsconfig.json`
-    /// from disk until the native project resolver and provider-fed sync land.
+    /// Send resolver-managed project files to the type provider.
+    /// `.vue` files are exposed as `.vue.tsx` for IDE queries and `.vue.ts`
+    /// for public API resolution; non-Vue files are synced as source files.
     #[default]
-    TsxOnly,
-    /// Send ALL files: `.vue` as TSX, `.ts`/`.js` as-is, `tsconfig.json`, type declarations.
-    /// Required when the type provider has no file system access (WASM playground, remote workspaces).
     FullProject,
 }

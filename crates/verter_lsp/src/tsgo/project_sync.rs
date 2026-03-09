@@ -6,8 +6,7 @@ use crate::ProjectSyncMode;
 
 /// Syncs project files to a `TypeProvider`.
 ///
-/// In `TsxOnly` mode, only `.vue` -> TSX files are sent.
-/// In `FullProject` mode, all files are sent (for environments without file system access).
+/// In `FullProject` mode, `.vue` outputs and non-Vue source files are all sent.
 #[derive(Clone)]
 pub struct ProjectSync {
     provider: Arc<dyn TypeProvider>,
@@ -85,12 +84,9 @@ impl ProjectSync {
         self.provider.close_file(dts_path).await
     }
 
-    /// Sync a non-Vue file to the type provider (only in FullProject mode).
+    /// Sync a non-Vue file to the type provider.
     pub async fn sync_file(&self, path: &str, content: &str) -> Result<(), TypeProviderError> {
-        match self.mode {
-            ProjectSyncMode::FullProject => self.provider.update_file(path, content).await,
-            ProjectSyncMode::TsxOnly => Ok(()), // Legacy until provider-fed project sync lands.
-        }
+        self.provider.update_file(path, content).await
     }
 
     pub fn mode(&self) -> ProjectSyncMode {
@@ -119,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn tsx_sync_sends_update_file() {
         let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
         sync.sync_tsx("App.vue.tsx", "export default {}")
             .await
@@ -140,7 +136,7 @@ mod tests {
     #[tokio::test]
     async fn open_tsx_sends_open_file() {
         let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
         sync.open_tsx("App.vue.tsx", "const x = 1;").await.unwrap();
 
@@ -159,7 +155,7 @@ mod tests {
     #[tokio::test]
     async fn load_tsx_sends_load_file() {
         let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
         sync.load_tsx("App.vue.tsx", "const x = 1;").await.unwrap();
 
@@ -178,7 +174,7 @@ mod tests {
     #[tokio::test]
     async fn close_tsx_sends_close_file() {
         let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
         sync.close_tsx("App.vue.tsx").await.unwrap();
 
@@ -196,7 +192,7 @@ mod tests {
     #[tokio::test]
     async fn open_dts_sends_open_file() {
         let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
         sync.open_dts("App.vue.ts", "export default App;")
             .await
@@ -217,7 +213,7 @@ mod tests {
     #[tokio::test]
     async fn load_dts_sends_load_file() {
         let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
         sync.load_dts("App.vue.ts", "export default App;")
             .await
@@ -238,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn sync_dts_sends_update_file() {
         let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
         sync.sync_dts("App.vue.ts", "export default App;")
             .await
@@ -259,7 +255,7 @@ mod tests {
     #[tokio::test]
     async fn close_dts_sends_close_file() {
         let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
         sync.close_dts("App.vue.ts").await.unwrap();
 
@@ -294,27 +290,10 @@ mod tests {
         }
     }
 
-    /// @ai-generated — Non-Vue files are skipped in TsxOnly mode
+    /// @ai-generated — Vue TSX is sent in resolver-managed mode
     #[tokio::test]
-    async fn non_vue_file_skipped_in_tsx_only_mode() {
-        let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
-
-        sync.sync_file("utils.ts", "export const x = 1;")
-            .await
-            .unwrap();
-
-        let calls = mock.file_sync_calls();
-        assert!(
-            calls.is_empty(),
-            "TsxOnly mode should not sync non-Vue files"
-        );
-    }
-
-    /// @ai-generated — Vue TSX is sent regardless of mode
-    #[tokio::test]
-    async fn vue_tsx_sent_in_both_modes() {
-        for mode in [ProjectSyncMode::TsxOnly, ProjectSyncMode::FullProject] {
+    async fn vue_tsx_sent_in_full_project_mode() {
+        for mode in [ProjectSyncMode::FullProject] {
             let mock = MockTypeProvider::new();
             let sync = make_sync(&mock, mode);
 
@@ -332,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn load_and_open_use_different_provider_methods() {
         let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::TsxOnly);
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
         sync.load_tsx("A.vue.tsx", "load content").await.unwrap();
         sync.open_tsx("B.vue.tsx", "open content").await.unwrap();
@@ -364,7 +343,7 @@ mod tests {
     async fn sync_tsx_propagates_provider_errors() {
         let failing =
             FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
-        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
 
         let result = sync.sync_tsx("App.vue.tsx", "export default {}").await;
         assert!(result.is_err(), "sync_tsx should propagate provider error");
@@ -380,7 +359,7 @@ mod tests {
     async fn open_tsx_propagates_provider_errors() {
         let failing =
             FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
-        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
 
         let result = sync.open_tsx("App.vue.tsx", "const x = 1;").await;
         assert!(result.is_err(), "open_tsx should propagate provider error");
@@ -391,7 +370,7 @@ mod tests {
     async fn load_tsx_propagates_provider_errors() {
         let failing =
             FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
-        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
 
         let result = sync.load_tsx("App.vue.tsx", "const x = 1;").await;
         assert!(result.is_err(), "load_tsx should propagate provider error");
@@ -402,7 +381,7 @@ mod tests {
     async fn load_dts_propagates_provider_errors() {
         let failing =
             FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
-        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
 
         let result = sync.load_dts("App.vue.ts", "export default App;").await;
         assert!(result.is_err(), "load_dts should propagate provider error");
@@ -413,7 +392,7 @@ mod tests {
     async fn close_tsx_propagates_provider_errors() {
         let failing =
             FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
-        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
 
         let result = sync.close_tsx("App.vue.tsx").await;
         assert!(result.is_err(), "close_tsx should propagate provider error");
@@ -421,7 +400,7 @@ mod tests {
 
     /// @ai-generated — Regression: sync_file in FullProject mode propagates provider errors.
     #[tokio::test]
-    async fn sync_file_full_project_propagates_provider_errors() {
+    async fn sync_file_full_project_propagates_provider_errors_duplicate() {
         let failing =
             FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
         let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
@@ -433,18 +412,17 @@ mod tests {
         );
     }
 
-    /// @ai-generated — sync_file in TsxOnly mode succeeds even with failing provider
-    /// because non-Vue files are skipped entirely (no provider call made).
+    /// @ai-generated — sync_file propagates provider errors for non-Vue files.
     #[tokio::test]
-    async fn sync_file_tsx_only_succeeds_with_failing_provider() {
+    async fn sync_file_full_project_propagates_provider_errors() {
         let failing =
             FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
-        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
 
         let result = sync.sync_file("utils.ts", "export const x = 1;").await;
         assert!(
-            result.is_ok(),
-            "sync_file in TsxOnly mode should skip provider entirely"
+            result.is_err(),
+            "sync_file should propagate provider errors"
         );
     }
 
@@ -453,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_operations_after_provider_death() {
         let failing = FailingTypeProvider::new("write error: broken pipe");
-        let sync = make_sync_failing(&failing, ProjectSyncMode::TsxOnly);
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
 
         // All operations should return errors, none should panic
         for i in 0..5 {
