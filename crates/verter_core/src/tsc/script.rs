@@ -35,8 +35,8 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement};
 use oxc_ast::{Comment, CommentContent};
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType};
 use oxc_sourcemap::SourceMapBuilder;
+use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::common::Span;
@@ -145,11 +145,15 @@ impl RenderedText {
     fn append_rendered(&mut self, rendered: RenderedText) {
         let base = self.text.len();
         self.text.push_str(&rendered.text);
-        self.mappings
-            .extend(rendered.mappings.into_iter().map(|mapping| GeneratedMapping {
-                generated_offset: mapping.generated_offset + base,
-                source_span: mapping.source_span,
-            }));
+        self.mappings.extend(
+            rendered
+                .mappings
+                .into_iter()
+                .map(|mapping| GeneratedMapping {
+                    generated_offset: mapping.generated_offset + base,
+                    source_span: mapping.source_span,
+                }),
+        );
     }
 }
 
@@ -185,11 +189,15 @@ impl TscWriter {
     fn append_rendered(&mut self, rendered: RenderedText) {
         let base = self.text.len();
         self.text.push_str(&rendered.text);
-        self.mappings
-            .extend(rendered.mappings.into_iter().map(|mapping| GeneratedMapping {
-                generated_offset: mapping.generated_offset + base,
-                source_span: mapping.source_span,
-            }));
+        self.mappings.extend(
+            rendered
+                .mappings
+                .into_iter()
+                .map(|mapping| GeneratedMapping {
+                    generated_offset: mapping.generated_offset + base,
+                    source_span: mapping.source_span,
+                }),
+        );
     }
 
     fn into_parts(self) -> (String, Vec<GeneratedMapping>) {
@@ -1467,10 +1475,7 @@ fn generate_code(
         encoded
     ));
 
-    TscOutput {
-        code,
-        source_map,
-    }
+    TscOutput { code, source_map }
 }
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
@@ -1610,7 +1615,9 @@ fn render_props_shape_type(
     let mut rendered = RenderedText::default();
 
     match props_ts {
-        Some(PropsTs::TypeRef(name)) => rendered.push_str(&wrap_defaulted_props(name, defaulted_prop_names)),
+        Some(PropsTs::TypeRef(name)) => {
+            rendered.push_str(&wrap_defaulted_props(name, defaulted_prop_names))
+        }
         Some(PropsTs::TypeText(text)) => {
             rendered.push_str(&wrap_defaulted_props(text, defaulted_prop_names))
         }
@@ -1689,7 +1696,8 @@ fn render_full_props_type(
     });
     let mut parts = Vec::new();
 
-    let props_part = render_props_shape_type(props_ts, defaulted_prop_names, generic_props.as_ref());
+    let props_part =
+        render_props_shape_type(props_ts, defaulted_prop_names, generic_props.as_ref());
     if !props_part.is_empty() {
         parts.push(props_part);
     }
@@ -2078,7 +2086,9 @@ fn build_tsc_source_map(
     let source_resolver = PositionResolver::new_for_sourcemap(sfc_source);
 
     for mapping in mappings {
-        if mapping.generated_offset > code.len() || mapping.source_span.start as usize > sfc_source.len() {
+        if mapping.generated_offset > code.len()
+            || mapping.source_span.start as usize > sfc_source.len()
+        {
             continue;
         }
         let (generated_line, generated_col) =

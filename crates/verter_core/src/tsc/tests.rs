@@ -29,8 +29,8 @@ fn gen_tsc_output_with_external_type(
     dep_source: &str,
 ) -> super::script::TscOutput {
     let alloc = Allocator::default();
-    let resolved =
-        resolve_external_type(type_name, dep_source, &alloc).expect("failed to resolve external type");
+    let resolved = resolve_external_type(type_name, dep_source, &alloc)
+        .expect("failed to resolve external type");
     let mut external_types = FxHashMap::default();
     external_types.insert(type_name.to_string(), resolved);
     generate_tsc_output_with_options(
@@ -2192,7 +2192,10 @@ defineEmits<{
         r.contains("((event: 'update', ...args: [id: number, data: { name: string }]) => void)"),
         "shorthand emits should preserve tuple payload text in $emit: {r}"
     );
-    assert!(!r.contains("__EmitFn<"), "helper emit aliases should be gone: {r}");
+    assert!(
+        !r.contains("__EmitFn<"),
+        "helper emit aliases should be gone: {r}"
+    );
 }
 
 #[test]
@@ -2224,7 +2227,10 @@ defineEmits<{ (e: 'click', event: MouseEvent): void }>()
         r.contains("((event: 'click', event: MouseEvent) => void)"),
         "function-form emits should inline $emit overloads: {r}"
     );
-    assert!(!r.contains("__EmitFn<"), "helper emit aliases should be gone: {r}");
+    assert!(
+        !r.contains("__EmitFn<"),
+        "helper emit aliases should be gone: {r}"
+    );
 }
 
 // ── Object-arg defineEmits: $emit + $props typing ────────────────────────────
@@ -2266,14 +2272,18 @@ defineEmits<{ (e: 'my-event', value: string): void }>()
         .code
         .find(r#""onMyEvent""#)
         .expect("generated handler prop");
-    let (generated_line, generated_col) = offset_to_zero_based_line_col(&out.code, generated_offset);
+    let (generated_line, generated_col) =
+        offset_to_zero_based_line_col(&out.code, generated_offset);
     let token = sourcemap
         .lookup_source_view_token(&lookup, generated_line, generated_col)
         .expect("mapped handler prop token");
     let expected_offset = sfc.find("'my-event'").expect("source event literal");
     let (expected_line, expected_col) = offset_to_zero_based_line_col(sfc, expected_offset);
 
-    assert_eq!(token.get_source().map(|s| s.as_ref()), Some("/test/TestComp.vue"));
+    assert_eq!(
+        token.get_source().map(|s| s.as_ref()),
+        Some("/test/TestComp.vue")
+    );
     assert_eq!(token.get_src_line(), expected_line);
     assert_eq!(token.get_src_col(), expected_col);
 }
@@ -2287,14 +2297,18 @@ defineProps<{ title: string; count?: number }>()
     let sourcemap = SourceMap::from_json_string(&out.source_map).expect("valid source map");
     let lookup = sourcemap.generate_lookup_table();
     let generated_offset = out.code.find("title: string").expect("generated prop");
-    let (generated_line, generated_col) = offset_to_zero_based_line_col(&out.code, generated_offset);
+    let (generated_line, generated_col) =
+        offset_to_zero_based_line_col(&out.code, generated_offset);
     let token = sourcemap
         .lookup_source_view_token(&lookup, generated_line, generated_col)
         .expect("mapped prop token");
     let expected_offset = sfc.find("title: string").expect("source prop");
     let (expected_line, expected_col) = offset_to_zero_based_line_col(sfc, expected_offset);
 
-    assert_eq!(token.get_source().map(|s| s.as_ref()), Some("/test/TestComp.vue"));
+    assert_eq!(
+        token.get_source().map(|s| s.as_ref()),
+        Some("/test/TestComp.vue")
+    );
     assert_eq!(token.get_src_line(), expected_line);
     assert_eq!(token.get_src_col(), expected_col);
 }
@@ -2311,14 +2325,18 @@ const title = defineModel<string>('title')
         .code
         .find(r#""onUpdate:title""#)
         .expect("generated model handler");
-    let (generated_line, generated_col) = offset_to_zero_based_line_col(&out.code, generated_offset);
+    let (generated_line, generated_col) =
+        offset_to_zero_based_line_col(&out.code, generated_offset);
     let token = sourcemap
         .lookup_source_view_token(&lookup, generated_line, generated_col)
         .expect("mapped model token");
     let expected_offset = sfc.find("'title'").expect("source model name");
     let (expected_line, expected_col) = offset_to_zero_based_line_col(sfc, expected_offset);
 
-    assert_eq!(token.get_source().map(|s| s.as_ref()), Some("/test/TestComp.vue"));
+    assert_eq!(
+        token.get_source().map(|s| s.as_ref()),
+        Some("/test/TestComp.vue")
+    );
     assert_eq!(token.get_src_line(), expected_line);
     assert_eq!(token.get_src_col(), expected_col);
 }

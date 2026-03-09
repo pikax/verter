@@ -21,25 +21,27 @@ fn profile() -> CompileProfile {
 }
 
 fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(source),
-        file_kind: FileKind::VueSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(source),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 }
 
 fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(source),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(source),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 }
 
 fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::DiagnosticsSnapshot {
@@ -51,7 +53,10 @@ fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::Diagnosti
     }) {
         Err(HostError::CompileError { diagnostics }) => diagnostics,
         Err(other) => panic!("expected compile error, got {other:?}"),
-        Ok(result) => panic!("expected compile error, got successful response {}", result.id),
+        Ok(result) => panic!(
+            "expected compile error, got successful response {}",
+            result.id
+        ),
     }
 }
 
@@ -60,7 +65,12 @@ fn find_diag<'a>(diagnostics: &'a crate::DiagnosticsSnapshot, code: &str) -> &'a
         .diagnostics
         .iter()
         .find(|diag| diag.code == code)
-        .unwrap_or_else(|| panic!("expected diagnostic {code}, got {:?}", diagnostics.diagnostics))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected diagnostic {code}, got {:?}",
+                diagnostics.diagnostics
+            )
+        })
 }
 
 fn assert_missing_src_compile_error(
@@ -165,8 +175,7 @@ fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
     );
 
     let import_start = source.find("import type").unwrap() as u32;
-    let import_end = import_start
-        + "import type { Props } from './types'".len() as u32;
+    let import_end = import_start + "import type { Props } from './types'".len() as u32;
     assert_eq!(
         missing.span,
         Some(Span::new(import_start, import_end)),
@@ -190,7 +199,8 @@ fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
 #[test]
 fn missing_template_src_retries_successfully_after_dependency_arrives() {
     let host = strict_host();
-    let source = "<template src=\"./resolved.html\"></template>\n<script setup>const n = 1</script>";
+    let source =
+        "<template src=\"./resolved.html\"></template>\n<script setup>const n = 1</script>";
     upsert_vue(&host, "/src/Comp.vue", source);
 
     let diagnostics = compile_main_error(&host, "/src/Comp.vue");

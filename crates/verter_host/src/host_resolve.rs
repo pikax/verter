@@ -516,10 +516,9 @@ impl VerterHost {
 
             for (idx, req) in snapshot.external_requests.iter().enumerate() {
                 if !ext_sources.contains_key(&req.resolved_canonical_id) {
-                    let span = snapshot
-                        .src_blocks
-                        .get(idx)
-                        .map(|block| verter_span::Span::new(block.tag_open_start, block.tag_open_end));
+                    let span = snapshot.src_blocks.get(idx).map(|block| {
+                        verter_span::Span::new(block.tag_open_start, block.tag_open_end)
+                    });
                     diagnostics =
                         diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
                             severity: HostSeverity::Error,
@@ -622,7 +621,8 @@ impl VerterHost {
         };
 
         if !unresolved_macro_type_diags.is_empty() {
-            diagnostics = diagnostics.merge(DiagnosticsSnapshot::from_vec(unresolved_macro_type_diags));
+            diagnostics =
+                diagnostics.merge(DiagnosticsSnapshot::from_vec(unresolved_macro_type_diags));
             return Err(diagnostics);
         }
 

@@ -431,7 +431,10 @@ fn test_define_props_unresolvable_type_reports_error() {
     };
     let result = compile(input, &options, &verter_opts, &allocator);
     assert!(
-        result.errors.iter().any(|error| error.code == "XInvalidMacroType"),
+        result
+            .errors
+            .iter()
+            .any(|error| error.code == "XInvalidMacroType"),
         "unresolvable imported props type should surface a compiler error, got: {:?}",
         result.errors
     );
@@ -444,21 +447,26 @@ fn test_define_emits_invalid_imported_type_reports_error() {
     let options = CodegenOptions::new().with_filename("test.vue");
     let verter_opts = VerterCompileOptions {
         force_js: true,
-        external_types: Some(make_external_types("ExternalEmits", "export type ExternalEmits = string")),
+        external_types: Some(make_external_types(
+            "ExternalEmits",
+            "export type ExternalEmits = string",
+        )),
         ..Default::default()
     };
     let result = compile(input, &options, &verter_opts, &allocator);
 
     assert!(
-        result.errors.iter().any(|error| error.code == "XInvalidMacroType"),
+        result
+            .errors
+            .iter()
+            .any(|error| error.code == "XInvalidMacroType"),
         "invalid imported emits type should surface a compiler error, got: {:?}",
         result.errors
     );
     assert!(
-        result
-            .errors
-            .iter()
-            .any(|error| error.message.contains("defineEmits() type argument 'ExternalEmits'")),
+        result.errors.iter().any(|error| error
+            .message
+            .contains("defineEmits() type argument 'ExternalEmits'")),
         "diagnostic should mention the invalid defineEmits import, got: {:?}",
         result.errors
     );
@@ -471,21 +479,26 @@ fn test_define_props_invalid_imported_type_reports_error() {
     let options = CodegenOptions::new().with_filename("test.vue");
     let verter_opts = VerterCompileOptions {
         force_js: true,
-        external_types: Some(make_external_types("ExternalProps", "export type ExternalProps = string")),
+        external_types: Some(make_external_types(
+            "ExternalProps",
+            "export type ExternalProps = string",
+        )),
         ..Default::default()
     };
     let result = compile(input, &options, &verter_opts, &allocator);
 
     assert!(
-        result.errors.iter().any(|error| error.code == "XInvalidMacroType"),
+        result
+            .errors
+            .iter()
+            .any(|error| error.code == "XInvalidMacroType"),
         "invalid imported props type should surface a compiler error, got: {:?}",
         result.errors
     );
     assert!(
-        result
-            .errors
-            .iter()
-            .any(|error| error.message.contains("defineProps() type argument 'ExternalProps'")),
+        result.errors.iter().any(|error| error
+            .message
+            .contains("defineProps() type argument 'ExternalProps'")),
         "diagnostic should mention the invalid defineProps import, got: {:?}",
         result.errors
     );

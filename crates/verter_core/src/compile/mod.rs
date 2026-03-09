@@ -236,7 +236,9 @@ fn collect_invalid_macro_type_diagnostics(
     let companion_types = match (companion_types, external_types) {
         (Some(mut companion), Some(external)) => {
             for (key, value) in external {
-                companion.entry(key.clone()).or_insert_with(|| value.clone());
+                companion
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
             }
             Some(companion)
         }
@@ -265,9 +267,9 @@ fn collect_invalid_macro_type_diagnostics(
         match mac {
             ScriptMacro::DefineProps { type_params, .. } => {
                 if let Some(type_params) = type_params {
-                    let type_text =
-                        content_str[type_params.type_span.start as usize..type_params.type_span.end as usize]
-                            .trim();
+                    let type_text = content_str
+                        [type_params.type_span.start as usize..type_params.type_span.end as usize]
+                        .trim();
                     validate_imported_macro_type(
                         "defineProps",
                         type_params,
@@ -282,9 +284,9 @@ fn collect_invalid_macro_type_diagnostics(
                 ..
             } => {
                 if let Some(type_params) = define_props_type_params {
-                    let type_text =
-                        content_str[type_params.type_span.start as usize..type_params.type_span.end as usize]
-                            .trim();
+                    let type_text = content_str
+                        [type_params.type_span.start as usize..type_params.type_span.end as usize]
+                        .trim();
                     validate_imported_macro_type(
                         "defineProps",
                         type_params,
@@ -296,9 +298,9 @@ fn collect_invalid_macro_type_diagnostics(
             }
             ScriptMacro::DefineEmits { type_params, .. } => {
                 if let Some(type_params) = type_params {
-                    let type_text =
-                        content_str[type_params.type_span.start as usize..type_params.type_span.end as usize]
-                            .trim();
+                    let type_text = content_str
+                        [type_params.type_span.start as usize..type_params.type_span.end as usize]
+                        .trim();
                     validate_imported_macro_type(
                         "defineEmits",
                         type_params,
