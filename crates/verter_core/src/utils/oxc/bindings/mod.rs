@@ -56,8 +56,8 @@ pub use helpers::{
     collect_assignment_target_locals, collect_assignment_target_locals_array,
     collect_assignment_target_locals_object, collect_assignment_target_maybe_default_locals,
     collect_chain_element_references, collect_expression_references, collect_pattern_locals,
-    collect_pattern_references, collect_ts_type_references_from_expression,
-    collect_type_references,
+    collect_pattern_references, collect_setup_binding_refs,
+    collect_ts_type_references_from_expression, collect_type_references,
 };
 
 // Re-export span-based helpers (avoiding self-referential struct issues)

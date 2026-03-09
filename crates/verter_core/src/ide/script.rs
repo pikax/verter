@@ -67,6 +67,7 @@ use crate::cursor::ScriptLanguage;
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::{is_simple_ident, BindingType};
 use crate::template::code_gen::types::CodeGenOutput;
+use crate::utils::oxc::bindings::collect_setup_binding_refs;
 use crate::utils::oxc::vue::{
     parse_script, parse_script_with_companion, MacroDeclarator, MacroTypeParams, ScriptItem,
     ScriptMacro, ScriptMode,
@@ -1052,6 +1053,30 @@ fn process_tsx_script_setup<'alloc>(
                 ));
             }
             destruct_block.push_str(" /* verter-destructured-end */\n");
+
+            // Emit void(name) for bindings referenced in script body or style v-bind().
+            // This prevents TS from flagging them as "unused" when they're only used
+            // in script (not in template) or only in style v-bind() expressions.
+            let setup_name_set: FxHashSet<&str> = setup_bindings.iter().map(|(n, _)| *n).collect();
+            let mut script_refs = collect_setup_binding_refs(effective_program, &setup_name_set);
+            // Merge style v-bind references
+            for name in &options.style_v_bind_vars {
+                if setup_name_set.contains(name.as_str()) {
+                    // We need a &str that lives long enough — use the setup_bindings entry
+                    if let Some((n, _)) = setup_bindings.iter().find(|(n, _)| *n == name.as_str()) {
+                        script_refs.insert(n);
+                    }
+                }
+            }
+            if !script_refs.is_empty() {
+                for (name, _) in &setup_bindings {
+                    if script_refs.contains(name) {
+                        destruct_block.push_str(&format!("void({});", name));
+                    }
+                }
+                destruct_block.push('\n');
+            }
+
             wrapper_end.push_str(&destruct_block);
 
             // Store metadata (block_start/block_end computed later from final TSX)
@@ -4797,6 +4822,7 @@ mod tests {
             embed_ambient_types: true,
             is_jsx: false,
             conditional_root_narrowing: false,
+            style_v_bind_vars: vec![],
         };
 
         // Use unified CT mode: pass template_end so comp functions are emitted in code
@@ -4891,6 +4917,7 @@ mod tests {
             embed_ambient_types: true,
             is_jsx: false,
             conditional_root_narrowing: true,
+            style_v_bind_vars: vec![],
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -7014,6 +7041,7 @@ const el2 = ref<HTMLSpanElement>()
                 embed_ambient_types: true,
                 is_jsx: false,
                 conditional_root_narrowing: false,
+                style_v_bind_vars: vec![],
             },
         );
         assert!(
@@ -7598,6 +7626,7 @@ const props = defineProps<{ msg: string }>()
                 embed_ambient_types: false,
                 is_jsx: false,
                 conditional_root_narrowing: false,
+                style_v_bind_vars: vec![],
             },
         );
 
@@ -8620,6 +8649,7 @@ count.
             embed_ambient_types: true,
             is_jsx: true,
             conditional_root_narrowing: false,
+            style_v_bind_vars: vec![],
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -9080,6 +9110,7 @@ const props = defineProps<{ msg: string }>()
             embed_ambient_types: true,
             is_jsx: false,
             conditional_root_narrowing: false,
+            style_v_bind_vars: vec![],
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -9176,6 +9207,7 @@ function handleClick(event) {}
             embed_ambient_types: true,
             is_jsx: false,
             conditional_root_narrowing: false,
+            style_v_bind_vars: vec![],
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -9530,6 +9562,87 @@ const props = defineProps<{ msg: string }>()
         assert!(
             code.contains("void __props"),
             "should have void __props to suppress unused warning: {}",
+            code
+        );
+    }
+
+    // ── void(name) for script-referenced bindings ────────────────────
+
+    #[test]
+    fn test_void_script_referenced_binding() {
+        let source = r#"<script setup lang="ts">
+import { ref, computed } from 'vue'
+const count = ref(0)
+const doubled = computed(() => count.value * 2)
+const unused = ref(42)
+</script>
+<template><div>{{ doubled }}</div></template>"#;
+        let (code, _) = gen_tsx_script(source);
+        // count is used in script (in computed), should get void()
+        assert!(
+            code.contains("void(count)"),
+            "should emit void(count) for script-referenced binding: {}",
+            code
+        );
+        // doubled is used in template only, not in script — no void needed
+        assert!(
+            !code.contains("void(doubled)"),
+            "should NOT emit void(doubled) — only used in template: {}",
+            code
+        );
+        // unused is not used anywhere in script
+        assert!(
+            !code.contains("void(unused)"),
+            "should NOT emit void(unused) — not referenced in script: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_void_script_referenced_shadowed() {
+        let source = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+function foo(count: number) { return count; }
+</script>
+<template><div>{{ count }}</div></template>"#;
+        let (code, _) = gen_tsx_script(source);
+        // count is only referenced where shadowed by param — not a free ref
+        assert!(
+            !code.contains("void(count)"),
+            "should NOT emit void(count) — only shadowed references: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_void_style_v_bind_referenced() {
+        let source = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const color = ref('red')
+</script>
+<template><div>hello</div></template>"#;
+        let (code, _, _) = gen_tsx_script_full_with_options(
+            source,
+            IdeScriptOptions {
+                component_name: "App",
+                js_component_name: "App",
+                filename: "App.vue",
+                scope_id: "data-v-abc123",
+                has_scoped_style: false,
+                runtime_module_name: "vue",
+                types_module_name: "@verter/types",
+                is_vapor: false,
+                embed_ambient_types: true,
+                is_jsx: false,
+                conditional_root_narrowing: false,
+                style_v_bind_vars: vec!["color".to_string()],
+            },
+        );
+        // color is referenced in style v-bind, should get void()
+        assert!(
+            code.contains("void(color)"),
+            "should emit void(color) for style v-bind referenced binding: {}",
             code
         );
     }

@@ -1206,8 +1206,6 @@ fn test_tag_name_includes_components() {
             dynamic_classes: vec![],
             v_models: vec![],
             span: verter_span::Span::new(0, 0),
-            used_in_script: false,
-            used_in_style: false,
         }],
     );
 

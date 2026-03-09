@@ -816,6 +816,9 @@ pub(crate) struct CompileInput {
     pub(crate) macro_type_deps: Vec<verter_analysis::MacroTypeDep>,
     /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
     pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    /// Binding names referenced in style `v-bind()` expressions.
+    /// Extracted from `FileEntry.style_analyses` at cache-miss time.
+    pub(crate) style_v_bind_vars: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

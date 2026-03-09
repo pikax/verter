@@ -273,6 +273,10 @@ pub struct VerterCompileOptions {
     /// `$props.`/`__props.` prefix for correct runtime access.
     /// The codegen skips dynamic tracking (patch flags / renderEffect) for these props.
     pub prop_constness_overrides: Option<rustc_hash::FxHashSet<String>>,
+    /// Binding names referenced in style `v-bind()` expressions.
+    /// Populated from the host's `StyleBlockAnalysis.v_binds` data.
+    /// Used by IDE codegen to emit `void(name)` and prevent false unused diagnostics.
+    pub style_v_bind_vars: Vec<String>,
 }
 
 // ── Result types ───────────────────────────────────────────────────

@@ -226,6 +226,20 @@ impl VerterHost {
                     content_override_layer: entry.content_overrides.get(&profile_hash).cloned(),
                     macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
                     cached_parse: entry.cached_parse.clone(),
+                    style_v_bind_vars: entry
+                        .style_analyses
+                        .iter()
+                        .flat_map(|sa| {
+                            sa.v_binds.iter().map(|vb| {
+                                // Extract root identifier (e.g., "theme.color" → "theme")
+                                vb.expression
+                                    .split('.')
+                                    .next()
+                                    .unwrap_or(&vb.expression)
+                                    .to_string()
+                            })
+                        })
+                        .collect(),
                 },
                 fallback_last_good,
                 meta: entry.meta.clone(),
@@ -549,6 +563,7 @@ impl VerterHost {
             external_types,
             extract_template_data: scope.needs_template_analysis(),
             prop_constness_overrides: None, // TODO(Phase 6): populated by cross-file optimizer
+            style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
         };
 
         // Reuse cached parse when source wasn't modified by external src= merging

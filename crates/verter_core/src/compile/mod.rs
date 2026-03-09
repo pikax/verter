@@ -767,6 +767,7 @@ fn compile_inner(
             embed_ambient_types: options.embed_ambient_types,
             is_jsx,
             conditional_root_narrowing: options.conditional_root_narrowing,
+            style_v_bind_vars: verter_options.style_v_bind_vars.clone(),
         };
 
         // Unified single CodeTransform for both script and template.
