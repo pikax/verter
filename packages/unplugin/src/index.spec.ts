@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { defineConfig, resolveConfig } from "vite";
 import unplugin, { unpluginFactory } from "./index";
 import { resetHost } from "./core/compiler";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
@@ -146,6 +147,90 @@ describe("type exports", () => {
     ) as any;
     expect(plugin).toBeDefined();
     expect(plugin.name).toBe("unplugin-verter");
+  });
+});
+
+describe("vite style virtual modules", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = join(
+      tmpdir(),
+      `verter-vite-style-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(tempDir, { recursive: true });
+    resetHost();
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+    resetHost();
+  });
+
+  async function createVitePlugin() {
+    const plugin = unpluginFactory(undefined, {
+      framework: "vite",
+      versions: { unplugin: "0.0.0", vite: "7.0.0" },
+    } as any) as any;
+
+    const viteConfig = await resolveConfig(
+      defineConfig({
+        root: tempDir,
+        build: { cssCodeSplit: false },
+      }),
+      "build",
+      "production",
+    );
+
+    plugin.vite.configResolved(viteConfig);
+    return plugin;
+  }
+
+  it("loads compiled CSS for a scoped scss style virtual module", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "ScopedStyle.vue").replace(/\\/g, "/");
+    const sfc = `<template><button class="scoped-style">x</button></template>
+<style scoped lang="scss">
+$border: #555;
+.scoped-style {
+  &:hover {
+    border-color: $border;
+  }
+}
+</style>`;
+
+    await plugin.transform(sfc, file);
+    const style = await plugin.load(`${file}?vue&type=style&index=0&lang.scss`);
+
+    expect(style).toBeDefined();
+    expect(style.code).toContain(".scoped-style:hover");
+    expect(style.code).toContain("#555");
+    expect(style.code).not.toContain("$border");
+    expect(style.code).not.toContain("[data-v-");
+  });
+
+  it("scopes compiled CSS for non-css style virtual modules without re-preprocessing", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "ScopedTransform.vue").replace(/\\/g, "/");
+    const sfc = `<template><button class="scoped-transform">x</button></template>
+<style scoped lang="scss">
+$border: #555;
+.scoped-transform {
+  &:hover {
+    border-color: $border;
+  }
+}
+</style>`;
+
+    await plugin.transform(sfc, file);
+    const styleId = `${file}?vue&type=style&index=0&lang.scss`;
+    const style = await plugin.load(styleId);
+    const transformed = await plugin.transform(style.code, styleId);
+
+    expect(transformed).toBeDefined();
+    expect(transformed.code).toContain("[data-v-");
+    expect(transformed.code).toContain("#555");
+    expect(transformed.code).not.toContain("$border");
   });
 });
 

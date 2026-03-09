@@ -37,7 +37,7 @@ async function resolveUpsertDependencies(
           fileKind: "non_sfc",
         });
       } catch {
-        // External source not found — host will report the error
+        // External source not found â€” host will report the error
       }
     }
   }
@@ -54,7 +54,7 @@ async function resolveUpsertDependencies(
       const absBase = path.resolve(path.dirname(filename), imp.source);
       for (const ext of exts) {
         const fullPath = absBase + ext;
-        // Skip .vue files — they'll be properly upserted as VueSfc when
+        // Skip .vue files â€” they'll be properly upserted as VueSfc when
         // Vite's module graph processes them via transform(). Upserting
         // them as non_sfc here would clobber their SFC-specific metadata
         // (script_lang, style_langs, etc.).
@@ -154,7 +154,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
   // matching @vitejs/plugin-vue's behavior.
   const scriptCache = new Map<string, { code: string; map: any }>();
 
-  // Build timing instrumentation — accumulates per-phase timings across all .vue transforms.
+  // Build timing instrumentation â€” accumulates per-phase timings across all .vue transforms.
   // Enabled when VERTER_TIMING=1 env var is set.
   const timing = process.env.VERTER_TIMING === "1";
   let tFileCount = 0;
@@ -238,7 +238,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       const { filename, query } = parseVueRequest(id);
       // Main .vue files for compilation
       if (filter(filename) && !query.vue) return true;
-      // Style virtual files that need CSS preprocessing (LESS/SCSS/Stylus → CSS)
+      // Style virtual files need one more pass for CSS scoping.
       if (query.vue && query.type === "style" && query.lang && query.lang !== "css" && filter(filename)) return true;
       return false;
     },
@@ -329,35 +329,19 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
     async transform(code, id) {
       const { filename, query } = parseVueRequest(id);
 
-      // Handle style virtual files: preprocess LESS/SCSS/Stylus → CSS, then scope
+      // Non-CSS style blocks are already preprocessed during the main SFC transform.
+      // The virtual style transform only needs to scope the compiled CSS.
       if (query.vue && query.type === "style") {
-        const lang = query.lang;
-        if (lang && lang !== "css" && viteConfig) {
-          try {
-            const { preprocessCSS } = await import("vite");
-            const preprocessed = await preprocessCSS(
-              code,
-              `${filename}.${lang}`,
-              viteConfig!,
-            );
-            let css = preprocessed.code;
-
-            // Apply scoped CSS transformation
-            const profile = profileCache.get(filename);
-            if (profile) {
-              const processed = processStyle(css, {
-                scopeId: profile.componentId ?? "",
-                scoped: true, // TODO: detect from block attributes
-              });
-              css = processed.code;
-            }
-
-            return { code: css, map: null };
-          } catch {
-            // Preprocessor unavailable — return raw content
-          }
+        let css = code;
+        const profile = profileCache.get(filename);
+        if (profile) {
+          const processed = processStyle(css, {
+            scopeId: profile.componentId ?? "",
+            scoped: true, // TODO: detect from block attributes
+          });
+          css = processed.code;
         }
-        return;
+        return { code: css, map: null };
       }
 
       const host = loadHost();
@@ -422,9 +406,9 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         // In Vite mode, emit the compiled output as a script sub-request.
         // This matches @vitejs/plugin-vue's architecture where the main module
         // is a thin wrapper that imports from sub-requests:
-        //   - Script: ?vue&type=script&lang.ts  → processed by vite:esbuild (TS)
-        //   - Script: ?vue&type=script&lang.jsx → processed by @vitejs/plugin-vue-jsx
-        //   - Style:  ?vue&type=style&lang.less → processed by Vite's CSS pipeline
+        //   - Script: ?vue&type=script&lang.ts  â†’ processed by vite:esbuild (TS)
+        //   - Script: ?vue&type=script&lang.jsx â†’ processed by @vitejs/plugin-vue-jsx
+        //   - Style:  ?vue&type=style&lang.less â†’ processed by Vite's CSS pipeline
         //
         // This ensures downstream plugins (vue-jsx, external-globals, etc.) receive
         // properly processed JavaScript, not raw TS/JSX.
