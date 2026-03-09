@@ -1,0 +1,203 @@
+{
+  "fixture": "single-project",
+  "providerKind": "tsserver",
+  "scenario": "provider-backed",
+  "runs": 5,
+  "generatedAt": "2026-03-09T20:51:56.052Z",
+  "summary": {
+    "activationToReadyMs": {
+      "median": 3107,
+      "p95": 4040,
+      "min": 2857,
+      "max": 4040
+    },
+    "activationToFirstTypedCompletionMs": {
+      "median": 3115,
+      "p95": 4051,
+      "min": 2860,
+      "max": 4051
+    },
+    "readyToFirstTypedCompletionMs": {
+      "median": 11,
+      "p95": 31,
+      "min": 3,
+      "max": 31
+    },
+    "activationToTypeProviderStartedMs": {
+      "median": 530,
+      "p95": 1364,
+      "min": 423,
+      "max": 1364
+    },
+    "typeProviderStartedToFirstTypedCompletionMs": {
+      "median": 2585,
+      "p95": 2956,
+      "min": 2437,
+      "max": 2956
+    },
+    "typeProviderStartedToReadyMs": {
+      "median": 2577,
+      "p95": 2940,
+      "min": 2434,
+      "max": 2940
+    }
+  },
+  "baselineComparison": {
+    "status": "ok",
+    "baselineMedian": 3107,
+    "currentMedian": 3115,
+    "toleranceMs": 621
+  },
+  "reports": [
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T20:51:30.542Z",
+      "startup": {
+        "activationStartMs": 1773089486398,
+        "typeProviderStartedMs": 1773089487762,
+        "lspReadyMs": 1773089490438,
+        "firstTypedCompletionMs": 1773089490449,
+        "firstDiagnosticMs": 1773089490501,
+        "activationToReadyMs": 4040,
+        "activationToFirstTypedCompletionMs": 4051,
+        "readyToFirstTypedCompletionMs": 11,
+        "activationToTypeProviderStartedMs": 1364,
+        "typeProviderStartedToFirstTypedCompletionMs": 2687,
+        "typeProviderStartedToReadyMs": 2676,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": 4103,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    },
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T20:51:37.488Z",
+      "startup": {
+        "activationStartMs": 1773089493801,
+        "typeProviderStartedMs": 1773089494477,
+        "lspReadyMs": 1773089497417,
+        "firstTypedCompletionMs": 1773089497433,
+        "firstDiagnosticMs": 1773089497474,
+        "activationToReadyMs": 3616,
+        "activationToFirstTypedCompletionMs": 3632,
+        "readyToFirstTypedCompletionMs": 16,
+        "activationToTypeProviderStartedMs": 676,
+        "typeProviderStartedToFirstTypedCompletionMs": 2956,
+        "typeProviderStartedToReadyMs": 2940,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": 3673,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    },
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T20:51:43.780Z",
+      "startup": {
+        "activationStartMs": 1773089500576,
+        "typeProviderStartedMs": 1773089501106,
+        "lspReadyMs": 1773089503683,
+        "firstTypedCompletionMs": 1773089503691,
+        "firstDiagnosticMs": 1773089503739,
+        "activationToReadyMs": 3107,
+        "activationToFirstTypedCompletionMs": 3115,
+        "readyToFirstTypedCompletionMs": 8,
+        "activationToTypeProviderStartedMs": 530,
+        "typeProviderStartedToFirstTypedCompletionMs": 2585,
+        "typeProviderStartedToReadyMs": 2577,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": 3163,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    },
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T20:51:50.070Z",
+      "startup": {
+        "activationStartMs": 1773089506885,
+        "typeProviderStartedMs": 1773089507381,
+        "lspReadyMs": 1773089509850,
+        "firstTypedCompletionMs": 1773089509881,
+        "firstDiagnosticMs": 1773089509906,
+        "activationToReadyMs": 2965,
+        "activationToFirstTypedCompletionMs": 2996,
+        "readyToFirstTypedCompletionMs": 31,
+        "activationToTypeProviderStartedMs": 496,
+        "typeProviderStartedToFirstTypedCompletionMs": 2500,
+        "typeProviderStartedToReadyMs": 2469,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": 3021,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    },
+    {
+      "fixture": "single-project",
+      "timestamp": "2026-03-09T20:51:55.816Z",
+      "startup": {
+        "activationStartMs": 1773089512919,
+        "typeProviderStartedMs": 1773089513342,
+        "lspReadyMs": 1773089515776,
+        "firstTypedCompletionMs": 1773089515779,
+        "firstDiagnosticMs": null,
+        "activationToReadyMs": 2857,
+        "activationToFirstTypedCompletionMs": 2860,
+        "readyToFirstTypedCompletionMs": 3,
+        "activationToTypeProviderStartedMs": 423,
+        "typeProviderStartedToFirstTypedCompletionMs": 2437,
+        "typeProviderStartedToReadyMs": 2434,
+        "typeProvider": "tsserver",
+        "providerKind": "tsserver"
+      },
+      "hover": {
+        "samples": [],
+        "avgMs": null,
+        "p95Ms": null,
+        "maxMs": null
+      },
+      "diagnostics": {
+        "timeToFirstDiagnosticMs": null,
+        "totalDiagnostics": 0,
+        "sources": []
+      }
+    }
+  ]
+}

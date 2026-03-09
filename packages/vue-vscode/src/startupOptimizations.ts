@@ -7,6 +7,7 @@ export interface StartupTimingLike {
   typeProviderStartedMs?: number | null;
   lspReadyMs?: number | null;
   firstTypedCompletionMs?: number | null;
+  firstDiagnosticMs?: number | null;
 }
 
 export interface StartupSegments {

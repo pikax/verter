@@ -17,6 +17,8 @@ export interface StartupTiming {
   typeProviderStartedMs?: number;
   lspReadyMs?: number;
   firstTypedCompletionMs?: number;
+  firstTypedCompletionLabel?: string;
+  firstTypedCompletionKind?: string;
   firstDiagnosticMs?: number;
   providerKind?: "tsgo" | "tsserver" | "verter-only";
   activationToReadyMs?: number;
@@ -114,12 +116,13 @@ export async function waitForFileReady(
   options: {
     probePosition?: vscode.Position;
     expectedLabel?: string;
+    expectedKinds?: vscode.CompletionItemKind[];
     timeoutMs?: number;
     intervalMs?: number;
   } = {},
 ): Promise<void> {
   const { timeoutMs = 20_000, intervalMs = 150 } = options;
-  let { probePosition, expectedLabel } = options;
+  let { probePosition, expectedLabel, expectedKinds } = options;
 
   // Auto-detect from mustache expressions if not provided
   if (!probePosition || !expectedLabel) {
@@ -172,7 +175,11 @@ export async function waitForFileReady(
 
     if (completions?.items) {
       const match = completions.items.find((item) => item.label === expectedLabel);
-      if (match && match.kind !== undefined && match.kind !== vscode.CompletionItemKind.Text) {
+      if (
+        match &&
+        match.kind !== undefined &&
+        matchesExpectedCompletionKind(match.kind, expectedKinds)
+      ) {
         return;
       }
     }
@@ -380,7 +387,7 @@ export function parseStartupTiming(): StartupTiming {
   );
   const readyMatch = log.match(/\[TIMING\] ready (\d+)/);
   const typedCompletionMatch = log.match(
-    /\[TIMING\] first_typed_completion (\d+) [^\s]+ [^\s]+/,
+    /\[TIMING\] first_typed_completion (\d+) ([^\s]+) ([^\s]+)/,
   );
   const firstDiagnosticMatch = log.match(/\[TIMING\] first_diagnostic (\d+)/);
 
@@ -394,6 +401,8 @@ export function parseStartupTiming(): StartupTiming {
   const firstTypedCompletionMs = typedCompletionMatch
     ? parseInt(typedCompletionMatch[1], 10)
     : undefined;
+  const firstTypedCompletionLabel = typedCompletionMatch?.[2];
+  const firstTypedCompletionKind = typedCompletionMatch?.[3];
   const firstDiagnosticMs = firstDiagnosticMatch
     ? parseInt(firstDiagnosticMatch[1], 10)
     : undefined;
@@ -415,6 +424,8 @@ export function parseStartupTiming(): StartupTiming {
     typeProviderStartedMs,
     lspReadyMs,
     firstTypedCompletionMs,
+    firstTypedCompletionLabel,
+    firstTypedCompletionKind,
     firstDiagnosticMs,
     providerKind,
     ...segments,
@@ -552,4 +563,14 @@ export function findNthPosition(
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function matchesExpectedCompletionKind(
+  actualKind: vscode.CompletionItemKind,
+  expectedKinds?: readonly vscode.CompletionItemKind[],
+): boolean {
+  if (expectedKinds && expectedKinds.length > 0) {
+    return expectedKinds.includes(actualKind);
+  }
+  return actualKind !== vscode.CompletionItemKind.Text;
 }

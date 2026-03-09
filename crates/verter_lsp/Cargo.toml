@@ -39,4 +39,5 @@ name = "verter-lsp"
 path = "src/main.rs"
 
 [dev-dependencies]
+futures-util = "0.3"
 tempfile = "3.26.0"

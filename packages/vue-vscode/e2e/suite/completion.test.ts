@@ -350,6 +350,11 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     // POSITIVE: prop members present
     expect(labels, "should include 'title'").to.include("title");
+    const titleItem = items.find((i) => i.label === "title");
+    expect(titleItem!.kind, "'title' kind").to.be.oneOf([
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
 
     // NEGATIVE: no Vue-attr transformations in expression context
     expect(

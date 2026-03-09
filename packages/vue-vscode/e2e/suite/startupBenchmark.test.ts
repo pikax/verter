@@ -29,6 +29,10 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
     expect(editor?.document.languageId, "Benchmark should target a Vue file").to.equal("vue");
 
     const timing = await waitForStartupTiming();
+    const typedCompletion = timing as typeof timing & {
+      firstTypedCompletionLabel?: string;
+      firstTypedCompletionKind?: string;
+    };
 
     expect(timing.activationStartMs, "activation_start marker should be present").to.be.a("number");
     expect(
@@ -53,6 +57,14 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
       "typeProviderStartedToReadyMs should be present",
     ).to.be.a("number");
     expect(timing.providerKind, "provider kind should be detected").to.equal("tsserver");
+    expect(
+      typedCompletion.firstTypedCompletionLabel,
+      "startup benchmark should target the props.title member probe",
+    ).to.equal("title");
+    expect(
+      typedCompletion.firstTypedCompletionKind,
+      "startup benchmark should record a provider-backed member completion kind",
+    ).to.be.oneOf(["Property", "Field"]);
 
     expect(
       timing.firstTypedCompletionMs!,

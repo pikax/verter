@@ -18,13 +18,11 @@ const fixtureName = "single-project";
 const providerKind = "tsserver";
 const appVueRelativePath = "src/App.vue";
 const runs = Number.parseInt(process.env.VERTER_STARTUP_BENCHMARK_RUNS ?? "5", 10);
-const scenario = process.env.VERTER_STARTUP_BENCHMARK_SCENARIO ?? "default";
+const scenario = process.env.VERTER_STARTUP_BENCHMARK_SCENARIO ?? "provider-backed";
 const benchmarkDir = path.resolve(__dirname, "benchmarks");
 const resultsDir = path.join(benchmarkDir, "results");
-const baselinePath = path.join(
-  benchmarkDir,
-  `${fixtureName}-${providerKind}-baseline.json`,
-);
+const startupProbe = getStartupProbeConfig(scenario);
+const baselinePath = getBaselinePath(scenario);
 
 main().catch((error) => {
   console.error("Startup benchmark failed:", error);
@@ -79,11 +77,7 @@ async function main() {
         VERTER_E2E_ONLY: "startupBenchmark.test.js",
         VERTER_E2E_STARTUP_BENCHMARK: "1",
         VERTER_E2E_TYPE_PROVIDER: providerKind,
-        VERTER_E2E_STARTUP_PROBE: JSON.stringify({
-          relativePath: appVueRelativePath,
-          completionAnchor: "{{ count }}",
-          completionLabel: "count",
-        }),
+        VERTER_E2E_STARTUP_PROBE: JSON.stringify(startupProbe),
         VERTER_E2E_LOG_FILE: logFile,
         VERTER_E2E_TIMING_FILE: timingFile,
         VERTER_LOG: "debug",
@@ -225,6 +219,33 @@ function summarizeMetric(values) {
     min: sorted[0],
     max: sorted[sorted.length - 1],
   };
+}
+
+function getStartupProbeConfig(selectedScenario) {
+  if (selectedScenario === "provider-backed") {
+    return {
+      relativePath: appVueRelativePath,
+      completionAnchor: "{{ props.title }}",
+      completionLabel: "title",
+      completionKinds: ["Property", "Field"],
+    };
+  }
+
+  return {
+    relativePath: appVueRelativePath,
+    completionAnchor: "{{ count }}",
+    completionLabel: "count",
+  };
+}
+
+function getBaselinePath(selectedScenario) {
+  if (selectedScenario === "default") {
+    return path.join(benchmarkDir, `${fixtureName}-${providerKind}-baseline.json`);
+  }
+  return path.join(
+    benchmarkDir,
+    `${fixtureName}-${providerKind}-${selectedScenario}-baseline.json`,
+  );
 }
 
 function compareAgainstBaseline(summary) {

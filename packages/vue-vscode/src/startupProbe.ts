@@ -14,6 +14,7 @@ export interface StartupProbeConfig {
   relativePath: string;
   completionAnchor: string;
   completionLabel: string;
+  completionKinds?: string[];
   pollIntervalMs?: number;
   timeoutMs?: number;
 }
@@ -51,6 +52,11 @@ export function readStartupProbeConfig(): StartupProbeConfig | undefined {
       relativePath: normalizePath(parsed.relativePath),
       completionAnchor: parsed.completionAnchor,
       completionLabel: parsed.completionLabel,
+      completionKinds: Array.isArray(parsed.completionKinds)
+        ? parsed.completionKinds.filter(
+            (kind): kind is string => typeof kind === "string" && kind.length > 0,
+          )
+        : undefined,
       pollIntervalMs: parsed.pollIntervalMs,
       timeoutMs: parsed.timeoutMs,
     };
@@ -189,7 +195,7 @@ export class StartupProbe {
       if (
         match &&
         match.kind !== undefined &&
-        match.kind !== CompletionItemKind.Text
+        matchesExpectedCompletionKind(match.kind, this.config.completionKinds)
       ) {
         writeTimingMarker(
           "first_typed_completion",
@@ -211,6 +217,17 @@ export class StartupProbe {
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, "/");
+}
+
+function matchesExpectedCompletionKind(
+  actualKind: CompletionItemKind,
+  expectedKinds?: readonly string[],
+): boolean {
+  if (expectedKinds && expectedKinds.length > 0) {
+    const actualKindName = CompletionItemKind[actualKind];
+    return actualKindName !== undefined && expectedKinds.includes(actualKindName);
+  }
+  return actualKind !== CompletionItemKind.Text;
 }
 
 function sleep(ms: number): Promise<void> {
