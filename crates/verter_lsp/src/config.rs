@@ -962,8 +962,18 @@ impl DiagnosticSeverityConfig {
 pub struct ProjectConfig {
     /// Directory this project covers (e.g., `packages/ui/`). Always forward slashes.
     pub root: String,
+    /// Workspace folder that discovered this project.
+    pub workspace_root: String,
     /// Canonical tsconfig path when this project is backed by a discovered config.
     pub tsconfig_path: Option<String>,
+    /// Resolved tsconfig file membership for owner selection.
+    pub membership: crate::project_resolver::ProjectMembership,
+    /// Existing IDE alias sources (currently Vite aliases) injected ahead of tsconfig paths.
+    pub workspace_aliases: Vec<crate::project_resolver::WorkspaceAlias>,
+    /// Preserved tsconfig compiler options for the native resolver.
+    pub compiler_options: crate::project_resolver::IdeProjectCompilerOptions,
+    /// Resolved project-reference edges for the native resolver.
+    pub references: Vec<String>,
     /// Path alias resolver (from tsconfig + vite.config, merged).
     pub path_resolver: TsConfigPathResolver,
     /// Lint configuration for this project.
@@ -972,6 +982,21 @@ pub struct ProjectConfig {
     pub linter: verter_diagnostics::Linter,
     /// Whether lint was explicitly configured for this project.
     pub lint_explicitly_configured: bool,
+}
+
+impl ProjectConfig {
+    pub fn to_ide_project_config(&self) -> crate::project_resolver::IdeProjectConfig {
+        let mut project = crate::project_resolver::IdeProjectConfig::new(
+            self.root.clone(),
+            self.workspace_root.clone(),
+            self.tsconfig_path.clone(),
+        );
+        project.workspace_aliases = self.workspace_aliases.clone();
+        project.compiler_options = self.compiler_options.clone();
+        project.references = self.references.clone();
+        project.membership = self.membership.clone();
+        project
+    }
 }
 
 /// Registry of per-project configurations for a multi-root workspace.
@@ -1008,18 +1033,18 @@ impl ProjectRegistry {
             // Discover tsconfigs under this root
             let mut discovery = TsConfigDiscovery::new();
             discovery.discover(&root_path);
-            let mut has_root_tsconfig = false;
 
             for entry in discovery.configs() {
                 let Some(dir) = entry.config_path.parent() else {
                     continue;
                 };
                 let project_root = dir.to_string_lossy().replace('\\', "/");
-                if project_root == canonical {
-                    has_root_tsconfig = true;
-                }
                 let project_root_path = PathBuf::from(&project_root);
                 let mut resolver = TsConfigPathResolver::from_tsconfig(&entry.config_path);
+                let membership = load_project_membership(&entry.config_path);
+                let compiler_options = load_compiler_options(&entry.config_path);
+                let references = load_project_references(&entry.config_path);
+                let mut workspace_aliases = Vec::new();
 
                 if vite_config_enabled {
                     if let Some(np) = node_path {
@@ -1030,6 +1055,13 @@ impl ProjectRegistry {
                                 vite_aliases.len(),
                                 project_root
                             );
+                            workspace_aliases = vite_aliases
+                                .iter()
+                                .map(|(find, replacement)| crate::project_resolver::WorkspaceAlias {
+                                    find: find.clone(),
+                                    replacement: replacement.clone(),
+                                })
+                                .collect();
                             resolver.merge_vite_aliases(vite_aliases);
                         }
                     }
@@ -1040,7 +1072,12 @@ impl ProjectRegistry {
 
                 projects.push(ProjectConfig {
                     root: project_root,
+                    workspace_root: canonical.clone(),
                     tsconfig_path: Some(entry.config_path.to_string_lossy().replace('\\', "/")),
+                    membership,
+                    workspace_aliases,
+                    compiler_options,
+                    references,
                     path_resolver: resolver,
                     lint_config: lint.clone(),
                     linter,
@@ -1048,18 +1085,21 @@ impl ProjectRegistry {
                 });
             }
 
-            if !has_root_tsconfig {
-                let lint = discover_lint_config(&root_path);
-                let linter = verter_diagnostics::Linter::new(lint.config.clone());
-                projects.push(ProjectConfig {
-                    root: canonical,
-                    tsconfig_path: None,
-                    path_resolver: TsConfigPathResolver::default(),
-                    lint_config: lint.clone(),
-                    linter,
-                    lint_explicitly_configured: lint.explicitly_configured,
-                });
-            }
+            let lint = discover_lint_config(&root_path);
+            let linter = verter_diagnostics::Linter::new(lint.config.clone());
+            projects.push(ProjectConfig {
+                root: canonical,
+                workspace_root: crate::documents::uri_to_canonical_id_from_str(root_uri),
+                tsconfig_path: None,
+                membership: crate::project_resolver::ProjectMembership::MatchAll,
+                workspace_aliases: Vec::new(),
+                compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                references: Vec::new(),
+                path_resolver: TsConfigPathResolver::default(),
+                lint_config: lint.clone(),
+                linter,
+                lint_explicitly_configured: lint.explicitly_configured,
+            });
         }
 
         sort_projects(&mut projects);
@@ -1076,24 +1116,28 @@ impl ProjectRegistry {
 
             let mut discovery = TsConfigDiscovery::new();
             discovery.discover(&root_path);
-            let mut has_root_tsconfig = false;
 
             for entry in discovery.configs() {
                 let Some(dir) = entry.config_path.parent() else {
                     continue;
                 };
                 let project_root = dir.to_string_lossy().replace('\\', "/");
-                if project_root == root {
-                    has_root_tsconfig = true;
-                }
                 let project_root_path = PathBuf::from(&project_root);
                 let resolver = TsConfigPathResolver::from_tsconfig(&entry.config_path);
+                let membership = load_project_membership(&entry.config_path);
+                let compiler_options = load_compiler_options(&entry.config_path);
+                let references = load_project_references(&entry.config_path);
                 let lint = discover_lint_config(&project_root_path);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());
 
                 projects.push(ProjectConfig {
                     root: project_root,
+                    workspace_root: root.to_string(),
                     tsconfig_path: Some(entry.config_path.to_string_lossy().replace('\\', "/")),
+                    membership,
+                    workspace_aliases: Vec::new(),
+                    compiler_options,
+                    references,
                     path_resolver: resolver,
                     lint_config: lint.clone(),
                     linter,
@@ -1101,18 +1145,21 @@ impl ProjectRegistry {
                 });
             }
 
-            if !has_root_tsconfig {
-                let lint = discover_lint_config(&root_path);
-                let linter = verter_diagnostics::Linter::new(lint.config.clone());
-                projects.push(ProjectConfig {
-                    root: root.to_string(),
-                    tsconfig_path: None,
-                    path_resolver: TsConfigPathResolver::default(),
-                    lint_config: lint.clone(),
-                    linter,
-                    lint_explicitly_configured: lint.explicitly_configured,
-                });
-            }
+            let lint = discover_lint_config(&root_path);
+            let linter = verter_diagnostics::Linter::new(lint.config.clone());
+            projects.push(ProjectConfig {
+                root: root.to_string(),
+                workspace_root: root.to_string(),
+                tsconfig_path: None,
+                membership: crate::project_resolver::ProjectMembership::MatchAll,
+                workspace_aliases: Vec::new(),
+                compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                references: Vec::new(),
+                path_resolver: TsConfigPathResolver::default(),
+                lint_config: lint.clone(),
+                linter,
+                lint_explicitly_configured: lint.explicitly_configured,
+            });
         }
 
         sort_projects(&mut projects);
@@ -1124,12 +1171,9 @@ impl ProjectRegistry {
     /// Falls back to `None` if no project root is a prefix of the file path.
     pub fn find_project(&self, file_path: &str) -> Option<&ProjectConfig> {
         let normalized = file_path.replace('\\', "/");
-        self.projects.iter().find(|p| {
-            normalized.starts_with(&p.root)
-                && (normalized.len() == p.root.len()
-                    || p.root.ends_with('/')
-                    || normalized.as_bytes().get(p.root.len()) == Some(&b'/'))
-        })
+        self.projects
+            .iter()
+            .find(|project| project_matches_file(project, &normalized))
     }
 
     /// Resolve a path alias for a file, using the file's project-specific resolver.
@@ -1176,6 +1220,15 @@ impl ProjectRegistry {
         &self.projects
     }
 
+    pub fn to_native_project_resolver(&self) -> crate::project_resolver::NativeProjectResolver {
+        crate::project_resolver::NativeProjectResolver::new(
+            self.projects
+                .iter()
+                .map(ProjectConfig::to_ide_project_config)
+                .collect(),
+        )
+    }
+
     /// Get all project roots.
     pub fn project_roots(&self) -> Vec<&str> {
         self.projects.iter().map(|p| p.root.as_str()).collect()
@@ -1214,6 +1267,263 @@ fn project_rank(project: &ProjectConfig) -> u8 {
         Some(_) => 1,
         None => 2,
     }
+}
+
+fn project_matches_file(project: &ProjectConfig, file_path: &str) -> bool {
+    if !path_has_prefix(file_path, &project.root) {
+        return false;
+    }
+
+    match &project.membership {
+        crate::project_resolver::ProjectMembership::MatchAll => true,
+        crate::project_resolver::ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            if matches_any_pattern(file_path, exclude) {
+                return false;
+            }
+
+            if files.iter().any(|candidate| candidate == file_path) {
+                return true;
+            }
+
+            if !include.is_empty() {
+                return matches_any_pattern(file_path, include);
+            }
+
+            !exclude.is_empty()
+        }
+    }
+}
+
+fn path_has_prefix(path: &str, prefix: &str) -> bool {
+    path.starts_with(prefix)
+        && (path.len() == prefix.len()
+            || prefix.ends_with('/')
+            || path.as_bytes().get(prefix.len()) == Some(&b'/'))
+}
+
+fn matches_any_pattern(path: &str, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
+        .any(|pattern| pattern.matches(path))
+}
+
+fn load_project_membership(tsconfig_path: &Path) -> crate::project_resolver::ProjectMembership {
+    load_project_membership_inner(tsconfig_path, 0)
+        .unwrap_or(crate::project_resolver::ProjectMembership::MatchAll)
+}
+
+fn load_compiler_options(tsconfig_path: &Path) -> crate::project_resolver::IdeProjectCompilerOptions {
+    load_compiler_options_inner(tsconfig_path, 0).unwrap_or_default()
+}
+
+fn load_compiler_options_inner(
+    tsconfig_path: &Path,
+    depth: u8,
+) -> Option<crate::project_resolver::IdeProjectCompilerOptions> {
+    if depth > 8 {
+        return None;
+    }
+
+    let tsconfig_dir = tsconfig_path.parent()?;
+    let content = std::fs::read_to_string(tsconfig_path).ok()?;
+    let cleaned = strip_json_comments(&content);
+    let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+
+    let inherited = json
+        .get("extends")
+        .and_then(|value| value.as_str())
+        .and_then(|extends| resolve_tsconfig_extends(tsconfig_dir, extends))
+        .and_then(|base_path| load_compiler_options_inner(&base_path, depth + 1))
+        .unwrap_or_default();
+
+    let mut compiler_options = inherited;
+    let Some(raw_compiler_options) = json.get("compilerOptions") else {
+        return Some(compiler_options);
+    };
+
+    if let Some(base_url) = raw_compiler_options.get("baseUrl").and_then(|value| value.as_str()) {
+        compiler_options.base_url = Some(resolve_path_value(tsconfig_dir, base_url));
+    }
+
+    if let Some(paths) = raw_compiler_options.get("paths").and_then(|value| value.as_object()) {
+        let base_url = compiler_options
+            .base_url
+            .clone()
+            .unwrap_or_else(|| tsconfig_dir.to_string_lossy().replace('\\', "/"));
+        compiler_options.paths = paths
+            .iter()
+            .map(|(pattern, targets)| {
+                let targets = targets
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str())
+                    .map(|value| resolve_path_target(&base_url, value))
+                    .collect::<Vec<_>>();
+                (pattern.clone(), targets)
+            })
+            .collect();
+    }
+
+    Some(compiler_options)
+}
+
+fn load_project_references(tsconfig_path: &Path) -> Vec<String> {
+    let Some(tsconfig_dir) = tsconfig_path.parent() else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(tsconfig_path) else {
+        return Vec::new();
+    };
+    let cleaned = strip_json_comments(&content);
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&cleaned) else {
+        return Vec::new();
+    };
+
+    json.get("references")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("path").and_then(|value| value.as_str()))
+        .filter_map(|reference| resolve_tsconfig_reference(tsconfig_dir, reference))
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect()
+}
+
+fn load_project_membership_inner(
+    tsconfig_path: &Path,
+    depth: u8,
+) -> Option<crate::project_resolver::ProjectMembership> {
+    if depth > 8 {
+        return None;
+    }
+
+    let tsconfig_dir = tsconfig_path.parent()?;
+    let content = std::fs::read_to_string(tsconfig_path).ok()?;
+    let cleaned = strip_json_comments(&content);
+    let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+
+    let inherited = json
+        .get("extends")
+        .and_then(|value| value.as_str())
+        .and_then(|extends| resolve_tsconfig_extends(tsconfig_dir, extends))
+        .and_then(|base_path| load_project_membership_inner(&base_path, depth + 1))
+        .unwrap_or(crate::project_resolver::ProjectMembership::MatchAll);
+
+    let has_files = json.get("files").is_some();
+    let has_include = json.get("include").is_some();
+    let has_exclude = json.get("exclude").is_some();
+
+    if !has_files && !has_include && !has_exclude {
+        return Some(inherited);
+    }
+
+    let (mut files, mut include, mut exclude) = match inherited {
+        crate::project_resolver::ProjectMembership::MatchAll => (Vec::new(), Vec::new(), Vec::new()),
+        crate::project_resolver::ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => (files, include, exclude),
+    };
+
+    if has_files {
+        files = json_string_array(&json, "files")
+            .into_iter()
+            .map(|value| resolve_membership_path(tsconfig_dir, &value, false))
+            .collect();
+    }
+
+    if has_include {
+        include = json_string_array(&json, "include")
+            .into_iter()
+            .map(|value| resolve_membership_path(tsconfig_dir, &value, true))
+            .collect();
+    }
+
+    if has_exclude {
+        exclude = json_string_array(&json, "exclude")
+            .into_iter()
+            .map(|value| resolve_membership_path(tsconfig_dir, &value, true))
+            .collect();
+    }
+
+    Some(crate::project_resolver::ProjectMembership::IncludeExclude {
+        files,
+        include,
+        exclude,
+    })
+}
+
+fn json_string_array(json: &serde_json::Value, key: &str) -> Vec<String> {
+    json.get(key)
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect()
+}
+
+fn resolve_membership_path(tsconfig_dir: &Path, value: &str, allow_directory_glob: bool) -> String {
+    let resolved = if Path::new(value).is_absolute() {
+        PathBuf::from(value)
+    } else {
+        tsconfig_dir.join(value)
+    };
+
+    let normalized = resolved.to_string_lossy().replace('\\', "/");
+    if !allow_directory_glob {
+        return normalized;
+    }
+
+    if normalized.contains('*') || normalized.contains('?') || normalized.contains('[') {
+        return normalized;
+    }
+
+    if Path::new(&resolved)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some()
+    {
+        return normalized;
+    }
+
+    format!("{normalized}/**/*")
+}
+
+fn resolve_path_value(tsconfig_dir: &Path, value: &str) -> String {
+    if Path::new(value).is_absolute() {
+        normalize_path_buf(&PathBuf::from(value))
+    } else {
+        normalize_path_buf(&tsconfig_dir.join(value))
+    }
+}
+
+fn resolve_path_target(base_url: &str, value: &str) -> String {
+    if Path::new(value).is_absolute() {
+        normalize_path_buf(&PathBuf::from(value))
+    } else {
+        normalize_path_buf(&PathBuf::from(base_url).join(value))
+    }
+}
+
+fn normalize_path_buf(path: &Path) -> String {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.to_string_lossy().replace('\\', "/")
 }
 
 #[cfg(test)]
@@ -2213,7 +2523,12 @@ export default {{
         let registry = ProjectRegistry {
             projects: vec![ProjectConfig {
                 root: "/workspace/app".to_string(),
+                workspace_root: "/workspace".to_string(),
                 tsconfig_path: None,
+                membership: crate::project_resolver::ProjectMembership::MatchAll,
+                workspace_aliases: Vec::new(),
+                compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                references: Vec::new(),
                 path_resolver: TsConfigPathResolver::default(),
                 lint_config: ResolvedLintConfig::default(),
                 linter: verter_diagnostics::Linter::default(),
@@ -2239,7 +2554,12 @@ export default {{
             projects: vec![
                 ProjectConfig {
                     root: "/workspace/explicit/".to_string(),
+                    workspace_root: "/workspace".to_string(),
                     tsconfig_path: None,
+                    membership: crate::project_resolver::ProjectMembership::MatchAll,
+                    workspace_aliases: Vec::new(),
+                    compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                    references: Vec::new(),
                     path_resolver: TsConfigPathResolver::default(),
                     lint_config: ResolvedLintConfig {
                         config: verter_diagnostics::LintConfig {
@@ -2253,7 +2573,12 @@ export default {{
                 },
                 ProjectConfig {
                     root: "/workspace/default/".to_string(),
+                    workspace_root: "/workspace".to_string(),
                     tsconfig_path: None,
+                    membership: crate::project_resolver::ProjectMembership::MatchAll,
+                    workspace_aliases: Vec::new(),
+                    compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                    references: Vec::new(),
                     path_resolver: TsConfigPathResolver::default(),
                     lint_config: ResolvedLintConfig::default(),
                     linter: verter_diagnostics::Linter::default(),
@@ -2298,6 +2623,147 @@ export default {{
         assert!(
             project.is_none(),
             "file outside all workspace roots should return None"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_solution_style_root_does_not_own_member_files() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_solution_owner");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::create_dir_all(tmp.join("tests")).unwrap();
+
+        std::fs::write(
+            tmp.join("tsconfig.json"),
+            r#"{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.vitest.json" }
+  ]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("tsconfig.app.json"),
+            r#"{
+  "include": ["src/**/*"],
+  "exclude": ["tests/**/*"]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("tsconfig.vitest.json"),
+            r#"{
+  "include": ["tests/**/*"]
+}"#,
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let source_file = format!("{root}/src/App.vue");
+        let expected_app = format!("{root}/tsconfig.app.json");
+        let solution_root = format!("{root}/tsconfig.json");
+
+        let project = registry
+            .find_project(&source_file)
+            .expect("solution-style workspace should still find an owner");
+
+        assert_eq!(
+            project.tsconfig_path.as_deref(),
+            Some(expected_app.as_str()),
+            "src/App.vue should be owned by tsconfig.app.json, not the solution tsconfig"
+        );
+        assert_ne!(
+            project.tsconfig_path.as_deref(),
+            Some(solution_root.as_str()),
+            "solution-style tsconfig.json must not claim files outside its membership"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_unmatched_root_file_uses_synthetic_workspace_project() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_synth_workspace");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::create_dir_all(tmp.join("scripts")).unwrap();
+
+        std::fs::write(
+            tmp.join("tsconfig.app.json"),
+            r#"{
+  "include": ["src/**/*"]
+}"#,
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let unmatched = format!("{root}/scripts/tool.ts");
+
+        let project = registry
+            .find_project(&unmatched)
+            .expect("unmatched file should fall back to a synthetic workspace project");
+
+        assert_eq!(
+            project.tsconfig_path, None,
+            "scripts/tool.ts should not be assigned to tsconfig.app.json"
+        );
+        assert_eq!(
+            project.root, root,
+            "synthetic workspace project should use the workspace root"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_projects_preserve_compiler_options_through_extends() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_compiler_options");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+
+        std::fs::write(
+            tmp.join("tsconfig.base.json"),
+            r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("tsconfig.app.json"),
+            r#"{
+  "extends": "./tsconfig.base.json",
+  "include": ["src/**/*"]
+}"#,
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let app_file = format!("{root}/src/App.ts");
+        let project = registry
+            .find_project(&app_file)
+            .expect("extended tsconfig project should own src/App.ts");
+
+        assert_eq!(
+            project.compiler_options.base_url.as_deref(),
+            Some(root.as_str()),
+            "baseUrl should be resolved to an absolute canonical path"
+        );
+        assert_eq!(
+            project.compiler_options.paths,
+            vec![("@/*".to_string(), vec![format!("{root}/src/*")])],
+            "tsconfig paths should be preserved on the project for native resolution"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

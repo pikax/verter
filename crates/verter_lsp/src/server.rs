@@ -34,6 +34,7 @@ use crate::features::organize_imports::organize_imports_actions;
 use crate::features::references::references_at_position;
 use crate::features::rename::{prepare_rename, rename_at_position};
 use crate::features::workspace_symbol::workspace_symbols;
+use crate::project_resolver::ProjectResolverReader;
 use crate::statistics::Statistics;
 use crate::tsgo::merge;
 use crate::tsgo::project_sync::ProjectSync;
@@ -712,6 +713,85 @@ impl VerterLanguageServer {
         }
     }
 
+    async fn sync_non_vue_provider_graph(
+        &self,
+        resolver: &crate::project_resolver::NativeProjectResolver,
+        initial_ids: Vec<String>,
+    ) {
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+
+        let reader = LspProjectResolverReader::new(&self.documents);
+        let mut pending = initial_ids;
+        let mut seen = HashSet::new();
+
+        while let Some(canonical_id) = pending.pop() {
+            if !seen.insert(canonical_id.clone()) || canonical_id.ends_with(".vue") {
+                continue;
+            }
+
+            let Some(source) = reader.read_text(&canonical_id) else {
+                continue;
+            };
+
+            let module_references = self
+                .documents
+                .host
+                .upsert(verter_host::UpsertRequest {
+                    canonical_id: Some(canonical_id.clone()),
+                    input_id: canonical_id.clone(),
+                    source: Arc::clone(&source),
+                    file_kind: verter_host::FileKind::NonSfc,
+                    aliases: Vec::new(),
+                })
+                .map(|result| result.module_references)
+                .unwrap_or_default();
+
+            let rewritten = rewrite_non_vue_source_for_provider_with_resolver(
+                resolver,
+                &reader,
+                &canonical_id,
+                &source,
+                &module_references,
+            );
+            let provider_path = resolver
+                .provider_id_for_source(&canonical_id)
+                .unwrap_or_else(|| canonical_id.clone());
+
+            if let Err(e) = sync.sync_file(&provider_path, &rewritten).await {
+                tracing::warn!("failed to sync provider shadow file {provider_path}: {e}");
+            }
+
+            let resolved_dependencies = collect_resolved_provider_dependencies(
+                resolver,
+                &reader,
+                &canonical_id,
+                &module_references,
+            );
+            if !resolved_dependencies.is_empty() {
+                self.documents.host.set_import_dependencies(
+                    &canonical_id,
+                    resolved_dependencies
+                        .iter()
+                        .map(|entry| entry.source_id.clone())
+                        .collect(),
+                );
+            }
+
+            for dependency in resolved_dependencies {
+                if dependency.file_kind == verter_host::FileKind::VueSfc {
+                    self.sync_vue_public_api_by_canonical_id(&dependency.source_id)
+                        .await;
+                } else if dependency.provider_target
+                    == crate::project_resolver::ProviderTarget::ShadowSourceFile
+                {
+                    pending.push(dependency.source_id.clone());
+                }
+            }
+        }
+    }
+
     fn sync_api_to_provider_in_background(&self, uri: Uri) {
         let Some(sync) = self.project_sync.clone() else {
             return;
@@ -719,10 +799,10 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(&uri) else {
             return;
         };
-        let Some(base) = canonical_id.strip_suffix(".vue") else {
+        let resolver = self.native_project_resolver();
+        let Some(dts_path) = provider_api_path_for_source(resolver.as_ref(), &canonical_id) else {
             return;
         };
-        let dts_path = format!("{base}.vue.ts");
         let host = self.documents.host_arc();
         tokio::spawn(async move {
             let api = tokio::task::block_in_place(|| host.get_public_api(&canonical_id));
@@ -810,18 +890,24 @@ impl VerterLanguageServer {
         Some((ide_path, ide.code, mapper.unwrap()))
     }
 
+    fn native_project_resolver(&self) -> Option<crate::project_resolver::NativeProjectResolver> {
+        let registry = self.project_registry.read();
+        registry
+            .as_ref()
+            .map(crate::config::ProjectRegistry::to_native_project_resolver)
+    }
+
     /// Generate the IDE file path (.tsx or .jsx) for a given Vue file URI.
     fn ide_path_for_uri(&self, uri: &Uri) -> String {
         let canonical = self
             .documents
             .get_canonical_id(uri)
             .unwrap_or_else(|| uri.as_str().to_string());
-        let ext = if self.documents.is_jsx(uri) {
-            ".jsx"
-        } else {
-            ".tsx"
-        };
-        format!("{canonical}{ext}")
+        provider_ide_path_for_source(
+            self.native_project_resolver().as_ref(),
+            &canonical,
+            self.documents.is_jsx(uri),
+        )
     }
 
     /// Generate the DTS declaration file path (.vue.ts) for a given Vue file URI.
@@ -829,17 +915,14 @@ impl VerterLanguageServer {
     /// `import('./Comp.vue')` resolves to `./Comp.vue.ts`
     fn dts_path_for_uri(&self, uri: &Uri) -> Option<String> {
         let canonical = self.documents.get_canonical_id(uri)?;
-        let base = canonical.strip_suffix(".vue")?;
-        Some(format!("{base}.vue.ts"))
+        provider_api_path_for_source(self.native_project_resolver().as_ref(), &canonical)
     }
 
     /// Get IDE content and mapper by IDE path (reverse lookup).
     fn ide_context_by_path(&self, ide_path: &str) -> Option<(String, Arc<str>, PositionMapper)> {
-        // IDE path is "{canonical_id}.tsx" or "{canonical_id}.jsx"
-        let canonical_id = ide_path
-            .strip_suffix(".tsx")
-            .or_else(|| ide_path.strip_suffix(".jsx"))?;
-        let uri = self.documents.canonical_id_to_uri(canonical_id)?;
+        let binding = self.native_project_resolver();
+        let canonical_id = source_id_from_provider_vue_path(binding.as_ref(), ide_path)?;
+        let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
         self.ide_context(&uri)
     }
 
@@ -943,10 +1026,9 @@ impl VerterLanguageServer {
         let (_tsx_path, tsx_content, mapper) = self.ide_context_by_path(ide_path)?;
         let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
         // Get the Vue file's line index
-        let canonical_id = ide_path
-            .strip_suffix(".tsx")
-            .or_else(|| ide_path.strip_suffix(".jsx"))?;
-        let uri = self.documents.canonical_id_to_uri(canonical_id)?;
+        let binding = self.native_project_resolver();
+        let canonical_id = source_id_from_provider_vue_path(binding.as_ref(), ide_path)?;
+        let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
         let doc = self.documents.get(&uri)?;
         Some(merge::ExternalIdeContext {
             tsx_line_index,
@@ -974,10 +1056,9 @@ impl VerterLanguageServer {
 
     /// Find the Vue URI corresponding to an IDE path.
     fn vue_uri_from_ide_path(&self, ide_path: &str) -> Option<Uri> {
-        let canonical_id = ide_path
-            .strip_suffix(".tsx")
-            .or_else(|| ide_path.strip_suffix(".jsx"))?;
-        self.documents.canonical_id_to_uri(canonical_id)
+        let binding = self.native_project_resolver();
+        let canonical_id = source_id_from_provider_vue_path(binding.as_ref(), ide_path)?;
+        self.documents.canonical_id_to_uri(&canonical_id)
     }
 
     /// Resolve a child component's analysis from an import source path.
@@ -1105,30 +1186,92 @@ impl VerterLanguageServer {
                 .map(|result| result.module_references)
                 .unwrap_or_default();
 
-            let rewritten = rewrite_non_vue_source_for_provider(&last.text, &module_references);
+            let native_resolver = {
+                let registry_guard = self.project_registry.read();
+                registry_guard
+                    .as_ref()
+                    .map(crate::config::ProjectRegistry::to_native_project_resolver)
+            };
+            let reader = LspProjectResolverReader::new(&self.documents);
+            let (provider_path, rewritten, resolved_dependencies) =
+                if let Some(resolver) = native_resolver.as_ref() {
+                    (
+                        resolver
+                            .provider_id_for_source(&path)
+                            .unwrap_or_else(|| path.clone()),
+                        rewrite_non_vue_source_for_provider_with_resolver(
+                            resolver,
+                            &reader,
+                            &path,
+                            &last.text,
+                            &module_references,
+                        ),
+                        collect_resolved_provider_dependencies(
+                            resolver,
+                            &reader,
+                            &path,
+                            &module_references,
+                        ),
+                    )
+                } else {
+                    (
+                        path.clone(),
+                        rewrite_non_vue_source_for_provider(&last.text, &module_references),
+                        Vec::new(),
+                    )
+                };
 
             if let Some(sync) = &self.project_sync {
-                if let Err(e) = sync.sync_file(&path, &rewritten).await {
+                if let Err(e) = sync.sync_file(&provider_path, &rewritten).await {
                     tracing::warn!("failed to sync file in type provider: {e}");
                 }
             }
 
-            let vue_targets: Vec<String> =
+            let vue_targets: Vec<String> = if resolved_dependencies.is_empty() {
                 collect_exact_and_finite_vue_specifiers(&module_references)
                     .into_iter()
                     .filter_map(|specifier| {
                         resolve_vue_specifier_target(&self.project_registry, &path, &specifier)
                     })
-                    .collect();
+                    .collect()
+            } else {
+                resolved_dependencies
+                    .iter()
+                    .filter(|dependency| dependency.file_kind == verter_host::FileKind::VueSfc)
+                    .map(|dependency| dependency.source_id.clone())
+                    .collect()
+            };
 
-            if !vue_targets.is_empty() {
+            let resolved_workspace_deps: Vec<String> = if resolved_dependencies.is_empty() {
+                vue_targets.clone()
+            } else {
+                resolved_dependencies
+                    .iter()
+                    .map(|dependency| dependency.source_id.clone())
+                    .collect()
+            };
+
+            if !resolved_workspace_deps.is_empty() {
                 self.documents
                     .host
-                    .set_import_dependencies(&path, vue_targets.clone());
+                    .set_import_dependencies(&path, resolved_workspace_deps);
             }
 
             for vue_target in vue_targets {
                 self.sync_vue_public_api_by_canonical_id(&vue_target).await;
+            }
+
+            if let Some(resolver) = native_resolver.as_ref() {
+                let non_vue_targets = resolved_dependencies
+                    .iter()
+                    .filter(|dependency| {
+                        dependency.file_kind == verter_host::FileKind::NonSfc
+                            && dependency.provider_target
+                                == crate::project_resolver::ProviderTarget::ShadowSourceFile
+                    })
+                    .map(|dependency| dependency.source_id.clone())
+                    .collect::<Vec<_>>();
+                self.sync_non_vue_provider_graph(resolver, non_vue_targets).await;
             }
         }
     }
@@ -1161,17 +1304,23 @@ impl VerterLanguageServer {
                             let profile = self.documents.tsx_profile.read().clone();
                             if let Some(ide) = self.documents.host.get_ide(&canonical_id, &profile)
                             {
-                                let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-                                let tsx_path = format!("{canonical_id}{ext}");
+                                let resolver = self.native_project_resolver();
+                                let tsx_path = provider_ide_path_for_source(
+                                    resolver.as_ref(),
+                                    &canonical_id,
+                                    ide.is_jsx,
+                                );
                                 let _ = sync.close_tsx(&tsx_path).await;
                                 self.background_synced_files.remove(&tsx_path);
                             }
                         }
-                        // Close DTS file
-                        let base = canonical_id.strip_suffix(".vue").unwrap_or(&canonical_id);
-                        let dts_path = format!("{base}.vue.ts");
-                        let _ = sync.close_dts(&dts_path).await;
-                        self.background_synced_files.remove(&dts_path);
+                        if let Some(dts_path) = provider_api_path_for_source(
+                            self.native_project_resolver().as_ref(),
+                            &canonical_id,
+                        ) {
+                            let _ = sync.close_dts(&dts_path).await;
+                            self.background_synced_files.remove(&dts_path);
+                        }
                     }
                     self.documents.host.remove(&canonical_id);
                 }
@@ -1232,12 +1381,13 @@ impl VerterLanguageServer {
         // For tsserver: sync IDE files (TS plugin resolves .vue → .vue.tsx).
         if let Some(sync) = &self.project_sync {
             let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+            let resolver = self.native_project_resolver();
 
             if !is_tsgo {
                 // tsserver: sync IDE output
                 if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
-                    let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-                    let tsx_path = format!("{canonical_id}{ext}");
+                    let tsx_path =
+                        provider_ide_path_for_source(resolver.as_ref(), canonical_id, ide.is_jsx);
                     let is_bg = self.background_synced_files.contains_key(&tsx_path);
                     let result = if is_bg {
                         sync.sync_tsx(&tsx_path, &ide.code).await
@@ -1254,8 +1404,11 @@ impl VerterLanguageServer {
 
             // Sync .vue.ts for cross-file component type resolution
             if let Some(api) = self.documents.host.get_public_api(canonical_id) {
-                let base = canonical_id.strip_suffix(".vue").unwrap_or(canonical_id);
-                let dts_path = format!("{base}.vue.ts");
+                let Some(dts_path) =
+                    provider_api_path_for_source(resolver.as_ref(), canonical_id)
+                else {
+                    return;
+                };
                 let is_bg = self.background_synced_files.contains_key(&dts_path);
                 let result = if is_tsgo {
                     // TSGO: open/update DTS so it's in TSGO's virtual FS
@@ -1865,6 +2018,80 @@ fn quote_wrapped_specifier(raw_text: &str, specifier: &str) -> String {
     format!("{quote}{specifier}{quote}")
 }
 
+fn provider_ide_path_for_source(
+    resolver: Option<&crate::project_resolver::NativeProjectResolver>,
+    canonical_id: &str,
+    is_jsx: bool,
+) -> String {
+    resolver
+        .and_then(|resolver| resolver.provider_ide_id_for_source(canonical_id, is_jsx))
+        .unwrap_or_else(|| {
+            let ext = if is_jsx { ".jsx" } else { ".tsx" };
+            format!("{canonical_id}{ext}")
+        })
+}
+
+fn provider_api_path_for_source(
+    resolver: Option<&crate::project_resolver::NativeProjectResolver>,
+    canonical_id: &str,
+) -> Option<String> {
+    resolver
+        .and_then(|resolver| resolver.provider_id_for_source(canonical_id))
+        .or_else(|| {
+            let base = canonical_id.strip_suffix(".vue")?;
+            Some(format!("{base}.vue.ts"))
+        })
+}
+
+fn source_id_from_provider_vue_path(
+    resolver: Option<&crate::project_resolver::NativeProjectResolver>,
+    provider_path: &str,
+) -> Option<String> {
+    resolver
+        .and_then(|resolver| resolver.source_id_from_provider_id(provider_path))
+        .or_else(|| {
+            provider_path
+                .strip_suffix(".tsx")
+                .or_else(|| provider_path.strip_suffix(".jsx"))
+                .or_else(|| provider_path.strip_suffix(".ts"))
+                .map(str::to_string)
+        })
+}
+
+struct LspProjectResolverReader<'a> {
+    documents: &'a DocumentRegistry,
+}
+
+impl<'a> LspProjectResolverReader<'a> {
+    fn new(documents: &'a DocumentRegistry) -> Self {
+        Self { documents }
+    }
+}
+
+impl crate::project_resolver::ProjectResolverReader for LspProjectResolverReader<'_> {
+    fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.documents
+            .host()
+            .get_source(canonical_id)
+            .or_else(|| std::fs::read_to_string(canonical_id).ok().map(Arc::<str>::from))
+    }
+
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        self.documents.host().get_source(canonical_id).is_some()
+            || std::path::Path::new(canonical_id).is_file()
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        if self.documents.host().get_source(canonical_id).is_some() {
+            return Some(canonical_id.replace('\\', "/"));
+        }
+
+        std::fs::canonicalize(canonical_id)
+            .ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+    }
+}
+
 fn rewrite_non_vue_source_for_provider(
     source: &str,
     module_references: &[verter_host::ScriptModuleReference],
@@ -1900,6 +2127,117 @@ fn rewrite_non_vue_source_for_provider(
     }
 
     rewritten
+}
+
+fn rewrite_non_vue_source_for_provider_with_resolver(
+    resolver: &crate::project_resolver::NativeProjectResolver,
+    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    importer_id: &str,
+    source: &str,
+    module_references: &[verter_host::ScriptModuleReference],
+) -> String {
+    let mut rewritten = source.to_string();
+    let mut replacements: Vec<(usize, usize, String)> = module_references
+        .iter()
+        .filter_map(|reference| {
+            if reference.analyzability != verter_analysis::ModuleReferenceAnalyzability::Exact {
+                return None;
+            }
+
+            let specifier = reference.literal_specifier.as_ref()?;
+            let resolved = resolver.resolve_with_reader(
+                reader,
+                &crate::project_resolver::ResolveRequest {
+                    importer_id: importer_id.to_string(),
+                    specifier: specifier.clone(),
+                    kind: module_reference_request_kind(reference),
+                    phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                },
+            )?;
+
+            let start = reference.expr_span.start as usize;
+            let end = reference.expr_span.end as usize;
+            source.get(start..end)?;
+
+            Some((
+                start,
+                end,
+                quote_wrapped_specifier(&reference.raw_text, &resolved.provider_specifier),
+            ))
+        })
+        .collect();
+
+    replacements.sort_by(|left, right| right.0.cmp(&left.0));
+    for (start, end, replacement) in replacements {
+        rewritten.replace_range(start..end, &replacement);
+    }
+
+    rewritten
+}
+
+fn collect_resolved_provider_dependencies(
+    resolver: &crate::project_resolver::NativeProjectResolver,
+    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    importer_id: &str,
+    module_references: &[verter_host::ScriptModuleReference],
+) -> Vec<crate::project_resolver::ResolveResult> {
+    let mut seen = HashSet::new();
+    let mut resolved = Vec::new();
+
+    for reference in module_references {
+        let kind = module_reference_request_kind(reference);
+        match reference.analyzability {
+            verter_analysis::ModuleReferenceAnalyzability::Exact => {
+                if let Some(specifier) = &reference.literal_specifier {
+                    if let Some(result) = resolver.resolve_with_reader(
+                        reader,
+                        &crate::project_resolver::ResolveRequest {
+                            importer_id: importer_id.to_string(),
+                            specifier: specifier.clone(),
+                            kind,
+                            phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                        },
+                    ) {
+                        let key = (result.source_id.clone(), result.provider_id.clone());
+                        if seen.insert(key) {
+                            resolved.push(result);
+                        }
+                    }
+                }
+            }
+            verter_analysis::ModuleReferenceAnalyzability::FiniteSet => {
+                for specifier in &reference.finite_specifiers {
+                    if let Some(result) = resolver.resolve_with_reader(
+                        reader,
+                        &crate::project_resolver::ResolveRequest {
+                            importer_id: importer_id.to_string(),
+                            specifier: specifier.clone(),
+                            kind,
+                            phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                        },
+                    ) {
+                        let key = (result.source_id.clone(), result.provider_id.clone());
+                        if seen.insert(key) {
+                            resolved.push(result);
+                        }
+                    }
+                }
+            }
+            verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic => {}
+        }
+    }
+
+    resolved
+}
+
+fn module_reference_request_kind(
+    reference: &verter_host::ScriptModuleReference,
+) -> crate::project_resolver::ResolveRequestKind {
+    if reference.is_type_only {
+        crate::project_resolver::ResolveRequestKind::TypeImport
+    } else {
+        crate::project_resolver::ResolveRequestKind::EsmImport
+    }
 }
 
 fn collect_exact_and_finite_vue_specifiers(
@@ -2509,8 +2847,17 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 let ide = documents.host.get_ide(&canonical_id, &profile);
 
                 if let Some(ide) = ide {
-                    let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-                    let tsx_path = format!("{canonical_id}{ext}");
+                    let native_resolver = {
+                        let registry = project_registry.read();
+                        registry
+                            .as_ref()
+                            .map(crate::config::ProjectRegistry::to_native_project_resolver)
+                    };
+                    let tsx_path = provider_ide_path_for_source(
+                        native_resolver.as_ref(),
+                        &canonical_id,
+                        ide.is_jsx,
+                    );
                     let encoding = position_encoding.read().clone();
                     let tsx_li =
                         crate::documents::line_index::LineIndex::new(&ide.code, encoding.clone());
@@ -2885,9 +3232,13 @@ impl LanguageServer for VerterLanguageServer {
 
         if startup_policy.sync_imported_vue_files {
             for import_id in &imported_vue_priority_ids {
-                let base = import_id.strip_suffix(".vue").unwrap_or(import_id);
-                let dts_path = format!("{base}.vue.ts");
-                if !self.background_synced_files.contains_key(&dts_path) {
+                let should_sync = provider_api_path_for_source(
+                    self.native_project_resolver().as_ref(),
+                    import_id,
+                )
+                .map(|dts_path| !self.background_synced_files.contains_key(&dts_path))
+                .unwrap_or(true);
+                if should_sync {
                     self.resync_background_vue_file(import_id).await;
                 }
             }
@@ -3171,16 +3522,21 @@ impl LanguageServer for VerterLanguageServer {
             if let Some(sync) = &self.project_sync {
                 let profile = self.documents.tsx_profile.read().clone();
                 if let Some(ide) = self.documents.host().get_ide(&canonical_id, &profile) {
-                    let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-                    let tsx_path = format!("{canonical_id}{ext}");
+                    let tsx_path = provider_ide_path_for_source(
+                        self.native_project_resolver().as_ref(),
+                        &canonical_id,
+                        ide.is_jsx,
+                    );
                     let _ = sync.close_tsx(&tsx_path).await;
                     self.background_synced_files.remove(&tsx_path);
                 }
-                // Close the .vue.ts declaration file
-                let base = canonical_id.strip_suffix(".vue").unwrap_or(&canonical_id);
-                let dts_path = format!("{base}.vue.ts");
-                let _ = sync.close_dts(&dts_path).await;
-                self.background_synced_files.remove(&dts_path);
+                if let Some(dts_path) = provider_api_path_for_source(
+                    self.native_project_resolver().as_ref(),
+                    &canonical_id,
+                ) {
+                    let _ = sync.close_dts(&dts_path).await;
+                    self.background_synced_files.remove(&dts_path);
+                }
             }
             self.documents.host().remove(&canonical_id);
             self.cached_verter_diags.remove(uri.as_str());
@@ -5123,7 +5479,9 @@ fn debug_snippet(content: &str, offset: usize) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use futures_util::StreamExt;
     use verter_host::{HostConfig, VerterHost};
@@ -5372,6 +5730,41 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct TestResolverReader {
+        files: HashSet<String>,
+        texts: HashMap<String, Arc<str>>,
+    }
+
+    impl TestResolverReader {
+        fn with_files(paths: &[&str]) -> Self {
+            let mut reader = Self::default();
+            for path in paths {
+                let normalized = path.replace('\\', "/");
+                reader.files.insert(normalized.clone());
+                reader
+                    .texts
+                    .insert(normalized, Arc::<str>::from("// test file"));
+            }
+            reader
+        }
+    }
+
+    impl crate::project_resolver::ProjectResolverReader for TestResolverReader {
+        fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
+            self.texts.get(&canonical_id.replace('\\', "/")).cloned()
+        }
+
+        fn file_exists(&self, canonical_id: &str) -> bool {
+            self.files.contains(&canonical_id.replace('\\', "/"))
+        }
+
+        fn realpath(&self, canonical_id: &str) -> Option<String> {
+            let normalized = canonical_id.replace('\\', "/");
+            self.file_exists(&normalized).then_some(normalized)
+        }
+    }
+
     #[test]
     fn rewrite_non_vue_source_for_provider_rewrites_exact_vue_specifiers() {
         let source = "import Foo from './Foo.vue';\nconst load = () => import(\"./Bar.vue\");\nconst keep = import(`./${name}.vue`);\n";
@@ -5415,6 +5808,185 @@ mod tests {
         assert!(rewritten.contains("'./Foo.vue.ts'"));
         assert!(rewritten.contains("\"./Bar.vue.ts\""));
         assert!(rewritten.contains("import(`./${name}.vue`)"));
+    }
+
+    #[test]
+    fn rewrite_non_vue_source_for_provider_with_resolver_rewrites_workspace_targets() {
+        let source =
+            "import Foo from './Foo.vue';\nimport util from './util';\nconst keep = import(`./${name}.vue`);\n";
+        let foo_expr = "'./Foo.vue'";
+        let util_expr = "'./util'";
+        let dynamic_expr = "`./${name}.vue`";
+        let foo_start = source.find(foo_expr).unwrap();
+        let util_start = source.find(util_expr).unwrap();
+        let dynamic_start = source.find(dynamic_expr).unwrap();
+
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+        let reader = TestResolverReader::with_files(&[
+            "/workspace/src/Foo.vue",
+            "/workspace/src/util.ts",
+        ]);
+
+        let rewritten = rewrite_non_vue_source_for_provider_with_resolver(
+            &resolver,
+            &reader,
+            "/workspace/src/App.ts",
+            source,
+            &[
+                test_module_reference(
+                    foo_expr,
+                    Some("./Foo.vue"),
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::Exact,
+                    foo_start,
+                    foo_start + foo_expr.len(),
+                ),
+                test_module_reference(
+                    util_expr,
+                    Some("./util"),
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::Exact,
+                    util_start,
+                    util_start + util_expr.len(),
+                ),
+                test_module_reference(
+                    dynamic_expr,
+                    None,
+                    &["./Foo.vue"],
+                    verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                    dynamic_start,
+                    dynamic_start + dynamic_expr.len(),
+                ),
+            ],
+        );
+
+        assert!(rewritten.contains("'./Foo.vue.ts'"));
+        assert!(rewritten.contains("'./util.__verter__.ts'"));
+        assert!(
+            rewritten.contains("import(`./${name}.vue`)"),
+            "finite-set dynamics must keep the original expression text"
+        );
+    }
+
+    #[test]
+    fn collect_resolved_provider_dependencies_resolves_exact_and_finite_targets() {
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+        let reader = TestResolverReader::with_files(&[
+            "/workspace/src/Foo.vue",
+            "/workspace/src/util.ts",
+        ]);
+
+        let resolved = collect_resolved_provider_dependencies(
+            &resolver,
+            &reader,
+            "/workspace/src/App.ts",
+            &[
+                test_module_reference(
+                    "'./Foo.vue'",
+                    Some("./Foo.vue"),
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::Exact,
+                    0,
+                    11,
+                ),
+                test_module_reference(
+                    "expr",
+                    None,
+                    &["./Foo.vue", "./util"],
+                    verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                    0,
+                    4,
+                ),
+            ],
+        );
+
+        let resolved_sources = resolved
+            .iter()
+            .map(|entry| entry.source_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resolved_sources,
+            vec!["/workspace/src/Foo.vue", "/workspace/src/util.ts"],
+            "exact and finite-set dependencies should resolve through the native resolver"
+        );
+        assert!(
+            resolved.iter().any(|entry| entry.provider_specifier == "./Foo.vue.ts"),
+            "Vue dependencies should target their provider API paths"
+        );
+        assert!(
+            resolved
+                .iter()
+                .any(|entry| entry.provider_specifier == "./util.__verter__.ts"),
+            "non-Vue workspace dependencies should target provider shadow files"
+        );
+    }
+
+    #[test]
+    fn provider_vue_path_helpers_use_synthetic_project_roots() {
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+
+        let ide_path = provider_ide_path_for_source(Some(&resolver), "/workspace/src/App.vue", false);
+        let api_path =
+            provider_api_path_for_source(Some(&resolver), "/workspace/src/App.vue").unwrap();
+
+        assert!(
+            ide_path.contains("/.verter/ide/"),
+            "Vue IDE files should use the synthetic provider root: {ide_path}"
+        );
+        assert!(
+            ide_path.ends_with(".tsx"),
+            "Vue IDE provider files must still have a TSX extension for the provider: {ide_path}"
+        );
+        assert!(
+            api_path.ends_with("/src/App.vue.ts"),
+            "Vue imports should resolve through the provider-side .vue.ts API file: {api_path}"
+        );
+        assert!(
+            !ide_path.starts_with("/workspace/src/App.vue"),
+            "Vue IDE provider IDs must not use the raw workspace path"
+        );
+    }
+
+    #[test]
+    fn provider_vue_path_helpers_round_trip_source_ids() {
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+
+        let ide_path = provider_ide_path_for_source(Some(&resolver), "/workspace/src/App.vue", true);
+        let api_path =
+            provider_api_path_for_source(Some(&resolver), "/workspace/src/App.vue").unwrap();
+
+        assert_eq!(
+            source_id_from_provider_vue_path(Some(&resolver), &ide_path).as_deref(),
+            Some("/workspace/src/App.vue")
+        );
+        assert_eq!(
+            source_id_from_provider_vue_path(Some(&resolver), &api_path).as_deref(),
+            Some("/workspace/src/App.vue")
+        );
     }
 
     #[test]
