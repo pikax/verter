@@ -39,14 +39,17 @@ fn test_rename_binding_across_blocks() {
             used_in_script: false,
             used_in_style: false,
         }],
-        template: Some(template::TemplateAnalysisSnapshot {
-            binding_occurrences: vec![template::TemplateBindingOccurrence {
-                name: "count".to_string(),
-                span: verter_span::Span::new(template_count as u32, template_count as u32 + 5),
-                usage_kind: template::BindingUsageKind::Interpolation,
-            }],
-            ..Default::default()
-        }),
+        template: Some(
+            (template::TemplateAnalysisSnapshot {
+                binding_occurrences: vec![template::TemplateBindingOccurrence {
+                    name: "count".to_string(),
+                    span: verter_span::Span::new(template_count as u32, template_count as u32 + 5),
+                    usage_kind: template::BindingUsageKind::Interpolation,
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
     let position = line_index
@@ -139,11 +142,14 @@ fn test_prepare_rename_css_class_in_template() {
     let el = make_element_with_attrs(source, "div", &["btn"], None);
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![css],
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![el],
-            ..Default::default()
-        }),
+        styles: (vec![css]).into(),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![el],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -163,11 +169,14 @@ fn test_rename_css_class_across_template_and_style() {
     let el = make_element_with_attrs(source, "div", &["btn"], None);
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![css],
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![el],
-            ..Default::default()
-        }),
+        styles: (vec![css]).into(),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![el],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -281,11 +290,14 @@ fn test_rename_css_id_across_template_and_style() {
     let el = make_element_with_attrs(source, "div", &[], Some("app"));
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![css],
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![el],
-            ..Default::default()
-        }),
+        styles: (vec![css]).into(),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![el],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -323,11 +335,14 @@ fn test_rename_css_class_doesnt_affect_other_names() {
     let el = make_element_with_attrs(source, "div", &["btn", "active"], None);
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![css],
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![el],
-            ..Default::default()
-        }),
+        styles: (vec![css]).into(),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![el],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -407,14 +422,17 @@ fn test_span_based_rename_no_false_positives() {
             used_in_script: false,
             used_in_style: false,
         }],
-        template: Some(template::TemplateAnalysisSnapshot {
-            binding_occurrences: vec![template::TemplateBindingOccurrence {
-                name: "count".to_string(),
-                span: verter_span::Span::new(interp_count as u32, interp_count as u32 + 5),
-                usage_kind: template::BindingUsageKind::Interpolation,
-            }],
-            ..Default::default()
-        }),
+        template: Some(
+            (template::TemplateAnalysisSnapshot {
+                binding_occurrences: vec![template::TemplateBindingOccurrence {
+                    name: "count".to_string(),
+                    span: verter_span::Span::new(interp_count as u32, interp_count as u32 + 5),
+                    usage_kind: template::BindingUsageKind::Interpolation,
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -482,14 +500,17 @@ fn test_rename_with_dual_script_blocks() {
             used_in_script: false,
             used_in_style: false,
         }],
-        template: Some(template::TemplateAnalysisSnapshot {
-            binding_occurrences: vec![template::TemplateBindingOccurrence {
-                name: "count".to_string(),
-                span: verter_span::Span::new(template_count as u32, template_count as u32 + 5),
-                usage_kind: template::BindingUsageKind::Interpolation,
-            }],
-            ..Default::default()
-        }),
+        template: Some(
+            (template::TemplateAnalysisSnapshot {
+                binding_occurrences: vec![template::TemplateBindingOccurrence {
+                    name: "count".to_string(),
+                    span: verter_span::Span::new(template_count as u32, template_count as u32 + 5),
+                    usage_kind: template::BindingUsageKind::Interpolation,
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 

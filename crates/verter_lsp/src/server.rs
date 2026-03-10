@@ -34,11 +34,11 @@ use crate::features::organize_imports::organize_imports_actions;
 use crate::features::references::references_at_position;
 use crate::features::rename::{prepare_rename, rename_at_position};
 use crate::features::workspace_symbol::workspace_symbols;
+use crate::project_resolver::ProjectResolverReader;
 use crate::provider_sync::{
     commit_sync_transition, prepare_sync_transition, remove_sync_state, ProviderPathKind,
     ProviderSyncState, ResolverSnapshot,
 };
-use crate::project_resolver::ProjectResolverReader;
 use crate::statistics::Statistics;
 use crate::tsgo::merge;
 use crate::tsgo::project_sync::ProjectSync;
@@ -736,8 +736,15 @@ impl VerterLanguageServer {
             let Some(mut transition) = self
                 .documents
                 .get_ide(uri)
-                .and_then(|ide| self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx))
-                .or_else(|| self.prepare_vue_provider_sync_transition(&canonical_id, self.documents.is_jsx(uri)))
+                .and_then(|ide| {
+                    self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                })
+                .or_else(|| {
+                    self.prepare_vue_provider_sync_transition(
+                        &canonical_id,
+                        self.documents.is_jsx(uri),
+                    )
+                })
             else {
                 self.pending_snapshot_provider_sync.insert(canonical_id);
                 return;
@@ -947,7 +954,9 @@ impl VerterLanguageServer {
             self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
         }
-        let Some(transition) = self.prepare_vue_provider_sync_transition(&canonical_id, self.documents.is_jsx(&uri)) else {
+        let Some(transition) =
+            self.prepare_vue_provider_sync_transition(&canonical_id, self.documents.is_jsx(&uri))
+        else {
             self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
         };
@@ -1246,8 +1255,11 @@ impl VerterLanguageServer {
         is_jsx: bool,
     ) -> Option<crate::provider_sync::ProviderSyncTransition> {
         let snapshot = self.resolver_snapshot()?;
-        let next_state =
-            crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)?;
+        let next_state = crate::provider_sync::vue_sync_state_for_source(
+            &snapshot.resolver,
+            canonical_id,
+            is_jsx,
+        )?;
         Some(prepare_sync_transition(
             &self.provider_sync_states,
             canonical_id,
@@ -1468,14 +1480,19 @@ impl VerterLanguageServer {
                 }
                 "delete" => {
                     // Close TSX/DTS in the type provider and clean up.
-                    if let Some(state) = self
-                        .remove_provider_sync_state(&canonical_id)
-                        .or_else(|| {
+                    if let Some(state) =
+                        self.remove_provider_sync_state(&canonical_id).or_else(|| {
                             let profile = self.documents.tsx_profile.read().clone();
-                            self.documents.host.get_ide(&canonical_id, &profile).and_then(|ide| {
-                                self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                            self.documents
+                                .host
+                                .get_ide(&canonical_id, &profile)
+                                .and_then(|ide| {
+                                    self.prepare_vue_provider_sync_transition(
+                                        &canonical_id,
+                                        ide.is_jsx,
+                                    )
                                     .map(|transition| transition.next)
-                            })
+                                })
                         })
                     {
                         self.close_provider_state(&state).await;
@@ -1542,7 +1559,9 @@ impl VerterLanguageServer {
             let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) else {
                 return;
             };
-            let Some(transition) = self.prepare_vue_provider_sync_transition(canonical_id, ide.is_jsx) else {
+            let Some(transition) =
+                self.prepare_vue_provider_sync_transition(canonical_id, ide.is_jsx)
+            else {
                 self.queue_snapshot_provider_sync(canonical_id.to_string());
                 return;
             };
@@ -1552,8 +1571,8 @@ impl VerterLanguageServer {
             if !is_tsgo {
                 // tsserver: sync IDE output
                 if let Some(tsx_path) = committed_state.ide_path.clone() {
-                    let is_bg =
-                        self.is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Ide);
+                    let is_bg = self
+                        .is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Ide);
                     let result = if is_bg {
                         sync.sync_tsx(&tsx_path, &ide.code).await
                     } else {
@@ -3277,7 +3296,10 @@ async fn sync_pending_non_vue_provider_file(
     close_stale_provider_paths(sync, &transition.stale_paths, "pending_snapshot").await;
 
     let mut committed_state = transition.next;
-    match sync.sync_file(&prepared.provider_path, &prepared.rewritten).await {
+    match sync
+        .sync_file(&prepared.provider_path, &prepared.rewritten)
+        .await
+    {
         Ok(()) => {
             committed_state.set_background_loaded(ProviderPathKind::Shadow, true);
             commit_sync_transition(provider_sync_states, canonical_id, committed_state);
@@ -3802,25 +3824,25 @@ impl LanguageServer for VerterLanguageServer {
 
             if let Some(state) = state {
                 if is_tsgo {
-                        // TSGO: always close IDE (.vue.tsx) — it was only opened for
-                        // internal type checking of this file. DTS stays alive for imports.
+                    // TSGO: always close IDE (.vue.tsx) — it was only opened for
+                    // internal type checking of this file. DTS stays alive for imports.
                     if let Some(path) = state.ide_path.as_ref() {
                         self.close_provider_paths(&[(ProviderPathKind::Ide, path.clone())])
                             .await;
                     }
                 } else if state.ide_background_loaded {
-                        // tsserver: keep background-synced TSX alive for cross-file resolution.
-                        tracing::debug!(
-                            "did_close: keeping background-synced file in provider: {}",
-                            state.ide_path.as_deref().unwrap_or("<missing>")
-                        );
-                    } else {
-                        // tsserver: close TSX and DTS for non-background files.
-                        self.close_provider_state(&state).await;
-                        self.remove_provider_sync_state(&canonical_id);
-                    }
+                    // tsserver: keep background-synced TSX alive for cross-file resolution.
+                    tracing::debug!(
+                        "did_close: keeping background-synced file in provider: {}",
+                        state.ide_path.as_deref().unwrap_or("<missing>")
+                    );
+                } else {
+                    // tsserver: close TSX and DTS for non-background files.
+                    self.close_provider_state(&state).await;
+                    self.remove_provider_sync_state(&canonical_id);
                 }
             }
+        }
         self.documents.did_close(uri);
         self.cached_verter_diags.remove(uri.as_str());
     }
@@ -3958,16 +3980,16 @@ impl LanguageServer for VerterLanguageServer {
                 Err(_) => continue,
             };
             let canonical_id = uri_to_canonical_id(&uri);
-            if let Some(state) = self
-                .remove_provider_sync_state(&canonical_id)
-                .or_else(|| {
-                    let profile = self.documents.tsx_profile.read().clone();
-                    self.documents.host().get_ide(&canonical_id, &profile).and_then(|ide| {
+            if let Some(state) = self.remove_provider_sync_state(&canonical_id).or_else(|| {
+                let profile = self.documents.tsx_profile.read().clone();
+                self.documents
+                    .host()
+                    .get_ide(&canonical_id, &profile)
+                    .and_then(|ide| {
                         self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
                             .map(|transition| transition.next)
                     })
-                })
-            {
+            }) {
                 self.close_provider_state(&state).await;
             }
             self.documents.host().remove(&canonical_id);

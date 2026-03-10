@@ -14,12 +14,15 @@ fn make_analysis_with_slots(
 ) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         imports,
-        macros,
+        macros: macros.into(),
         script_flags: flags.bits(),
-        template: Some(TemplateAnalysisSnapshot {
-            defined_slots: slots,
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                defined_slots: slots,
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     }
 }
@@ -32,12 +35,15 @@ fn make_analysis_with_emits(
 ) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         imports,
-        macros,
+        macros: macros.into(),
         script_flags: flags.bits(),
-        template: Some(TemplateAnalysisSnapshot {
-            emit_definitions: emits,
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                emit_definitions: emits,
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     }
 }
@@ -619,7 +625,7 @@ fn no_actions_with_empty_template() {
 
     let analysis = FileAnalysisSnapshot {
         script_flags: AnalysisFlags::empty().bits(),
-        template: Some(TemplateAnalysisSnapshot::default()),
+        template: Some((TemplateAnalysisSnapshot::default()).into()),
         ..Default::default()
     };
 

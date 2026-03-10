@@ -255,11 +255,14 @@ mod tests {
         FileAnalysisSnapshot {
             imports,
             bindings,
-            vue_api_calls,
-            template: Some(TemplateAnalysisSnapshot {
-                binding_occurrences: template_occurrences,
-                ..Default::default()
-            }),
+            vue_api_calls: vue_api_calls.into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    binding_occurrences: template_occurrences,
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         }
     }

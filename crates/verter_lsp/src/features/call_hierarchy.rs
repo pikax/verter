@@ -257,22 +257,25 @@ mod tests {
         let uri: Uri = "file:///test.vue".parse().unwrap();
 
         let analysis = FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                components: vec![TemplateComponentUsage {
-                    name: "Foo".into(),
-                    import_source: Some("./Foo.vue".into()),
-                    is_dynamic: false,
-                    props: vec![],
-                    has_spread: false,
-                    slots_used: vec![],
-                    static_classes: vec![],
-                    has_dynamic_class: false,
-                    dynamic_classes: vec![],
-                    v_models: vec![],
-                    span: verter_span::Span::new(60, 67),
-                }],
-                ..Default::default()
-            }),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    components: vec![TemplateComponentUsage {
+                        name: "Foo".into(),
+                        import_source: Some("./Foo.vue".into()),
+                        is_dynamic: false,
+                        props: vec![],
+                        has_spread: false,
+                        slots_used: vec![],
+                        static_classes: vec![],
+                        has_dynamic_class: false,
+                        dynamic_classes: vec![],
+                        v_models: vec![],
+                        span: verter_span::Span::new(60, 67),
+                    }],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 

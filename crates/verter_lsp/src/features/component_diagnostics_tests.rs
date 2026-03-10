@@ -9,10 +9,13 @@ use verter_analysis::types::VueApiCallSite;
 /// Helper to build a parent analysis with component usages.
 fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            components,
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                components,
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     }
 }
@@ -20,22 +23,25 @@ fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysis
 /// Helper to build a child analysis with defined props.
 fn make_child_with_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            prop_definitions: prop_names
-                .iter()
-                .map(|name| AnalyzedPropDefinition {
-                    name: name.to_string(),
-                    type_annotation: Some("string".into()),
-                    has_default: false,
-                    is_required: true,
-                    is_boolean: false,
-                    used_in_template: false,
-                    used_in_script: false,
-                    span: verter_span::Span::new(0, 0),
-                })
-                .collect(),
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                prop_definitions: prop_names
+                    .iter()
+                    .map(|name| AnalyzedPropDefinition {
+                        name: name.to_string(),
+                        type_annotation: Some("string".into()),
+                        has_default: false,
+                        is_required: true,
+                        is_boolean: false,
+                        used_in_template: false,
+                        used_in_script: false,
+                        span: verter_span::Span::new(0, 0),
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     }
 }
@@ -164,13 +170,14 @@ fn use_attrs_suppresses_all_unknown_props() {
         vec![make_prop("unknown1"), make_prop("unknown2")],
     )]);
     let child = FileAnalysisSnapshot {
-        vue_api_calls: vec![VueApiCallSite {
+        vue_api_calls: (vec![VueApiCallSite {
             api: VueApiClassification::UseAttrs,
             span: verter_span::Span::new(30, 42),
             arg_value: None,
             is_async_callback: false,
             callback_params: vec![],
-        }],
+        }])
+        .into(),
         ..Default::default()
     };
 
@@ -480,7 +487,8 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
                 prop_fields: vec![],
                 span: verter_span::Span::new(0, 30),
             })
-            .collect(),
+            .collect::<Vec<_>>()
+            .into(),
         ..Default::default()
     }
 }
@@ -631,23 +639,26 @@ fn make_child_with_roots(prop_names: &[&str], root_count: usize) -> FileAnalysis
         });
     }
     FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            prop_definitions: prop_names
-                .iter()
-                .map(|name| AnalyzedPropDefinition {
-                    name: name.to_string(),
-                    type_annotation: Some("string".into()),
-                    has_default: false,
-                    is_required: true,
-                    is_boolean: false,
-                    used_in_template: false,
-                    used_in_script: false,
-                    span: verter_span::Span::new(0, 0),
-                })
-                .collect(),
-            elements,
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                prop_definitions: prop_names
+                    .iter()
+                    .map(|name| AnalyzedPropDefinition {
+                        name: name.to_string(),
+                        type_annotation: Some("string".into()),
+                        has_default: false,
+                        is_required: true,
+                        is_boolean: false,
+                        used_in_template: false,
+                        used_in_script: false,
+                        span: verter_span::Span::new(0, 0),
+                    })
+                    .collect(),
+                elements,
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     }
 }

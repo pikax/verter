@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn find_macro_by_kind() {
         let analysis = FileAnalysisSnapshot {
-            macros: vec![AnalyzedMacro {
+            macros: (vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
                 is_type_based: true,
                 type_references: vec![],
@@ -224,7 +224,8 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 span: verter_span::Span::new(24, 60),
-            }],
+            }])
+            .into(),
             ..Default::default()
         };
         let source = "<script setup>\ndefineProps<{ msg: string }>()\n</script>";
@@ -244,31 +245,34 @@ mod tests {
     #[test]
     fn prop_names_returns_all_defined_props() {
         let analysis = FileAnalysisSnapshot {
-            template: Some(verter_analysis::template::TemplateAnalysisSnapshot {
-                prop_definitions: vec![
-                    AnalyzedPropDefinition {
-                        name: "msg".into(),
-                        type_annotation: Some("string".into()),
-                        has_default: false,
-                        is_required: true,
-                        is_boolean: false,
-                        used_in_template: true,
-                        used_in_script: false,
-                        span: verter_span::Span::new(0, 0),
-                    },
-                    AnalyzedPropDefinition {
-                        name: "count".into(),
-                        type_annotation: Some("number".into()),
-                        has_default: true,
-                        is_required: false,
-                        is_boolean: false,
-                        used_in_template: false,
-                        used_in_script: true,
-                        span: verter_span::Span::new(0, 0),
-                    },
-                ],
-                ..Default::default()
-            }),
+            template: Some(
+                (verter_analysis::template::TemplateAnalysisSnapshot {
+                    prop_definitions: vec![
+                        AnalyzedPropDefinition {
+                            name: "msg".into(),
+                            type_annotation: Some("string".into()),
+                            has_default: false,
+                            is_required: true,
+                            is_boolean: false,
+                            used_in_template: true,
+                            used_in_script: false,
+                            span: verter_span::Span::new(0, 0),
+                        },
+                        AnalyzedPropDefinition {
+                            name: "count".into(),
+                            type_annotation: Some("number".into()),
+                            has_default: true,
+                            is_required: false,
+                            is_boolean: false,
+                            used_in_template: false,
+                            used_in_script: true,
+                            span: verter_span::Span::new(0, 0),
+                        },
+                    ],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
         let source = "<script setup>\ndefineProps<{ msg: string, count: number }>()\n</script>";
@@ -284,25 +288,28 @@ mod tests {
     #[test]
     fn emit_names_returns_declared_emits() {
         let analysis = FileAnalysisSnapshot {
-            template: Some(verter_analysis::template::TemplateAnalysisSnapshot {
-                emit_definitions: vec![
-                    AnalyzedEmitDefinition {
-                        event_name: "save".into(),
-                        has_validator: false,
-                        is_declared: true,
-                        emit_locations: vec![],
-                        span: verter_span::Span::new(0, 0),
-                    },
-                    AnalyzedEmitDefinition {
-                        event_name: "delete".into(),
-                        has_validator: false,
-                        is_declared: false,
-                        emit_locations: vec![],
-                        span: verter_span::Span::new(0, 0),
-                    },
-                ],
-                ..Default::default()
-            }),
+            template: Some(
+                (verter_analysis::template::TemplateAnalysisSnapshot {
+                    emit_definitions: vec![
+                        AnalyzedEmitDefinition {
+                            event_name: "save".into(),
+                            has_validator: false,
+                            is_declared: true,
+                            emit_locations: vec![],
+                            span: verter_span::Span::new(0, 0),
+                        },
+                        AnalyzedEmitDefinition {
+                            event_name: "delete".into(),
+                            has_validator: false,
+                            is_declared: false,
+                            emit_locations: vec![],
+                            span: verter_span::Span::new(0, 0),
+                        },
+                    ],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
         let source = "<script setup>\ndefineEmits(['save'])\n</script>";
@@ -320,13 +327,14 @@ mod tests {
     #[test]
     fn has_use_attrs_detects_call() {
         let analysis = FileAnalysisSnapshot {
-            vue_api_calls: vec![verter_analysis::types::VueApiCallSite {
+            vue_api_calls: (vec![verter_analysis::types::VueApiCallSite {
                 api: VueApiClassification::UseAttrs,
                 span: verter_span::Span::new(30, 42),
                 arg_value: None,
                 is_async_callback: false,
                 callback_params: vec![],
-            }],
+            }])
+            .into(),
             ..Default::default()
         };
         let source = "<script setup>\nconst attrs = useAttrs()\n</script>";
@@ -381,7 +389,7 @@ mod tests {
     fn make_insert_into_macro_targets_type_literal() {
         let source = "<script setup lang=\"ts\">\ndefineProps<{\n  msg: string\n}>()\n</script>";
         let analysis = FileAnalysisSnapshot {
-            macros: vec![AnalyzedMacro {
+            macros: (vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
                 is_type_based: true,
                 type_references: vec![],
@@ -390,7 +398,8 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 span: verter_span::Span::new(24, 57), // past the closing `)`
-            }],
+            }])
+            .into(),
             ..Default::default()
         };
         let ctx = make_child_context(source, analysis);
@@ -411,7 +420,7 @@ mod tests {
     fn make_insert_into_macro_none_for_runtime_macro() {
         let source = "<script setup>\ndefineProps(['msg'])\n</script>";
         let analysis = FileAnalysisSnapshot {
-            macros: vec![AnalyzedMacro {
+            macros: (vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
                 is_type_based: false,
                 type_references: vec![],
@@ -420,7 +429,8 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 span: verter_span::Span::new(15, 35),
-            }],
+            }])
+            .into(),
             ..Default::default()
         };
         let ctx = make_child_context(source, analysis);

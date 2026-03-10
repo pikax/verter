@@ -1878,7 +1878,10 @@ mod tests {
         assert_eq!(result.moduleReferences[0].syntax, "dynamicImport");
         assert_eq!(result.moduleReferences[0].analyzability, "finiteSet");
         assert_eq!(result.moduleReferences[0].exprSpanStart, 11);
-        assert_eq!(result.moduleReferences[0].finiteSpecifiers, vec!["./Foo.vue"]);
+        assert_eq!(
+            result.moduleReferences[0].finiteSpecifiers,
+            vec!["./Foo.vue"]
+        );
     }
 
     // @ai-generated — Tests compile_batch_files() helper: multi-file parallel compilation

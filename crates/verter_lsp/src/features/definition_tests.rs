@@ -10,7 +10,7 @@ fn make_analysis(
     FileAnalysisSnapshot {
         bindings,
         imports,
-        macros,
+        macros: macros.into(),
         ..Default::default()
     }
 }
@@ -412,22 +412,25 @@ fn test_go_to_component_definition_from_template() {
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: Some("/project/ChildComp.vue".to_string()),
         }],
-        template: Some(TemplateAnalysisSnapshot {
-            components: vec![TemplateComponentUsage {
-                name: "ChildComp".to_string(),
-                import_source: Some("./ChildComp.vue".to_string()),
-                is_dynamic: false,
-                props: vec![],
-                has_spread: false,
-                slots_used: vec![],
-                static_classes: vec![],
-                has_dynamic_class: false,
-                dynamic_classes: vec![],
-                v_models: vec![],
-                span: verter_span::Span::new(0, 0),
-            }],
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                components: vec![TemplateComponentUsage {
+                    name: "ChildComp".to_string(),
+                    import_source: Some("./ChildComp.vue".to_string()),
+                    is_dynamic: false,
+                    props: vec![],
+                    has_spread: false,
+                    slots_used: vec![],
+                    static_classes: vec![],
+                    has_dynamic_class: false,
+                    dynamic_classes: vec![],
+                    v_models: vec![],
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -519,51 +522,55 @@ fn test_css_nav_template_class_to_style() {
     let class_attr_end = class_attr_start + "class=\"btn\"".len() as u32;
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".to_string(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![TemplateAttribute {
-                    name: "class".to_string(),
-                    value: Some("btn".to_string()),
-                    is_dynamic: false,
-                    span: verter_span::Span::new(class_attr_start, class_attr_end),
-                    name_end: 0,
-                    value_span: None,
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".to_string(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![TemplateAttribute {
+                        name: "class".to_string(),
+                        value: Some("btn".to_string()),
+                        is_dynamic: false,
+                        span: verter_span::Span::new(class_attr_start, class_attr_end),
+                        name_end: 0,
+                        value_span: None,
+                    }],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(0, 0),
+                    tag_span_end: 0,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(0, 0),
-                tag_span_end: 0,
-                content_end: 0,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
-        styles: vec![build_css_style_analysis(
+            })
+            .into(),
+        ),
+        styles: (vec![build_css_style_analysis(
             style_css,
             VueStyleInput::default(),
             false,
             false,
             None,
             style_content_start,
-        )],
+        )])
+        .into(),
         ..Default::default()
     };
 
@@ -614,51 +621,55 @@ fn test_css_nav_multi_class_attr() {
     let class_attr_end = class_attr_start + "class=\"btn primary\"".len() as u32;
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".to_string(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![TemplateAttribute {
-                    name: "class".to_string(),
-                    value: Some("btn primary".to_string()),
-                    is_dynamic: false,
-                    span: verter_span::Span::new(class_attr_start, class_attr_end),
-                    name_end: 0,
-                    value_span: None,
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".to_string(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![TemplateAttribute {
+                        name: "class".to_string(),
+                        value: Some("btn primary".to_string()),
+                        is_dynamic: false,
+                        span: verter_span::Span::new(class_attr_start, class_attr_end),
+                        name_end: 0,
+                        value_span: None,
+                    }],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(0, 0),
+                    tag_span_end: 0,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(0, 0),
-                tag_span_end: 0,
-                content_end: 0,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
-        styles: vec![build_css_style_analysis(
+            })
+            .into(),
+        ),
+        styles: (vec![build_css_style_analysis(
             style_css,
             VueStyleInput::default(),
             false,
             false,
             None,
             style_content_start,
-        )],
+        )])
+        .into(),
         ..Default::default()
     };
 
@@ -708,51 +719,55 @@ fn test_css_nav_template_id_to_style() {
     let id_attr_end = id_attr_start + "id=\"app\"".len() as u32;
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".to_string(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![TemplateAttribute {
-                    name: "id".to_string(),
-                    value: Some("app".to_string()),
-                    is_dynamic: false,
-                    span: verter_span::Span::new(id_attr_start, id_attr_end),
-                    name_end: 0,
-                    value_span: None,
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".to_string(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![TemplateAttribute {
+                        name: "id".to_string(),
+                        value: Some("app".to_string()),
+                        is_dynamic: false,
+                        span: verter_span::Span::new(id_attr_start, id_attr_end),
+                        name_end: 0,
+                        value_span: None,
+                    }],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(0, 0),
+                    tag_span_end: 0,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(0, 0),
-                tag_span_end: 0,
-                content_end: 0,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
-        styles: vec![build_css_style_analysis(
+            })
+            .into(),
+        ),
+        styles: (vec![build_css_style_analysis(
             style_css,
             VueStyleInput::default(),
             false,
             false,
             None,
             style_content_start,
-        )],
+        )])
+        .into(),
         ..Default::default()
     };
 
@@ -792,51 +807,55 @@ fn test_css_nav_dynamic_class_skipped() {
     let attr_end = attr_start + ":class=\"{ active: true }\"".len() as u32;
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".to_string(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![TemplateAttribute {
-                    name: "class".to_string(),
-                    value: Some("{ active: true }".to_string()),
-                    is_dynamic: true,
-                    span: verter_span::Span::new(attr_start, attr_end),
-                    name_end: 0,
-                    value_span: None,
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".to_string(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![TemplateAttribute {
+                        name: "class".to_string(),
+                        value: Some("{ active: true }".to_string()),
+                        is_dynamic: true,
+                        span: verter_span::Span::new(attr_start, attr_end),
+                        name_end: 0,
+                        value_span: None,
+                    }],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(0, 0),
+                    tag_span_end: 0,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(0, 0),
-                tag_span_end: 0,
-                content_end: 0,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
-        styles: vec![build_css_style_analysis(
+            })
+            .into(),
+        ),
+        styles: (vec![build_css_style_analysis(
             style_css,
             VueStyleInput::default(),
             false,
             false,
             None,
             scs,
-        )],
+        )])
+        .into(),
         ..Default::default()
     };
 
@@ -877,51 +896,55 @@ fn test_css_nav_style_to_template() {
     let class_attr_end = class_attr_start + "class=\"btn\"".len() as u32;
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".to_string(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![TemplateAttribute {
-                    name: "class".to_string(),
-                    value: Some("btn".to_string()),
-                    is_dynamic: false,
-                    span: verter_span::Span::new(class_attr_start, class_attr_end),
-                    name_end: 0,
-                    value_span: None,
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".to_string(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![TemplateAttribute {
+                        name: "class".to_string(),
+                        value: Some("btn".to_string()),
+                        is_dynamic: false,
+                        span: verter_span::Span::new(class_attr_start, class_attr_end),
+                        name_end: 0,
+                        value_span: None,
+                    }],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(0, 0),
+                    tag_span_end: 0,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(0, 0),
-                tag_span_end: 0,
-                content_end: 0,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
-        styles: vec![build_css_style_analysis(
+            })
+            .into(),
+        ),
+        styles: (vec![build_css_style_analysis(
             style_css,
             VueStyleInput::default(),
             false,
             false,
             None,
             style_content_start,
-        )],
+        )])
+        .into(),
         ..Default::default()
     };
 
@@ -1232,50 +1255,54 @@ fn test_dom_query_selector_navigates_to_element() {
     let call_end = (source.find("'.btn')").unwrap() + "'.btn')".len()) as u32;
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "button".to_string(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![TemplateAttribute {
-                    name: "class".to_string(),
-                    value: Some("btn".to_string()),
-                    is_dynamic: false,
-                    span: verter_span::Span::new(class_attr_start, class_attr_end),
-                    name_end: 0,
-                    value_span: None,
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "button".to_string(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![TemplateAttribute {
+                        name: "class".to_string(),
+                        value: Some("btn".to_string()),
+                        is_dynamic: false,
+                        span: verter_span::Span::new(class_attr_start, class_attr_end),
+                        name_end: 0,
+                        value_span: None,
+                    }],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(btn_elem_start, btn_elem_end),
+                    tag_span_end: btn_elem_end,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(btn_elem_start, btn_elem_end),
-                tag_span_end: btn_elem_end,
-                content_end: 0,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
-        dom_query_calls: vec![DomQueryCallSite {
+            })
+            .into(),
+        ),
+        dom_query_calls: (vec![DomQueryCallSite {
             kind: DomQueryKind::QuerySelector,
             selector_text: ".btn".to_string(),
             parsed: Some(parsed),
             span: verter_span::Span::new(doc_start, call_end),
             arg_span: verter_span::Span::new(arg_start as u32, arg_end as u32),
-        }],
+        }])
+        .into(),
         ..Default::default()
     };
 
@@ -1324,43 +1351,47 @@ fn test_dom_query_selector_no_match() {
     let arg_end = arg_start + ".missing".len();
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".to_string(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(0, 0),
-                tag_span_end: 0,
-                content_end: 0,
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".to_string(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(0, 0),
+                    tag_span_end: 0,
+                    content_end: 0,
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
-        dom_query_calls: vec![DomQueryCallSite {
+            })
+            .into(),
+        ),
+        dom_query_calls: (vec![DomQueryCallSite {
             kind: DomQueryKind::QuerySelector,
             selector_text: ".missing".to_string(),
             parsed: Some(parsed),
             span: verter_span::Span::new(0, 40),
             arg_span: verter_span::Span::new(arg_start as u32, arg_end as u32),
-        }],
+        }])
+        .into(),
         ..Default::default()
     };
 
@@ -1405,51 +1436,56 @@ fn test_dom_query_selector_falls_back_to_css() {
     let arg_end = arg_start + ".btn".len();
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".to_string(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(0, 0),
-                tag_span_end: 0,
-                content_end: 0,
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".to_string(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(0, 0),
+                    tag_span_end: 0,
+                    content_end: 0,
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
-        dom_query_calls: vec![DomQueryCallSite {
+            })
+            .into(),
+        ),
+        dom_query_calls: (vec![DomQueryCallSite {
             kind: DomQueryKind::QuerySelector,
             selector_text: ".btn".to_string(),
             parsed: Some(parsed),
             span: verter_span::Span::new(0, 40),
             arg_span: verter_span::Span::new(arg_start as u32, arg_end as u32),
-        }],
-        styles: vec![build_css_style_analysis(
+        }])
+        .into(),
+        styles: (vec![build_css_style_analysis(
             style_css,
             VueStyleInput::default(),
             false,
             false,
             None,
             style_content_start,
-        )],
+        )])
+        .into(),
         ..Default::default()
     };
 
@@ -1506,22 +1542,25 @@ fn test_path_alias_resolution_on_component_tag() {
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: None,
         }],
-        template: Some(TemplateAnalysisSnapshot {
-            components: vec![TemplateComponentUsage {
-                name: "FooComp".to_string(),
-                import_source: Some("@/components/FooComp.vue".to_string()),
-                is_dynamic: false,
-                props: vec![],
-                has_spread: false,
-                slots_used: vec![],
-                static_classes: vec![],
-                has_dynamic_class: false,
-                dynamic_classes: vec![],
-                v_models: vec![],
-                span: verter_span::Span::new(0, 0),
-            }],
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                components: vec![TemplateComponentUsage {
+                    name: "FooComp".to_string(),
+                    import_source: Some("@/components/FooComp.vue".to_string()),
+                    is_dynamic: false,
+                    props: vec![],
+                    has_spread: false,
+                    slots_used: vec![],
+                    static_classes: vec![],
+                    has_dynamic_class: false,
+                    dynamic_classes: vec![],
+                    v_models: vec![],
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -1624,58 +1663,64 @@ fn test_go_to_definition_event_handler_click() {
             used_in_script: false,
             used_in_style: false,
         }],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "button".into(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![],
-                directives: vec![TemplateDirective {
-                    name: "on".into(),
-                    raw_name: "@click".into(),
-                    argument: Some("click".into()),
-                    modifiers: vec![],
-                    expression: Some("handleClick".into()),
-                    span: verter_span::Span::new(click_offset as u32, (click_offset + 22) as u32),
-                    name_end: (click_offset + 6) as u32,
-                    arg_span: Some(verter_span::Span::new(
-                        (click_offset + 1) as u32,
-                        (click_offset + 6) as u32,
-                    )),
-                    expression_span: None,
-                    modifier_spans: vec![],
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "button".into(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![],
+                    directives: vec![TemplateDirective {
+                        name: "on".into(),
+                        raw_name: "@click".into(),
+                        argument: Some("click".into()),
+                        modifiers: vec![],
+                        expression: Some("handleClick".into()),
+                        span: verter_span::Span::new(
+                            click_offset as u32,
+                            (click_offset + 22) as u32,
+                        ),
+                        name_end: (click_offset + 6) as u32,
+                        arg_span: Some(verter_span::Span::new(
+                            (click_offset + 1) as u32,
+                            (click_offset + 6) as u32,
+                        )),
+                        expression_span: None,
+                        modifier_spans: vec![],
+                    }],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: true,
+                    has_bare_text: true,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(11, 60),
+                    tag_span_end: 45,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: true,
-                has_bare_text: true,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(11, 60),
-                tag_span_end: 45,
-                content_end: 0,
+                event_handlers: vec![verter_analysis::template::TemplateEventHandler {
+                    event_name: "click".into(),
+                    handler_binding: Some("handleClick".into()),
+                    is_inline: false,
+                    target_tag: "button".into(),
+                    // TemplateEventHandler.span is the ELEMENT span (set by extract_event_handlers)
+                    span: verter_span::Span::new(11, 60),
+                }],
                 ..Default::default()
-            }],
-            event_handlers: vec![verter_analysis::template::TemplateEventHandler {
-                event_name: "click".into(),
-                handler_binding: Some("handleClick".into()),
-                is_inline: false,
-                target_tag: "button".into(),
-                // TemplateEventHandler.span is the ELEMENT span (set by extract_event_handlers)
-                span: verter_span::Span::new(11, 60),
-            }],
-            ..Default::default()
-        }),
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -1735,58 +1780,64 @@ fn test_go_to_definition_inline_event_no_binding() {
             used_in_script: false,
             used_in_style: false,
         }],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "button".into(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![],
-                directives: vec![TemplateDirective {
-                    name: "on".into(),
-                    raw_name: "@click".into(),
-                    argument: Some("click".into()),
-                    modifiers: vec![],
-                    expression: Some("count++".into()),
-                    span: verter_span::Span::new(click_offset as u32, (click_offset + 17) as u32),
-                    name_end: (click_offset + 6) as u32,
-                    arg_span: Some(verter_span::Span::new(
-                        (click_offset + 1) as u32,
-                        (click_offset + 6) as u32,
-                    )),
-                    expression_span: None,
-                    modifier_spans: vec![],
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "button".into(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![],
+                    directives: vec![TemplateDirective {
+                        name: "on".into(),
+                        raw_name: "@click".into(),
+                        argument: Some("click".into()),
+                        modifiers: vec![],
+                        expression: Some("count++".into()),
+                        span: verter_span::Span::new(
+                            click_offset as u32,
+                            (click_offset + 17) as u32,
+                        ),
+                        name_end: (click_offset + 6) as u32,
+                        arg_span: Some(verter_span::Span::new(
+                            (click_offset + 1) as u32,
+                            (click_offset + 6) as u32,
+                        )),
+                        expression_span: None,
+                        modifier_spans: vec![],
+                    }],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: true,
+                    has_bare_text: true,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(11, 55),
+                    tag_span_end: 40,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: true,
-                has_bare_text: true,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(11, 55),
-                tag_span_end: 40,
-                content_end: 0,
+                event_handlers: vec![verter_analysis::template::TemplateEventHandler {
+                    event_name: "click".into(),
+                    handler_binding: None, // inline expression, no binding
+                    is_inline: true,
+                    target_tag: "button".into(),
+                    // TemplateEventHandler.span is the ELEMENT span
+                    span: verter_span::Span::new(11, 55),
+                }],
                 ..Default::default()
-            }],
-            event_handlers: vec![verter_analysis::template::TemplateEventHandler {
-                event_name: "click".into(),
-                handler_binding: None, // inline expression, no binding
-                is_inline: true,
-                target_tag: "button".into(),
-                // TemplateEventHandler.span is the ELEMENT span
-                span: verter_span::Span::new(11, 55),
-            }],
-            ..Default::default()
-        }),
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -1825,7 +1876,7 @@ fn test_go_to_definition_dollar_props() {
     let define_offset = source.find("defineProps").unwrap();
 
     let analysis = FileAnalysisSnapshot {
-        macros: vec![AnalyzedMacro {
+        macros: (vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec![],
@@ -1834,11 +1885,15 @@ fn test_go_to_definition_dollar_props() {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             span: verter_span::Span::new(define_offset as u32, (define_offset + 30) as u32),
-        }],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![],
-            ..Default::default()
-        }),
+        }])
+        .into(),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -1879,7 +1934,7 @@ fn test_go_to_definition_dollar_emit() {
     let define_offset = source.find("defineEmits").unwrap();
 
     let analysis = FileAnalysisSnapshot {
-        macros: vec![AnalyzedMacro {
+        macros: (vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: false,
             type_references: vec![],
@@ -1888,11 +1943,15 @@ fn test_go_to_definition_dollar_emit() {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             span: verter_span::Span::new(define_offset as u32, (define_offset + 22) as u32),
-        }],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![],
-            ..Default::default()
-        }),
+        }])
+        .into(),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -1932,11 +1991,14 @@ fn test_go_to_definition_dollar_props_without_macro() {
     let props_offset = source.find("$props").unwrap();
 
     let analysis = FileAnalysisSnapshot {
-        macros: vec![],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![],
-            ..Default::default()
-        }),
+        macros: (vec![]).into(),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 

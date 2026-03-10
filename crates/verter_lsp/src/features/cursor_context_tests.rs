@@ -16,7 +16,7 @@ fn empty_analysis() -> FileAnalysisSnapshot {
 
 fn analysis_with_template(template: TemplateAnalysisSnapshot) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
-        template: Some(template),
+        template: Some(template.into()),
         ..Default::default()
     }
 }
@@ -193,7 +193,7 @@ fn test_style_block_vbind() {
     let blocks = scan_sfc_blocks(source);
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![verter_analysis::StyleBlockAnalysis {
+        styles: (vec![verter_analysis::StyleBlockAnalysis {
             v_binds: vec![verter_analysis::style::AnalyzedVBind {
                 expression: "color".to_string(),
                 quoted: false,
@@ -202,7 +202,8 @@ fn test_style_block_vbind() {
                 generated_var_name: None,
             }],
             ..Default::default()
-        }],
+        }])
+        .into(),
         ..Default::default()
     };
 

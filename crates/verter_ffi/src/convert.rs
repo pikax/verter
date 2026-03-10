@@ -315,9 +315,7 @@ fn host_module_reference_semantics_to_string(semantics: impl std::fmt::Debug) ->
     }
 }
 
-fn host_module_reference_analyzability_to_string(
-    analyzability: impl std::fmt::Debug,
-) -> String {
+fn host_module_reference_analyzability_to_string(analyzability: impl std::fmt::Debug) -> String {
     match format!("{analyzability:?}").as_str() {
         "Exact" => "exact".to_string(),
         "FiniteSet" => "finiteSet".to_string(),
@@ -326,9 +324,7 @@ fn host_module_reference_analyzability_to_string(
     }
 }
 
-fn host_module_reference_to_ffi(
-    input: host::ScriptModuleReference,
-) -> FfiModuleReference {
+fn host_module_reference_to_ffi(input: host::ScriptModuleReference) -> FfiModuleReference {
     FfiModuleReference {
         syntax: host_module_reference_syntax_to_string(input.syntax),
         semantics: host_module_reference_semantics_to_string(input.semantics),

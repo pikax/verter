@@ -10,10 +10,13 @@ use verter_host::FileAnalysisSnapshot;
 
 fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            components,
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                components,
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     }
 }
@@ -72,20 +75,23 @@ fn add_prop_to_type_based_define_props() {
 
     let child_source = "<script setup lang=\"ts\">\ndefineProps<{\n  msg: string\n}>()\n</script>";
     let child_analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            prop_definitions: vec![AnalyzedPropDefinition {
-                name: "msg".into(),
-                type_annotation: Some("string".into()),
-                has_default: false,
-                is_required: true,
-                is_boolean: false,
-                used_in_template: false,
-                used_in_script: false,
-                span: verter_span::Span::new(0, 0),
-            }],
-            ..Default::default()
-        }),
-        macros: vec![AnalyzedMacro {
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                prop_definitions: vec![AnalyzedPropDefinition {
+                    name: "msg".into(),
+                    type_annotation: Some("string".into()),
+                    has_default: false,
+                    is_required: true,
+                    is_boolean: false,
+                    used_in_template: false,
+                    used_in_script: false,
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        macros: (vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec![],
@@ -94,7 +100,8 @@ fn add_prop_to_type_based_define_props() {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             span: verter_span::Span::new(24, 56),
-        }],
+        }])
+        .into(),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);
@@ -216,7 +223,7 @@ fn no_action_for_runtime_based_define_props() {
 
     let child_source = "<script setup>\ndefineProps(['msg'])\n</script>";
     let child_analysis = FileAnalysisSnapshot {
-        macros: vec![AnalyzedMacro {
+        macros: (vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: false,
             type_references: vec![],
@@ -225,7 +232,8 @@ fn no_action_for_runtime_based_define_props() {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             span: verter_span::Span::new(15, 35),
-        }],
+        }])
+        .into(),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);
@@ -399,10 +407,13 @@ fn make_parent_with_bindings_and_components(
     imports: Vec<verter_analysis::AnalyzedImport>,
 ) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            components,
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                components,
+                ..Default::default()
+            })
+            .into(),
+        ),
         bindings,
         imports,
         ..Default::default()
@@ -425,22 +436,25 @@ fn make_binding(name: &str) -> verter_analysis::AnalyzedBinding {
 
 fn make_child_with_props(source: &str, prop_names: &[&str]) -> ChildComponentContext {
     let child_analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            prop_definitions: prop_names
-                .iter()
-                .map(|name| AnalyzedPropDefinition {
-                    name: name.to_string(),
-                    type_annotation: Some("unknown".to_string()),
-                    has_default: false,
-                    is_required: false,
-                    is_boolean: false,
-                    used_in_template: false,
-                    used_in_script: false,
-                    span: verter_span::Span::new(0, 0),
-                })
-                .collect(),
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                prop_definitions: prop_names
+                    .iter()
+                    .map(|name| AnalyzedPropDefinition {
+                        name: name.to_string(),
+                        type_annotation: Some("unknown".to_string()),
+                        has_default: false,
+                        is_required: false,
+                        is_boolean: false,
+                        used_in_template: false,
+                        used_in_script: false,
+                        span: verter_span::Span::new(0, 0),
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
     make_child_context(source, child_analysis)

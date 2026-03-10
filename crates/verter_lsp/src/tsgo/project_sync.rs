@@ -162,7 +162,10 @@ fn render_provider_project_config(plan: &ProviderProjectPlan) -> String {
     }
     obj.insert("compilerOptions".to_string(), compiler_options);
     if !references.is_empty() {
-        obj.insert("references".to_string(), serde_json::Value::Array(references));
+        obj.insert(
+            "references".to_string(),
+            serde_json::Value::Array(references),
+        );
     }
     obj.insert("include".to_string(), json!(["./**/*"]));
 
@@ -422,18 +425,21 @@ mod tests {
             root: "/workspace/pkg-a".to_string(),
             workspace_root: "/workspace".to_string(),
             tsconfig_path: Some("/workspace/pkg-a/tsconfig.json".to_string()),
-            provider_root: tmp.path().join(".verter/ide/pkg-a").to_string_lossy().replace('\\', "/"),
+            provider_root: tmp
+                .path()
+                .join(".verter/ide/pkg-a")
+                .to_string_lossy()
+                .replace('\\', "/"),
             config_path: tmp
                 .path()
                 .join(".verter/ide/pkg-a/tsconfig.json")
                 .to_string_lossy()
                 .replace('\\', "/"),
-            reference_config_paths: vec![
-                tmp.path()
-                    .join(".verter/ide/shared/tsconfig.json")
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            ],
+            reference_config_paths: vec![tmp
+                .path()
+                .join(".verter/ide/shared/tsconfig.json")
+                .to_string_lossy()
+                .replace('\\', "/")],
         };
         let mock = MockTypeProvider::new();
         let sync = make_sync(&mock, ProjectSyncMode::FullProject);

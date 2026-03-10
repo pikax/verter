@@ -207,13 +207,14 @@ mod tests {
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: None,
             }],
-            vue_api_calls: vec![VueApiCallSite {
+            vue_api_calls: (vec![VueApiCallSite {
                 api: VueApiClassification::OnMounted,
                 span: verter_span::Span::new(0, 5),
                 arg_value: None,
                 is_async_callback: false,
                 callback_params: vec![],
-            }],
+            }])
+            .into(),
             ..Default::default()
         };
 

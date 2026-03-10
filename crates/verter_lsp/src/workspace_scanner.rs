@@ -412,7 +412,9 @@ async fn close_stale_paths(sync: &ProjectSync, stale_paths: &[(ProviderPathKind,
             ProviderPathKind::Shadow => sync.close_file(path).await,
         };
         if let Err(error) = result {
-            tracing::warn!("workspace_scanner: failed to close stale provider path {path}: {error}");
+            tracing::warn!(
+                "workspace_scanner: failed to close stale provider path {path}: {error}"
+            );
         }
     }
 }

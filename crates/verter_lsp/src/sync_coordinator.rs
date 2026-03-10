@@ -157,7 +157,9 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
     let Some(snapshot) = deps.resolver_snapshot.read().clone() else {
-        tracing::debug!("sync_coordinator: deferring sync without resolver snapshot {canonical_id}");
+        tracing::debug!(
+            "sync_coordinator: deferring sync without resolver snapshot {canonical_id}"
+        );
         return;
     };
     // Sync IDE (TSX) output to type provider
@@ -402,7 +404,11 @@ mod tests {
         commit_sync_transition(&states, "/workspace/src/App.vue", transition.next);
 
         let calls = mock.file_sync_calls();
-        assert_eq!(calls.len(), 2, "owner change should close both stale provider ids");
+        assert_eq!(
+            calls.len(),
+            2,
+            "owner change should close both stale provider ids"
+        );
         assert!(
             matches!(
                 &calls[0],

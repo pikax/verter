@@ -292,13 +292,16 @@ mod tests {
         vue_api_calls: Vec<VueApiCallSite>,
     ) -> FileAnalysisSnapshot {
         FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                template_refs,
-                elements,
-                ..Default::default()
-            }),
-            vue_api_calls,
-            dom_query_calls,
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    template_refs,
+                    elements,
+                    ..Default::default()
+                })
+                .into(),
+            ),
+            vue_api_calls: vue_api_calls.into(),
+            dom_query_calls: dom_query_calls.into(),
             ..Default::default()
         }
     }
@@ -520,13 +523,14 @@ mod tests {
         let parsed = parse_selector(".btn").unwrap();
         // Analysis with no template
         let analysis = FileAnalysisSnapshot {
-            dom_query_calls: vec![DomQueryCallSite {
+            dom_query_calls: (vec![DomQueryCallSite {
                 kind: DomQueryKind::QuerySelector,
                 selector_text: ".btn".to_string(),
                 parsed: Some(parsed),
                 span: verter_span::Span::new(15, 44),
                 arg_span: verter_span::Span::new(40, 44),
-            }],
+            }])
+            .into(),
             ..Default::default()
         };
 

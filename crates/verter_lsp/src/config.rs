@@ -1272,10 +1272,9 @@ impl ProjectRegistry {
             .iter()
             .filter_map(|project| {
                 project.tsconfig_path.as_ref().map(|tsconfig_path| {
-                    let config_path =
-                        crate::provider_sync::project_config_path_for_provider_root(
-                            &project.provider_root,
-                        );
+                    let config_path = crate::provider_sync::project_config_path_for_provider_root(
+                        &project.provider_root,
+                    );
                     (tsconfig_path.clone(), config_path)
                 })
             })
@@ -1294,10 +1293,9 @@ impl ProjectRegistry {
             .filter_map(|project| {
                 let ide_project = project.to_ide_project_config();
                 ide_project.tsconfig_path.map(|tsconfig_path| {
-                    let config_path =
-                        crate::provider_sync::project_config_path_for_provider_root(
-                            &ide_project.provider_root,
-                        );
+                    let config_path = crate::provider_sync::project_config_path_for_provider_root(
+                        &ide_project.provider_root,
+                    );
                     (tsconfig_path, config_path)
                 })
             })

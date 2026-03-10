@@ -300,11 +300,14 @@ mod tests {
 
         let el = make_element_with_attrs(source, "div", &["btn"], None);
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(verter_analysis::TemplateAnalysisSnapshot {
-                elements: vec![el],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (verter_analysis::TemplateAnalysisSnapshot {
+                    elements: vec![el],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -330,11 +333,14 @@ mod tests {
 
         let el = make_element_with_attrs(source, "div", &["btn"], None);
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(verter_analysis::TemplateAnalysisSnapshot {
-                elements: vec![el],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (verter_analysis::TemplateAnalysisSnapshot {
+                    elements: vec![el],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -476,11 +482,14 @@ mod tests {
         });
 
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(verter_analysis::TemplateAnalysisSnapshot {
-                elements: vec![el],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (verter_analysis::TemplateAnalysisSnapshot {
+                    elements: vec![el],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -507,11 +516,14 @@ mod tests {
 
         let el = make_element_with_attrs(source, "div", &["missing"], None);
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(verter_analysis::TemplateAnalysisSnapshot {
-                elements: vec![el],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (verter_analysis::TemplateAnalysisSnapshot {
+                    elements: vec![el],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 

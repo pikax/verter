@@ -490,11 +490,14 @@ mod tests {
         let css = build_style(source, &blocks);
 
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![make_element("div", &["foo"])],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![make_element("div", &["foo"])],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -525,11 +528,14 @@ mod tests {
         let css = build_style(source, &blocks);
 
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![make_element("div", &["foo", "bar"])],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![make_element("div", &["foo", "bar"])],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -562,11 +568,14 @@ mod tests {
         });
 
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![el],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![el],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -590,11 +599,14 @@ mod tests {
         let css = build_style(source, &blocks);
 
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![make_element("div", &["foo"])],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![make_element("div", &["foo"])],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -622,11 +634,14 @@ mod tests {
         let css = build_style(source, &blocks);
 
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![make_element("div", &[])],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![make_element("div", &[])],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 

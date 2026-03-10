@@ -11,7 +11,7 @@ fn make_analysis(
     FileAnalysisSnapshot {
         bindings,
         imports,
-        macros,
+        macros: macros.into(),
         ..Default::default()
     }
 }
@@ -160,7 +160,7 @@ fn test_hover_on_vue_api_call_site() {
     let call_offset = source.find("onMounted(() =>").unwrap();
 
     let analysis = FileAnalysisSnapshot {
-        vue_api_calls: vec![VueApiCallSite {
+        vue_api_calls: (vec![VueApiCallSite {
             api: VueApiClassification::OnMounted,
             span: verter_span::Span::new(
                 call_offset as u32,
@@ -169,7 +169,8 @@ fn test_hover_on_vue_api_call_site() {
             arg_value: None,
             is_async_callback: false,
             callback_params: vec![],
-        }],
+        }])
+        .into(),
         ..Default::default()
     };
 
@@ -253,46 +254,49 @@ fn test_hover_on_component_shows_prop_constness() {
     let comp_offset = source.find("<MyButton").unwrap();
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            components: vec![verter_analysis::template::TemplateComponentUsage {
-                name: "MyButton".into(),
-                import_source: Some("./MyButton.vue".into()),
-                is_dynamic: false,
-                props: vec![
-                    verter_analysis::template::TemplatePropUsage {
-                        name: "title".into(),
-                        is_bound: true,
-                        constness: verter_analysis::template::PropValueConstness::Dynamic,
-                        referenced_bindings: vec!["msg".into()],
-                        from_spread: false,
-                        span: verter_span::Span::new(
-                            (comp_offset + 10) as u32,
-                            (comp_offset + 22) as u32,
-                        ),
-                    },
-                    verter_analysis::template::TemplatePropUsage {
-                        name: "disabled".into(),
-                        is_bound: false,
-                        constness: verter_analysis::template::PropValueConstness::Const,
-                        referenced_bindings: vec![],
-                        from_spread: false,
-                        span: verter_span::Span::new(
-                            (comp_offset + 23) as u32,
-                            (comp_offset + 31) as u32,
-                        ),
-                    },
-                ],
-                has_spread: false,
-                slots_used: vec![],
-                static_classes: vec![],
-                has_dynamic_class: false,
-                dynamic_classes: vec![],
-                v_models: vec![],
-                span: verter_span::Span::new(comp_offset as u32, (comp_offset + 40) as u32),
-            }],
-            elements: vec![],
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                components: vec![verter_analysis::template::TemplateComponentUsage {
+                    name: "MyButton".into(),
+                    import_source: Some("./MyButton.vue".into()),
+                    is_dynamic: false,
+                    props: vec![
+                        verter_analysis::template::TemplatePropUsage {
+                            name: "title".into(),
+                            is_bound: true,
+                            constness: verter_analysis::template::PropValueConstness::Dynamic,
+                            referenced_bindings: vec!["msg".into()],
+                            from_spread: false,
+                            span: verter_span::Span::new(
+                                (comp_offset + 10) as u32,
+                                (comp_offset + 22) as u32,
+                            ),
+                        },
+                        verter_analysis::template::TemplatePropUsage {
+                            name: "disabled".into(),
+                            is_bound: false,
+                            constness: verter_analysis::template::PropValueConstness::Const,
+                            referenced_bindings: vec![],
+                            from_spread: false,
+                            span: verter_span::Span::new(
+                                (comp_offset + 23) as u32,
+                                (comp_offset + 31) as u32,
+                            ),
+                        },
+                    ],
+                    has_spread: false,
+                    slots_used: vec![],
+                    static_classes: vec![],
+                    has_dynamic_class: false,
+                    dynamic_classes: vec![],
+                    v_models: vec![],
+                    span: verter_span::Span::new(comp_offset as u32, (comp_offset + 40) as u32),
+                }],
+                elements: vec![],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -330,23 +334,26 @@ fn test_hover_on_component_with_no_props() {
     let comp_offset = source.find("<Popup").unwrap();
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            components: vec![verter_analysis::template::TemplateComponentUsage {
-                name: "Popup".into(),
-                import_source: Some("./Popup.vue".into()),
-                is_dynamic: false,
-                props: vec![], // No props
-                has_spread: false,
-                slots_used: vec![],
-                static_classes: vec![],
-                has_dynamic_class: false,
-                dynamic_classes: vec![],
-                v_models: vec![],
-                span: verter_span::Span::new(comp_offset as u32, (comp_offset + 10) as u32),
-            }],
-            elements: vec![],
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                components: vec![verter_analysis::template::TemplateComponentUsage {
+                    name: "Popup".into(),
+                    import_source: Some("./Popup.vue".into()),
+                    is_dynamic: false,
+                    props: vec![], // No props
+                    has_spread: false,
+                    slots_used: vec![],
+                    static_classes: vec![],
+                    has_dynamic_class: false,
+                    dynamic_classes: vec![],
+                    v_models: vec![],
+                    span: verter_span::Span::new(comp_offset as u32, (comp_offset + 10) as u32),
+                }],
+                elements: vec![],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -402,44 +409,47 @@ fn test_hover_on_element_shows_css_rules() {
     let div_offset = source.find("<div class").unwrap();
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![style],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".into(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![TemplateAttribute {
-                    name: "class".into(),
-                    value: Some("foo".into()),
-                    is_dynamic: false,
-                    span: verter_span::Span::new(0, 0),
-                    name_end: 0,
-                    value_span: None,
+        styles: (vec![style]).into(),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".into(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![TemplateAttribute {
+                        name: "class".into(),
+                        value: Some("foo".into()),
+                        is_dynamic: false,
+                        span: verter_span::Span::new(0, 0),
+                        name_end: 0,
+                        value_span: None,
+                    }],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(div_offset as u32, (div_offset + 20) as u32),
+                    tag_span_end: (div_offset + 20) as u32,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(div_offset as u32, (div_offset + 20) as u32),
-                tag_span_end: (div_offset + 20) as u32,
-                content_end: 0,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -654,30 +664,33 @@ fn test_hover_on_component_attr_does_not_show_constness() {
     let icon_offset = source.find(":icon").unwrap();
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            components: vec![verter_analysis::template::TemplateComponentUsage {
-                name: "Popup".into(),
-                import_source: Some("./Popup.vue".into()),
-                is_dynamic: false,
-                props: vec![verter_analysis::template::TemplatePropUsage {
-                    name: "icon".into(),
-                    is_bound: true,
-                    constness: verter_analysis::template::PropValueConstness::Dynamic,
-                    referenced_bindings: vec!["x".into()],
-                    from_spread: false,
-                    span: verter_span::Span::new(icon_offset as u32, (icon_offset + 10) as u32),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                components: vec![verter_analysis::template::TemplateComponentUsage {
+                    name: "Popup".into(),
+                    import_source: Some("./Popup.vue".into()),
+                    is_dynamic: false,
+                    props: vec![verter_analysis::template::TemplatePropUsage {
+                        name: "icon".into(),
+                        is_bound: true,
+                        constness: verter_analysis::template::PropValueConstness::Dynamic,
+                        referenced_bindings: vec!["x".into()],
+                        from_spread: false,
+                        span: verter_span::Span::new(icon_offset as u32, (icon_offset + 10) as u32),
+                    }],
+                    has_spread: false,
+                    slots_used: vec![],
+                    static_classes: vec![],
+                    has_dynamic_class: false,
+                    dynamic_classes: vec![],
+                    v_models: vec![],
+                    span: verter_span::Span::new(comp_offset as u32, (comp_offset + 30) as u32),
                 }],
-                has_spread: false,
-                slots_used: vec![],
-                static_classes: vec![],
-                has_dynamic_class: false,
-                dynamic_classes: vec![],
-                v_models: vec![],
-                span: verter_span::Span::new(comp_offset as u32, (comp_offset + 30) as u32),
-            }],
-            elements: vec![],
-            ..Default::default()
-        }),
+                elements: vec![],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -727,44 +740,50 @@ fn test_hover_on_div_class_attr_does_not_show_css() {
     let class_offset = source.find("class=").unwrap();
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![style],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".into(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![TemplateAttribute {
-                    name: "class".into(),
-                    value: Some("foo".into()),
-                    is_dynamic: false,
-                    span: verter_span::Span::new(class_offset as u32, (class_offset + 11) as u32),
-                    name_end: (class_offset + 5) as u32,
-                    value_span: None,
+        styles: (vec![style]).into(),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".into(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![TemplateAttribute {
+                        name: "class".into(),
+                        value: Some("foo".into()),
+                        is_dynamic: false,
+                        span: verter_span::Span::new(
+                            class_offset as u32,
+                            (class_offset + 11) as u32,
+                        ),
+                        name_end: (class_offset + 5) as u32,
+                        value_span: None,
+                    }],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(div_offset as u32, (div_offset + 30) as u32),
+                    tag_span_end: (div_offset + 20) as u32,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(div_offset as u32, (div_offset + 30) as u32),
-                tag_span_end: (div_offset + 20) as u32,
-                content_end: 0,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -808,46 +827,49 @@ fn test_hover_on_ref_attr_does_not_show_import() {
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: None,
         }],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "span".into(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: ElementNamespace::Html,
-                attributes: vec![TemplateAttribute {
-                    name: "ref".into(),
-                    value: Some("el".into()),
-                    is_dynamic: false,
-                    span: verter_span::Span::new(
-                        template_ref_offset as u32,
-                        (template_ref_offset + 8) as u32,
-                    ),
-                    name_end: (template_ref_offset + 3) as u32,
-                    value_span: None,
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "span".into(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![TemplateAttribute {
+                        name: "ref".into(),
+                        value: Some("el".into()),
+                        is_dynamic: false,
+                        span: verter_span::Span::new(
+                            template_ref_offset as u32,
+                            (template_ref_offset + 8) as u32,
+                        ),
+                        name_end: (template_ref_offset + 3) as u32,
+                        value_span: None,
+                    }],
+                    directives: vec![],
+                    v_for: None,
+                    v_model: None,
+                    has_v_if: false,
+                    has_v_else: false,
+                    has_v_else_if: false,
+                    has_v_show: false,
+                    has_v_html: false,
+                    has_v_text: false,
+                    has_text_content: false,
+                    has_bare_text: false,
+                    has_element_children: false,
+                    nesting_depth: 0,
+                    parent_tag: None,
+                    parent_index: None,
+                    dynamic_classes: vec![],
+                    span: verter_span::Span::new(0, 50),
+                    tag_span_end: 30,
+                    content_end: 0,
+                    ..Default::default()
                 }],
-                directives: vec![],
-                v_for: None,
-                v_model: None,
-                has_v_if: false,
-                has_v_else: false,
-                has_v_else_if: false,
-                has_v_show: false,
-                has_v_html: false,
-                has_v_text: false,
-                has_text_content: false,
-                has_bare_text: false,
-                has_element_children: false,
-                nesting_depth: 0,
-                parent_tag: None,
-                parent_index: None,
-                dynamic_classes: vec![],
-                span: verter_span::Span::new(0, 50),
-                tag_span_end: 30,
-                content_end: 0,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -890,10 +912,13 @@ fn test_hover_on_ref_in_interpolation_still_shows_import() {
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: None,
         }],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![],
-            ..Default::default()
-        }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 

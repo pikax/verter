@@ -167,10 +167,13 @@ mod tests {
 
     fn make_analysis(handlers: Vec<TemplateEventHandler>) -> FileAnalysisSnapshot {
         FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                event_handlers: handlers,
-                ..Default::default()
-            }),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    event_handlers: handlers,
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         }
     }

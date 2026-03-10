@@ -459,7 +459,7 @@ mod tests {
         FileAnalysisSnapshot {
             bindings,
             imports,
-            macros,
+            macros: macros.into(),
             ..Default::default()
         }
     }
@@ -586,22 +586,25 @@ mod tests {
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                components: vec![TemplateComponentUsage {
-                    name: "MyButton".to_string(),
-                    import_source: Some("./MyButton.vue".to_string()),
-                    is_dynamic: false,
-                    props: vec![],
-                    has_spread: false,
-                    slots_used: vec![],
-                    static_classes: vec![],
-                    has_dynamic_class: false,
-                    dynamic_classes: vec![],
-                    v_models: vec![],
-                    span: verter_span::Span::new(11, 52),
-                }],
-                ..Default::default()
-            }),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    components: vec![TemplateComponentUsage {
+                        name: "MyButton".to_string(),
+                        import_source: Some("./MyButton.vue".to_string()),
+                        is_dynamic: false,
+                        props: vec![],
+                        has_spread: false,
+                        slots_used: vec![],
+                        static_classes: vec![],
+                        has_dynamic_class: false,
+                        dynamic_classes: vec![],
+                        v_models: vec![],
+                        span: verter_span::Span::new(11, 52),
+                    }],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -620,27 +623,30 @@ mod tests {
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![
-                    TemplateElement {
-                        tag: "div".to_string(),
-                        nesting_depth: 0,
-                        dynamic_classes: vec![],
-                        span: verter_span::Span::new(11, 42),
-                        content_end: 0,
-                        ..Default::default()
-                    },
-                    TemplateElement {
-                        tag: "span".to_string(),
-                        nesting_depth: 1,
-                        dynamic_classes: vec![],
-                        span: verter_span::Span::new(16, 35),
-                        content_end: 0,
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![
+                        TemplateElement {
+                            tag: "div".to_string(),
+                            nesting_depth: 0,
+                            dynamic_classes: vec![],
+                            span: verter_span::Span::new(11, 42),
+                            content_end: 0,
+                            ..Default::default()
+                        },
+                        TemplateElement {
+                            tag: "span".to_string(),
+                            nesting_depth: 1,
+                            dynamic_classes: vec![],
+                            span: verter_span::Span::new(16, 35),
+                            content_end: 0,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -660,7 +666,7 @@ mod tests {
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
-            styles: vec![StyleBlockAnalysis {
+            styles: (vec![StyleBlockAnalysis {
                 scoped: true,
                 css: Some(CssAnalysis {
                     classes: vec![
@@ -676,7 +682,8 @@ mod tests {
                     ..Default::default()
                 }),
                 ..Default::default()
-            }],
+            }])
+            .into(),
             ..Default::default()
         };
 

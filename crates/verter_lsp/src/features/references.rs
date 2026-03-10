@@ -531,7 +531,7 @@ mod tests {
         FileAnalysisSnapshot {
             bindings,
             imports,
-            macros,
+            macros: macros.into(),
             ..Default::default()
         }
     }
@@ -756,11 +756,14 @@ mod tests {
 
         let el = make_element_with_attrs(source, "div", &["btn"], None);
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![el],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![el],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -787,11 +790,14 @@ mod tests {
 
         let el = make_element_with_attrs(source, "div", &["btn"], None);
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![el],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![el],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -823,11 +829,14 @@ mod tests {
 
         let el = make_element_with_attrs(source, "div", &[], Some("app"));
         let analysis = FileAnalysisSnapshot {
-            styles: vec![css],
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![el],
-                ..Default::default()
-            }),
+            styles: (vec![css]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![el],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -853,10 +862,13 @@ mod tests {
 
         let el = make_element_with_attrs(source, "div", &["foo"], None);
         let analysis = FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![el],
-                ..Default::default()
-            }),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![el],
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 

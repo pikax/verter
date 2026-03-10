@@ -144,10 +144,13 @@ mod tests {
 
     fn make_template_analysis(elements: Vec<TemplateElement>) -> FileAnalysisSnapshot {
         FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                elements,
-                ..Default::default()
-            }),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements,
+                    ..Default::default()
+                })
+                .into(),
+            ),
             ..Default::default()
         }
     }

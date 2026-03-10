@@ -119,17 +119,20 @@ mod tests {
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![TemplateElement {
-                    tag: "div".to_string(),
-                    is_self_closing: false,
-                    dynamic_classes: vec![],
-                    span: verter_span::Span::new(13, 44),
-                    content_end: 0,
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![TemplateElement {
+                        tag: "div".to_string(),
+                        is_self_closing: false,
+                        dynamic_classes: vec![],
+                        span: verter_span::Span::new(13, 44),
+                        content_end: 0,
+                        ..Default::default()
+                    }],
                     ..Default::default()
-                }],
-                ..Default::default()
-            }),
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -151,17 +154,20 @@ mod tests {
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![TemplateElement {
-                    tag: "br".to_string(),
-                    is_self_closing: true,
-                    dynamic_classes: vec![],
-                    span: verter_span::Span::new(13, 19),
-                    content_end: 0,
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![TemplateElement {
+                        tag: "br".to_string(),
+                        is_self_closing: true,
+                        dynamic_classes: vec![],
+                        span: verter_span::Span::new(13, 19),
+                        content_end: 0,
+                        ..Default::default()
+                    }],
                     ..Default::default()
-                }],
-                ..Default::default()
-            }),
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -177,17 +183,20 @@ mod tests {
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
-            template: Some(TemplateAnalysisSnapshot {
-                elements: vec![TemplateElement {
-                    tag: "div".to_string(),
-                    is_self_closing: false,
-                    dynamic_classes: vec![],
-                    span: verter_span::Span::new(13, 30), // same line
-                    content_end: 0,
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![TemplateElement {
+                        tag: "div".to_string(),
+                        is_self_closing: false,
+                        dynamic_classes: vec![],
+                        span: verter_span::Span::new(13, 30), // same line
+                        content_end: 0,
+                        ..Default::default()
+                    }],
                     ..Default::default()
-                }],
-                ..Default::default()
-            }),
+                })
+                .into(),
+            ),
             ..Default::default()
         };
 

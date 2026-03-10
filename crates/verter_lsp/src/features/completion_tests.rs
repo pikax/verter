@@ -10,7 +10,7 @@ fn make_analysis(
     FileAnalysisSnapshot {
         bindings,
         imports,
-        macros,
+        macros: macros.into(),
         ..Default::default()
     }
 }
@@ -228,11 +228,14 @@ fn test_class_completions_in_static_class() {
     let css = build_style(source, &blocks);
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![css],
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![make_element_for_completion("div", &["fo"], None, source)],
-            ..Default::default()
-        }),
+        styles: (vec![css]).into(),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![make_element_for_completion("div", &["fo"], None, source)],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -278,11 +281,14 @@ fn test_no_class_completions_outside_class_attr() {
     let css = build_style(source, &blocks);
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![css],
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![make_element_for_completion("div", &[], Some("app"), source)],
-            ..Default::default()
-        }),
+        styles: (vec![css]).into(),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![make_element_for_completion("div", &[], Some("app"), source)],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -311,10 +317,13 @@ fn test_class_completions_no_style_block() {
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![make_element_for_completion("div", &["foo"], None, source)],
-            ..Default::default()
-        }),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![make_element_for_completion("div", &["foo"], None, source)],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -451,11 +460,14 @@ fn test_class_completions_in_dynamic_class() {
     });
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![css],
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![el],
-            ..Default::default()
-        }),
+        styles: (vec![css]).into(),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![el],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -512,11 +524,14 @@ fn test_no_class_completions_outside_dynamic_string() {
     });
 
     let analysis = FileAnalysisSnapshot {
-        styles: vec![css],
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![el],
-            ..Default::default()
-        }),
+        styles: (vec![css]).into(),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![el],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -810,10 +825,13 @@ fn make_event_directive_analysis(
     };
 
     FileAnalysisSnapshot {
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![el],
-            ..Default::default()
-        }),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![el],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     }
 }
@@ -886,10 +904,13 @@ fn make_vmodel_directive_analysis(
     };
 
     FileAnalysisSnapshot {
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![el],
-            ..Default::default()
-        }),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![el],
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     }
 }
@@ -1092,10 +1113,13 @@ fn make_analysis_with_template(
 ) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         bindings,
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            components,
-            ..Default::default()
-        }),
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                components,
+                ..Default::default()
+            })
+            .into(),
+        ),
         ..Default::default()
     }
 }
@@ -1501,32 +1525,35 @@ fn test_attr_value_shows_bindings() {
             used_in_script: false,
             used_in_style: false,
         }],
-        template: Some(verter_analysis::TemplateAnalysisSnapshot {
-            elements: vec![verter_analysis::TemplateElement {
-                tag: "div".to_string(),
-                is_component: false,
-                is_self_closing: false,
-                namespace: verter_analysis::ElementNamespace::Html,
-                attributes: vec![],
-                directives: vec![verter_analysis::template::TemplateDirective {
-                    name: "bind".to_string(),
-                    raw_name: ":foo".to_string(),
-                    argument: Some("foo".to_string()),
-                    modifiers: vec![],
-                    expression: Some(String::new()),
-                    span: verter_span::Span::new(dir_start, dir_end),
-                    name_end: dir_start + ":foo".len() as u32,
-                    arg_span: None,
-                    expression_span: Some(verter_span::Span::new(expr_start, expr_end)),
-                    modifier_spans: vec![],
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                elements: vec![verter_analysis::TemplateElement {
+                    tag: "div".to_string(),
+                    is_component: false,
+                    is_self_closing: false,
+                    namespace: verter_analysis::ElementNamespace::Html,
+                    attributes: vec![],
+                    directives: vec![verter_analysis::template::TemplateDirective {
+                        name: "bind".to_string(),
+                        raw_name: ":foo".to_string(),
+                        argument: Some("foo".to_string()),
+                        modifiers: vec![],
+                        expression: Some(String::new()),
+                        span: verter_span::Span::new(dir_start, dir_end),
+                        name_end: dir_start + ":foo".len() as u32,
+                        arg_span: None,
+                        expression_span: Some(verter_span::Span::new(expr_start, expr_end)),
+                        modifier_spans: vec![],
+                    }],
+                    span: verter_span::Span::new(el_start, el_end),
+                    tag_span_end: el_open_end,
+                    content_end: close_start,
+                    ..Default::default()
                 }],
-                span: verter_span::Span::new(el_start, el_end),
-                tag_span_end: el_open_end,
-                content_end: close_start,
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -2013,23 +2040,26 @@ fn test_template_completions_include_vfor_variables() {
             used_in_script: false,
             used_in_style: false,
         }],
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".to_string(),
-                span: verter_span::Span::new(100, 200),
-                v_for: Some(VForDirective {
-                    variable: "item".to_string(),
-                    index: Some("idx".to_string()),
-                    iterable: "items".to_string(),
-                    has_key: false,
-                    key_expression: None,
-                    key_uses_index: false,
-                    span: verter_span::Span::new(105, 130),
-                }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".to_string(),
+                    span: verter_span::Span::new(100, 200),
+                    v_for: Some(VForDirective {
+                        variable: "item".to_string(),
+                        index: Some("idx".to_string()),
+                        iterable: "items".to_string(),
+                        has_key: false,
+                        key_expression: None,
+                        key_uses_index: false,
+                        span: verter_span::Span::new(105, 130),
+                    }),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -2058,23 +2088,26 @@ fn test_template_completions_vfor_not_included_outside_scope() {
     use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, VForDirective};
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "div".to_string(),
-                span: verter_span::Span::new(100, 200),
-                v_for: Some(VForDirective {
-                    variable: "item".to_string(),
-                    index: None,
-                    iterable: "items".to_string(),
-                    has_key: false,
-                    key_expression: None,
-                    key_uses_index: false,
-                    span: verter_span::Span::new(105, 130),
-                }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "div".to_string(),
+                    span: verter_span::Span::new(100, 200),
+                    v_for: Some(VForDirective {
+                        variable: "item".to_string(),
+                        index: None,
+                        iterable: "items".to_string(),
+                        has_key: false,
+                        key_expression: None,
+                        key_uses_index: false,
+                        span: verter_span::Span::new(105, 130),
+                    }),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
@@ -2094,23 +2127,26 @@ fn test_template_completions_vfor_destructured_pattern() {
     use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, VForDirective};
 
     let analysis = FileAnalysisSnapshot {
-        template: Some(TemplateAnalysisSnapshot {
-            elements: vec![TemplateElement {
-                tag: "li".to_string(),
-                span: verter_span::Span::new(100, 300),
-                v_for: Some(VForDirective {
-                    variable: "{ name, email }".to_string(),
-                    index: None,
-                    iterable: "users".to_string(),
-                    has_key: false,
-                    key_expression: None,
-                    key_uses_index: false,
-                    span: verter_span::Span::new(105, 140),
-                }),
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "li".to_string(),
+                    span: verter_span::Span::new(100, 300),
+                    v_for: Some(VForDirective {
+                        variable: "{ name, email }".to_string(),
+                        index: None,
+                        iterable: "users".to_string(),
+                        has_key: false,
+                        key_expression: None,
+                        key_uses_index: false,
+                        span: verter_span::Span::new(105, 140),
+                    }),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        }),
+            })
+            .into(),
+        ),
         ..Default::default()
     };
 
