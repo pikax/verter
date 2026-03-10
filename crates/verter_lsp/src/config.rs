@@ -235,7 +235,7 @@ impl TsConfigPathResolver {
     /// any existing alias with the same prefix is replaced.
     pub fn merge_vite_aliases(&mut self, vite_aliases: Vec<(String, String)>) {
         for (find, replacement) in vite_aliases {
-            // find values from discover_vite_aliases are already normalized with `/` suffix
+            // find values are already normalized with `/` suffix (from vite_config module)
             // Remove any existing alias with the same prefix
             self.aliases.retain(|a| a.prefix != find);
 
@@ -583,183 +583,6 @@ impl TsConfigDiscovery {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Vite Config Alias Discovery
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Discover `resolve.alias` entries from a vite.config.{ts,js,mjs} file.
-///
-/// Spawns Node.js with a small inline script that dynamically imports the config
-/// and prints `resolve.alias` as JSON. Returns a list of `(find, replacement)` pairs
-/// suitable for merging into a `TsConfigPathResolver`.
-///
-/// Returns an empty vec if no vite config is found, Node.js is unavailable,
-/// the config has no `resolve.alias`, or evaluation fails/times out.
-pub fn discover_vite_aliases(project_root: &Path, node_path: &str) -> Vec<(String, String)> {
-    // Find vite config file
-    let config_file = ["vite.config.ts", "vite.config.js", "vite.config.mjs"]
-        .iter()
-        .map(|name| project_root.join(name))
-        .find(|p| p.exists());
-
-    let config_path = match config_file {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-
-    let config_path_str = config_path.to_string_lossy().replace('\\', "/");
-
-    // Inline Node.js script that dynamically imports the vite config and
-    // extracts resolve.alias as JSON. Uses pathToFileURL for correct Windows paths.
-    // For .ts configs, tries to register tsx loader first.
-    let loader_setup = if config_path_str.ends_with(".ts") {
-        "try { await import('tsx/esm'); } catch {}"
-    } else {
-        ""
-    };
-
-    let script = format!(
-        r#"
-const {{ pathToFileURL }} = require('url');
-(async () => {{
-  try {{
-    {loader_setup}
-    const mod = await import(pathToFileURL('{config_path_str}').href);
-    const config = mod.default || mod;
-    const raw = typeof config === 'function' ? config({{ mode: 'development', command: 'serve' }}) : config;
-    const resolved = raw instanceof Promise ? await raw : raw;
-    const alias = resolved?.resolve?.alias;
-    if (!alias) {{ process.stdout.write('__VERTER_ALIASES_BEGIN__[]__VERTER_ALIASES_END__'); return; }}
-    let entries = [];
-    if (Array.isArray(alias)) {{
-      for (const a of alias) {{
-        if (a.find && a.replacement) {{
-          const f = typeof a.find === 'string' ? a.find : null;
-          if (f) entries.push({{ find: f, replacement: a.replacement }});
-        }}
-      }}
-    }} else if (typeof alias === 'object') {{
-      for (const [key, val] of Object.entries(alias)) {{
-        if (typeof val === 'string') entries.push({{ find: key, replacement: val }});
-      }}
-    }}
-    process.stdout.write('__VERTER_ALIASES_BEGIN__' + JSON.stringify(entries) + '__VERTER_ALIASES_END__');
-  }} catch (e) {{
-    process.stderr.write('vite config eval error: ' + e.message + '\n');
-    process.stdout.write('__VERTER_ALIASES_BEGIN__[]__VERTER_ALIASES_END__');
-  }}
-}})();
-"#
-    );
-
-    let result = std::process::Command::new(node_path)
-        .arg("-e")
-        .arg(&script)
-        .current_dir(project_root)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output();
-
-    let output = match result {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::debug!("failed to spawn node for vite config: {e}");
-            return Vec::new();
-        }
-    };
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.is_empty() {
-        tracing::debug!(
-            "vite config eval stderr ({}): {}",
-            config_path_str,
-            stderr.trim()
-        );
-    }
-
-    if !output.status.success() {
-        tracing::debug!(
-            "vite config eval failed for {} (exit code: {:?})",
-            config_path_str,
-            output.status.code()
-        );
-        return Vec::new();
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let entries = match parse_vite_alias_stdout(&stdout) {
-        Some(v) => v,
-        None => {
-            let trimmed = stdout.trim();
-            if !trimmed.is_empty() {
-                tracing::debug!(
-                    "failed to parse vite alias output for {} (raw: {:?})",
-                    config_path_str,
-                    &trimmed[..trimmed.len().min(200)]
-                );
-            }
-            return Vec::new();
-        }
-    };
-
-    entries
-        .into_iter()
-        .map(|e| {
-            let replacement = PathBuf::from(&e.replacement);
-            // Make replacement absolute relative to project root if not already
-            let abs_replacement = if replacement.is_absolute() {
-                replacement
-            } else {
-                project_root.join(&replacement)
-            };
-            let abs_str = abs_replacement.to_string_lossy().replace('\\', "/");
-            // Normalize: bare aliases like `@` become `@/` for wildcard matching
-            let find = if e.find.ends_with('/') {
-                e.find
-            } else {
-                format!("{}/", e.find)
-            };
-            (find, abs_str)
-        })
-        .collect()
-}
-
-#[derive(serde::Deserialize)]
-struct ViteAliasEntry {
-    find: String,
-    replacement: String,
-}
-
-/// Sentinel markers used to extract JSON from potentially noisy Node.js stdout.
-/// The vite config eval script wraps its JSON output in these markers so that
-/// warnings, deprecation notices, or other console output don't corrupt parsing.
-const VITE_SENTINEL_BEGIN: &str = "__VERTER_ALIASES_BEGIN__";
-const VITE_SENTINEL_END: &str = "__VERTER_ALIASES_END__";
-
-/// Parse vite alias JSON from Node.js stdout, handling noise via sentinel markers.
-///
-/// Strategy:
-/// 1. If sentinel markers are present, extract JSON between them (ignores prefix/suffix noise).
-/// 2. Fallback: try parsing the entire trimmed output as JSON (backward compat).
-/// 3. Returns `None` if input is empty, whitespace-only, or unparseable.
-fn parse_vite_alias_stdout(raw: &str) -> Option<Vec<ViteAliasEntry>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    // Sentinel-based extraction (handles prefix AND suffix noise)
-    if let Some(begin) = trimmed.find(VITE_SENTINEL_BEGIN) {
-        let after = &trimmed[begin + VITE_SENTINEL_BEGIN.len()..];
-        if let Some(end) = after.find(VITE_SENTINEL_END) {
-            return serde_json::from_str(&after[..end]).ok();
-        }
-    }
-
-    // Fallback: try clean parse (backward compat with old eval script)
-    serde_json::from_str(trimmed).ok()
-}
-
 /// Merge VS Code initialization options into a resolved lint config.
 pub fn merge_init_options(resolved: &mut ResolvedLintConfig, init_options: &serde_json::Value) {
     if let Some(lint) = init_options.get("lint") {
@@ -974,7 +797,7 @@ pub struct ProjectConfig {
     pub compiler_options: crate::project_resolver::IdeProjectCompilerOptions,
     /// Resolved project-reference edges for the native resolver.
     pub references: Vec<String>,
-    /// Path alias resolver (from tsconfig + vite.config, merged).
+    /// Path alias resolver (from tsconfig paths, or vite aliases on fallback projects).
     pub path_resolver: TsConfigPathResolver,
     /// Lint configuration for this project.
     pub lint_config: ResolvedLintConfig,
@@ -982,6 +805,18 @@ pub struct ProjectConfig {
     pub linter: verter_diagnostics::Linter,
     /// Whether lint was explicitly configured for this project.
     pub lint_explicitly_configured: bool,
+    /// Path to the analyzed vite config file (only on fallback projects).
+    pub vite_config_path: Option<String>,
+    /// Config file + helper deps for invalidation (canonical absolute paths).
+    /// Always includes the config file itself. Only populated on fallback projects.
+    pub vite_config_deps: Vec<String>,
+}
+
+/// Result of building a project registry, including trust-required entries.
+pub struct RegistryBuildResult {
+    pub registry: ProjectRegistry,
+    /// Configs that need user trust before their aliases can be used.
+    pub trust_required: Vec<crate::vite_config::ViteConfigTrustInfo>,
 }
 
 impl ProjectConfig {
@@ -1047,15 +882,15 @@ impl ProjectRegistry {
     /// and discovers lint config. If a root has no tsconfig, a default project is created
     /// with empty aliases.
     ///
-    /// When `node_path` is provided and `vite_config_enabled` is true, also evaluates
-    /// `vite.config.{ts,js,mjs}` per project root and merges `resolve.alias` entries
-    /// into the path resolver (vite aliases take precedence over tsconfig aliases).
+    /// Build a registry from workspace roots. Tsconfig-backed projects use tsconfig
+    /// paths exclusively; fallback (no-tsconfig) projects get vite aliases via static
+    /// analysis or trusted execution.
     pub fn from_workspace_roots(
         roots: &[String],
-        node_path: Option<&str>,
-        vite_config_enabled: bool,
-    ) -> Self {
+        vite_opts: &crate::vite_config::ViteConfigOptions,
+    ) -> RegistryBuildResult {
         let mut projects = Vec::new();
+        let mut trust_required = Vec::new();
 
         for root_uri in roots {
             let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
@@ -1071,34 +906,13 @@ impl ProjectRegistry {
                 };
                 let project_root = dir.to_string_lossy().replace('\\', "/");
                 let project_root_path = PathBuf::from(&project_root);
-                let mut resolver = TsConfigPathResolver::from_tsconfig(&entry.config_path);
+                let resolver = TsConfigPathResolver::from_tsconfig(&entry.config_path);
                 let membership = load_project_membership(&entry.config_path);
                 let compiler_options = load_compiler_options(&entry.config_path);
                 let references = load_project_references(&entry.config_path);
-                let mut workspace_aliases = Vec::new();
-
-                if vite_config_enabled {
-                    if let Some(np) = node_path {
-                        let vite_aliases = discover_vite_aliases(&project_root_path, np);
-                        if !vite_aliases.is_empty() {
-                            tracing::info!(
-                                "discovered {} vite aliases for {}",
-                                vite_aliases.len(),
-                                project_root
-                            );
-                            workspace_aliases = vite_aliases
-                                .iter()
-                                .map(|(find, replacement)| {
-                                    crate::project_resolver::WorkspaceAlias {
-                                        find: find.clone(),
-                                        replacement: replacement.clone(),
-                                    }
-                                })
-                                .collect();
-                            resolver.merge_vite_aliases(vite_aliases);
-                        }
-                    }
-                }
+                // Tsconfig-backed projects use tsconfig paths as the sole alias source.
+                // Vite aliases are only applied to fallback (no-tsconfig) projects.
+                let workspace_aliases = Vec::new();
 
                 let lint = discover_lint_config(&project_root_path);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());
@@ -1115,29 +929,141 @@ impl ProjectRegistry {
                     lint_config: lint.clone(),
                     linter,
                     lint_explicitly_configured: lint.explicitly_configured,
+                    vite_config_path: None,
+                    vite_config_deps: Vec::new(),
                 });
             }
 
+            // Fallback project (no tsconfig) — apply vite aliases if enabled
             let lint = discover_lint_config(&root_path);
             let linter = verter_diagnostics::Linter::new(lint.config.clone());
+            let mut fallback_resolver = TsConfigPathResolver::default();
+            let mut fallback_workspace_aliases = Vec::new();
+            let mut fallback_vite_config_path = None;
+            let mut fallback_vite_config_deps = Vec::new();
+
+            if vite_opts.enabled {
+                use crate::vite_config::{analyze_vite_config, ViteConfigAnalysis};
+                match analyze_vite_config(&root_path) {
+                    ViteConfigAnalysis::Resolved {
+                        config_path,
+                        aliases,
+                        dependency_files,
+                    } => {
+                        if !aliases.is_empty() {
+                            tracing::info!(
+                                "statically resolved {} vite aliases for {}",
+                                aliases.len(),
+                                canonical
+                            );
+                            fallback_workspace_aliases = aliases
+                                .iter()
+                                .map(|(find, replacement)| {
+                                    crate::project_resolver::WorkspaceAlias {
+                                        find: find.clone(),
+                                        replacement: replacement.clone(),
+                                    }
+                                })
+                                .collect();
+                            fallback_resolver.merge_vite_aliases(aliases);
+                        }
+                        fallback_vite_config_path = Some(config_path);
+                        fallback_vite_config_deps = dependency_files;
+                    }
+                    ViteConfigAnalysis::Complex {
+                        config_path,
+                        reason,
+                    } => {
+                        // Check if file is trusted
+                        let is_trusted = vite_opts.trusted_files.iter().any(|tf| {
+                            let tf_normalized = tf.replace('\\', "/");
+                            tf_normalized == config_path
+                        });
+
+                        if is_trusted {
+                            if let Some(np) = &vite_opts.node_path {
+                                let config_path_buf = PathBuf::from(&config_path);
+                                if let Some(result) =
+                                    crate::vite_config::execute_trusted_vite_config(
+                                        &config_path_buf,
+                                        &root_path,
+                                        np,
+                                    )
+                                {
+                                    if !result.aliases.is_empty() {
+                                        tracing::info!(
+                                            "trusted execution: {} vite aliases for {}",
+                                            result.aliases.len(),
+                                            canonical
+                                        );
+                                        fallback_workspace_aliases = result
+                                            .aliases
+                                            .iter()
+                                            .map(|(find, replacement)| {
+                                                crate::project_resolver::WorkspaceAlias {
+                                                    find: find.clone(),
+                                                    replacement: replacement.clone(),
+                                                }
+                                            })
+                                            .collect();
+                                        fallback_resolver.merge_vite_aliases(result.aliases);
+                                    }
+                                    fallback_vite_config_deps = result.dependency_files;
+                                } else {
+                                    // Execution failed, try LKG
+                                    let lkg = crate::vite_config::get_lkg_or_empty(&config_path);
+                                    if !lkg.is_empty() {
+                                        fallback_workspace_aliases = lkg
+                                            .iter()
+                                            .map(|(find, replacement)| {
+                                                crate::project_resolver::WorkspaceAlias {
+                                                    find: find.clone(),
+                                                    replacement: replacement.clone(),
+                                                }
+                                            })
+                                            .collect();
+                                        fallback_resolver.merge_vite_aliases(lkg);
+                                    }
+                                }
+                                fallback_vite_config_path = Some(config_path);
+                            }
+                        } else {
+                            // Not trusted → add to trust_required
+                            trust_required.push(crate::vite_config::ViteConfigTrustInfo {
+                                config_path: config_path.clone(),
+                                workspace_root: canonical.clone(),
+                                reason,
+                            });
+                            fallback_vite_config_path = Some(config_path);
+                        }
+                    }
+                    ViteConfigAnalysis::NotFound => {}
+                }
+            }
+
             projects.push(ProjectConfig {
                 root: canonical,
                 workspace_root: crate::documents::uri_to_canonical_id_from_str(root_uri),
                 tsconfig_path: None,
                 membership: crate::project_resolver::ProjectMembership::MatchAll,
-                workspace_aliases: Vec::new(),
+                workspace_aliases: fallback_workspace_aliases,
                 compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
-                path_resolver: TsConfigPathResolver::default(),
+                path_resolver: fallback_resolver,
                 lint_config: lint.clone(),
                 linter,
                 lint_explicitly_configured: lint.explicitly_configured,
+                vite_config_path: fallback_vite_config_path,
+                vite_config_deps: fallback_vite_config_deps,
             });
         }
 
         sort_projects(&mut projects);
 
-        Self { projects }
+        RegistryBuildResult {
+            registry: Self { projects },
+            trust_required,
+        }
     }
 
     /// Build a registry from canonical paths (not URIs). Used in tests.
@@ -1175,6 +1101,8 @@ impl ProjectRegistry {
                     lint_config: lint.clone(),
                     linter,
                     lint_explicitly_configured: lint.explicitly_configured,
+                    vite_config_path: None,
+                    vite_config_deps: Vec::new(),
                 });
             }
 
@@ -1192,6 +1120,8 @@ impl ProjectRegistry {
                 lint_config: lint.clone(),
                 linter,
                 lint_explicitly_configured: lint.explicitly_configured,
+                vite_config_path: None,
+                vite_config_deps: Vec::new(),
             });
         }
 
@@ -2399,149 +2329,331 @@ mod tests {
         );
     }
 
-    #[test]
-    fn discover_vite_aliases_no_config_returns_empty() {
-        let tmp = std::env::temp_dir().join("verter_test_vite_no_config");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        let result = discover_vite_aliases(&tmp, "node");
-        assert!(
-            result.is_empty(),
-            "should return empty when no vite config exists"
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
+    // =====================================================================
+    // Tsconfig-first policy tests (Phase 1)
+    // =====================================================================
 
     #[test]
-    fn discover_vite_aliases_simple_config() {
-        // Only run if Node.js is available
-        let node = crate::tsserver::find_node();
-        if node.is_none() {
-            eprintln!("skipping discover_vite_aliases_simple_config: node not found");
-            return;
-        }
-        let node = node.unwrap();
-
-        let tmp = std::env::temp_dir().join("verter_test_vite_simple");
+    fn tsconfig_backed_project_no_vite_aliases() {
+        // Tsconfig-backed projects must NOT get vite aliases merged, even when
+        // vite.config.ts exists alongside and vite_config_enabled is true.
+        let tmp = std::env::temp_dir().join("verter_test_tsconfig_first_no_vite");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("src")).unwrap();
 
-        // Create a simple vite.config.js with resolve.alias
+        // Create tsconfig with path aliases
         std::fs::write(
-            tmp.join("vite.config.js"),
-            &format!(
-                r#"
-export default {{
-  resolve: {{
-    alias: {{
-      '@': '{src_dir}',
-    }}
-  }}
-}};
-"#,
-                src_dir = tmp.join("src").to_string_lossy().replace('\\', "/")
-            ),
+            tmp.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}"#,
         )
         .unwrap();
 
-        let result = discover_vite_aliases(&tmp, &node);
+        // Create vite config with different alias
+        std::fs::write(
+            tmp.join("vite.config.js"),
+            "export default { resolve: { alias: { '~': './lib' } } };",
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_workspace_roots(
+            &[root.clone()],
+            &crate::vite_config::ViteConfigOptions {
+                enabled: true,
+                trusted_files: Vec::new(),
+                node_path: Some("node".to_string()),
+            },
+        )
+        .registry;
+
+        // Find tsconfig-backed project
+        let file = format!("{root}/src/App.vue");
+        let project = registry.find_project(&file);
+        assert!(project.is_some(), "should find tsconfig-backed project");
+        let project = project.unwrap();
         assert!(
-            !result.is_empty(),
-            "should discover aliases from vite config"
+            project.tsconfig_path.is_some(),
+            "project should have tsconfig_path"
         );
-        assert_eq!(result.len(), 1, "should have exactly 1 alias");
-        assert_eq!(result[0].0, "@/", "alias find should be '@/'");
+
+        // Positive: tsconfig aliases present
         assert!(
-            result[0].1.contains("src"),
-            "alias replacement should contain 'src', got: {}",
-            result[0].1
+            !project.path_resolver.is_empty(),
+            "tsconfig aliases should be present"
         );
-        // Negative: should not have any empty entries
+
+        // Negative: no vite aliases in workspace_aliases
         assert!(
-            result.iter().all(|(f, r)| !f.is_empty() && !r.is_empty()),
-            "no alias should have empty find or replacement"
+            project.workspace_aliases.is_empty(),
+            "tsconfig-backed project must have empty workspace_aliases, got {} entries",
+            project.workspace_aliases.len()
+        );
+
+        // Negative: path resolver should NOT contain vite alias prefix "~/"
+        // (Only tsconfig paths: "@/*")
+        let has_tilde = project.path_resolver.resolve("~/foo").is_some();
+        assert!(
+            !has_tilde,
+            "tsconfig-backed project must not have vite alias ~/",
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn discover_vite_aliases_array_format() {
-        // Only run if Node.js is available
-        let node = crate::tsserver::find_node();
-        if node.is_none() {
-            eprintln!("skipping discover_vite_aliases_array_format: node not found");
-            return;
-        }
-        let node = node.unwrap();
-
-        let tmp = std::env::temp_dir().join("verter_test_vite_array");
+    fn tsconfig_backed_project_resolver_only_tsconfig_paths() {
+        // Verify that a tsconfig-backed project's resolver contains ONLY tsconfig
+        // paths and no vite alias prefixes.
+        let tmp = std::env::temp_dir().join("verter_test_tsconfig_only_paths");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("src")).unwrap();
         std::fs::create_dir_all(tmp.join("lib")).unwrap();
 
-        // Create vite config with array-style aliases
         std::fs::write(
-            tmp.join("vite.config.mjs"),
+            tmp.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+
+        // Vite config with both @ and ~ aliases
+        std::fs::write(
+            tmp.join("vite.config.js"),
             &format!(
-                r#"
-export default {{
-  resolve: {{
-    alias: [
-      {{ find: '@', replacement: '{src}' }},
-      {{ find: '~', replacement: '{lib}' }},
-    ]
-  }}
-}};
-"#,
+                "export default {{ resolve: {{ alias: {{ '@': '{src}', '~': '{lib}' }} }} }};",
                 src = tmp.join("src").to_string_lossy().replace('\\', "/"),
                 lib = tmp.join("lib").to_string_lossy().replace('\\', "/"),
             ),
         )
         .unwrap();
 
-        let result = discover_vite_aliases(&tmp, &node);
-        assert_eq!(result.len(), 2, "should discover 2 aliases");
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_workspace_roots(
+            &[root.clone()],
+            &crate::vite_config::ViteConfigOptions {
+                enabled: true,
+                trusted_files: Vec::new(),
+                node_path: Some("node".to_string()),
+            },
+        )
+        .registry;
+
+        let file = format!("{root}/src/App.vue");
+        let project = registry.find_project(&file).unwrap();
+
+        // tsconfig has @/* — that should exist
         assert!(
-            result.iter().any(|(f, _)| f == "@/"),
-            "should have @/ alias"
+            !project.path_resolver.is_empty(),
+            "path resolver should have tsconfig aliases"
+        );
+
+        // Negative: vite's ~ alias must NOT be in the resolver
+        // (even though vite config defines it)
+        let has_tilde = project.path_resolver.resolve("~/something").is_some();
+        assert!(
+            !has_tilde,
+            "vite ~ alias must not leak into tsconfig-backed resolver",
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // =====================================================================
+    // Phase 3: Fallback project vite alias wiring tests
+    // =====================================================================
+
+    #[test]
+    fn fallback_project_static_vite_aliases() {
+        // Fallback (no tsconfig) project with static-analyzable vite config
+        // should get aliases populated.
+        let tmp = std::env::temp_dir().join("verter_test_fallback_static_vite");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+
+        // No tsconfig.json — this will be a fallback project
+        std::fs::write(
+            tmp.join("vite.config.js"),
+            "export default { resolve: { alias: { '@': './src' } } };",
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let build_result = ProjectRegistry::from_workspace_roots(
+            &[root.clone()],
+            &crate::vite_config::ViteConfigOptions {
+                enabled: true,
+                trusted_files: Vec::new(),
+                node_path: None,
+            },
+        );
+
+        let file = format!("{root}/src/App.vue");
+        let project = build_result.registry.find_project(&file);
+        assert!(project.is_some(), "should find fallback project");
+        let project = project.unwrap();
+
+        // Positive: fallback project has no tsconfig
+        assert!(
+            project.tsconfig_path.is_none(),
+            "should be a fallback project"
+        );
+
+        // Positive: should have vite aliases
+        assert!(
+            !project.workspace_aliases.is_empty(),
+            "fallback project should have vite aliases"
+        );
+
+        // Positive: vite_config_path and vite_config_deps should be set
+        assert!(
+            project.vite_config_path.is_some(),
+            "vite_config_path should be set"
         );
         assert!(
-            result.iter().any(|(f, _)| f == "~/"),
-            "should have ~/ alias"
+            !project.vite_config_deps.is_empty(),
+            "vite_config_deps should include the config file"
         );
-        // Negative: should not have regex-based aliases (they are filtered out)
+
+        // Negative: no trust_required entries
         assert!(
-            result.iter().all(|(f, _)| !f.starts_with('^')),
-            "regex aliases should be filtered out"
+            build_result.trust_required.is_empty(),
+            "static analysis should not require trust"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn discover_vite_aliases_disabled_returns_empty() {
-        // Test that when vite_config_enabled is false, no aliases are discovered.
-        // This is tested at the ProjectRegistry level (from_workspace_roots skips discovery).
-        // At the function level, discover_vite_aliases always runs — the caller controls enablement.
-        let tmp = std::env::temp_dir().join("verter_test_vite_disabled");
+    fn fallback_project_complex_config_not_trusted() {
+        // Fallback project with complex (function export) vite config and no trust
+        // should have empty aliases and generate trust_required entry.
+        let tmp = std::env::temp_dir().join("verter_test_fallback_complex_notrusted");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
 
-        // Even with a vite config, if we don't call discover_vite_aliases, no aliases.
         std::fs::write(
-            tmp.join("vite.config.js"),
-            "export default { resolve: { alias: { '@': '/src' } } };",
+            tmp.join("vite.config.ts"),
+            r#"import { defineConfig } from 'vite'
+export default defineConfig(({ mode }) => ({
+  resolve: { alias: { '@': './src' } }
+}))"#,
         )
         .unwrap();
 
-        // Simulate disabled: just don't call discover_vite_aliases
-        let resolver = TsConfigPathResolver::default();
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let build_result = ProjectRegistry::from_workspace_roots(
+            &[root.clone()],
+            &crate::vite_config::ViteConfigOptions {
+                enabled: true,
+                trusted_files: Vec::new(),
+                node_path: None,
+            },
+        );
+
+        let file = format!("{root}/src/App.vue");
+        let project = build_result.registry.find_project(&file).unwrap();
+
+        // Negative: no aliases when not trusted
         assert!(
-            resolver.is_empty(),
-            "resolver should be empty when vite discovery not called"
+            project.workspace_aliases.is_empty(),
+            "untrusted complex config should have empty aliases"
+        );
+
+        // Positive: trust_required should have an entry
+        assert_eq!(
+            build_result.trust_required.len(),
+            1,
+            "should have 1 trust_required entry"
+        );
+        assert!(
+            build_result.trust_required[0].reason.contains("function")
+                || build_result.trust_required[0].reason.contains("arrow"),
+            "reason should mention function/arrow: {}",
+            build_result.trust_required[0].reason
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tsconfig_project_no_vite_config_path() {
+        // Tsconfig-backed projects should never have vite_config_path set.
+        let tmp = std::env::temp_dir().join("verter_test_tsconfig_no_vite_path");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+
+        std::fs::write(
+            tmp.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("vite.config.js"),
+            "export default { resolve: { alias: { '@': './src' } } };",
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let build_result = ProjectRegistry::from_workspace_roots(
+            &[root.clone()],
+            &crate::vite_config::ViteConfigOptions {
+                enabled: true,
+                trusted_files: Vec::new(),
+                node_path: None,
+            },
+        );
+
+        let file = format!("{root}/src/App.vue");
+        let project = build_result.registry.find_project(&file).unwrap();
+
+        // Positive: tsconfig project
+        assert!(project.tsconfig_path.is_some());
+
+        // Negative: no vite_config_path on tsconfig project
+        assert!(
+            project.vite_config_path.is_none(),
+            "tsconfig-backed project must not have vite_config_path"
+        );
+        assert!(
+            project.vite_config_deps.is_empty(),
+            "tsconfig-backed project must not have vite_config_deps"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn disabled_vite_fallback_has_no_aliases() {
+        // When vite is disabled, fallback projects should have empty aliases.
+        let tmp = std::env::temp_dir().join("verter_test_disabled_vite");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+
+        std::fs::write(
+            tmp.join("vite.config.js"),
+            "export default { resolve: { alias: { '@': './src' } } };",
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let build_result = ProjectRegistry::from_workspace_roots(
+            &[root.clone()],
+            &crate::vite_config::ViteConfigOptions {
+                enabled: false,
+                trusted_files: Vec::new(),
+                node_path: None,
+            },
+        );
+
+        let file = format!("{root}/src/App.vue");
+        let project = build_result.registry.find_project(&file).unwrap();
+
+        assert!(
+            project.workspace_aliases.is_empty(),
+            "disabled vite should mean empty aliases"
+        );
+        assert!(
+            project.vite_config_path.is_none(),
+            "disabled vite should not set vite_config_path"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -2618,6 +2730,8 @@ export default {{
                 lint_config: ResolvedLintConfig::default(),
                 linter: verter_diagnostics::Linter::default(),
                 lint_explicitly_configured: false,
+                vite_config_path: None,
+                vite_config_deps: Vec::new(),
             }],
         };
 
@@ -2655,6 +2769,8 @@ export default {{
                     },
                     linter: verter_diagnostics::Linter::default(),
                     lint_explicitly_configured: true,
+                    vite_config_path: None,
+                    vite_config_deps: Vec::new(),
                 },
                 ProjectConfig {
                     root: "/workspace/default/".to_string(),
@@ -2668,6 +2784,8 @@ export default {{
                     lint_config: ResolvedLintConfig::default(),
                     linter: verter_diagnostics::Linter::default(),
                     lint_explicitly_configured: false,
+                    vite_config_path: None,
+                    vite_config_deps: Vec::new(),
                 },
             ],
         };
@@ -2952,97 +3070,6 @@ export default {{
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    // ── parse_vite_alias_stdout tests ──────────────────────────────────
-
-    #[test]
-    fn parse_vite_alias_stdout_clean_json() {
-        let raw = r#"[{"find":"@","replacement":"/src"}]"#;
-        let result = parse_vite_alias_stdout(raw);
-        assert!(result.is_some(), "should parse clean JSON");
-        let entries = result.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].find, "@");
-        assert_eq!(entries[0].replacement, "/src");
-    }
-
-    #[test]
-    fn parse_vite_alias_stdout_empty_input() {
-        assert!(
-            parse_vite_alias_stdout("").is_none(),
-            "empty input should return None"
-        );
-        assert!(
-            parse_vite_alias_stdout("  \n  ").is_none(),
-            "whitespace-only input should return None"
-        );
-    }
-
-    #[test]
-    fn parse_vite_alias_stdout_sentinel_markers() {
-        let raw = "some noise\n__VERTER_ALIASES_BEGIN__[{\"find\":\"@\",\"replacement\":\"/src\"}]__VERTER_ALIASES_END__\nmore noise";
-        let result = parse_vite_alias_stdout(raw);
-        assert!(result.is_some(), "should extract JSON between sentinels");
-        let entries = result.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].find, "@");
-    }
-
-    #[test]
-    fn parse_vite_alias_stdout_sentinel_with_prefix_noise() {
-        let raw = "Warning: something\nDeprecation notice\n__VERTER_ALIASES_BEGIN__[]__VERTER_ALIASES_END__";
-        let result = parse_vite_alias_stdout(raw);
-        assert!(
-            result.is_some(),
-            "should handle prefix noise with sentinels"
-        );
-        assert!(result.unwrap().is_empty(), "should return empty array");
-    }
-
-    #[test]
-    fn parse_vite_alias_stdout_invalid_json_between_sentinels() {
-        let raw = "__VERTER_ALIASES_BEGIN__not-json__VERTER_ALIASES_END__";
-        let result = parse_vite_alias_stdout(raw);
-        assert!(
-            result.is_none(),
-            "should return None when sentinel content is not valid JSON"
-        );
-    }
-
-    #[test]
-    fn parse_vite_alias_stdout_multiple_sentinel_pairs() {
-        // First valid pair should win
-        let raw = "__VERTER_ALIASES_BEGIN__[{\"find\":\"@\",\"replacement\":\"/src\"}]__VERTER_ALIASES_END__ junk __VERTER_ALIASES_BEGIN__[{\"find\":\"~\",\"replacement\":\"/lib\"}]__VERTER_ALIASES_END__";
-        let result = parse_vite_alias_stdout(raw);
-        assert!(result.is_some(), "should use first sentinel pair");
-        let entries = result.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].find, "@", "should use first pair's content");
-        assert!(
-            entries.iter().all(|e| e.find != "~"),
-            "should not include second pair's content"
-        );
-    }
-
-    #[test]
-    fn parse_vite_alias_stdout_fallback_without_sentinels() {
-        // Backward compat: clean JSON without sentinels
-        let raw = r#"[{"find":"@","replacement":"/src"},{"find":"~","replacement":"/lib"}]"#;
-        let result = parse_vite_alias_stdout(raw);
-        assert!(result.is_some(), "should fall back to direct JSON parse");
-        assert_eq!(result.unwrap().len(), 2);
-    }
-
-    #[test]
-    fn parse_vite_alias_stdout_noisy_without_sentinels() {
-        // No sentinels + noise → fallback fails
-        let raw = "ExperimentalWarning: something\n[{\"find\":\"@\"}]";
-        let result = parse_vite_alias_stdout(raw);
-        assert!(
-            result.is_none(),
-            "noisy output without sentinels should return None (fallback parse fails)"
-        );
     }
 
     // =====================================================================

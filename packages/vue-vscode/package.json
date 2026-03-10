@@ -219,7 +219,13 @@
         "verter.viteConfig.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Discover resolve.alias from vite.config.{ts,js,mjs} for path alias resolution. Requires Node.js on PATH. Disable if vite config evaluation causes issues."
+          "description": "Discover resolve.alias from vite.config.{ts,js,mjs} for fallback projects without tsconfig.json. Simple configs are analyzed statically; complex configs require explicit trust via trustedFiles."
+        },
+        "verter.viteConfig.trustedFiles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Vite config file paths trusted for Node.js execution. Required when static analysis cannot extract aliases from complex configs (e.g. configs using environment variables or dynamic imports)."
         },
         "verter.mcp.enabled": {
           "type": "boolean",

@@ -19,6 +19,7 @@ import {
   Range as VRange,
   Position as VPosition,
   DiagnosticSeverity,
+  ConfigurationTarget,
 } from "vscode";
 import {
   LanguageClient,
@@ -225,6 +226,7 @@ async function activateExtension(context: ExtensionContext) {
     }
     deferredFeaturesRegistered = true;
     context.subscriptions.push(addNodeModulesChangedListener(getStartedClient));
+    context.subscriptions.push(addViteConfigChangedListener(getStartedClient));
     addVerterAnalysis(getStartedClient, context);
     setTimeout(() => {
       checkClaudeCodeAndNotify(context, log);
@@ -293,7 +295,9 @@ async function activateExtension(context: ExtensionContext) {
         e.affectsConfiguration("verter.typescript.tsdk") ||
         e.affectsConfiguration("verter.mcp.enabled") ||
         e.affectsConfiguration("verter.mcp.port") ||
-        e.affectsConfiguration("verter.inlayHints.enabled");
+        e.affectsConfiguration("verter.inlayHints.enabled") ||
+        e.affectsConfiguration("verter.viteConfig.enabled") ||
+        e.affectsConfiguration("verter.viteConfig.trustedFiles");
       if (!needsRestart || !server) {
         return;
       }
@@ -480,6 +484,7 @@ export async function activateVueLanguageServer(
       },
       viteConfig: {
         enabled: workspace.getConfiguration("verter").get<boolean>("viteConfig.enabled", true),
+        trustedFiles: workspace.getConfiguration("verter").get<string[]>("viteConfig.trustedFiles", []),
       },
       inlayHints: {
         enabled: workspace.getConfiguration("verter").get<boolean>("inlayHints.enabled", true),
@@ -728,6 +733,50 @@ export async function activateVueLanguageServer(
   }
   registerMcpListener(client);
 
+  // ── Vite config trust prompt ────────────────────────────────────
+  // When the LSP sends $/verter/viteConfigTrustRequired, show a warning
+  // prompting the user to trust the file for execution.
+  const promptedViteConfigs = new Set<string>();
+
+  function registerViteConfigTrustHandler(lc: LanguageClient) {
+    lc.onNotification(
+      NotificationType.ViteConfigTrustRequired,
+      async (params: { configPath: string; workspaceRoot: string; reason: string }) => {
+        if (promptedViteConfigs.has(params.configPath)) return;
+        promptedViteConfigs.add(params.configPath);
+
+        const action = await window.showWarningMessage(
+          `Verter cannot statically analyze ${params.configPath}. Trust this file for execution?`,
+          "Trust File",
+          "Open File",
+          "Disable Vite Discovery",
+        );
+
+        if (action === "Trust File") {
+          const config = workspace.getConfiguration("verter");
+          const existing = config.get<string[]>("viteConfig.trustedFiles", []);
+          if (!existing.includes(params.configPath)) {
+            await config.update(
+              "viteConfig.trustedFiles",
+              [...existing, params.configPath],
+              ConfigurationTarget.Workspace,
+            );
+            // Restart is triggered by the config change watcher
+          }
+        } else if (action === "Open File") {
+          const doc = await workspace.openTextDocument(Uri.file(params.configPath));
+          await window.showTextDocument(doc);
+        } else if (action === "Disable Vite Discovery") {
+          await workspace
+            .getConfiguration("verter")
+            .update("viteConfig.enabled", false, ConfigurationTarget.Workspace);
+          // Restart is triggered by the config change watcher
+        }
+      },
+    );
+  }
+  registerViteConfigTrustHandler(client);
+
   // ── Heartbeat watchdog ──────────────────────────────────────────
   // The Rust server sends $/verter/heartbeat every 5 seconds. If we don't
   // receive one for 30 seconds, the server is likely frozen (e.g., tokio
@@ -882,6 +931,7 @@ export async function activateVueLanguageServer(
           registerTypeProviderPidListener(client);
           registerHeartbeatMonitor(client);
           registerMcpListener(client);
+          registerViteConfigTrustHandler(client);
           await client.start();
         },
         killTrackedTypeProvider,
@@ -1343,6 +1393,28 @@ function addNodeModulesChangedListener(getClient: GetClient): Disposable {
       workspaceFoldersListener.dispose();
       watchers.forEach((watcher) => watcher.dispose());
       watchers.clear();
+    },
+  };
+}
+
+function addViteConfigChangedListener(getClient: GetClient): Disposable {
+  const pattern = "**/vite.config.{ts,js,mjs,cjs,mts,cts}";
+  const watcher = workspace.createFileSystemWatcher(pattern);
+
+  const send = (uri: Uri, type: "create" | "update" | "delete") => {
+    getClient().sendNotification(NotificationType.OnFileChanged, {
+      type,
+      uri: uri.toString(),
+    });
+  };
+
+  watcher.onDidChange((e) => send(e, "update"));
+  watcher.onDidCreate((e) => send(e, "create"));
+  watcher.onDidDelete((e) => send(e, "delete"));
+
+  return {
+    dispose() {
+      watcher.dispose();
     },
   };
 }

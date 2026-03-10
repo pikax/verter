@@ -164,6 +164,23 @@ pub struct McpReadyParams {
     pub port: u16,
 }
 
+/// Server → client notification: a Vite config requires trust for execution.
+/// Sent from `background_init()` when static analysis cannot handle a config and
+/// the file is not in `trustedFiles`. The extension shows a prompt to the user.
+pub enum ViteConfigTrustRequired {}
+
+impl tower_lsp_server::ls_types::notification::Notification for ViteConfigTrustRequired {
+    type Params = ViteConfigTrustRequiredParams;
+    const METHOD: &'static str = "$/verter/viteConfigTrustRequired";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ViteConfigTrustRequiredParams {
+    pub config_path: String,
+    pub workspace_root: String,
+    pub reason: String,
+}
+
 /// Params for `$/onDidChangeTsOrJsFile` notification.
 #[derive(Debug, Deserialize)]
 pub struct OnDidChangeTsOrJsFileParams {
@@ -437,8 +454,8 @@ pub struct VerterLanguageServer {
     action_engine: verter_actions::ActionEngine,
     /// Lint options from initializationOptions, stored during initialize() for use in initialized().
     init_lint_options: tokio::sync::Mutex<Option<serde_json::Value>>,
-    /// Whether vite config alias discovery is enabled (from initializationOptions).
-    vite_config_enabled: std::sync::atomic::AtomicBool,
+    /// Vite config options (enabled, trusted files, node path).
+    vite_config_options: tokio::sync::Mutex<crate::vite_config::ViteConfigOptions>,
     /// Whether type provider inlay hints are enabled (from initializationOptions).
     inlay_hints_enabled: std::sync::atomic::AtomicBool,
     /// Cached verter diagnostics per document: URI → (version, diagnostics).
@@ -548,7 +565,9 @@ impl VerterLanguageServer {
             fallback_linter,
             action_engine: verter_actions::ActionEngine::default(),
             init_lint_options: tokio::sync::Mutex::new(None),
-            vite_config_enabled: std::sync::atomic::AtomicBool::new(true),
+            vite_config_options: tokio::sync::Mutex::new(
+                crate::vite_config::ViteConfigOptions::default(),
+            ),
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             cached_verter_diags,
             provider_sync_states,
@@ -1877,7 +1896,74 @@ impl VerterLanguageServer {
             }
         }
 
-        // Future: invalidate module resolution caches, trigger re-analysis
+        // Check if the changed file is a known vite config or its dependency.
+        // If so, trigger a full registry rebuild to re-analyze aliases.
+        let canonical_path = if let Ok(uri) = params.uri.parse::<Uri>() {
+            uri_to_canonical_id(&uri)
+        } else {
+            crate::documents::uri_to_canonical_id_from_str(&params.uri)
+        };
+
+        let is_vite_dep = {
+            let registry = self.project_registry.read();
+            if let Some(reg) = registry.as_ref() {
+                reg.projects()
+                    .iter()
+                    .any(|p| p.vite_config_deps.iter().any(|dep| dep == &canonical_path))
+            } else {
+                false
+            }
+        };
+
+        if is_vite_dep {
+            tracing::info!(
+                "vite config dependency changed: {} — triggering registry rebuild",
+                canonical_path
+            );
+            self.trigger_registry_rebuild().await;
+        }
+    }
+
+    /// Trigger a full registry rebuild (same as did_change_workspace_folders).
+    /// Used when vite config files change on disk.
+    async fn trigger_registry_rebuild(&self) {
+        let roots = self.workspace_roots.lock().await.clone();
+        if roots.is_empty() {
+            return;
+        }
+        let my_gen = self
+            .init_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+
+        let mut vite_opts = self.vite_config_options.lock().await.clone();
+        vite_opts.node_path = crate::tsserver::find_node();
+        let args = BackgroundInitArgs {
+            roots,
+            vite_opts,
+            init_lint_opts: None,
+            my_gen,
+            client: self.client.clone(),
+            type_provider: self.type_provider.clone(),
+            project_registry: Arc::clone(&self.project_registry),
+            resolver_snapshot: Arc::clone(&self.resolver_snapshot),
+            fallback_linter: Arc::clone(&self.fallback_linter),
+            workspace_scanner: Arc::clone(&self.workspace_scanner),
+            init_generation: Arc::clone(&self.init_generation),
+            project_sync: self.project_sync.clone(),
+            documents: Arc::clone(&self.documents),
+            provider_sync_states: Arc::clone(&self.provider_sync_states),
+            pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
+            is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
+            cached_verter_diags: Arc::clone(&self.cached_verter_diags),
+            position_encoding: Arc::clone(&self.position_encoding),
+        };
+
+        tokio::spawn(async move {
+            if let Err(e) = background_init(args).await {
+                tracing::error!("background vite config rebuild failed: {e}");
+            }
+        });
     }
 
     /// Re-read a non-open .vue file from disk, upsert, compile, and sync to TSGO.
@@ -3370,8 +3456,7 @@ fn spawn_heartbeat(client: Client) {
 /// All fields are owned or Arc-wrapped so the task can run independently.
 struct BackgroundInitArgs {
     roots: Vec<String>,
-    node_path: Option<String>,
-    vite_config_enabled: bool,
+    vite_opts: crate::vite_config::ViteConfigOptions,
     init_lint_opts: Option<serde_json::Value>,
     my_gen: u64,
     client: Client,
@@ -3405,8 +3490,7 @@ struct BackgroundInitArgs {
 async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     let BackgroundInitArgs {
         roots,
-        node_path,
-        vite_config_enabled,
+        vite_opts,
         init_lint_opts,
         my_gen,
         client,
@@ -3430,17 +3514,16 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
     // 1. Build project registry (spawn_blocking — blocking I/O: vite eval, tsconfig)
     let roots_for_registry = roots.clone();
-    let np = node_path.clone();
+    let vite_opts_for_registry = vite_opts.clone();
     let registry_result = tokio::task::spawn_blocking(move || {
         crate::config::ProjectRegistry::from_workspace_roots(
             &roots_for_registry,
-            np.as_deref(),
-            vite_config_enabled,
+            &vite_opts_for_registry,
         )
     })
     .await;
 
-    let mut registry = match registry_result {
+    let build_result = match registry_result {
         Ok(r) => r,
         Err(e) => {
             if e.is_panic() {
@@ -3455,6 +3538,9 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             return Err(tower_lsp_server::jsonrpc::Error::internal_error());
         }
     };
+
+    let mut registry = build_result.registry;
+    let trust_required = build_result.trust_required;
 
     // Log discovered projects
     for project in registry.projects() {
@@ -3671,6 +3757,22 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         .send_notification::<VerterReady>(VerterReadyParams { gen: my_gen })
         .await;
 
+    // Notify client about Vite configs that need trust approval
+    for info in &trust_required {
+        tracing::info!(
+            "vite config trust required: {} ({})",
+            info.config_path,
+            info.reason
+        );
+        client
+            .send_notification::<ViteConfigTrustRequired>(ViteConfigTrustRequiredParams {
+                config_path: info.config_path.clone(),
+                workspace_root: info.workspace_root.clone(),
+                reason: info.reason.clone(),
+            })
+            .await;
+    }
+
     tracing::info!("background init complete (gen={my_gen})");
     Ok(())
 }
@@ -3813,9 +3915,7 @@ async fn sync_pending_vue_provider_file(
             let Some(ide_path) = committed_state.ide_path.clone() else {
                 return false;
             };
-            let result = if is_open {
-                sync.sync_tsx(&ide_path, &ide.code).await
-            } else if committed_state.ide_background_loaded {
+            let result = if is_open || committed_state.ide_background_loaded {
                 sync.sync_tsx(&ide_path, &ide.code).await
             } else {
                 sync.load_tsx(&ide_path, &ide.code).await
@@ -4050,17 +4150,26 @@ impl LanguageServer for VerterLanguageServer {
             if opts.get("lint").is_some() {
                 *self.init_lint_options.lock().await = Some(opts.clone());
             }
-            // Read viteConfig.enabled setting (default: true)
-            if let Some(vite_enabled) = opts
-                .get("viteConfig")
-                .and_then(|v| v.get("enabled"))
-                .and_then(|v| v.as_bool())
+            // Read viteConfig settings
             {
-                self.vite_config_enabled
-                    .store(vite_enabled, std::sync::atomic::Ordering::Relaxed);
+                let mut vite_opts = self.vite_config_options.lock().await;
+                if let Some(vite_config) = opts.get("viteConfig") {
+                    if let Some(enabled) = vite_config.get("enabled").and_then(|v| v.as_bool()) {
+                        vite_opts.enabled = enabled;
+                    }
+                    if let Some(trusted) =
+                        vite_config.get("trustedFiles").and_then(|v| v.as_array())
+                    {
+                        vite_opts.trusted_files = trusted
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.replace('\\', "/")))
+                            .collect();
+                    }
+                }
                 tracing::info!(
-                    "vite config alias discovery: {}",
-                    if vite_enabled { "enabled" } else { "disabled" }
+                    "vite config: enabled={}, trusted_files={}",
+                    vite_opts.enabled,
+                    vite_opts.trusted_files.len()
                 );
             }
             // Read inlayHints.enabled setting (default: true)
@@ -4191,12 +4300,11 @@ impl LanguageServer for VerterLanguageServer {
         // to tsserver before configure_paths() runs, creating inferred projects
         // without path aliases (causing "Cannot find module '@/...'" errors).
         // D. Clone Arcs for background task
+        let mut vite_opts = self.vite_config_options.lock().await.clone();
+        vite_opts.node_path = crate::tsserver::find_node();
         let args = BackgroundInitArgs {
             roots,
-            node_path: crate::tsserver::find_node(),
-            vite_config_enabled: self
-                .vite_config_enabled
-                .load(std::sync::atomic::Ordering::Relaxed),
+            vite_opts,
             init_lint_opts,
             my_gen,
             client: self.client.clone(),
@@ -4502,12 +4610,11 @@ impl LanguageServer for VerterLanguageServer {
             + 1;
 
         // Spawn background task for the blocking work (same as background_init)
+        let mut vite_opts = self.vite_config_options.lock().await.clone();
+        vite_opts.node_path = crate::tsserver::find_node();
         let args = BackgroundInitArgs {
             roots,
-            node_path: crate::tsserver::find_node(),
-            vite_config_enabled: self
-                .vite_config_enabled
-                .load(std::sync::atomic::Ordering::Relaxed),
+            vite_opts,
             init_lint_opts: None,
             my_gen,
             client: self.client.clone(),
@@ -7526,9 +7633,7 @@ mod tests {
         });
 
         let server = service.inner();
-        server
-            .vite_config_enabled
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        server.vite_config_options.lock().await.enabled = false;
         *server.workspace_roots.lock().await = vec![format!(
             "file:///{}",
             temp_root.to_string_lossy().replace('\\', "/")

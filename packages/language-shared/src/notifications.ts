@@ -41,6 +41,7 @@ export enum NotificationType {
   Heartbeat = "$/verter/heartbeat",
   Ready = "$/verter/ready",
   McpReady = "$/verter/mcpReady",
+  ViteConfigTrustRequired = "$/verter/viteConfigTrustRequired",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -81,5 +82,10 @@ export type NotificationParams = {
   };
   [NotificationType.McpReady]: {
     port: number;
+  };
+  [NotificationType.ViteConfigTrustRequired]: {
+    configPath: string;
+    workspaceRoot: string;
+    reason: string;
   };
 };

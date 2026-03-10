@@ -151,10 +151,15 @@ TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner r
 In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` that groups per-project configuration.
 
 **Key types** (`crates/verter_lsp/src/config.rs`):
-- `ProjectConfig` — per-project: root path, `TsConfigPathResolver`, `ResolvedLintConfig`, `Linter` instance
+- `ProjectConfig` — per-project: root path, `TsConfigPathResolver`, `ResolvedLintConfig`, `Linter` instance, optional `vite_config_path` and `vite_config_deps`
 - `ProjectRegistry` — sorted by root length (longest prefix first), provides `find_project()`, `resolve_alias()`, `find_project_root()`, `linter_for()`
+- `RegistryBuildResult` — returned from `from_workspace_roots()`, contains `registry` + `trust_required` list
 
-**Path alias resolution**: Each project's `TsConfigPathResolver` is built from its `tsconfig.json`. When `verter.viteConfig.enabled` is true (default), `discover_vite_aliases()` spawns Node.js to evaluate `vite.config.{ts,js,mjs}` and merges `resolve.alias` entries (vite aliases take precedence).
+**Path alias resolution** (tsconfig-first policy): Tsconfig-backed projects use ONLY `tsconfig.json` `compilerOptions.paths` — Vite aliases are never merged. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
+1. **Static analysis** (OXC): Parses `vite.config.{ts,js,mjs,cjs,mts,cts}` without executing code. Handles object/array alias forms, `defineConfig()`, template literals, `path.resolve()`, `new URL()`, `fileURLToPath()`. Returns `Complex` for configs using env vars, dynamic imports, or non-allowlisted packages.
+2. **Trusted execution** (opt-in): For complex configs, spawns Node.js with `loadConfigFromFile` if the file is in `verter.viteConfig.trustedFiles`. Includes env sanitization, 10s timeout, and last-known-good caching.
+
+The server sends `$/verter/viteConfigTrustRequired` notifications for complex configs not yet trusted, and the extension shows a trust prompt. Config file changes (detected via file watcher) trigger a full registry rebuild.
 
 **Type provider integration**: TSGO receives `workspace/didChangeWorkspaceFolders` notifications. tsserver uses per-file `projectRootPath` from the project registry. Both resilient wrappers store workspace folders for restart replay.
 

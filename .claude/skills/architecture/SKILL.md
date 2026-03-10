@@ -119,7 +119,7 @@ sync_coordinator.rs  → Debounced type provider sync during typing
 
 ### Per-Project Configuration (`config.rs`)
 
-`ProjectRegistry` groups per-project config for multi-root workspaces. Each `ProjectConfig` has: root path, `TsConfigPathResolver` (merged tsconfig + vite aliases), `ResolvedLintConfig`, and a `Linter` instance. `discover_vite_aliases()` spawns Node.js to evaluate `vite.config.{ts,js,mjs}` and extract `resolve.alias`.
+`ProjectRegistry` groups per-project config for multi-root workspaces. Each `ProjectConfig` has: root path, `TsConfigPathResolver`, `ResolvedLintConfig`, `Linter` instance, and optional `vite_config_path`/`vite_config_deps`. Tsconfig-backed projects use only tsconfig paths; fallback projects get Vite aliases via OXC static analysis (`vite_config.rs`) or trusted Node.js execution.
 
 ### TypeProvider Trait (`tsgo/traits.rs`)
 
