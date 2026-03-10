@@ -1626,25 +1626,58 @@ impl VerterLanguageServer {
         parent_uri: &Uri,
         import_source: &str,
     ) -> Option<crate::features::cross_file::ChildComponentContext> {
-        let analysis = self.resolve_component(parent_uri, import_source)?;
         let canonical_id = uri_to_canonical_id(parent_uri);
 
         // Resolve the child's canonical ID
-        let child_canonical_id = if import_source.starts_with('.') {
-            let parts: Vec<&str> = canonical_id.split('/').collect();
-            let dir = parts[..parts.len().saturating_sub(1)].join("/");
-            resolve_import_path(&dir, import_source)
-        } else {
-            let registry_guard = self.project_registry.read();
-            if let Some(ref registry) = *registry_guard {
-                registry
-                    .resolve_alias(&canonical_id, import_source)
-                    .unwrap_or_else(|| import_source.to_string())
-            } else {
-                import_source.to_string()
-            }
-        };
+        let child_canonical_id = self
+            .resolve_import_specifier(&canonical_id, import_source)
+            .unwrap_or_else(|| {
+                if import_source.starts_with('.') {
+                    let parts: Vec<&str> = canonical_id.split('/').collect();
+                    let dir = parts[..parts.len().saturating_sub(1)].join("/");
+                    resolve_import_path(&dir, import_source)
+                } else {
+                    let registry_guard = self.project_registry.read();
+                    if let Some(ref registry) = *registry_guard {
+                        registry
+                            .resolve_alias(&canonical_id, import_source)
+                            .unwrap_or_else(|| import_source.to_string())
+                    } else {
+                        import_source.to_string()
+                    }
+                }
+            });
 
+        if self
+            .documents
+            .host()
+            .get_source(&child_canonical_id)
+            .is_none()
+            || self
+                .documents
+                .host()
+                .get_analysis(&child_canonical_id)
+                .is_none()
+        {
+            let child_source = std::fs::read_to_string(&child_canonical_id).ok()?;
+            let _ = self.documents.host().upsert(verter_host::UpsertRequest {
+                canonical_id: Some(child_canonical_id.clone()),
+                input_id: child_canonical_id.clone(),
+                source: Arc::from(child_source.as_str()),
+                file_kind: verter_host::FileKind::VueSfc,
+                aliases: vec![],
+            });
+            self.hydrate_vue_compile_blockers_for_canonical_id(&child_canonical_id);
+            let profile = self.documents.tsx_profile.read().clone();
+            let _ = self
+                .documents
+                .host
+                .ensure_compiled(&child_canonical_id, &profile);
+        }
+
+        let analysis = self
+            .resolve_component(parent_uri, import_source)
+            .or_else(|| self.documents.host().get_analysis(&child_canonical_id))?;
         // Get the child's source
         let child_source_arc = self.documents.host().get_source(&child_canonical_id)?;
         let child_source = child_source_arc.to_string();
@@ -1653,12 +1686,65 @@ impl VerterLanguageServer {
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
 
         Some(crate::features::cross_file::ChildComponentContext {
+            canonical_id: child_canonical_id,
             uri: child_uri,
             source: child_source,
             analysis,
             blocks,
             line_index,
         })
+    }
+
+    fn child_hover_for_target(
+        &self,
+        parent_uri: &Uri,
+        target: &hover::ChildHoverTarget,
+    ) -> Option<Hover> {
+        match target {
+            hover::ChildHoverTarget::ComponentTag(target) => {
+                let child = self.resolve_component_context(parent_uri, &target.import_source)?;
+                let public_api = self
+                    .documents
+                    .host()
+                    .get_public_api(&child.canonical_id)
+                    .map(|api| api.code.to_string());
+                Some(hover::build_child_component_hover(
+                    &target.component_name,
+                    &target.import_source,
+                    &child.analysis,
+                    public_api.as_deref(),
+                    &target.usage_props,
+                ))
+            }
+            hover::ChildHoverTarget::ImportBinding(target) => {
+                let child = self.resolve_component_context(parent_uri, &target.import_source)?;
+                let public_api = self
+                    .documents
+                    .host()
+                    .get_public_api(&child.canonical_id)
+                    .map(|api| api.code.to_string());
+                Some(hover::build_child_component_hover(
+                    &target.binding_name,
+                    &target.import_source,
+                    &child.analysis,
+                    public_api.as_deref(),
+                    &[],
+                ))
+            }
+            hover::ChildHoverTarget::EventAttribute(target) => {
+                let child = self.resolve_component_context(parent_uri, &target.import_source)?;
+                let public_api = self
+                    .documents
+                    .host()
+                    .get_public_api(&child.canonical_id)
+                    .map(|api| api.code.to_string());
+                hover::build_child_event_hover(
+                    &target.vue_attr,
+                    &child.analysis,
+                    public_api.as_deref(),
+                )
+            }
+        }
     }
 
     /// Check if a URI is a virtual file and return its TSGO routing context.
@@ -4494,6 +4580,18 @@ impl LanguageServer for VerterLanguageServer {
         let vue_kind_label = verter_full.as_ref().and_then(|r| r.vue_kind_label.clone());
         let verter_result = verter_full.map(|r| r.hover);
 
+        let child_hover_target = (|| {
+            let analysis = self.documents.get_analysis(uri)?;
+            let doc = self.documents.get(uri)?;
+            let vue_offset = doc.line_index.position_to_offset(position)?;
+            hover::child_hover_target_at_offset(vue_offset, &doc.source, &analysis)
+        })();
+        if let Some(target) = child_hover_target.as_ref() {
+            if let Some(child_hover) = self.child_hover_for_target(uri, target) {
+                return Ok(Some(child_hover));
+            }
+        }
+
         // Slot syntax: verter provides rich hover; type provider returns unhelpful
         // generic types (`() any`, `string`). Skip type provider merge entirely.
         if verter_result.is_some() {
@@ -6519,6 +6617,106 @@ mod tests {
         }
     }
 
+    fn make_hover_test_service(
+        type_provider: Arc<dyn TypeProvider>,
+    ) -> tower_lsp_server::LspService<VerterLanguageServer> {
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                },
+            )
+        });
+        service
+    }
+
+    fn install_test_resolver(server: &VerterLanguageServer) {
+        *server.resolver_snapshot.write() = Some(ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+                crate::project_resolver::IdeProjectConfig::new(
+                    "/workspace".to_string(),
+                    "/workspace".to_string(),
+                    Some("/workspace/tsconfig.json".to_string()),
+                ),
+            ]),
+        });
+    }
+
+    fn open_test_vue(server: &VerterLanguageServer, path: &str, source: &str) -> Uri {
+        let uri: Uri = format!("file://{path}").parse().expect("valid test uri");
+        let _ = server.documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+        uri
+    }
+
+    fn hover_params(uri: &Uri, position: Position) -> HoverParams {
+        HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        }
+    }
+
+    fn hover_text(hover: Option<Hover>) -> String {
+        match hover.expect("hover should exist").contents {
+            HoverContents::Markup(m) => m.value,
+            HoverContents::Scalar(MarkedString::String(s)) => s,
+            HoverContents::Scalar(MarkedString::LanguageString(ls)) => ls.value,
+            HoverContents::Array(items) => items
+                .into_iter()
+                .map(|item| match item {
+                    MarkedString::String(s) => s,
+                    MarkedString::LanguageString(ls) => ls.value,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    fn set_type_hover_at_vue_position(
+        server: &VerterLanguageServer,
+        provider: &MockTypeProvider,
+        uri: &Uri,
+        position: Position,
+        contents: &str,
+    ) {
+        let ctx = server
+            .type_provider_context(uri)
+            .expect("type provider context should exist");
+        let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &ctx.vue_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("vue position should map to tsx");
+        provider.set_hover(
+            &ctx.tsx_path,
+            tsx_offset,
+            Some(HoverInfo {
+                contents: contents.to_string(),
+                range_start: None,
+                range_end: None,
+            }),
+        );
+    }
+
     #[test]
     fn debug_snippet_ascii() {
         let content = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -7586,7 +7784,10 @@ mod tests {
             .documents
             .get_analysis(&app_uri)
             .expect("parent analysis should exist");
-        let template = analysis.template.as_ref().expect("template analysis should exist");
+        let template = analysis
+            .template
+            .as_ref()
+            .expect("template analysis should exist");
         let component = template
             .components
             .iter()
@@ -7599,7 +7800,9 @@ mod tests {
             "template component should retain the raw barrel import source"
         );
         assert_eq!(
-            server.component_import_binding_name(&analysis, component).as_deref(),
+            server
+                .component_import_binding_name(&analysis, component)
+                .as_deref(),
             Some("BarrelComp"),
             "named barrel imports should preserve the local component binding name"
         );
@@ -7626,7 +7829,10 @@ mod tests {
             .resolve_component_document_for_usage(&app_uri, &analysis, component)
             .expect("component usage should resolve through the barrel");
 
-        assert_eq!(child.uri, child_uri, "barrel should resolve to the child SFC");
+        assert_eq!(
+            child.uri, child_uri,
+            "barrel should resolve to the child SFC"
+        );
         assert!(
             child.analysis.macros.iter().any(|mac| {
                 mac.kind == verter_analysis::AnalyzedMacroKind::DefineEmits
@@ -7740,6 +7946,307 @@ mod tests {
 
         drain_handle.abort();
         drop(service);
+    }
+
+    #[tokio::test]
+    async fn hover_prefers_child_component_summary_over_import_alias_on_component_tag() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+defineProps<{ foo: string; bar: number }>()
+const emit = defineEmits<{ custom: [payload: string] }>()
+</script>
+<template><div /></template>
+"#;
+        let app_source = r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+
+<template>
+  <MyComp foo="literal" :bar="1" @custom="handler($event)" />
+</template>
+"#;
+
+        let _child_uri = open_test_vue(server, "/workspace/src/MyComp.vue", child_source);
+        let app_uri = open_test_vue(server, "/workspace/src/App.vue", app_source);
+
+        let mut position = Position {
+            line: 5,
+            character: 2,
+        };
+        position.character += 1;
+
+        set_type_hover_at_vue_position(
+            server,
+            &provider,
+            &app_uri,
+            position,
+            "```typescript\n(alias) import MyComp\nimport MyComp\n```",
+        );
+
+        let text = hover_text(
+            server
+                .hover(hover_params(&app_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+
+        assert!(
+            text.contains("Props:"),
+            "hover should show props, got: {text}"
+        );
+        assert!(
+            text.contains("foo"),
+            "hover should include foo, got: {text}"
+        );
+        assert!(
+            text.contains("string"),
+            "hover should include foo type, got: {text}"
+        );
+        assert!(
+            text.contains("bar"),
+            "hover should include bar, got: {text}"
+        );
+        assert!(
+            text.contains("number"),
+            "hover should include bar type, got: {text}"
+        );
+        assert!(
+            text.contains("Emits:"),
+            "hover should show emits, got: {text}"
+        );
+        assert!(
+            text.contains("custom"),
+            "hover should include custom emit, got: {text}"
+        );
+        assert!(
+            text.contains("payload"),
+            "hover should include payload label, got: {text}"
+        );
+        assert!(
+            !text.contains("(alias) import MyComp"),
+            "hover must not prefer import alias hover, got: {text}"
+        );
+        assert!(
+            !text.contains("DefineComponent<{}, {}>"),
+            "hover must not degrade to fallback component shell, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hover_prefers_child_component_summary_over_import_alias_on_vue_import_binding() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+defineProps<{ foo: string; bar: number }>()
+const emit = defineEmits<{ custom: [payload: string] }>()
+</script>
+<template><div /></template>
+"#;
+        let app_source = r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+</script>
+
+<template>
+  <MyComp />
+</template>
+"#;
+
+        let _child_uri = open_test_vue(server, "/workspace/src/MyComp.vue", child_source);
+        let app_uri = open_test_vue(server, "/workspace/src/App.vue", app_source);
+
+        let position = Position {
+            line: 1,
+            character: 7,
+        };
+
+        set_type_hover_at_vue_position(
+            server,
+            &provider,
+            &app_uri,
+            position,
+            "```typescript\n(alias) import MyComp\nimport MyComp\n```",
+        );
+
+        let text = hover_text(
+            server
+                .hover(hover_params(&app_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+
+        assert!(
+            text.contains("Props:"),
+            "hover should show props, got: {text}"
+        );
+        assert!(
+            text.contains("foo"),
+            "hover should include foo, got: {text}"
+        );
+        assert!(
+            text.contains("bar"),
+            "hover should include bar, got: {text}"
+        );
+        assert!(
+            text.contains("Emits:"),
+            "hover should show emits, got: {text}"
+        );
+        assert!(
+            text.contains("custom"),
+            "hover should include custom emit, got: {text}"
+        );
+        assert!(
+            !text.contains("(alias) import MyComp"),
+            "hover must not prefer import alias hover, got: {text}"
+        );
+        assert!(
+            !text.contains("DefineComponent<{}, {}>"),
+            "hover must not degrade to fallback component shell, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hover_rewrites_component_event_attr_to_vue_syntax() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+const emit = defineEmits<{ custom: [payload: string] }>()
+</script>
+<template><div /></template>
+"#;
+        let app_source = r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+function handleCustom(payload: string) {
+  console.log(payload)
+}
+</script>
+
+<template>
+  <MyComp @custom="handleCustom($event)" />
+</template>
+"#;
+
+        let _child_uri = open_test_vue(server, "/workspace/src/MyComp.vue", child_source);
+        let app_uri = open_test_vue(server, "/workspace/src/App.vue", app_source);
+
+        let position = Position {
+            line: 8,
+            character: 11,
+        };
+
+        set_type_hover_at_vue_position(
+            server,
+            &provider,
+            &app_uri,
+            position,
+            "```typescript\n(property) onCustom: (payload: string) => void\n```",
+        );
+
+        let text = hover_text(
+            server
+                .hover(hover_params(&app_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+
+        assert!(
+            text.contains("@custom"),
+            "hover should use Vue event syntax, got: {text}"
+        );
+        assert!(
+            text.contains("payload"),
+            "hover should include payload label, got: {text}"
+        );
+        assert!(
+            text.contains("string"),
+            "hover should include payload type, got: {text}"
+        );
+        assert!(
+            !text.contains("onCustom"),
+            "hover must not expose TSX on* naming, got: {text}"
+        );
+        assert!(
+            !text.contains(": any"),
+            "hover must not degrade to any, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hover_rewrites_prop_backed_event_attr_to_vue_syntax() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+defineProps<{ label: string; onAlert?: (payload: string) => void }>()
+</script>
+<template><button>{{ label }}</button></template>
+"#;
+        let app_source = r#"<script setup lang="ts">
+import OnEventPropComp from './OnEventPropComp.vue'
+function handleCustom(payload: string) {
+  console.log(payload)
+}
+</script>
+
+<template>
+  <OnEventPropComp label="go" @alert="handleCustom" />
+</template>
+"#;
+
+        let _child_uri = open_test_vue(server, "/workspace/src/OnEventPropComp.vue", child_source);
+        let app_uri = open_test_vue(server, "/workspace/src/App.vue", app_source);
+
+        let position = Position {
+            line: 8,
+            character: 29,
+        };
+
+        set_type_hover_at_vue_position(
+            server,
+            &provider,
+            &app_uri,
+            position,
+            "```typescript\n(property) onAlert?: (payload: string) => void\n```",
+        );
+
+        let text = hover_text(
+            server
+                .hover(hover_params(&app_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+
+        assert!(
+            text.contains("@alert"),
+            "hover should use Vue event syntax, got: {text}"
+        );
+        assert!(
+            text.contains("payload"),
+            "hover should include payload label, got: {text}"
+        );
+        assert!(
+            text.contains("string"),
+            "hover should include payload type, got: {text}"
+        );
+        assert!(
+            !text.contains("onAlert"),
+            "hover must not expose TSX on* naming, got: {text}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

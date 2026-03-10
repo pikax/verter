@@ -139,6 +139,9 @@ pub fn merge_hover(
             if let Some(label) = vue_kind_label {
                 type_block = replace_kind_prefix(&type_block, label);
             }
+            if let Some(vue_attr) = extract_vue_attr_label(&verter_text) {
+                type_block = replace_primary_label_with_vue_attr(&type_block, &vue_attr);
+            }
             let merged = if context.trim().is_empty() {
                 type_block
             } else {
@@ -268,6 +271,47 @@ fn replace_kind_prefix(content: &str, vue_label: &str) -> String {
         }
     }
     content.to_string()
+}
+
+fn extract_vue_attr_label(text: &str) -> Option<String> {
+    let mut rest = text;
+    while let Some(start) = rest.find('`') {
+        rest = &rest[start + 1..];
+        let end = rest.find('`')?;
+        let candidate = &rest[..end];
+        if candidate.starts_with('@') {
+            let label_end = candidate.find('(').unwrap_or(candidate.len());
+            return Some(candidate[..label_end].trim().to_string());
+        }
+        rest = &rest[end + 1..];
+    }
+    None
+}
+
+fn replace_primary_label_with_vue_attr(content: &str, vue_attr: &str) -> String {
+    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+    if lines.len() < 2 {
+        return content.to_string();
+    }
+
+    let line = &lines[1];
+    let prefix_end = if line.starts_with('(') {
+        line.find(") ").map(|idx| idx + 2).unwrap_or(0)
+    } else {
+        0
+    };
+    let rest = &line[prefix_end..];
+    let name_end = rest
+        .find("?:")
+        .or_else(|| rest.find(": "))
+        .unwrap_or(rest.len());
+
+    if name_end == rest.len() {
+        return content.to_string();
+    }
+
+    lines[1] = format!("{}{}{}", &line[..prefix_end], vue_attr, &rest[name_end..]);
+    lines.join("\n")
 }
 
 // ── JSX → Vue Attribute Transformation ──────────────────────────────
@@ -2687,6 +2731,39 @@ mod tests {
         assert!(
             !text.contains("(const)"),
             "generic kind prefix must be replaced: {text}"
+        );
+    }
+
+    #[test]
+    fn merge_hover_component_event_rewrites_primary_label_to_vue_syntax() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let verter = make_verter_hover("**Component event** â€” `@custom(payload: string)`");
+        let type_hover = HoverInfo {
+            contents: "(property) onCustom: (payload: string) => void".to_string(),
+            range_start: None,
+            range_end: None,
+        };
+
+        let result = merge_hover(
+            Some(verter),
+            Some(type_hover),
+            &mapper,
+            &tsx_li,
+            &vue_li,
+            None,
+        );
+        let text = match result.unwrap().contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        let first_content_line = text.lines().nth(1).unwrap_or_default();
+        assert!(
+            first_content_line.contains("@custom"),
+            "primary hover label should use Vue event syntax, got: {text}"
+        );
+        assert!(
+            !first_content_line.contains("onCustom"),
+            "primary hover label must not expose TSX on* naming, got: {text}"
         );
     }
 

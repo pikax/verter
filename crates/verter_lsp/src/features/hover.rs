@@ -1,6 +1,8 @@
 // Phase 2: Hover — binding name, kind, source location from verter_host analysis.
 // Phase 3: Enhanced with full resolved type signature, JSDoc from TypeProvider.
 
+use std::collections::{HashMap, HashSet};
+
 use tower_lsp_server::ls_types::*;
 use verter_host::FileAnalysisSnapshot;
 
@@ -15,6 +17,41 @@ pub struct VerterHoverResult {
     pub hover: Hover,
     /// If set, replaces the type provider's `({kind})` prefix in the merged hover.
     pub vue_kind_label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildHoverTarget {
+    ComponentTag(ComponentTagHoverTarget),
+    ImportBinding(ImportBindingHoverTarget),
+    EventAttribute(ComponentEventHoverTarget),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentTagHoverTarget {
+    pub component_name: String,
+    pub import_source: String,
+    pub usage_props: Vec<ComponentUsagePropInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportBindingHoverTarget {
+    pub binding_name: String,
+    pub import_source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentEventHoverTarget {
+    pub component_name: String,
+    pub import_source: String,
+    pub event_name: String,
+    pub vue_attr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentUsagePropInfo {
+    pub name: String,
+    pub is_bound: bool,
+    pub constness: verter_analysis::template::PropValueConstness,
 }
 
 impl From<Hover> for VerterHoverResult {
@@ -150,6 +187,226 @@ fn make_hover(value: String) -> Hover {
     }
 }
 
+pub fn hover_text(hover: &Hover) -> String {
+    match &hover.contents {
+        HoverContents::Markup(markup) => markup.value.clone(),
+        HoverContents::Scalar(MarkedString::String(text)) => text.clone(),
+        HoverContents::Scalar(MarkedString::LanguageString(text)) => text.value.clone(),
+        HoverContents::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                MarkedString::String(text) => text.clone(),
+                MarkedString::LanguageString(text) => text.value.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+pub fn child_hover_target_at_offset(
+    offset: u32,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<ChildHoverTarget> {
+    if let Some(template) = analysis.template.as_deref() {
+        if let Some(target) = component_event_hover_target(offset, template) {
+            return Some(ChildHoverTarget::EventAttribute(target));
+        }
+
+        if let Some(target) = component_tag_hover_target(offset, source, template) {
+            return Some(ChildHoverTarget::ComponentTag(target));
+        }
+    }
+
+    direct_vue_import_binding_hover_target(offset, analysis).map(ChildHoverTarget::ImportBinding)
+}
+
+pub fn build_child_component_hover(
+    component_name: &str,
+    import_source: &str,
+    child_analysis: &FileAnalysisSnapshot,
+    public_api_code: Option<&str>,
+    usage_props: &[ComponentUsagePropInfo],
+) -> Hover {
+    let template = child_analysis.template.as_deref();
+    let handler_props = public_api_code
+        .map(parse_public_api_handler_props)
+        .unwrap_or_default();
+    let prop_types = public_api_code
+        .map(parse_public_api_props)
+        .unwrap_or_default();
+
+    let mut lines = vec![format!("**`<{component_name}>`** (from `{import_source}`)")];
+
+    let mut prop_lines = Vec::new();
+    if let Some(template) = template {
+        if !template.prop_definitions.is_empty() {
+            for prop in &template.prop_definitions {
+                let prop_type = prop
+                    .type_annotation
+                    .clone()
+                    .or_else(|| prop_types.get(&prop.name).cloned())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let optional = !prop.is_required || prop.has_default;
+                let optional_marker = if optional { "?" } else { "" };
+                prop_lines.push(format!(
+                    "- `{}`{}: {}",
+                    prop.name, optional_marker, prop_type
+                ));
+            }
+        }
+    }
+    if prop_lines.is_empty() && !prop_types.is_empty() {
+        let mut props: Vec<_> = prop_types.into_iter().collect();
+        props.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, prop_type) in props {
+            prop_lines.push(format!("- `{name}`: {prop_type}"));
+        }
+    }
+    if !prop_lines.is_empty() {
+        lines.push(String::new());
+        lines.push("**Props:**".to_string());
+        lines.extend(prop_lines);
+    }
+
+    let mut emit_lines = Vec::new();
+    if let Some(template) = template {
+        let emit_entries: Vec<String> = template
+            .emit_definitions
+            .iter()
+            .filter(|emit| emit.is_declared)
+            .map(|emit| {
+                format!(
+                    "- `{}`{}",
+                    emit_name_for_summary(&emit.event_name),
+                    emit_summary_signature(&emit.event_name, &handler_props)
+                )
+            })
+            .collect();
+        emit_lines.extend(emit_entries);
+    }
+    if emit_lines.is_empty() && !handler_props.is_empty() {
+        let mut seen = HashSet::new();
+        let mut fallback_emits = handler_props
+            .iter()
+            .filter_map(|(name, signature)| {
+                let vue_attr = crate::tsgo::merge::jsx_prop_to_vue_attr(name)?;
+                if !vue_attr.starts_with('@') {
+                    return None;
+                }
+                let emit_name = vue_attr.trim_start_matches('@').to_string();
+                if !seen.insert(emit_name.clone()) {
+                    return None;
+                }
+                Some(format!(
+                    "- `{emit_name}`{}",
+                    summarize_event_handler_signature(signature)
+                ))
+            })
+            .collect::<Vec<_>>();
+        fallback_emits.sort();
+        emit_lines.extend(fallback_emits);
+    }
+    if !emit_lines.is_empty() {
+        lines.push(String::new());
+        lines.push("**Emits:**".to_string());
+        lines.extend(emit_lines);
+    }
+
+    if !usage_props.is_empty() {
+        lines.push(String::new());
+        lines.push("**Usage:**".to_string());
+        for prop in usage_props {
+            let constness_label = match prop.constness {
+                verter_analysis::template::PropValueConstness::Const => "const",
+                verter_analysis::template::PropValueConstness::Dynamic => "dynamic",
+                verter_analysis::template::PropValueConstness::Unknown => "unknown",
+            };
+            let icon = match prop.constness {
+                verter_analysis::template::PropValueConstness::Const => "\u{2713}",
+                verter_analysis::template::PropValueConstness::Dynamic => "\u{2197}",
+                verter_analysis::template::PropValueConstness::Unknown => "?",
+            };
+            let bound = if prop.is_bound { ":" } else { "" };
+            lines.push(format!(
+                "- {icon} `{bound}{}` — *{constness_label}*",
+                prop.name
+            ));
+        }
+    }
+
+    make_hover(lines.join("\n"))
+}
+
+pub fn build_child_event_hover(
+    vue_attr: &str,
+    child_analysis: &FileAnalysisSnapshot,
+    public_api_code: Option<&str>,
+) -> Option<Hover> {
+    let template = child_analysis.template.as_deref()?;
+    let handler_props = public_api_code
+        .map(parse_public_api_handler_props)
+        .unwrap_or_default();
+
+    if let Some(prop) = template.prop_definitions.iter().find(|prop| {
+        crate::tsgo::merge::jsx_prop_to_vue_attr(&prop.name).as_deref() == Some(vue_attr)
+    }) {
+        let signature = prop
+            .type_annotation
+            .clone()
+            .or_else(|| {
+                handler_props
+                    .iter()
+                    .find(|(name, _)| {
+                        crate::tsgo::merge::jsx_prop_to_vue_attr(name).as_deref() == Some(vue_attr)
+                    })
+                    .map(|(_, signature)| signature.clone())
+            })
+            .unwrap_or_else(|| "() => void".to_string());
+        return Some(make_hover(format!(
+            "```typescript\n{}{}\n```",
+            vue_attr,
+            normalize_event_handler_signature(&signature)
+        )));
+    }
+
+    if let Some(signature) = template
+        .emit_definitions
+        .iter()
+        .filter(|emit| emit.is_declared)
+        .find_map(|emit| {
+            let emit_vue_attr = vue_event_attr_label(&emit.event_name);
+            if emit_vue_attr == vue_attr {
+                Some(
+                    handler_signature_for_event(&emit.event_name, &handler_props)
+                        .unwrap_or_else(|| "() => void".to_string()),
+                )
+            } else {
+                None
+            }
+        })
+    {
+        return Some(make_hover(format!(
+            "```typescript\n{}{}\n```",
+            vue_attr,
+            normalize_event_handler_signature(&signature)
+        )));
+    }
+
+    handler_props
+        .iter()
+        .find(|(name, _)| {
+            crate::tsgo::merge::jsx_prop_to_vue_attr(name).as_deref() == Some(vue_attr)
+        })
+        .map(|(_, signature)| {
+            make_hover(format!(
+                "```typescript\n{}{}\n```",
+                vue_attr,
+                normalize_event_handler_signature(signature)
+            ))
+        })
+}
+
 fn hover_in_script(
     offset: usize,
     source: &str,
@@ -162,6 +419,28 @@ fn hover_in_script(
 
     let word = word_at_offset(source, offset)?;
     hover_for_word(&word, analysis)
+}
+
+fn direct_vue_import_binding_hover_target(
+    offset: u32,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<ImportBindingHoverTarget> {
+    for import in &analysis.imports {
+        if import.is_type_only || !import.source.ends_with(".vue") {
+            continue;
+        }
+        if let Some(binding) = import
+            .bindings
+            .iter()
+            .find(|binding| offset >= binding.span.start && offset < binding.span.end)
+        {
+            return Some(ImportBindingHoverTarget {
+                binding_name: binding.name.clone(),
+                import_source: import.source.clone(),
+            });
+        }
+    }
+    None
 }
 
 fn hover_in_template(
@@ -458,18 +737,7 @@ fn component_prop_constness_hover(
     // Find component usage at cursor position — match only the tag name.
     // c.name is PascalCase-normalized but the source tag may be kebab-case,
     // so scan the source to find the actual tag name end.
-    let comp = template.components.iter().find(|c| {
-        let tag_start = c.span.start + 1; // skip '<'
-                                          // Scan source to find tag name end (handles kebab-case)
-        let tag_end = source
-            .get(tag_start as usize..)
-            .and_then(|s| {
-                s.find(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
-                    .map(|i| tag_start + i as u32)
-            })
-            .unwrap_or(c.span.end);
-        offset >= tag_start && offset < tag_end
-    })?;
+    let comp = find_component_usage_at_tag_offset(offset, source, template)?;
 
     let mut lines = Vec::new();
     let source_info = comp
@@ -517,6 +785,85 @@ fn component_prop_constness_hover(
             value: lines.join("\n"),
         }),
         range: None,
+    })
+}
+
+fn component_tag_hover_target(
+    offset: u32,
+    source: &str,
+    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+) -> Option<ComponentTagHoverTarget> {
+    let comp = find_component_usage_at_tag_offset(offset, source, template)?;
+    let import_source = comp.import_source.clone()?;
+    let usage_props = comp
+        .props
+        .iter()
+        .map(|prop| ComponentUsagePropInfo {
+            name: prop.name.clone(),
+            is_bound: prop.is_bound,
+            constness: prop.constness,
+        })
+        .collect();
+
+    Some(ComponentTagHoverTarget {
+        component_name: comp.name.clone(),
+        import_source,
+        usage_props,
+    })
+}
+
+fn component_event_hover_target(
+    offset: u32,
+    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+) -> Option<ComponentEventHoverTarget> {
+    for el in &template.elements {
+        if !el.is_component {
+            continue;
+        }
+        for dir in &el.directives {
+            if dir.name != "on" {
+                continue;
+            }
+            let Some(arg_span) = dir.arg_span.as_ref() else {
+                continue;
+            };
+            let hover_start = dir.span.start.saturating_sub(1);
+            let hover_end = arg_span.end;
+            if offset < hover_start || offset >= hover_end {
+                continue;
+            }
+            let component = template.components.iter().find(|component| {
+                component.span.start == el.span.start && component.span.end == el.span.end
+            })?;
+            let import_source = component.import_source.clone()?;
+            let event_name = dir.argument.clone()?;
+            return Some(ComponentEventHoverTarget {
+                component_name: component.name.clone(),
+                import_source,
+                vue_attr: vue_event_attr_label(&event_name),
+                event_name,
+            });
+        }
+    }
+    None
+}
+
+fn find_component_usage_at_tag_offset<'a>(
+    offset: u32,
+    source: &str,
+    template: &'a verter_analysis::template::TemplateAnalysisSnapshot,
+) -> Option<&'a verter_analysis::template::TemplateComponentUsage> {
+    template.components.iter().find(|component| {
+        let tag_start = component.span.start + 1;
+        let tag_end = source
+            .get(tag_start as usize..)
+            .and_then(|slice| {
+                slice
+                    .find(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
+                    .map(|idx| tag_start + idx as u32)
+            })
+            .unwrap_or(component.span.end);
+        offset >= tag_start && offset < tag_end
     })
 }
 
@@ -759,6 +1106,272 @@ fn format_macro_hover(mac: &verter_analysis::AnalyzedMacro) -> Hover {
             value: lines.join("\n\n"),
         }),
         range: None,
+    }
+}
+
+fn parse_public_api_handler_props(code: &str) -> HashMap<String, String> {
+    parse_public_api_fields(code)
+        .into_iter()
+        .filter_map(|(name, value)| {
+            if name.starts_with("on") && value.contains("=>") {
+                Some((name, value))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn parse_public_api_props(code: &str) -> HashMap<String, String> {
+    parse_public_api_fields(code)
+        .into_iter()
+        .filter_map(|(name, value)| {
+            if name.starts_with("on") || name.starts_with('$') {
+                return None;
+            }
+            Some((name, value))
+        })
+        .collect()
+}
+
+fn parse_public_api_fields(code: &str) -> Vec<(String, String)> {
+    let Some(props_start) = code.find("$props:") else {
+        return Vec::new();
+    };
+    let props_slice = &code[props_start + "$props:".len()..];
+    let mut fields = Vec::new();
+    let mut brace_cursor = 0usize;
+    while let Some(rel) = props_slice[brace_cursor..].find('{') {
+        let open = brace_cursor + rel;
+        let Some(close) = find_matching_delimiter(props_slice, open, '{', '}') else {
+            break;
+        };
+        let block = &props_slice[open + 1..close];
+        fields.extend(parse_type_literal_fields(block));
+        brace_cursor = close + 1;
+    }
+    fields
+}
+
+fn parse_type_literal_fields(block: &str) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    let bytes = block.as_bytes();
+    let mut start = 0usize;
+    let mut depth_paren = 0u32;
+    let mut depth_bracket = 0u32;
+    let mut depth_brace = 0u32;
+    let mut idx = 0usize;
+
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'(' => depth_paren += 1,
+            b')' => depth_paren = depth_paren.saturating_sub(1),
+            b'[' => depth_bracket += 1,
+            b']' => depth_bracket = depth_bracket.saturating_sub(1),
+            b'{' => depth_brace += 1,
+            b'}' => depth_brace = depth_brace.saturating_sub(1),
+            b';' if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
+                if let Some(field) = parse_field_entry(block[start..idx].trim()) {
+                    fields.push(field);
+                }
+                start = idx + 1;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    if let Some(field) = parse_field_entry(block[start..].trim()) {
+        fields.push(field);
+    }
+
+    fields
+}
+
+fn parse_field_entry(field: &str) -> Option<(String, String)> {
+    let trimmed = field.trim();
+    if trimmed.is_empty() || trimmed.starts_with("/**") {
+        return None;
+    }
+
+    let separator = find_field_separator(trimmed)?;
+    let raw_name = trimmed[..separator].trim();
+    let raw_value = trimmed[separator + 1..].trim();
+    let raw_name = raw_name.trim_end_matches('?').trim();
+    let name = raw_name
+        .strip_prefix('"')
+        .and_then(|name| name.strip_suffix('"'))
+        .unwrap_or(raw_name)
+        .trim()
+        .to_string();
+    if name.is_empty() || raw_value.is_empty() {
+        return None;
+    }
+
+    Some((name, raw_value.to_string()))
+}
+
+fn find_field_separator(field: &str) -> Option<usize> {
+    let mut in_string = false;
+    for (idx, ch) in field.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            ':' if !in_string => return Some(idx),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_matching_delimiter(text: &str, open_idx: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0u32;
+    for (idx, ch) in text.char_indices().skip(open_idx) {
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+fn handler_signature_for_event(
+    event_name: &str,
+    handler_props: &HashMap<String, String>,
+) -> Option<String> {
+    let vue_attr = vue_event_attr_label(event_name);
+    emit_handler_keys(event_name)
+        .into_iter()
+        .find_map(|key| handler_props.get(&key).cloned())
+        .or_else(|| {
+            handler_props
+                .iter()
+                .find(|(name, _)| {
+                    crate::tsgo::merge::jsx_prop_to_vue_attr(name).as_deref()
+                        == Some(vue_attr.as_str())
+                })
+                .map(|(_, signature)| signature.clone())
+        })
+}
+
+fn emit_summary_signature(event_name: &str, handler_props: &HashMap<String, String>) -> String {
+    handler_signature_for_event(event_name, handler_props)
+        .map(|signature| summarize_event_handler_signature(&signature))
+        .unwrap_or_else(|| "()".to_string())
+}
+
+fn emit_name_for_summary(event_name: &str) -> String {
+    vue_event_attr_label(event_name)
+        .trim_start_matches('@')
+        .to_string()
+}
+
+fn normalize_event_handler_signature(signature: &str) -> String {
+    if let Some(tuple_params) = tuple_payload_params(signature) {
+        return format!("({tuple_params}) => void");
+    }
+    signature.trim().to_string()
+}
+
+fn summarize_event_handler_signature(signature: &str) -> String {
+    if let Some(tuple_params) = tuple_payload_params(signature) {
+        return format!("({tuple_params})");
+    }
+    if let Some(params) = parameter_list(signature) {
+        return format!("({params})");
+    }
+    "()".to_string()
+}
+
+fn tuple_payload_params(signature: &str) -> Option<String> {
+    let trimmed = signature.trim();
+    let start = trimmed.strip_prefix("(...args: [")?;
+    let end = start.find("]) =>")?;
+    Some(start[..end].trim().to_string())
+}
+
+fn parameter_list(signature: &str) -> Option<String> {
+    let trimmed = signature.trim();
+    let params = trimmed.strip_prefix('(')?;
+    let end = params.find(')')?;
+    Some(params[..end].trim().to_string())
+}
+
+fn emit_handler_keys(event_name: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let canonical = format!("on{}", capitalize_first(event_name));
+    keys.push(canonical.clone());
+
+    if !event_name.contains(':') {
+        let camel = format!("on{}", capitalize_first(&camelize_event_name(event_name)));
+        if camel != canonical {
+            keys.push(camel);
+        }
+
+        let kebab = format!("on{}", capitalize_first(&hyphenate_event_name(event_name)));
+        if kebab != canonical && !keys.iter().any(|key| key == &kebab) {
+            keys.push(kebab);
+        }
+    }
+
+    keys
+}
+
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn camelize_event_name(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut capitalize_next = false;
+    for ch in text.chars() {
+        if ch == '-' {
+            capitalize_next = true;
+            continue;
+        }
+        if capitalize_next {
+            result.extend(ch.to_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn hyphenate_event_name(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() + 4);
+    for (idx, ch) in text.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if idx > 0 {
+                result.push('-');
+            }
+            result.push(ch.to_ascii_lowercase());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn vue_event_attr_label(event_name: &str) -> String {
+    let mut parts = event_name.splitn(2, ':');
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next();
+    match second {
+        Some(second) => format!(
+            "@{}:{}",
+            hyphenate_event_name(first),
+            hyphenate_event_name(second)
+        ),
+        None => format!("@{}", hyphenate_event_name(first)),
     }
 }
 

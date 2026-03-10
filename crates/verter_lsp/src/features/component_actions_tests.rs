@@ -56,6 +56,7 @@ fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComp
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     ChildComponentContext {
+        canonical_id: "/project/src/Child.vue".to_string(),
         uri: "file:///project/src/Child.vue".parse().unwrap(),
         source: source.to_string(),
         analysis,

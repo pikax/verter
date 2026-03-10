@@ -23,6 +23,8 @@ use crate::features::action_utils;
 /// cross-file `WorkspaceEdit`s.
 #[derive(Clone)]
 pub struct ChildComponentContext {
+    /// Canonical ID of the child component file.
+    pub canonical_id: String,
     /// The URI of the child component file.
     pub uri: Uri,
     /// The full source text of the child component.
@@ -153,6 +155,7 @@ mod tests {
         let blocks = scan_sfc_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         ChildComponentContext {
+            canonical_id: "/project/src/Child.vue".to_string(),
             uri: "file:///project/src/Child.vue".parse().unwrap(),
             source: source.to_string(),
             analysis,

@@ -142,6 +142,7 @@ mod tests {
                     model_name: None,
                     has_inherit_attrs_false: false,
                     prop_fields: vec![],
+                    emit_fields: vec![],
                     span: Span::new(20, 42),
                 },
                 AnalyzedMacro {
@@ -152,6 +153,7 @@ mod tests {
                     model_name: Some("title".to_string()),
                     has_inherit_attrs_false: false,
                     prop_fields: vec![],
+                    emit_fields: vec![],
                     span: Span::new(50, 72),
                 },
             ],
