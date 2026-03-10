@@ -1916,7 +1916,7 @@ impl VerterLanguageServer {
         };
 
         if is_vite_dep {
-            tracing::info!(
+            tracing::debug!(
                 "vite config dependency changed: {} — triggering registry rebuild",
                 canonical_path
             );
@@ -3759,7 +3759,7 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
     // Notify client about Vite configs that need trust approval
     for info in &trust_required {
-        tracing::info!(
+        tracing::debug!(
             "vite config trust required: {} ({})",
             info.config_path,
             info.reason

@@ -934,7 +934,10 @@ impl ProjectRegistry {
                 });
             }
 
-            // Fallback project (no tsconfig) — apply vite aliases if enabled
+            // Fallback project (no tsconfig) — apply vite aliases if enabled.
+            // Skip vite analysis when tsconfigs were found for this root: those projects
+            // already own alias resolution and the fallback is only a catch-all.
+            let has_tsconfigs = !discovery.configs().is_empty();
             let lint = discover_lint_config(&root_path);
             let linter = verter_diagnostics::Linter::new(lint.config.clone());
             let mut fallback_resolver = TsConfigPathResolver::default();
@@ -942,7 +945,7 @@ impl ProjectRegistry {
             let mut fallback_vite_config_path = None;
             let mut fallback_vite_config_deps = Vec::new();
 
-            if vite_opts.enabled {
+            if vite_opts.enabled && !has_tsconfigs {
                 use crate::vite_config::{analyze_vite_config, ViteConfigAnalysis};
                 match analyze_vite_config(&root_path) {
                     ViteConfigAnalysis::Resolved {
@@ -951,7 +954,7 @@ impl ProjectRegistry {
                         dependency_files,
                     } => {
                         if !aliases.is_empty() {
-                            tracing::info!(
+                            tracing::debug!(
                                 "statically resolved {} vite aliases for {}",
                                 aliases.len(),
                                 canonical
@@ -991,7 +994,7 @@ impl ProjectRegistry {
                                     )
                                 {
                                     if !result.aliases.is_empty() {
-                                        tracing::info!(
+                                        tracing::debug!(
                                             "trusted execution: {} vite aliases for {}",
                                             result.aliases.len(),
                                             canonical
