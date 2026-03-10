@@ -85,10 +85,12 @@ import { createHost } from '@verter/wasm'
 
 const host = await createHost({ devMode: true })
 
-host.upsert({
+const update = host.upsert({
   inputId: 'App.vue',
   source: sfcSource,
 })
+
+// update.moduleReferences — import/require sites for dependency tracking
 
 const file = host.getVirtualFile({
   rawId: 'App.vue',
@@ -117,14 +119,46 @@ The `Host` class exposes the same methods as `@verter/native`'s `VerterHost`:
 | `resolve(rawId)` | `HostResolvedId \| null` | Resolve raw ID to canonical ID |
 | `upsert(request)` | `HostUpdateResult` | Register/update a file |
 | `applyStyleOverrides(request)` | `HostUpdateResult` | Apply preprocessed CSS overrides |
-| `getTsx(canonicalId, profile?)` | `HostTsxResponse \| null` | Get TSX for type checking |
+| `getIde(canonicalId, profile?)` | `HostIdeResponse \| null` | Get TSX or JSX for type checking |
 | `getVirtualFile(query)` | `HostVirtualFileResponse` | Get compiled virtual file |
 | `listVirtualFiles(canonicalId)` | `HostVirtualNodeKind[]` | List virtual nodes for a file |
 | `remove(canonicalOrAlias)` | `HostRemoveResult \| null` | Remove file from host |
 | `getAnalysis(canonicalOrAlias)` | `unknown \| null` | Get analysis snapshot (native JS object) |
 | `setImportDependencies(id, deps)` | `void` | Set resolved import dependencies |
+| `collectResolvableModuleReferenceSpecifiers(moduleReferences)` | `string[]` | Return exact/finite candidate specifiers in encounter order |
+| `resolveKnownModuleReferenceDependencies(ownerId, moduleReferences, knownIds, extensions?)` | `string[]` | Resolve exact/finite candidates against an in-memory file set |
 
 See the [@verter/native documentation](./native.md) for detailed descriptions of each method and their parameter types.
+
+#### Shared module reference flow
+
+`host.upsert()` now returns `moduleReferences`, which are classified as:
+
+- `exact` — one literal specifier
+- `finiteSet` — a bounded static candidate set
+- `unknownDynamic` — intentionally unresolved
+
+For browser-only consumers such as the playground, keep resolution in memory:
+
+```ts
+const update = host.upsert({
+  inputId: '/src/App.vue',
+  source: sfcSource,
+})
+
+const resolvedDeps = host.resolveKnownModuleReferenceDependencies(
+  '/src/App.vue',
+  update.moduleReferences,
+  Object.keys(fileMap),
+  ['.ts', '.tsx', '.js', '.jsx', '.vue', '/index.ts'],
+)
+
+host.setImportDependencies('/src/App.vue', resolvedDeps)
+```
+
+This helper never reads from disk. It only considers the supplied `knownIds` and extension order, and it skips every `unknownDynamic` import. If you need a bundler to participate in resolution, use `collectResolvableModuleReferenceSpecifiers()` to hand only exact/finite candidates to that resolver, then call `setImportDependencies()` with the successfully resolved canonical IDs.
+
+For IDE/provider consumers, importing `App.vue` resolves through the public `.vue.ts` surface. The internal IDE TSX/JSX virtual filename is not part of the public contract.
 
 ## Types
 
@@ -212,7 +246,7 @@ The `Host` class accepts and returns the same `Host*` types as `@verter/native`.
 
 - `HostConfig`
 - `HostCompileProfile`
-- `HostTsxResponse`
+- `HostIdeResponse`
 - `HostUpdateResult`
 - `HostUpsertRequest`
 - `HostVirtualFileResponse`

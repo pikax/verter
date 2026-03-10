@@ -19,11 +19,11 @@ sha2 = { workspace = true }
 bitflags = "2"
 rustc-hash = { workspace = true }
 serde = { workspace = true }
-
+serde_json = { workspace = true }
+glob = "0.3"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
-serde_json = { workspace = true }
 
 [[bench]]
 name = "analysis_bench"

@@ -26,6 +26,7 @@ mod exports;
 pub mod file_usage;
 mod imports;
 mod macros;
+pub mod project_resolver;
 pub mod project_index;
 pub mod scope;
 pub mod selector_match;

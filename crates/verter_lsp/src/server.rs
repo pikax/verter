@@ -709,7 +709,7 @@ impl VerterLanguageServer {
                     return;
                 };
                 self.close_provider_paths(&transition.stale_paths).await;
-                let mut committed_state = transition.next;
+                let committed_state = transition.next;
                 let Some(ide_path) = committed_state.ide_path.clone() else {
                     return;
                 };
@@ -733,7 +733,7 @@ impl VerterLanguageServer {
                 Some(id) => id,
                 None => return,
             };
-            let Some(mut transition) = self
+            let Some(transition) = self
                 .documents
                 .get_ide(uri)
                 .and_then(|ide| {
@@ -827,7 +827,9 @@ impl VerterLanguageServer {
         let vue_targets = prepared
             .resolved_dependencies
             .iter()
-            .filter(|dependency| dependency.file_kind == verter_host::FileKind::VueSfc)
+            .filter(|dependency| {
+                dependency.provider_target == crate::project_resolver::ProviderTarget::VuePublicApi
+            })
             .map(|dependency| dependency.source_id.clone())
             .collect::<Vec<_>>();
         for vue_target in vue_targets {
@@ -838,9 +840,8 @@ impl VerterLanguageServer {
             .resolved_dependencies
             .iter()
             .filter(|dependency| {
-                dependency.file_kind == verter_host::FileKind::NonSfc
-                    && dependency.provider_target
-                        == crate::project_resolver::ProviderTarget::ShadowSourceFile
+                dependency.provider_target
+                    == crate::project_resolver::ProviderTarget::ShadowSourceFile
             })
             .map(|dependency| dependency.source_id.clone())
             .collect::<Vec<_>>();
@@ -931,7 +932,8 @@ impl VerterLanguageServer {
             }
 
             for dependency in resolved_dependencies {
-                if dependency.file_kind == verter_host::FileKind::VueSfc {
+                if dependency.provider_target == crate::project_resolver::ProviderTarget::VuePublicApi
+                {
                     self.sync_vue_public_api_by_canonical_id(&dependency.source_id)
                         .await;
                 } else if dependency.provider_target
@@ -1084,15 +1086,6 @@ impl VerterLanguageServer {
             .unwrap_or_else(|| uri.as_str().to_string());
         let snapshot = self.resolver_snapshot()?;
         provider_ide_path_for_source(&snapshot.resolver, &canonical, self.documents.is_jsx(uri))
-    }
-
-    /// Generate the DTS declaration file path (.vue.ts) for a given Vue file URI.
-    /// Uses TypeScript 5.0 `allowArbitraryExtensions` naming convention:
-    /// `import('./Comp.vue')` resolves to `./Comp.vue.ts`
-    fn dts_path_for_uri(&self, uri: &Uri) -> Option<String> {
-        let canonical = self.documents.get_canonical_id(uri)?;
-        let snapshot = self.resolver_snapshot()?;
-        provider_api_path_for_source(&snapshot.resolver, &canonical)
     }
 
     /// Get IDE content and mapper by IDE path (reverse lookup).
@@ -2210,6 +2203,7 @@ fn provider_ide_path_for_source(
     resolver.provider_ide_id_for_source(canonical_id, is_jsx)
 }
 
+#[cfg(test)]
 fn provider_api_path_for_source(
     resolver: &crate::project_resolver::NativeProjectResolver,
     canonical_id: &str,
@@ -2579,7 +2573,7 @@ fn collect_priority_vue_targets_from_module_references(
             let Some(resolved) = snapshot.resolver.resolve_with_reader(reader, &request) else {
                 continue;
             };
-            if resolved.file_kind == verter_host::FileKind::VueSfc
+            if resolved.provider_target == crate::project_resolver::ProviderTarget::VuePublicApi
                 && seen.insert(resolved.source_id.clone())
             {
                 ids.push(resolved.source_id);

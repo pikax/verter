@@ -80,6 +80,75 @@ fn host_err(err: host::HostError) -> JsValue {
     JsValue::from_str(&host_error_to_string(&err))
 }
 
+fn ffi_module_reference_syntax_from_str(
+    syntax: &str,
+) -> Result<verter_analysis::ModuleReferenceSyntax, JsValue> {
+    match syntax {
+        "staticImport" => Ok(verter_analysis::ModuleReferenceSyntax::StaticImport),
+        "exportFrom" => Ok(verter_analysis::ModuleReferenceSyntax::ExportFrom),
+        "dynamicImport" => Ok(verter_analysis::ModuleReferenceSyntax::DynamicImport),
+        "requireCall" => Ok(verter_analysis::ModuleReferenceSyntax::RequireCall),
+        other => Err(ffi_err(format!("unknown module reference syntax: {other}"))),
+    }
+}
+
+fn ffi_module_reference_semantics_from_str(
+    semantics: &str,
+) -> Result<verter_analysis::ModuleReferenceSemantics, JsValue> {
+    match semantics {
+        "import" => Ok(verter_analysis::ModuleReferenceSemantics::Import),
+        "require" => Ok(verter_analysis::ModuleReferenceSemantics::Require),
+        other => Err(ffi_err(format!(
+            "unknown module reference semantics: {other}"
+        ))),
+    }
+}
+
+fn ffi_module_reference_analyzability_from_str(
+    analyzability: &str,
+) -> Result<verter_analysis::ModuleReferenceAnalyzability, JsValue> {
+    match analyzability {
+        "exact" => Ok(verter_analysis::ModuleReferenceAnalyzability::Exact),
+        "finiteSet" => Ok(verter_analysis::ModuleReferenceAnalyzability::FiniteSet),
+        "unknownDynamic" => Ok(verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic),
+        other => Err(ffi_err(format!(
+            "unknown module reference analyzability: {other}"
+        ))),
+    }
+}
+
+fn ffi_module_reference_to_analysis(
+    input: FfiModuleReference,
+) -> Result<verter_analysis::AnalyzedModuleReference, JsValue> {
+    Ok(verter_analysis::AnalyzedModuleReference {
+        syntax: ffi_module_reference_syntax_from_str(&input.syntax)?,
+        semantics: ffi_module_reference_semantics_from_str(&input.semantics)?,
+        is_type_only: input.is_type_only,
+        span: verter_span::Span::new(input.span_start, input.span_end),
+        expr_span: verter_span::Span::new(input.expr_span_start, input.expr_span_end),
+        raw_text: input.raw_text,
+        literal_specifier: input.literal_specifier,
+        finite_specifiers: input.finite_specifiers,
+        static_prefix: input.static_prefix,
+        analyzability: ffi_module_reference_analyzability_from_str(&input.analyzability)?,
+    })
+}
+
+fn default_known_dependency_extensions() -> Vec<String> {
+    vec![
+        "".to_string(),
+        ".ts".to_string(),
+        ".tsx".to_string(),
+        ".js".to_string(),
+        ".jsx".to_string(),
+        ".mts".to_string(),
+        ".mjs".to_string(),
+        ".cts".to_string(),
+        ".cjs".to_string(),
+        ".vue".to_string(),
+    ]
+}
+
 // =============================================================================
 // VerterHost (in-memory virtual file host)
 //
@@ -368,6 +437,55 @@ impl WasmVerterHost {
     ) -> Result<(), JsValue> {
         let deps: Vec<String> = parse_wasm_input(resolved_deps)?;
         catch_panic(|| self.inner.set_import_dependencies(canonical_or_alias, deps))
+    }
+
+    /// Returns the exact and finite-set module reference candidates in encounter order.
+    ///
+    /// Unknown-dynamic references are skipped entirely.
+    #[wasm_bindgen(js_name = collectResolvableModuleReferenceSpecifiers)]
+    pub fn collect_resolvable_module_reference_specifiers(
+        &self,
+        module_references: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let module_references = parse_wasm_input::<Vec<FfiModuleReference>>(module_references)?
+            .into_iter()
+            .map(ffi_module_reference_to_analysis)
+            .collect::<Result<Vec<_>, _>>()?;
+        let specifiers =
+            verter_analysis::project_resolver::collect_resolvable_module_reference_specifiers(
+                &module_references,
+            );
+        to_wasm_value(&specifiers)
+    }
+
+    /// Resolves exact and finite module reference candidates against a caller-provided
+    /// in-memory known-file set, without reading from disk.
+    #[wasm_bindgen(js_name = resolveKnownModuleReferenceDependencies)]
+    pub fn resolve_known_module_reference_dependencies(
+        &self,
+        owner_id: &str,
+        module_references: JsValue,
+        known_ids: JsValue,
+        extensions: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let module_references = parse_wasm_input::<Vec<FfiModuleReference>>(module_references)?
+            .into_iter()
+            .map(ffi_module_reference_to_analysis)
+            .collect::<Result<Vec<_>, _>>()?;
+        let known_ids: Vec<String> = parse_wasm_input(known_ids)?;
+        let extensions = if extensions.is_undefined() || extensions.is_null() {
+            default_known_dependency_extensions()
+        } else {
+            parse_wasm_input::<Vec<String>>(extensions)?
+        };
+        let resolved =
+            verter_analysis::project_resolver::resolve_known_module_reference_dependencies(
+                owner_id,
+                &module_references,
+                &known_ids,
+                &extensions,
+            );
+        to_wasm_value(&resolved)
     }
 
     /// Runs lint rules against a file's analysis data and returns diagnostics.

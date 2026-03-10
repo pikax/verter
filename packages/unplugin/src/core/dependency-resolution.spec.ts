@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { VerterHost } from "@verter/native";
 
 import { collectResolvableModuleReferenceSpecifiers } from "./dependency-resolution";
 
 describe("collectResolvableModuleReferenceSpecifiers", () => {
-  it("keeps exact and finite-set candidates in encounter order", () => {
-    const specifiers = collectResolvableModuleReferenceSpecifiers([
+  it("matches the shared native host helper for exact and finite-set candidates", () => {
+    const host = new VerterHost();
+    const moduleReferences = [
       {
         syntax: "staticImport",
         semantics: "import",
@@ -30,13 +32,16 @@ describe("collectResolvableModuleReferenceSpecifiers", () => {
         exprSpanStart: 12,
         exprSpanEnd: 28,
       },
-    ]);
+    ];
 
-    expect(specifiers).toEqual(["./Foo.vue", "./Bar.vue", "./types"]);
+    expect(collectResolvableModuleReferenceSpecifiers(host, moduleReferences)).toEqual(
+      host.collectResolvableModuleReferenceSpecifiers(moduleReferences),
+    );
   });
 
   it("skips unknown dynamic references without speculative prefix matching", () => {
-    const specifiers = collectResolvableModuleReferenceSpecifiers([
+    const host = new VerterHost();
+    const specifiers = collectResolvableModuleReferenceSpecifiers(host, [
       {
         syntax: "dynamicImport",
         semantics: "import",

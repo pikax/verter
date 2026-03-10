@@ -1,13 +1,13 @@
 /**
  * @ai-generated - Integration tests for the unplugin factory.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { defineConfig, resolveConfig } from "vite";
 import unplugin, { unpluginFactory } from "./index";
-import { resetHost } from "./core/compiler";
+import { loadHost, resetHost } from "./core/compiler";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 
 describe("unplugin factory", () => {
@@ -495,6 +495,115 @@ const count = helper()
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("bundler dependency delegation", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = join(
+      tmpdir(),
+      `verter-deps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(tempDir, { recursive: true });
+    resetHost();
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+    resetHost();
+  });
+
+  function createPlugin() {
+    return unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+  }
+
+  it("transform delegates exact and finite candidates through the resolve hook", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+    const typeFile = join(tempDir, "types.ts").replace(/\\/g, "/");
+    const aFile = join(tempDir, "a.ts").replace(/\\/g, "/");
+    const bFile = join(tempDir, "b.ts").replace(/\\/g, "/");
+    writeFileSync(typeFile, "export interface Props { name: string }\n");
+    writeFileSync(aFile, "export const a = 1\n");
+    writeFileSync(bFile, "export const b = 2\n");
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      const map: Record<string, string> = {
+        "./types": typeFile,
+        "./a": aFile,
+        "./b": bFile,
+      };
+      return map[source] ? { id: map[source] } : null;
+    });
+
+    await plugin.transform.call(
+      { resolve: resolveSpy },
+      `<script setup lang="ts">
+import type { Props } from './types'
+const branch = cond ? './a' : './b'
+import(branch)
+</script>
+<template><div>ok</div></template>`,
+      filename,
+    );
+
+    expect(resolveSpy).toHaveBeenCalledWith("./types", filename, { skipSelf: true });
+    expect(resolveSpy).toHaveBeenCalledWith("./a", filename, { skipSelf: true });
+    expect(resolveSpy).toHaveBeenCalledWith("./b", filename, { skipSelf: true });
+  });
+
+  it("transform does not delegate unknown dynamic references", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "Dynamic.vue").replace(/\\/g, "/");
+    const resolveSpy = vi.fn();
+
+    await plugin.transform.call(
+      { resolve: resolveSpy },
+      `<script setup lang="ts">
+import(\`./widgets/\${window.name}\`)
+</script>
+<template><div>ok</div></template>`,
+      filename,
+    );
+
+    expect(resolveSpy).not.toHaveBeenCalled();
+  });
+
+  it("resolved .vue dependencies are recorded but not upserted as non_sfc", async () => {
+    const plugin = createPlugin();
+    const host = loadHost();
+    const filename = join(tempDir, "Parent.vue").replace(/\\/g, "/");
+    const childFile = join(tempDir, "Child.vue").replace(/\\/g, "/");
+    writeFileSync(childFile, "<template><div>child</div></template>\n");
+
+    const upsertSpy = vi.spyOn(host, "upsert");
+    const setDepsSpy = vi.spyOn(host, "setImportDependencies");
+
+    await plugin.transform.call(
+      {
+        resolve: vi.fn(async (source: string) =>
+          source === "./Child.vue" ? { id: childFile } : null,
+        ),
+      },
+      `<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>`,
+      filename,
+    );
+
+    expect(setDepsSpy).toHaveBeenCalledWith(filename, [childFile]);
+    expect(
+      upsertSpy.mock.calls.some(
+        ([request]) =>
+          request?.inputId === childFile && request?.fileKind === "non_sfc",
+      ),
+    ).toBe(false);
   });
 });
 

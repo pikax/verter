@@ -95,7 +95,7 @@ const result = host.upsert({
 // result.changed — whether content actually changed
 // result.sliceChanges — which blocks (script/template/style) changed
 // result.externalSourceRequests — external src= attributes to resolve
-// result.importSpecifiers — script imports to resolve for type deps
+// result.moduleReferences — import/require sites for dependency tracking
 // result.diagnostics — parse-time diagnostics
 ```
 
@@ -110,6 +110,14 @@ const result = host.upsert({
 | `aliases` | `string[]?` | Additional IDs that resolve to this file |
 
 **Returns:** `HostUpdateResult`
+
+`HostUpdateResult.moduleReferences` is the shared dependency-tracking surface for non-IDE consumers. Each reference reports:
+
+- `analyzability: "exact"` when there is one literal specifier
+- `analyzability: "finiteSet"` when static analysis found a bounded candidate set
+- `analyzability: "unknownDynamic"` when the import is too dynamic to resolve safely
+
+Only the exact and finite-set cases should feed dependency resolution. Unknown dynamic imports are intentionally left unresolved.
 
 #### `host.getVirtualFile(query)`
 
@@ -133,19 +141,36 @@ const file = host.getVirtualFile({
 
 **Returns:** `HostVirtualFileResponse`
 
-#### `host.getTsx(canonicalId, profile?)`
+#### `host.getPublicApi(canonicalId)`
 
-Get the TSX representation of a file for type checking. Used by the LSP and TSGO integration.
+Get the public TypeScript surface for a Vue SFC.
 
 ```ts
-const tsx = host.getTsx('/path/to/App.vue', {
-  enableTypes: true,
-})
-// tsx.code — valid TSX code
-// tsx.sourceMap — source map JSON string
+const publicApi = host.getPublicApi('/path/to/App.vue')
+// publicApi.code — public `.vue.ts` module surface
+// publicApi.sourceMap — source map JSON string
 ```
 
-**Returns:** `HostTsxResponse | null`
+For provider and IDE consumers, importing `App.vue` resolves through the public `.vue.ts` surface. The internal IDE TSX/JSX virtual filename is not part of the public API contract.
+
+**Returns:** `{ code: string; sourceMap?: string } | null`
+
+#### `host.getIde(canonicalId, profile?)`
+
+Get the IDE representation of a file for type checking. Used by the LSP and provider integration.
+
+```ts
+const ide = host.getIde('/path/to/App.vue', {
+  target: 'ide',
+})
+// ide.code — valid TSX or JSX code
+// ide.sourceMap — source map JSON string
+// ide.isJsx — true for JSX, false for TSX
+```
+
+The IDE virtual filename used behind this API is internal. Consumers should rely on the returned code and source map, not on a specific virtual suffix such as `.vue.tsx`.
+
+**Returns:** `HostIdeResponse | null`
 
 #### `host.applyStyleOverrides(request)`
 
@@ -207,6 +232,58 @@ host.setImportDependencies('/path/to/App.vue', [
   '/path/to/composables.ts',
 ])
 ```
+
+Call this after you resolve `moduleReferences` from `upsert()`. The host does not guess unresolved dynamic imports for you.
+
+#### `host.collectResolvableModuleReferenceSpecifiers(moduleReferences)`
+
+Collect the exact and finite candidate specifiers from `HostUpdateResult.moduleReferences`, preserving encounter order and skipping `unknownDynamic` entries.
+
+```ts
+const { moduleReferences } = host.upsert({
+  inputId: '/path/to/App.vue',
+  source: sfcSource,
+})
+
+const candidates = host.collectResolvableModuleReferenceSpecifiers(moduleReferences)
+// ['vue', './foo', './bar', './bar/index']
+```
+
+Use this when you want the bundler or another resolver to handle candidate lookup. This is the contract used by `@verter/unplugin`: delegate only exact/finite candidates, leave unknown dynamic imports unresolved, then pass the resolved canonical IDs back through `setImportDependencies()`.
+
+**Returns:** `string[]`
+
+#### `host.resolveKnownModuleReferenceDependencies(ownerCanonicalId, moduleReferences, knownIds, extensions?)`
+
+Resolve exact and finite `moduleReferences` against an explicit in-memory file set, without reading from disk.
+
+```ts
+const knownIds = [
+  '/src/App.vue',
+  '/src/composables/useCount.ts',
+  '/src/types.ts',
+]
+
+const resolvedDeps = host.resolveKnownModuleReferenceDependencies(
+  '/src/App.vue',
+  moduleReferences,
+  knownIds,
+  ['.ts', '.tsx', '.js', '.jsx', '.vue', '/index.ts'],
+)
+
+host.setImportDependencies('/src/App.vue', resolvedDeps)
+```
+
+This is the shared non-IDE resolver path used by the playground. Resolution is restricted to the provided `knownIds` plus the caller-supplied extension order. The helper remains disk-free and skips every `unknownDynamic` import.
+
+**Parameters:**
+
+- `ownerCanonicalId` (`string`) — canonical ID of the importing file
+- `moduleReferences` (`HostModuleReference[]`) — `upsert()` output
+- `knownIds` (`string[]`) — explicit file map or pre-known canonical IDs
+- `extensions` (`string[]?`) — extension probe order for relative candidates
+
+**Returns:** `string[]`
 
 ## Types
 
@@ -297,8 +374,8 @@ interface HostCompileProfile {
   forceJs?: boolean
   /** Generate source maps */
   sourceMap?: boolean
-  /** Enable type annotations in TSX output */
-  enableTypes?: boolean
+  /** Compilation target preset */
+  target?: 'bundler' | 'ide' | 'analysis'
 }
 ```
 
@@ -318,6 +395,8 @@ interface HostUpdateResult {
   diagnostics: HostDiagnosticsSnapshot
   externalSourceRequests: HostExternalSourceRequest[]
   importSpecifiers: HostScriptImportInfo[]
+  moduleReferences: HostModuleReference[]
+  preprocessorRequests: HostPreprocessorRequest[]
   parseDurationMs: number
 }
 ```

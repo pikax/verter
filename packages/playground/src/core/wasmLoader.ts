@@ -24,6 +24,13 @@ export interface WasmModule {
     getVirtualFile: (query: unknown) => unknown;
     listVirtualFiles: (canonicalId: string) => unknown;
     remove: (canonicalOrAlias: string) => unknown;
+    collectResolvableModuleReferenceSpecifiers?: (moduleReferences: unknown) => unknown;
+    resolveKnownModuleReferenceDependencies?: (
+      ownerCanonicalId: string,
+      moduleReferences: unknown,
+      knownIds: string[],
+      extensions?: string[],
+    ) => unknown;
   };
   default: (input?: unknown) => Promise<unknown>;
 }

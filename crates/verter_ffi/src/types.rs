@@ -174,7 +174,7 @@ pub struct FfiScriptImportInfo {
 }
 
 /// Summary of a single module reference found in a script block.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FfiModuleReference {
     pub syntax: String,

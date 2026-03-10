@@ -77,6 +77,89 @@ const view = import('./Foo.vue')
     expect(mainFile.code).toContain("const x");
     expect(mainFile.code).not.toContain(": number");
   });
+
+  it("collects exact and finite module reference candidates in encounter order", () => {
+    const host = new VerterHost() as any;
+    const specifiers = host.collectResolvableModuleReferenceSpecifiers([
+      {
+        syntax: "staticImport",
+        semantics: "import",
+        isTypeOnly: false,
+        rawText: "'./exact'",
+        literalSpecifier: "./exact",
+        finiteSpecifiers: [],
+        analyzability: "exact",
+        spanStart: 0,
+        spanEnd: 8,
+        exprSpanStart: 0,
+        exprSpanEnd: 8,
+      },
+      {
+        syntax: "dynamicImport",
+        semantics: "import",
+        isTypeOnly: false,
+        rawText: "`./${name}`",
+        finiteSpecifiers: ["./components/Foo.vue", "./utils", "./exact"],
+        analyzability: "finiteSet",
+        spanStart: 10,
+        spanEnd: 24,
+        exprSpanStart: 10,
+        exprSpanEnd: 24,
+      },
+      {
+        syntax: "dynamicImport",
+        semantics: "import",
+        isTypeOnly: false,
+        rawText: "`./${name}.vue`",
+        finiteSpecifiers: [],
+        staticPrefix: "./",
+        analyzability: "unknownDynamic",
+        spanStart: 26,
+        spanEnd: 42,
+        exprSpanStart: 26,
+        exprSpanEnd: 42,
+      },
+    ]);
+
+    expect(specifiers).toEqual(["./exact", "./components/Foo.vue", "./utils"]);
+  });
+
+  it("resolves known module reference dependencies with caller-supplied extension order", () => {
+    const host = new VerterHost() as any;
+    const moduleReferences = [
+      {
+        syntax: "staticImport",
+        semantics: "import",
+        isTypeOnly: false,
+        rawText: "'./widget'",
+        literalSpecifier: "./widget",
+        finiteSpecifiers: [],
+        analyzability: "exact",
+        spanStart: 0,
+        spanEnd: 9,
+        exprSpanStart: 0,
+        exprSpanEnd: 9,
+      },
+    ];
+    const knownIds = ["src/widget.ts", "src/widget.vue"];
+
+    expect(
+      host.resolveKnownModuleReferenceDependencies(
+        "src/App.vue",
+        moduleReferences,
+        knownIds,
+        [".vue", ".ts"],
+      ),
+    ).toEqual(["src/widget.vue"]);
+    expect(
+      host.resolveKnownModuleReferenceDependencies(
+        "src/App.vue",
+        moduleReferences,
+        knownIds,
+        [".ts", ".vue"],
+      ),
+    ).toEqual(["src/widget.ts"]);
+  });
 });
 
 describe("VerterHost type declarations in sync with native binary", () => {
@@ -101,6 +184,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
     const declaredMethods = [
       "applyBlockOverrides",
       "applyStyleOverrides",
+      "collectResolvableModuleReferenceSpecifiers",
       "getAnalysis",
       "getCodeActions",
       "getDocumentSymbols",
@@ -113,6 +197,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "matchCssSelectors",
       "remove",
       "resolve",
+      "resolveKnownModuleReferenceDependencies",
       "setImportDependencies",
       "upsert",
     ].sort();

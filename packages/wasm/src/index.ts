@@ -75,6 +75,7 @@ export type {
   HostDiagnosticsSnapshot,
   HostExternalSourceRequest,
   HostScriptImportInfo,
+  HostModuleReference,
   HostPreprocessorRequest,
   HostBlockOverrideEntry,
   HostBlockOverrideRequest,
@@ -100,6 +101,7 @@ import type {
   HostConfig,
   HostCompileProfile,
   HostIdeResponse,
+  HostModuleReference,
   HostResolvedId,
   HostUpsertRequest,
   HostStyleOverrideRequest,
@@ -135,6 +137,15 @@ type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
 type WasmHostGetIdeFn = (canonicalId: string, profile?: HostCompileProfile) => HostIdeResponse | null;
 type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
 type WasmHostSetImportDependenciesFn = (canonicalOrAlias: string, resolvedDeps: string[]) => void;
+type WasmHostCollectResolvableModuleReferenceSpecifiersFn = (
+  moduleReferences: HostModuleReference[],
+) => string[];
+type WasmHostResolveKnownModuleReferenceDependenciesFn = (
+  ownerCanonicalId: string,
+  moduleReferences: HostModuleReference[],
+  knownIds: string[],
+  extensions?: string[],
+) => string[];
 type WasmHostLintFn = (canonicalOrAlias: string, config?: unknown) => HostLintDiagnostic[];
 type WasmHostGetCodeActionsFn = (canonicalOrAlias: string, offset: number) => HostCodeAction[];
 type WasmHostGetLintRuleMetadataFn = () => HostLintRuleMetadata[];
@@ -151,6 +162,8 @@ interface WasmHostBinding {
   remove: WasmHostRemoveFn;
   getAnalysis: WasmHostGetAnalysisFn;
   setImportDependencies: WasmHostSetImportDependenciesFn;
+  collectResolvableModuleReferenceSpecifiers: WasmHostCollectResolvableModuleReferenceSpecifiersFn;
+  resolveKnownModuleReferenceDependencies: WasmHostResolveKnownModuleReferenceDependenciesFn;
   lint: WasmHostLintFn;
   getCodeActions: WasmHostGetCodeActionsFn;
   getLintRuleMetadata: WasmHostGetLintRuleMetadataFn;
@@ -314,6 +327,24 @@ export class Host {
    */
   setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void {
     this.inner.setImportDependencies(canonicalOrAlias, resolvedDeps);
+  }
+
+  collectResolvableModuleReferenceSpecifiers(moduleReferences: HostModuleReference[]): string[] {
+    return this.inner.collectResolvableModuleReferenceSpecifiers(moduleReferences);
+  }
+
+  resolveKnownModuleReferenceDependencies(
+    ownerCanonicalId: string,
+    moduleReferences: HostModuleReference[],
+    knownIds: string[],
+    extensions?: string[],
+  ): string[] {
+    return this.inner.resolveKnownModuleReferenceDependencies(
+      ownerCanonicalId,
+      moduleReferences,
+      knownIds,
+      extensions,
+    );
   }
 
   /** Runs lint rules against a file and returns diagnostics with UTF-16 spans. */

@@ -1,7 +1,7 @@
 /**
  * @ai-generated - Tests for compiler pure functions.
  */
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -253,6 +253,51 @@ describe("resolveKnownModuleReferenceDependencies", () => {
     expect(
       resolveKnownModuleReferenceDependencies("src/App.vue", moduleReferences, files),
     ).toEqual(["src/exact.ts", "src/components/Foo.vue", "src/utils/index.ts"]);
+  });
+
+  it("uses shared host resolver when the loaded wasm runtime supports it", async () => {
+    const host = createMockPlaygroundHost({
+      hasSharedResolver: true,
+      resolvedDeps: ["src/types.ts"],
+    });
+    const compiler = await loadCompilerWithMockedWasmHost(host.MockHost as any);
+    const app = new File("src/App.vue", "<template><div>ok</div></template>");
+    const types = new File("src/types.ts", "export interface Props { name: string }");
+
+    await compiler.compileFile(app, undefined, undefined, {
+      [app.filename]: app,
+      [types.filename]: types,
+    });
+
+    expect(host.resolveKnownModuleReferenceDependencies).toHaveBeenCalledWith(
+      "src/App.vue",
+      expect.any(Array),
+      ["src/App.vue", "src/types.ts"],
+      ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".vue"],
+    );
+    expect(host.setImportDependencies).toHaveBeenCalledWith("src/App.vue", ["src/types.ts"]);
+  });
+
+  it("falls back to the local TS resolver when an older loaded wasm runtime lacks the helper", async () => {
+    const host = createMockPlaygroundHost({
+      hasSharedResolver: false,
+    });
+    const compiler = await loadCompilerWithMockedWasmHost(host.MockHost as any);
+    const app = new File("src/App.vue", "<template><div>ok</div></template>");
+    const types = new File("src/types.ts", "export interface Props { name: string }");
+
+    await compiler.compileFile(app, undefined, undefined, {
+      [app.filename]: app,
+      [types.filename]: types,
+    });
+
+    expect(host.setImportDependencies).toHaveBeenCalledWith("src/App.vue", ["src/types.ts"]);
+    expect(host.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputId: "src/types.ts",
+        fileKind: "non_sfc",
+      }),
+    );
   });
 });
 
@@ -686,6 +731,77 @@ async function loadWasmHost(): Promise<WasmHost> {
     maxProfilesPerFile: 8,
   }) as WasmHost;
 }
+
+function createMockPlaygroundHost(options: {
+  resolvedDeps?: string[];
+  hasSharedResolver: boolean;
+}) {
+  const upsert = vi.fn((request: { inputId: string }) => ({
+    diagnostics: { diagnostics: [], hasErrors: false },
+    moduleReferences: request.inputId.endsWith("App.vue")
+      ? [
+          {
+            syntax: "staticImport",
+            semantics: "import",
+            isTypeOnly: true,
+            rawText: "'./types'",
+            literalSpecifier: "./types",
+            finiteSpecifiers: [],
+            analyzability: "exact",
+            spanStart: 0,
+            spanEnd: 8,
+            exprSpanStart: 0,
+            exprSpanEnd: 8,
+          },
+        ]
+      : [],
+    parseDurationMs: 0,
+  }));
+  const setImportDependencies = vi.fn();
+  const resolveKnownModuleReferenceDependencies = options.hasSharedResolver
+    ? vi.fn(() => options.resolvedDeps ?? ["src/types.ts"])
+    : undefined;
+
+  class MockHost {
+    upsert = upsert;
+    listVirtualFiles = vi.fn(() => [{ kind: "main" }]);
+    getVirtualFile = vi.fn(() => ({
+      code: "export default {}",
+      diagnostics: { diagnostics: [], hasErrors: false },
+    }));
+    setImportDependencies = setImportDependencies;
+    getAnalysis = vi.fn(() => null);
+
+    constructor(_config?: unknown) {
+      if (resolveKnownModuleReferenceDependencies) {
+        (this as any).resolveKnownModuleReferenceDependencies =
+          resolveKnownModuleReferenceDependencies;
+      }
+    }
+  }
+
+  return {
+    MockHost,
+    upsert,
+    setImportDependencies,
+    resolveKnownModuleReferenceDependencies,
+  };
+}
+
+async function loadCompilerWithMockedWasmHost(MockHost: new (config?: unknown) => unknown) {
+  vi.resetModules();
+  vi.doMock("./wasmLoader", () => ({
+    loadLocalWasm: vi.fn(async () => ({ default: vi.fn(async () => {}), VerterHost: MockHost })),
+    loadCommitWasm: vi.fn(async () => ({ default: vi.fn(async () => {}), VerterHost: MockHost })),
+    loadReleaseWasm: vi.fn(async () => ({ default: vi.fn(async () => {}), VerterHost: MockHost })),
+  }));
+  return await import("./compiler");
+}
+
+afterEach(() => {
+  vi.doUnmock("./wasmLoader");
+  vi.resetModules();
+});
 
 /**
  * Compile a Vue SFC using the real WASM host and return the combined source map

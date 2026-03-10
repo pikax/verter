@@ -132,6 +132,13 @@ interface HostBinding {
   getDocumentSymbols?(canonicalOrAlias: string): HostDocumentSymbol[];
   matchCssSelectors?(canonicalOrAlias: string): HostSelectorMatchResult[];
   setImportDependencies?(canonicalOrAlias: string, resolvedDeps: string[]): void;
+  collectResolvableModuleReferenceSpecifiers?(moduleReferences: HostModuleReference[]): string[];
+  resolveKnownModuleReferenceDependencies?(
+    ownerCanonicalId: string,
+    moduleReferences: HostModuleReference[],
+    knownIds: string[],
+    extensions?: string[],
+  ): string[];
 }
 
 /** Convert structured host diagnostics to display strings. */
@@ -329,10 +336,19 @@ function syncKnownModuleReferenceDependencies(
   if (!wasmHost || typeof wasmHost.setImportDependencies !== "function") return;
 
   const knownIndex = buildKnownFileIndex(knownFiles);
-  const pending = resolveKnownModuleReferenceDependencies(ownerFilename, moduleReferences, knownFiles);
-  wasmHost.setImportDependencies(ownerFilename, pending);
+  const resolvedDeps =
+    typeof wasmHost.resolveKnownModuleReferenceDependencies === "function"
+      ? wasmHost.resolveKnownModuleReferenceDependencies(
+          ownerFilename,
+          [...(moduleReferences ?? [])],
+          Object.values(knownFiles).map((file) => file.filename),
+          [...PLAYGROUND_RESOLVE_EXTENSIONS],
+        )
+      : resolveKnownModuleReferenceDependencies(ownerFilename, moduleReferences, knownFiles);
+  wasmHost.setImportDependencies(ownerFilename, resolvedDeps);
 
   const visited = new Set<string>();
+  const pending = [...resolvedDeps];
   while (pending.length > 0) {
     const depFilename = pending.shift()!;
     const depId = normalizeModuleFileId(depFilename);
@@ -349,11 +365,19 @@ function syncKnownModuleReferenceDependencies(
       aliases: [],
     });
 
-    const childDeps = resolveKnownModuleReferenceDependencies(
-      depFile.filename,
-      depResult.moduleReferences,
-      knownFiles,
-    );
+    const childDeps =
+      typeof wasmHost.resolveKnownModuleReferenceDependencies === "function"
+        ? wasmHost.resolveKnownModuleReferenceDependencies(
+            depFile.filename,
+            depResult.moduleReferences ?? [],
+            Object.values(knownFiles).map((file) => file.filename),
+            [...PLAYGROUND_RESOLVE_EXTENSIONS],
+          )
+        : resolveKnownModuleReferenceDependencies(
+            depFile.filename,
+            depResult.moduleReferences,
+            knownFiles,
+          );
     wasmHost.setImportDependencies(depFile.filename, childDeps);
     pending.push(...childDeps);
   }

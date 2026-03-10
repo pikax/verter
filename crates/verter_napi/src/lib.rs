@@ -742,6 +742,75 @@ fn host_module_reference_analyzability_to_str(
     }
 }
 
+fn napi_module_reference_syntax_from_str(
+    syntax: &str,
+) -> Result<verter_analysis::ModuleReferenceSyntax> {
+    match syntax {
+        "staticImport" => Ok(verter_analysis::ModuleReferenceSyntax::StaticImport),
+        "exportFrom" => Ok(verter_analysis::ModuleReferenceSyntax::ExportFrom),
+        "dynamicImport" => Ok(verter_analysis::ModuleReferenceSyntax::DynamicImport),
+        "requireCall" => Ok(verter_analysis::ModuleReferenceSyntax::RequireCall),
+        other => Err(ffi_err(format!("unknown module reference syntax: {other}"))),
+    }
+}
+
+fn napi_module_reference_semantics_from_str(
+    semantics: &str,
+) -> Result<verter_analysis::ModuleReferenceSemantics> {
+    match semantics {
+        "import" => Ok(verter_analysis::ModuleReferenceSemantics::Import),
+        "require" => Ok(verter_analysis::ModuleReferenceSemantics::Require),
+        other => Err(ffi_err(format!(
+            "unknown module reference semantics: {other}"
+        ))),
+    }
+}
+
+fn napi_module_reference_analyzability_from_str(
+    analyzability: &str,
+) -> Result<verter_analysis::ModuleReferenceAnalyzability> {
+    match analyzability {
+        "exact" => Ok(verter_analysis::ModuleReferenceAnalyzability::Exact),
+        "finiteSet" => Ok(verter_analysis::ModuleReferenceAnalyzability::FiniteSet),
+        "unknownDynamic" => Ok(verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic),
+        other => Err(ffi_err(format!(
+            "unknown module reference analyzability: {other}"
+        ))),
+    }
+}
+
+fn napi_module_reference_to_analysis(
+    input: NapiModuleReference,
+) -> Result<verter_analysis::AnalyzedModuleReference> {
+    Ok(verter_analysis::AnalyzedModuleReference {
+        syntax: napi_module_reference_syntax_from_str(&input.syntax)?,
+        semantics: napi_module_reference_semantics_from_str(&input.semantics)?,
+        is_type_only: input.isTypeOnly,
+        span: verter_span::Span::new(input.spanStart, input.spanEnd),
+        expr_span: verter_span::Span::new(input.exprSpanStart, input.exprSpanEnd),
+        raw_text: input.rawText,
+        literal_specifier: input.literalSpecifier,
+        finite_specifiers: input.finiteSpecifiers,
+        static_prefix: input.staticPrefix,
+        analyzability: napi_module_reference_analyzability_from_str(&input.analyzability)?,
+    })
+}
+
+fn default_known_dependency_extensions() -> Vec<String> {
+    vec![
+        "".to_string(),
+        ".ts".to_string(),
+        ".tsx".to_string(),
+        ".js".to_string(),
+        ".jsx".to_string(),
+        ".mts".to_string(),
+        ".mjs".to_string(),
+        ".cts".to_string(),
+        ".cjs".to_string(),
+        ".vue".to_string(),
+    ]
+}
+
 fn host_module_reference_to_napi(input: host::ScriptModuleReference) -> NapiModuleReference {
     NapiModuleReference {
         syntax: host_module_reference_syntax_to_str(input.syntax).to_string(),
@@ -1235,6 +1304,50 @@ impl NapiVerterHost {
             self.inner
                 .set_import_dependencies(&canonical_or_alias, resolved_deps);
         }))
+    }
+
+    /// Returns the exact and finite-set module reference candidates in encounter order.
+    ///
+    /// Unknown-dynamic references are skipped entirely.
+    #[napi(js_name = "collectResolvableModuleReferenceSpecifiers")]
+    pub fn collect_resolvable_module_reference_specifiers(
+        &self,
+        module_references: Vec<NapiModuleReference>,
+    ) -> Result<Vec<String>> {
+        let module_references = module_references
+            .into_iter()
+            .map(napi_module_reference_to_analysis)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(
+            verter_analysis::project_resolver::collect_resolvable_module_reference_specifiers(
+                &module_references,
+            ),
+        )
+    }
+
+    /// Resolves exact and finite module reference candidates against a caller-provided
+    /// in-memory known-file set, without reading from disk.
+    #[napi(js_name = "resolveKnownModuleReferenceDependencies")]
+    pub fn resolve_known_module_reference_dependencies(
+        &self,
+        owner_id: String,
+        module_references: Vec<NapiModuleReference>,
+        known_ids: Vec<String>,
+        extensions: Option<Vec<String>>,
+    ) -> Result<Vec<String>> {
+        let module_references = module_references
+            .into_iter()
+            .map(napi_module_reference_to_analysis)
+            .collect::<Result<Vec<_>>>()?;
+        let extensions = extensions.unwrap_or_else(default_known_dependency_extensions);
+        Ok(
+            verter_analysis::project_resolver::resolve_known_module_reference_dependencies(
+                &owner_id,
+                &module_references,
+                &known_ids,
+                &extensions,
+            ),
+        )
     }
 
     /// Compute cross-file prop constness optimizations.

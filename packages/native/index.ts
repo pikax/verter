@@ -229,6 +229,13 @@ export declare class VerterHost {
    * smart invalidation (cross-file change tracking).
    */
   setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void;
+  collectResolvableModuleReferenceSpecifiers(moduleReferences: import("./host-types").HostModuleReference[]): string[];
+  resolveKnownModuleReferenceDependencies(
+    ownerCanonicalId: string,
+    moduleReferences: import("./host-types").HostModuleReference[],
+    knownIds: string[],
+    extensions?: string[],
+  ): string[];
   /**
    * Runs lint rules against a file's analysis data and returns diagnostics.
    * @param config - Optional JSON string with lint config. Pass undefined for defaults.

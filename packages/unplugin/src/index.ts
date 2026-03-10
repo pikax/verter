@@ -12,6 +12,26 @@ import { preprocessBlock } from "./core/preprocessor";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
 
+type ResolveHook = (
+  source: string,
+  importer: string,
+  options: { skipSelf: true },
+) => Promise<unknown> | unknown;
+
+function resolvedIdFromHookResult(result: unknown): string | null {
+  if (!result) return null;
+  if (typeof result === "string") {
+    return result.startsWith("\0") || result.includes("?") ? null : result;
+  }
+  if (typeof result !== "object") return null;
+
+  const resolved = result as { id?: unknown; external?: unknown };
+  if (resolved.external) return null;
+  if (typeof resolved.id !== "string") return null;
+  if (resolved.id.startsWith("\0") || resolved.id.includes("?")) return null;
+  return resolved.id;
+}
+
 /**
  * Resolves external sources and type-dependency imports from an upsert result.
  * Shared between `transform()` and `buildStart()` (preCompile).
@@ -20,6 +40,7 @@ async function resolveUpsertDependencies(
   host: VerterHost,
   filename: string,
   upsertResult: HostUpdateResult,
+  resolveId?: ResolveHook,
 ): Promise<void> {
   // Resolve external sources (e.g., <style src="./foo.less">, <template src="./t.html">)
   if (upsertResult.externalSourceRequests.length > 0) {
@@ -38,7 +59,7 @@ async function resolveUpsertDependencies(
           fileKind: "non_sfc",
         });
       } catch {
-        // External source not found â€” host will report the error
+        // External source not found; host will report the error.
       }
     }
   }
@@ -47,38 +68,60 @@ async function resolveUpsertDependencies(
   // results back to the host without speculating on unknown dynamic imports.
   const resolvedDependencyIds = new Set<string>();
   const dependencySpecifiers = collectResolvableModuleReferenceSpecifiers(
+    host,
     upsertResult.moduleReferences ?? [],
   );
   if (dependencySpecifiers.length > 0) {
     const fs = await import("fs");
     const path = await import("path");
     const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
-    for (const specifier of dependencySpecifiers) {
-      if (!specifier.startsWith(".")) continue; // bundler-owned aliases/bare imports stay delegated
 
-      const absBase = path.resolve(path.dirname(filename), specifier);
-      for (const ext of exts) {
-        const fullPath = absBase + ext;
-        if (fullPath.endsWith(".vue") && fs.existsSync(fullPath)) {
-          resolvedDependencyIds.add(fullPath);
-          break;
+    if (resolveId) {
+      for (const specifier of dependencySpecifiers) {
+        const resolvedId = resolvedIdFromHookResult(
+          await resolveId(specifier, filename, { skipSelf: true }),
+        );
+        if (!resolvedId) continue;
+        if (resolvedId.endsWith(".vue")) {
+          resolvedDependencyIds.add(resolvedId);
+          continue;
         }
-        // Skip .vue files â€” they'll be properly upserted as VueSfc when
-        // Vite's module graph processes them via transform(). Upserting
-        // them as non_sfc here would clobber their SFC-specific metadata
-        // (script_lang, style_langs, etc.).
-        if (fullPath.endsWith(".vue")) continue;
         try {
-          const depSource = fs.readFileSync(fullPath);
+          const depSource = fs.readFileSync(resolvedId);
           host.upsert({
-            inputId: fullPath,
+            inputId: resolvedId,
             source: depSource,
             fileKind: "non_sfc",
           });
-          resolvedDependencyIds.add(fullPath);
-          break;
+          resolvedDependencyIds.add(resolvedId);
         } catch {
           continue;
+        }
+      }
+    } else {
+      for (const specifier of dependencySpecifiers) {
+        if (!specifier.startsWith(".")) continue;
+
+        const absBase = path.resolve(path.dirname(filename), specifier);
+        for (const ext of exts) {
+          const fullPath = absBase + ext;
+          if (fullPath.endsWith(".vue") && fs.existsSync(fullPath)) {
+            resolvedDependencyIds.add(fullPath);
+            break;
+          }
+          if (fullPath.endsWith(".vue")) continue;
+          try {
+            const depSource = fs.readFileSync(fullPath);
+            host.upsert({
+              inputId: fullPath,
+              source: depSource,
+              fileKind: "non_sfc",
+            });
+            resolvedDependencyIds.add(fullPath);
+            break;
+          } catch {
+            continue;
+          }
         }
       }
     }
@@ -290,7 +333,12 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           source,
         });
 
-        await resolveUpsertDependencies(host, filename, upsertResult);
+        await resolveUpsertDependencies(
+          host,
+          filename,
+          upsertResult,
+          typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
+        );
 
         // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
         await applyPreprocessorRequests(
@@ -388,7 +436,12 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       });
       const t1 = timing ? performance.now() : 0;
 
-      await resolveUpsertDependencies(host, filename, upsertResult);
+      await resolveUpsertDependencies(
+        host,
+        filename,
+        upsertResult,
+        typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
+      );
 
       // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
       await applyPreprocessorRequests(
@@ -508,3 +561,4 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 const unplugin = createUnplugin(unpluginFactory);
 
 export default unplugin;
+
