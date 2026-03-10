@@ -207,6 +207,8 @@ export interface NativeBlockOverrideRequest {
   overrides: NativeBlockOverrideEntry[];
 }
 
+export type HostPublicApiMode = "public" | "testing";
+
 export declare class VerterHost {
   constructor(config?: import("./host-types").HostConfig);
   resolve(rawId: string): import("./host-types").HostResolvedId | null;
@@ -214,7 +216,10 @@ export declare class VerterHost {
   /** @deprecated Use `applyBlockOverrides` instead — unified API for all block types. */
   applyStyleOverrides(request: HostStyleOverrideRequest): import("./host-types").HostUpdateResult;
   applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
-  getPublicApi(canonicalId: string): { code: string; sourceMap?: string } | null;
+  getPublicApi(
+    canonicalId: string,
+    mode?: HostPublicApiMode,
+  ): { code: string; sourceMap?: string } | null;
   getIde(canonicalId: string, profile?: import("./host-types").HostCompileProfile): import("./host-types").HostIdeResponse | null;
   getVirtualFile(query: import("./host-types").HostVirtualQuery): import("./host-types").HostVirtualFileResponse | null;
   listVirtualFiles(canonicalId: string): import("./host-types").HostVirtualNodeKind[];

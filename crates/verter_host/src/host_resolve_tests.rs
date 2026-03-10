@@ -5,7 +5,7 @@ use verter_span::Span;
 use crate::shared::read_lock;
 use crate::{
     CompileErrorPolicy, CompileProfile, FileKind, HostConfig, HostDiagnostic, HostError,
-    HostSeverity, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    HostSeverity, PublicApiMode, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
 fn strict_host() -> VerterHost {
@@ -62,6 +62,17 @@ fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::Diagnosti
 
 fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
     host.get_public_api(canonical_id)
+        .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
+        .code
+        .to_string()
+}
+
+fn public_api_code_with_mode(
+    host: &VerterHost,
+    canonical_id: &str,
+    mode: PublicApiMode,
+) -> String {
+    host.get_public_api_with_mode(canonical_id, mode)
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
         .code
         .to_string()
@@ -383,5 +394,54 @@ fn invalid_imported_define_emits_type_keeps_emits_shape_error() {
             .contains("defineEmits() type argument 'Emits' must resolve to emit call signatures or a named-tuple emits object."),
         "expected emits-shape diagnostic, got: {}",
         invalid.message
+    );
+}
+
+#[test]
+fn testing_public_api_exposes_internal_script_setup_bindings() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst count = ref(1)\nconst label = 'ready'\n</script>\n<template><div>{{ count }} {{ label }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    let public = public_api_code(&host, "/src/Comp.vue");
+    let testing = public_api_code_with_mode(&host, "/src/Comp.vue", PublicApiMode::Testing);
+
+    assert!(
+        testing.contains("count: typeof count"),
+        "testing mode should expose ref bindings on the instance: {testing}"
+    );
+    assert!(
+        testing.contains("label: typeof label"),
+        "testing mode should expose local bindings on the instance: {testing}"
+    );
+    assert!(
+        !testing.contains("ref: typeof ref"),
+        "value imports must not be exposed as instance bindings: {testing}"
+    );
+    assert!(
+        !public.contains("count: typeof count"),
+        "public mode must remain unchanged: {public}"
+    );
+}
+
+#[test]
+fn testing_public_api_ignores_define_expose_narrowing() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst foo = ref(1)\nconst bar = ref('hidden')\ndefineExpose({ foo })\n</script>\n<template><div>{{ foo }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    let testing = public_api_code_with_mode(&host, "/src/Comp.vue", PublicApiMode::Testing);
+
+    assert!(
+        testing.contains("foo: typeof foo"),
+        "testing mode should retain explicitly exposed bindings: {testing}"
+    );
+    assert!(
+        testing.contains("bar: typeof bar"),
+        "testing mode should also retain non-exposed internal bindings: {testing}"
+    );
+    assert!(
+        !testing.contains("defineExpose({ foo }) as"),
+        "testing mode should not narrow the debug instance to defineExpose: {testing}"
     );
 }

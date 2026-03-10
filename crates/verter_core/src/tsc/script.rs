@@ -43,6 +43,7 @@ use crate::common::Span;
 use crate::cursor::position::PositionResolver;
 use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use crate::parser::Syntax;
+use crate::template::code_gen::binding::BindingType;
 use crate::tokenizer::byte::tokenize_sfc;
 use crate::utils::oxc::vue::{
     extract_companion_types, parse_script_with_companion, MacroArrayArg, MacroObjectArg,
@@ -58,6 +59,16 @@ pub struct TscOutput {
     pub source_map: String,
 }
 
+/// Output mode for generated TypeScript declaration files.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TscMode {
+    /// Public component API only.
+    #[default]
+    Public,
+    /// Testing/debug API that exposes script-setup bindings on the instance.
+    Testing,
+}
+
 /// Options for tsc codegen.
 #[derive(Debug, Default)]
 pub struct TscGenOptions {
@@ -67,6 +78,8 @@ pub struct TscGenOptions {
     pub filename: Option<String>,
     /// Pre-resolved external macro types, keyed by imported type name.
     pub external_types: Option<rustc_hash::FxHashMap<String, ResolvedElements>>,
+    /// Public or testing/debug output mode.
+    pub mode: TscMode,
 }
 
 // ── Internal state ───────────────────────────────────────────────────────────
@@ -105,6 +118,19 @@ enum EmitPayload {
 struct ModelEntry {
     name: String,
     ts_type: String,
+    map_span: Option<Span>,
+}
+
+struct TestingPropBinding {
+    name: String,
+    ts_type: String,
+    optional: bool,
+    map_span: Option<Span>,
+}
+
+struct TestBindingEntry {
+    name: String,
+    binding_type: BindingType,
     map_span: Option<Span>,
 }
 
@@ -218,6 +244,8 @@ struct TscMacroState {
     // defineProps — TypeScript type info
     props_ts: Option<PropsTs>,
     defaulted_prop_names: Vec<String>,
+    // defineProps — internal bare-prop bindings used by testing mode
+    testing_props: Vec<TestingPropBinding>,
 
     // defineEmits — runtime emit names (for array output)
     emits_names: Vec<String>,
@@ -315,6 +343,11 @@ pub fn generate_tsc_output_with_options(
     };
     let parsed =
         parse_script_with_companion(&program, ScriptMode::Setup, 0, content_str, companion_types);
+    let test_bindings = if matches!(tsc_options.mode, TscMode::Testing) {
+        collect_test_bindings(&parsed.bindings, content_str, content_span.start)
+    } else {
+        Vec::new()
+    };
 
     // ── 4. Collect type-only imports ──────────────────────────────────
     let type_imports = collect_type_imports(&parsed.items);
@@ -362,23 +395,39 @@ pub fn generate_tsc_output_with_options(
     };
 
     // ── 8. Extract root conditions for narrowing ────────────────────
-    let narrowing = if tsc_options.conditional_root_narrowing {
+    let narrowing = if tsc_options.conditional_root_narrowing
+        && matches!(tsc_options.mode, TscMode::Public)
+    {
         extract_tsc_narrowing(syntax.template_ast(), &state, sfc_source)
     } else {
         None
     };
 
     // ── 9. Generate code + source map ────────────────────────────────
-    generate_code(
-        component_name,
-        &state,
-        sfc_source,
-        tsc_options.filename.as_deref(),
-        generic_params,
-        attrs_type,
-        narrowing.as_ref(),
-        root_element_tag.as_deref(),
-    )
+    if matches!(tsc_options.mode, TscMode::Testing) {
+        generate_testing_code(
+            component_name,
+            &state,
+            sfc_source,
+            tsc_options.filename.as_deref(),
+            generic_params,
+            attrs_type,
+            root_element_tag.as_deref(),
+            content_str,
+            &test_bindings,
+        )
+    } else {
+        generate_code(
+            component_name,
+            &state,
+            sfc_source,
+            tsc_options.filename.as_deref(),
+            generic_params,
+            attrs_type,
+            narrowing.as_ref(),
+            root_element_tag.as_deref(),
+        )
+    }
 }
 
 // ── Step 4: collect type imports ─────────────────────────────────────────────
@@ -693,6 +742,12 @@ fn process_props_with_defaults(defaults: &MacroObjectArg<'_>, state: &mut TscMac
             }
         }
     }
+
+    for prop in &mut state.testing_props {
+        if default_names.contains(&prop.name.as_str()) {
+            prop.optional = false;
+        }
+    }
 }
 
 fn process_options(obj: &MacroObjectArg<'_>, content_str: &str, state: &mut TscMacroState) {
@@ -744,7 +799,7 @@ fn normalize_resolved_span(span: Span, span_is_absolute: bool, content_offset: u
 fn process_props<'a>(
     type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
-    _array_arg: Option<&MacroArrayArg>,
+    array_arg: Option<&MacroArrayArg>,
     content_str: &'a str,
     content_offset: u32,
     type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
@@ -753,6 +808,35 @@ fn process_props<'a>(
     state: &mut TscMacroState,
 ) {
     if let Some(tp) = type_params {
+        state.testing_props = tp
+            .resolved
+            .props
+            .iter()
+            .map(|prop| {
+                let name = prop.key_name.clone().unwrap_or_else(|| {
+                    content_str[prop.key.start as usize..prop.key.end as usize].to_string()
+                });
+                let ts_type = if let Some(ts) = prop.type_span {
+                    content_str[ts.start as usize..ts.end as usize]
+                        .trim()
+                        .to_string()
+                } else {
+                    runtime_types_to_ts(&prop.types)
+                };
+
+                TestingPropBinding {
+                    name,
+                    optional: prop.optional,
+                    ts_type,
+                    map_span: Some(if prop.map_local {
+                        normalize_resolved_span(prop.key, prop.span_is_absolute, content_offset)
+                    } else {
+                        local_to_sfc_span(tp.type_span, content_offset)
+                    }),
+                }
+            })
+            .collect();
+
         let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
 
         if looks_like_named_type_reference(type_text) {
@@ -805,6 +889,7 @@ fn process_props<'a>(
         // Object-syntax: uses AST-extracted MacroProperty fields exclusively.
         // No string parsing of prop values — all type info comes from the AST.
         let mut entries = Vec::new();
+        state.testing_props.clear();
         for prop in &obj.properties {
             // Runtime: reconstruct from AST-extracted fields.
             // We can't use raw value text because `as PropType<X>` may appear
@@ -831,12 +916,32 @@ fn process_props<'a>(
             entries.push(InlinePropEntry {
                 name: prop.name.to_string(),
                 optional,
-                ts_type,
+                ts_type: ts_type.clone(),
                 comment: None,
+                map_span: Some(local_to_sfc_span(prop.name_span, content_offset)),
+            });
+            state.testing_props.push(TestingPropBinding {
+                name: prop.name.to_string(),
+                optional: !prop.required && !prop.has_default,
+                ts_type,
                 map_span: Some(local_to_sfc_span(prop.name_span, content_offset)),
             });
         }
         state.props_ts = Some(PropsTs::Inline(entries));
+    } else if let Some(arr) = array_arg {
+        state.testing_props = arr
+            .element_spans
+            .iter()
+            .map(|elem_span| {
+                let elem = content_str[elem_span.start as usize..elem_span.end as usize].trim();
+                TestingPropBinding {
+                    name: elem.trim_matches(|c: char| c == '\'' || c == '"').to_string(),
+                    ts_type: "unknown".to_string(),
+                    optional: true,
+                    map_span: Some(local_to_sfc_span(*elem_span, content_offset)),
+                }
+            })
+            .collect();
     }
 }
 
@@ -1089,6 +1194,111 @@ fn process_slots(
     type_usage_tracker.mark_type_text(type_text);
 }
 
+fn collect_test_bindings(
+    bindings: &[(Span, BindingType)],
+    content_str: &str,
+    content_offset: u32,
+) -> Vec<TestBindingEntry> {
+    let mut seen_order = Vec::new();
+    let mut latest_by_name = FxHashMap::default();
+
+    for (span, binding_type) in bindings {
+        if matches!(
+            binding_type,
+            BindingType::SetupImport | BindingType::Data | BindingType::Options
+        ) {
+            continue;
+        }
+        if span.start >= span.end || span.end as usize > content_str.len() {
+            continue;
+        }
+        let name = content_str[span.start as usize..span.end as usize].to_string();
+        if name.trim().is_empty() {
+            continue;
+        }
+        if !latest_by_name.contains_key(&name) {
+            seen_order.push(name.clone());
+        }
+        latest_by_name.insert(
+            name.clone(),
+            TestBindingEntry {
+                name,
+                binding_type: *binding_type,
+                map_span: Some(local_to_sfc_span(*span, content_offset)),
+            },
+        );
+    }
+
+    seen_order
+        .into_iter()
+        .filter_map(|name| latest_by_name.remove(&name))
+        .collect()
+}
+
+fn is_testing_decl_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    if crate::utils::oxc::bindings::keywords::is_keyword(name.as_bytes()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
+fn render_testing_prop_type(prop: &TestingPropBinding) -> String {
+    if prop.optional {
+        format!("({}) | undefined", prop.ts_type)
+    } else {
+        prop.ts_type.clone()
+    }
+}
+
+fn render_testing_binding_key(name: &str) -> String {
+    if is_testing_decl_ident(name) {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
+    }
+}
+
+fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut depth = 0u32;
+    let mut segment_start = 0usize;
+
+    for (idx, ch) in generic_params.char_indices() {
+        match ch {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' | ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let segment = generic_params[segment_start..idx].trim();
+                if let Some(name) = segment
+                    .split(|c: char| c == ' ' || c == ':' || c == '=')
+                    .find(|part| !part.is_empty())
+                {
+                    names.push(name.to_string());
+                }
+                segment_start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+
+    let trailing = generic_params[segment_start..].trim();
+    if let Some(name) = trailing
+        .split(|c: char| c == ' ' || c == ':' || c == '=')
+        .find(|part| !part.is_empty())
+    {
+        names.push(name.to_string());
+    }
+
+    names
+}
+
 // ── Step 6: generate code ─────────────────────────────────────────────────────
 
 fn generate_empty_stub(component_name: &str) -> TscOutput {
@@ -1246,6 +1456,195 @@ fn extract_tsc_narrowing(
         narrowing,
         branch_tags,
     })
+}
+
+fn generate_testing_code(
+    component_name: &str,
+    state: &TscMacroState,
+    sfc_source: &str,
+    filename: Option<&str>,
+    generic_params: Option<&str>,
+    attrs_type: Option<&str>,
+    root_element_tag: Option<&str>,
+    setup_content: &str,
+    test_bindings: &[TestBindingEntry],
+) -> TscOutput {
+    let mut out = TscWriter::new(setup_content.len().saturating_add(2048));
+
+    out.push_str("import { defineComponent } from \"vue\"\n");
+    out.push_str("type __OmitNew<T> = { [K in keyof T]: T[K] }\n");
+    out.push_str(
+        "type __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\n",
+    );
+    out.push_str(
+        "type __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\n",
+    );
+    out.push_str(
+        "declare function defineProps<TypeProps>(): TypeProps\ndeclare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\ndeclare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\n",
+    );
+    out.push_str(
+        "declare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\ndeclare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\ndeclare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\n",
+    );
+    out.push_str(
+        "declare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\ndeclare function defineOptions(options: Record<string, unknown>): void\ndeclare function defineSlots<Slots extends Record<string, any>>(): Slots\ndeclare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\ndeclare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\n",
+    );
+
+    if let Some(gp) = generic_params {
+        for name in extract_generic_param_names(gp) {
+            if is_testing_decl_ident(&name) {
+                out.push_str(&format!("type {} = any\n", name));
+            }
+        }
+    }
+
+    let declared_names: FxHashSet<String> = test_bindings
+        .iter()
+        .filter(|binding| !matches!(binding.binding_type, BindingType::Props))
+        .map(|binding| binding.name.clone())
+        .collect();
+    for prop in &state.testing_props {
+        if declared_names.contains(&prop.name) || !is_testing_decl_ident(&prop.name) {
+            continue;
+        }
+        out.push_str("declare const ");
+        if let Some(map_span) = prop.map_span {
+            out.push_mapped(&prop.name, map_span);
+        } else {
+            out.push_str(&prop.name);
+        }
+        out.push_str(": ");
+        out.push_str(&render_testing_prop_type(prop));
+        out.push_str("\n");
+    }
+
+    if !setup_content.trim().is_empty() {
+        out.push_str(setup_content);
+        if !setup_content.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+
+    if test_bindings.is_empty() {
+        out.push_str("type __Verter_TestBindings = {}\n\n");
+    } else {
+        out.push_str("type __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{\n");
+        for binding in test_bindings {
+            out.push_str("  ");
+            let rendered_name = render_testing_binding_key(&binding.name);
+            if let Some(map_span) = binding.map_span {
+                out.push_mapped(&rendered_name, map_span);
+            } else {
+                out.push_str(&rendered_name);
+            }
+            out.push_str(": typeof ");
+            out.push_str(&binding.name);
+            out.push_str(";\n");
+        }
+        out.push_str("}>\n\n");
+    }
+
+    out.push_str("const __comp = defineComponent({\n");
+
+    if let Some(ref name) = state.options_name {
+        out.push_str(&format!("  name: '{}' as const,\n", name));
+    }
+    for (key, val) in &state.options_extras {
+        out.push_str(&format!("  {}: {},\n", key, val));
+    }
+
+    let has_props = !state.props_runtime.is_empty() || !state.models.is_empty();
+    if has_props {
+        out.push_str("  props: {\n");
+        for (name, val) in &state.props_runtime {
+            out.push_str(&format!("    {}: {},\n", name, val));
+        }
+        for model in &state.models {
+            let ctor = ts_to_constructor(&model.ts_type);
+            out.push_str(&format!("    {}: {},\n", model.name, ctor));
+        }
+        out.push_str("  },\n");
+    }
+
+    let has_emits = !state.emits_names.is_empty() || !state.models.is_empty();
+    if has_emits {
+        let mut names: Vec<String> = state
+            .emits_names
+            .iter()
+            .map(|n| format!("'{}'", n))
+            .collect();
+        for model in &state.models {
+            names.push(format!("'update:{}'", model.name));
+        }
+        out.push_str(&format!("  emits: [{}],\n", names.join(", ")));
+    }
+
+    out.push_str("})\n\n");
+    out.push_str(&format!(
+        "declare const {name}: __OmitNew<typeof __comp> & {{\n",
+        name = component_name,
+    ));
+
+    let full_props = render_full_props_type(
+        &state.props_ts,
+        &state.emits_ts,
+        &state.models,
+        &state.defaulted_prop_names,
+        None,
+    );
+
+    match generic_params {
+        Some(gp) => {
+            out.push_str(&format!(
+                "  new<{gp}>(props?: import(\"vue\").PublicProps & "
+            ));
+            out.append_rendered(full_props);
+            out.push_str("): {\n");
+        }
+        None => {
+            out.push_str("  new(props?: import(\"vue\").PublicProps & ");
+            out.append_rendered(full_props);
+            out.push_str("): {\n");
+        }
+    }
+
+    out.push_str("    $props: import(\"vue\").PublicProps & ");
+    out.append_rendered(render_full_props_type(
+        &state.props_ts,
+        &state.emits_ts,
+        &state.models,
+        &state.defaulted_prop_names,
+        None,
+    ));
+    out.push_str(",\n");
+    out.push_str("    $emit: ");
+    out.append_rendered(render_emit_fn_type(&state.emits_ts, &state.models));
+    out.push_str(",\n");
+    if let Some(ref slots) = state.slots_ts {
+        out.push_str(&format!("    $slots: {},\n", slots));
+    }
+    out.push_str("    $data: {},\n");
+    if let Some(attrs) = attrs_type {
+        out.push_str(&format!("    $attrs: {},\n", attrs));
+    } else if root_element_tag.is_some() {
+        out.push_str("    $attrs: import(\"vue\").HTMLAttributes,\n");
+    } else {
+        out.push_str("    $attrs: {},\n");
+    }
+    out.push_str("    $refs: {},\n");
+    out.push_str("  } & __Verter_TestBindings\n");
+    out.push_str("}\n");
+    out.push_str(&format!("export default {}\n", component_name));
+
+    let (mut code, mappings) = out.into_parts();
+    let source_map = build_tsc_source_map(&code, sfc_source, filename, &mappings);
+    let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
+    code.push_str(&format!(
+        "//# sourceMappingURL=data:application/json;base64,{}\n",
+        encoded
+    ));
+
+    TscOutput { code, source_map }
 }
 
 fn generate_code(

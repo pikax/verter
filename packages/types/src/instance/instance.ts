@@ -272,13 +272,18 @@ export type ExternalPublicInstanceFromMacro<T, Attrs, El extends Element> = Publ
 /**
  * Creates a public instance type for testing purposes with attrs included in props.
  *
- * This type is specifically designed for use in Vitest tests where you need to verify
- * that attrs are properly merged into `$props`. It includes:
+ * This type is specifically designed for tests where you need to verify that attrs
+ * are properly merged into `$props`. It includes:
  * - `MakeDefaultsOptional` is `true`: Props with defaults are optional
  * - `AttrsProps` is `true`: Attrs ARE included in `$props` (for testing attr merging)
  *
- * **Note:** This type should only be used in test files. For production code, use
- * `SFCPublicInstanceFromMacro` or `ExternalPublicInstanceFromMacro` instead.
+ * This is **not** the same as Vue Test Utils `wrapper.vm`. VTU intentionally exposes
+ * internal `<script setup>` bindings even when `defineExpose()` narrows the normal
+ * public instance, and Verter's test-aware `.vue` import surface is now generated
+ * directly in Rust to model that behavior.
+ *
+ * @deprecated Prefer Verter's test-aware `.vue` import resolution instead of using
+ * this alias as a proxy for `wrapper.vm`.
  *
  * @template T - The macro return type from `createMacroReturn`
  * @template Attrs - The component's attrs type (fallthrough attributes)

@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { isVue, isRelativeVue, isVueTs, isRelativeVueTs } from "./utils";
+import {
+  getVueVirtualFileInfo,
+  isLikelyTestFileName,
+  isRelativeVue,
+  isRelativeVueTs,
+  isVue,
+  isVueTs,
+} from "./utils";
 
 describe("isVue", () => {
   it("matches .vue suffix", () => {
@@ -54,5 +61,43 @@ describe("isRelativeVueTs", () => {
   it("does not match non-relative .vue.ts", () => {
     expect(isRelativeVueTs("@/Foo.vue.ts")).toBe(false);
     expect(isRelativeVueTs("vue.vue.ts")).toBe(false);
+  });
+});
+
+describe("getVueVirtualFileInfo", () => {
+  it("parses the public virtual suffixes", () => {
+    expect(getVueVirtualFileInfo("/src/Foo.vue.ts")).toEqual({
+      sourceFileName: "/src/Foo.vue",
+      mode: "public",
+    });
+    expect(getVueVirtualFileInfo("/src/Foo.vue.d.ts")).toEqual({
+      sourceFileName: "/src/Foo.vue",
+      mode: "public",
+    });
+  });
+
+  it("parses the testing virtual suffix", () => {
+    expect(getVueVirtualFileInfo("/src/Foo.vue.__verter_test.ts")).toEqual({
+      sourceFileName: "/src/Foo.vue",
+      mode: "testing",
+    });
+  });
+
+  it("returns null for non-virtual paths", () => {
+    expect(getVueVirtualFileInfo("/src/Foo.vue")).toBeNull();
+    expect(getVueVirtualFileInfo("/src/Foo.ts")).toBeNull();
+  });
+});
+
+describe("isLikelyTestFileName", () => {
+  it("matches common spec and test file names", () => {
+    expect(isLikelyTestFileName("/src/App.spec.ts")).toBe(true);
+    expect(isLikelyTestFileName("/src/App.test.tsx")).toBe(true);
+    expect(isLikelyTestFileName("/src/__tests__/App.ts")).toBe(true);
+  });
+
+  it("does not flag normal source files", () => {
+    expect(isLikelyTestFileName("/src/App.ts")).toBe(false);
+    expect(isLikelyTestFileName("/src/components/Foo.vue")).toBe(false);
   });
 });

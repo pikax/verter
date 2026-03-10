@@ -837,6 +837,15 @@ pub struct TscResponse {
     pub source_map: Option<Arc<str>>,
 }
 
+/// Controls which public API surface the host generates for a Vue SFC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicApiMode {
+    /// The normal public instance surface used by application code.
+    Public,
+    /// A Vue Test Utils-like debug surface that exposes `<script setup>` bindings.
+    Testing,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CompileSlot {
     pub(crate) semantic_hash: Hash16,

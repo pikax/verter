@@ -1191,6 +1191,7 @@ fn compile_inner(
                 conditional_root_narrowing: options.conditional_root_narrowing,
                 filename: options.filename.clone(),
                 external_types: verter_options.external_types.clone(),
+                mode: tsc::TscMode::Public,
             },
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;

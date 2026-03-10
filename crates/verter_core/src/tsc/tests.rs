@@ -1,4 +1,4 @@
-use super::script::{generate_tsc_output_with_options, TscGenOptions};
+use super::script::{generate_tsc_output_with_options, TscGenOptions, TscMode};
 use crate::utils::oxc::vue::resolve_type::resolve_external_type;
 use oxc_allocator::Allocator;
 use oxc_sourcemap::SourceMap;
@@ -56,6 +56,22 @@ fn gen_tsc_narrowing(sfc: &str) -> String {
     .code
 }
 
+fn gen_tsc_testing(sfc: &str) -> String {
+    gen_tsc_output_testing(sfc).code
+}
+
+fn gen_tsc_output_testing(sfc: &str) -> super::script::TscOutput {
+    generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+            mode: TscMode::Testing,
+            ..Default::default()
+        },
+    )
+}
+
 fn offset_to_zero_based_line_col(text: &str, offset: usize) -> (u32, u32) {
     let mut line = 0u32;
     let mut col = 0u32;
@@ -101,6 +117,102 @@ defineProps<Props>()
     assert!(!r.contains("___VERTER___"), "no IDE wrapper");
     assert!(!r.contains("setup("), "no setup() in __comp");
     assert!(!r.contains("__verter_"), "no intermediate aliases");
+}
+
+// @ai-generated - Testing mode exposes internal script-setup bindings on the instance.
+#[test]
+fn tsc_testing_mode_exposes_local_script_setup_bindings_on_instance() {
+    let public = gen_tsc(
+        r#"<script setup lang="ts">
+const count = 1
+const label = 'hello'
+</script><template><div>{{ count }} {{ label }}</div></template>"#,
+    );
+    let testing = gen_tsc_testing(
+        r#"<script setup lang="ts">
+const count = 1
+const label = 'hello'
+</script><template><div>{{ count }} {{ label }}</div></template>"#,
+    );
+
+    assert!(
+        testing.contains("type __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{"),
+        "testing mode should emit a debug binding helper: {testing}"
+    );
+    assert!(
+        testing.contains("count: typeof count"),
+        "testing mode should expose count on the instance: {testing}"
+    );
+    assert!(
+        testing.contains("label: typeof label"),
+        "testing mode should expose label on the instance: {testing}"
+    );
+    assert!(
+        !testing.contains("ref: typeof ref"),
+        "value imports must not become instance bindings: {testing}"
+    );
+    assert!(
+        !public.contains("count: typeof count"),
+        "public mode must keep script-setup bindings hidden: {public}"
+    );
+}
+
+// @ai-generated - Testing mode mirrors VTU wrapper.vm shallow ref unwrapping.
+#[test]
+fn tsc_testing_mode_unwraps_ref_like_bindings_on_instance() {
+    let testing = gen_tsc_testing(
+        r#"<script setup lang="ts">
+import { computed, ref } from 'vue'
+
+const count = ref(1)
+const doubled = computed(() => count.value * 2)
+</script><template><div>{{ doubled }}</div></template>"#,
+    );
+
+    assert!(
+        testing.contains("type __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{"),
+        "testing mode should use ShallowUnwrapRef for instance bindings: {testing}"
+    );
+    assert!(
+        testing.contains("count: typeof count"),
+        "ref bindings should be included before unwrapping: {testing}"
+    );
+    assert!(
+        testing.contains("doubled: typeof doubled"),
+        "computed bindings should be included before unwrapping: {testing}"
+    );
+    assert!(
+        !testing.contains("ref: typeof ref"),
+        "imported helpers must stay out of the instance binding map: {testing}"
+    );
+}
+
+// @ai-generated - defineExpose must not narrow test-only wrapper.vm bindings.
+#[test]
+fn tsc_testing_mode_ignores_define_expose_narrowing() {
+    let testing = gen_tsc_testing(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+
+const foo = ref(1)
+const bar = ref('hidden')
+
+defineExpose({ foo })
+</script><template><div>{{ foo }}</div></template>"#,
+    );
+
+    assert!(
+        testing.contains("foo: typeof foo"),
+        "explicitly exposed bindings should still be present: {testing}"
+    );
+    assert!(
+        testing.contains("bar: typeof bar"),
+        "non-exposed bindings must remain available in testing mode: {testing}"
+    );
+    assert!(
+        !testing.contains("defineExpose({ foo }) as"),
+        "testing mode should not rewrite defineExpose into a narrowing helper: {testing}"
+    );
 }
 
 // ── defineProps({ ... }) — object syntax, runtime + TS types ─────────────────

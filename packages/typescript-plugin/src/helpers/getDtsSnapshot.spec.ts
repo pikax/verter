@@ -201,6 +201,27 @@ defineProps<{ title: string }>()
     expect(dtsEntry?.sourceMap).toBeTruthy();
   });
 
+  // @ai-generated - Testing mode gets its own virtual cache key and exposes bindings.
+  it.skipIf(!hasNativeBinary)("caches testing-mode output under the dedicated virtual suffix", () => {
+    const sfc = `
+<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(1)
+</script>
+<template><div>{{ count }}</div></template>
+`;
+    parseFile("/test/Cached.vue", sfc, mockLogger);
+    const result = parseFile("/test/Cached.vue", sfc, mockLogger, undefined, "testing");
+
+    const publicEntry = getCachedVirtualPublicApi("/test/Cached.vue.ts");
+    const testingEntry = getCachedVirtualPublicApi("/test/Cached.vue.__verter_test.ts");
+
+    expect(result).toContain("count: typeof count");
+    expect(testingEntry?.code).toContain("count: typeof count");
+    expect(testingEntry?.sourceMap).toBeTruthy();
+    expect(publicEntry?.code).not.toContain("count: typeof count");
+  });
+
   it.skipIf(!hasNativeBinary)("remaps virtual definition spans back to the local .vue file", () => {
     const sfc = `
 <script setup lang="ts">
@@ -265,6 +286,36 @@ defineProps<{ label: string }>()
       fileName: "/test/Refresh.vue",
       textSpan: {
         start: updated.indexOf("label: string"),
+        length: 1,
+      },
+    });
+  });
+
+  // @ai-generated - Testing-mode sourcemaps should still remap wrapper.vm bindings to the SFC.
+  it.skipIf(!hasNativeBinary)("remaps testing-mode binding spans back to the local .vue file", () => {
+    const sfc = `
+<script setup lang="ts">
+const count = 1
+</script>
+<template><div>{{ count }}</div></template>
+`;
+    parseFile("/test/Debug.vue", sfc, mockLogger, undefined, "testing");
+    const cached = getCachedVirtualPublicApi("/test/Debug.vue.__verter_test.ts");
+
+    expect(cached).toBeDefined();
+    const generatedStart = cached!.code.indexOf("count: typeof count");
+    expect(generatedStart).toBeGreaterThanOrEqual(0);
+
+    const remapped = remapVirtualSpan(
+      "/test/Debug.vue.__verter_test.ts",
+      { start: generatedStart, length: "count".length },
+      (fileName) => (fileName === "/test/Debug.vue" ? sfc : undefined),
+    );
+
+    expect(remapped).toEqual({
+      fileName: "/test/Debug.vue",
+      textSpan: {
+        start: sfc.indexOf("count = 1"),
         length: 1,
       },
     });

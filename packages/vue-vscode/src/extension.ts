@@ -150,11 +150,42 @@ async function activateExtension(context: ExtensionContext) {
     compiledCodeContentProvider,
   );
 
-  const ensureTypeScriptPluginConfigured = (document?: TextDocument) => {
+  const getTypeScriptPluginConfig = (): {
+    enable: true;
+    exposeBindingsTesting?: boolean;
+  } => {
+    const pluginConfig: {
+      enable: true;
+      exposeBindingsTesting?: boolean;
+    } = { enable: true };
+    const experimentalConfig = workspace.getConfiguration("verter.experimental");
+    const inspect = experimentalConfig.inspect<boolean>("exposeBindingsTesting");
+    const hasExplicitValue =
+      inspect?.globalValue !== undefined ||
+      inspect?.workspaceValue !== undefined ||
+      inspect?.workspaceFolderValue !== undefined ||
+      inspect?.globalLanguageValue !== undefined ||
+      inspect?.workspaceLanguageValue !== undefined ||
+      inspect?.workspaceFolderLanguageValue !== undefined;
+
+    if (hasExplicitValue) {
+      pluginConfig.exposeBindingsTesting = experimentalConfig.get<boolean>(
+        "exposeBindingsTesting",
+        false,
+      );
+    }
+
+    return pluginConfig;
+  };
+
+  const ensureTypeScriptPluginConfigured = (
+    document?: TextDocument,
+    force = false,
+  ) => {
     if (
       tsPluginConfigured ||
       tsPluginPromise ||
-      !shouldConfigureBuiltInTypeScriptPlugin(document?.languageId)
+      (!force && !shouldConfigureBuiltInTypeScriptPlugin(document?.languageId))
     ) {
       return tsPluginPromise;
     }
@@ -164,9 +195,7 @@ async function activateExtension(context: ExtensionContext) {
       commands.executeCommand(
         "_typescript.configurePlugin",
         require.resolve("@verter/typescript-plugin"),
-        {
-          enable: true,
-        },
+        getTypeScriptPluginConfig(),
       ),
     )
       .then(() => {
@@ -252,6 +281,12 @@ async function activateExtension(context: ExtensionContext) {
       ensureStartedForVueDocument(editor?.document);
     }),
     workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("verter.experimental.exposeBindingsTesting")) {
+        tsPluginConfigured = false;
+        tsPluginPromise = undefined;
+        void ensureTypeScriptPluginConfigured(undefined, true);
+      }
+
       const needsRestart =
         e.affectsConfiguration("verter.server.logLevel") ||
         e.affectsConfiguration("verter.typeProvider") ||

@@ -160,6 +160,29 @@ const view = import('./Foo.vue')
       ),
     ).toEqual(["src/widget.ts"]);
   });
+
+  it("returns a testing-mode public API that exposes script setup bindings", () => {
+    const host = new VerterHost();
+    host.upsert({
+      inputId: "DebugBindings.vue",
+      source: `<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(1)
+const hidden = ref('secret')
+defineExpose({ count })
+</script>
+<template><div>{{ count }}</div></template>`,
+    });
+
+    const publicApi = host.getPublicApi("DebugBindings.vue");
+    const testingApi = host.getPublicApi("DebugBindings.vue", "testing");
+
+    expect(publicApi?.code).toBeTruthy();
+    expect(testingApi?.code).toContain("count: typeof count");
+    expect(testingApi?.code).toContain("hidden: typeof hidden");
+    expect(testingApi?.code).not.toContain("ref: typeof ref");
+    expect(publicApi?.code).not.toContain("hidden: typeof hidden");
+  });
 });
 
 describe("VerterHost type declarations in sync with native binary", () => {

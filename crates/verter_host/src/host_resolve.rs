@@ -578,6 +578,19 @@ impl VerterHost {
     ///
     /// Returns `None` if the file is not in the host or not a Vue SFC.
     pub fn get_public_api(&self, canonical_id: &str) -> Option<TscResponse> {
+        self.get_public_api_with_mode(canonical_id, PublicApiMode::Public)
+    }
+
+    /// Generate public API output for a Vue SFC using the requested surface mode.
+    ///
+    /// `PublicApiMode::Public` matches the default application-facing instance shape.
+    /// `PublicApiMode::Testing` exposes internal `<script setup>` bindings in a
+    /// Vue Test Utils-like debug surface.
+    pub fn get_public_api_with_mode(
+        &self,
+        canonical_id: &str,
+        mode: PublicApiMode,
+    ) -> Option<TscResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let (source, file_kind, macro_type_deps, script_imports) = {
             let files = read_lock(&self.files);
@@ -604,6 +617,10 @@ impl VerterHost {
             &macro_type_deps,
             &script_imports,
         );
+        let tsc_mode = match mode {
+            PublicApiMode::Public => verter_core::tsc::TscMode::Public,
+            PublicApiMode::Testing => verter_core::tsc::TscMode::Testing,
+        };
         let tsc_out = verter_core::tsc::generate_tsc_output_with_options(
             &source,
             &component_name,
@@ -611,6 +628,7 @@ impl VerterHost {
                 conditional_root_narrowing: false,
                 filename: Some(canonical.clone()),
                 external_types,
+                mode: tsc_mode,
             },
         );
         Some(TscResponse {

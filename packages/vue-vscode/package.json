@@ -75,7 +75,8 @@
   "contributes": {
     "mcpServerDefinitionProviders": [
       {
-        "id": "verter"
+        "id": "verter",
+        "label": "Verter Vue Analysis"
       }
     ],
     "configuration": {
@@ -275,6 +276,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "**Experimental**: Enable generic narrowing for conditional root elements. When a root `v-if` references a prop, the component's type signature narrows based on the prop value passed by the parent."
+        },
+        "verter.experimental.exposeBindingsTesting": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Experimental**: In test files, resolve `.vue` imports to Verter's VTU-style debug public API. This exposes `<script setup>` bindings on the instance and ignores `defineExpose()` narrowing to match `wrapper.vm` access in Vue Test Utils."
         }
       }
     },

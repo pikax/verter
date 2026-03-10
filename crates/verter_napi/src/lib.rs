@@ -1275,9 +1275,22 @@ impl NapiVerterHost {
     ///
     /// Returns `{ code, sourceMap? }` or `null` if no TSC output is available.
     #[napi(js_name = "getPublicApi")]
-    pub fn get_public_api(&self, canonical_id: String) -> Result<Option<NapiTscResponse>> {
+    pub fn get_public_api(
+        &self,
+        canonical_id: String,
+        mode: Option<String>,
+    ) -> Result<Option<NapiTscResponse>> {
+        let mode = match mode.as_deref() {
+            None | Some("public") => host::PublicApiMode::Public,
+            Some("testing") => host::PublicApiMode::Testing,
+            Some(other) => {
+                return Err(ffi_err(format!(
+                    "invalid public api mode '{other}', expected 'public' or 'testing'"
+                )));
+            }
+        };
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
-            self.inner.get_public_api(&canonical_id)
+            self.inner.get_public_api_with_mode(&canonical_id, mode)
         }))?;
         Ok(result.map(|r| NapiTscResponse {
             code: r.code.to_string(),

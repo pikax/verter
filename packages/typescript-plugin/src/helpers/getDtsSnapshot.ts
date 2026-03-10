@@ -5,6 +5,8 @@ import {
   hydrateMacroTypeDependencies,
   type MacroTypeDependencyAccess,
 } from "./macroTypeHydration";
+import type { VuePublicApiMode } from "./utils";
+import { normalizePath, toVueVirtualFileName } from "./utils";
 
 export const FALLBACK_STUB = "export default {} as any";
 
@@ -18,12 +20,9 @@ let loadFailed = false;
 let loadError: string | null = null;
 const virtualPublicApiCache = new Map<string, CachedVirtualPublicApi>();
 
-function normalizePath(fileName: string): string {
-  return fileName.replace(/\\/g, "/");
-}
-
 function setCachedVirtualPublicApi(
   fileName: string,
+  mode: VuePublicApiMode,
   code: string,
   rawSourceMap: string | undefined,
 ): void {
@@ -34,14 +33,27 @@ function setCachedVirtualPublicApi(
     sourceMap: parsedSourceMap,
   };
 
-  virtualPublicApiCache.set(normalized + ".ts", entry);
+  if (mode === "testing") {
+    virtualPublicApiCache.set(toVueVirtualFileName(normalized, "testing"), entry);
+    return;
+  }
+
+  virtualPublicApiCache.set(toVueVirtualFileName(normalized, "public"), entry);
   virtualPublicApiCache.set(normalized + ".d.ts", entry);
 }
 
-function clearCachedVirtualPublicApi(fileName: string): void {
+function clearCachedVirtualPublicApi(
+  fileName: string,
+  mode?: VuePublicApiMode,
+): void {
   const normalized = normalizePath(fileName);
-  virtualPublicApiCache.delete(normalized + ".ts");
-  virtualPublicApiCache.delete(normalized + ".d.ts");
+  if (!mode || mode === "public") {
+    virtualPublicApiCache.delete(toVueVirtualFileName(normalized, "public"));
+    virtualPublicApiCache.delete(normalized + ".d.ts");
+  }
+  if (!mode || mode === "testing") {
+    virtualPublicApiCache.delete(toVueVirtualFileName(normalized, "testing"));
+  }
 }
 
 function tryCreateSourceMap(rawSourceMap: string): SourceMap | null {
@@ -55,9 +67,10 @@ function tryCreateSourceMap(rawSourceMap: string): SourceMap | null {
 function offsetToLineColumn(text: string, offset: number): { line: number; column: number } {
   const prefix = text.slice(0, offset);
   const lines = prefix.split("\n");
+  const lastLine = lines.length > 0 ? lines[lines.length - 1] : "";
   return {
     line: lines.length,
-    column: (lines.at(-1)?.length ?? 0) + 1,
+    column: lastLine.length + 1,
   };
 }
 
@@ -143,12 +156,13 @@ export const parseFile = (
   content: string,
   logger: tsModule.server.Logger,
   access?: MacroTypeDependencyAccess,
+  mode: VuePublicApiMode = "public",
 ): string => {
   logger.info(`[Verter] parsing ${fileName}`);
 
   const h = getHost();
   if (!h) {
-    clearCachedVirtualPublicApi(fileName);
+    clearCachedVirtualPublicApi(fileName, mode);
     logger.info(`[Verter] native binary not available, returning stub${loadError ? ` (error: ${loadError})` : ""}`);
     return FALLBACK_STUB;
   }
@@ -159,20 +173,20 @@ export const parseFile = (
 
     // getPublicApi() performs macro-only extraction (fast path — no full template compilation).
     // The generated code includes a //# sourceMappingURL= for Go-to-Definition support.
-    const tsc = h.getPublicApi(fileName);
+    const tsc = h.getPublicApi(fileName, mode);
     if (!tsc) {
       logger.info(`[Verter] getPublicApi returned null for ${fileName}, no script block`);
-      clearCachedVirtualPublicApi(fileName);
+      clearCachedVirtualPublicApi(fileName, mode);
       return FALLBACK_STUB;
     }
 
-    setCachedVirtualPublicApi(fileName, tsc.code, tsc.sourceMap);
+    setCachedVirtualPublicApi(fileName, mode, tsc.code, tsc.sourceMap);
     logger.info(`[Verter] compiled ${fileName} (${tsc.code.length} chars)`);
     return tsc.code;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     logger.info(`[Verter] compilation error for ${fileName}: ${msg}`);
-    clearCachedVirtualPublicApi(fileName);
+    clearCachedVirtualPublicApi(fileName, mode);
     return FALLBACK_STUB;
   }
 };
