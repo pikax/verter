@@ -2837,6 +2837,7 @@ const count = ref(0)
                         span: verter_span::Span::new(4, 5),
                     },
                 ],
+                emit_fields: vec![],
                 span: verter_span::Span::new(0, 100),
             }],
             bindings: vec![],

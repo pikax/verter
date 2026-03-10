@@ -85,6 +85,7 @@ mod tests {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
+                emit_fields: vec![],
                 span: Span::new(20, 34),
             }],
             ..Default::default()
@@ -117,6 +118,7 @@ mod tests {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
+                emit_fields: vec![],
                 span: Span::new(20, 42),
             }],
             ..Default::default()
@@ -174,6 +176,7 @@ mod tests {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
+                emit_fields: vec![],
                 span: Span::new(20, 40),
             }],
             ..Default::default()

@@ -1,7 +1,7 @@
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
 
-use crate::types::{AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField};
+use crate::types::{AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField};
 
 /// Classify a callee name as a Vue compiler macro.
 fn classify_macro(name: &str) -> Option<AnalyzedMacroKind> {
@@ -296,6 +296,12 @@ fn try_extract_macro(expr: &Expression<'_>, binding_name: Option<String>) -> Opt
                 Vec::new()
             };
 
+            let emit_fields = if kind == AnalyzedMacroKind::DefineEmits {
+                extract_emit_fields(call)
+            } else {
+                Vec::new()
+            };
+
             Some(AnalyzedMacro {
                 kind,
                 is_type_based,
@@ -304,6 +310,7 @@ fn try_extract_macro(expr: &Expression<'_>, binding_name: Option<String>) -> Opt
                 model_name,
                 has_inherit_attrs_false,
                 prop_fields,
+                emit_fields,
                 span: call.span.into(),
             })
         }
@@ -401,6 +408,122 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropFi
             .filter_map(|elem| {
                 if let ArrayExpressionElement::StringLiteral(lit) = elem {
                     Some(AnalyzedPropField {
+                        name: lit.value.to_string(),
+                        span: lit.span.into(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Extract individual emit field names and spans from a `defineEmits` call.
+///
+/// Handles:
+/// - Type-based property-signature: `defineEmits<{ custom: [payload: string]; click: [] }>()`
+/// - Type-based call-signature: `defineEmits<{ (e: 'change', id: number): void }>()`
+/// - Runtime array: `defineEmits(['custom', 'click'])`
+/// - Runtime object: `defineEmits({ custom: null })`
+fn extract_emit_fields(call: &CallExpression<'_>) -> Vec<AnalyzedEmitField> {
+    // Type-based: extract from type parameters
+    if let Some(ref type_args) = call.type_arguments {
+        if let Some(first) = type_args.params.first() {
+            return extract_emit_fields_from_type(first);
+        }
+    }
+
+    // Runtime: extract from first argument
+    if let Some(first_arg) = call.arguments.first() {
+        if let Some(expr) = first_arg.as_expression() {
+            return extract_emit_fields_from_runtime(expr);
+        }
+    }
+
+    Vec::new()
+}
+
+/// Extract emit fields from a TypeScript type parameter.
+///
+/// Handles two TSTypeLiteral member shapes:
+/// 1. `TSPropertySignature` — key name is the event name (e.g., `custom: [payload: string]`)
+/// 2. `TSCallSignatureDeclaration` — first param's string literal type is the event name
+fn extract_emit_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedEmitField> {
+    match ts_type {
+        TSType::TSTypeLiteral(literal) => literal
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                // Property signature: `custom: [payload: string]`
+                TSSignature::TSPropertySignature(prop) => {
+                    let key_name = match &prop.key {
+                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                        _ => None,
+                    };
+                    key_name.map(|name| AnalyzedEmitField {
+                        name,
+                        span: prop.key.span().into(),
+                    })
+                }
+                // Call signature: `(e: 'change', id: number): void`
+                TSSignature::TSCallSignatureDeclaration(call) => {
+                    // First param should be string literal type: `e: 'change'`
+                    let first_param = call.params.items.first()?;
+                    let type_ann = first_param.type_annotation.as_ref()?;
+                    if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
+                        if let TSLiteral::StringLiteral(s) = &lit.literal {
+                            return Some(AnalyzedEmitField {
+                                name: s.value.to_string(),
+                                span: s.span.into(),
+                            });
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            })
+            .collect(),
+        TSType::TSTypeReference(_) => Vec::new(),
+        TSType::TSIntersectionType(intersection) => intersection
+            .types
+            .iter()
+            .flat_map(|t| extract_emit_fields_from_type(t))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Extract emit fields from a runtime argument (object keys or array string elements).
+fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitField> {
+    match expr {
+        Expression::ObjectExpression(obj) => obj
+            .properties
+            .iter()
+            .filter_map(|prop| {
+                if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                    let key_name = match &p.key {
+                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                        _ => None,
+                    };
+                    key_name.map(|name| AnalyzedEmitField {
+                        name,
+                        span: p.key.span().into(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Expression::ArrayExpression(arr) => arr
+            .elements
+            .iter()
+            .filter_map(|elem| {
+                if let ArrayExpressionElement::StringLiteral(lit) = elem {
+                    Some(AnalyzedEmitField {
                         name: lit.value.to_string(),
                         span: lit.span.into(),
                     })
@@ -802,6 +925,120 @@ defineExpose({ props })
         assert!(
             macros[0].prop_fields.is_empty(),
             "type reference should yield empty prop fields"
+        );
+    }
+
+    // =========================================================================
+    // Emit field extraction tests
+    // =========================================================================
+
+    #[test]
+    fn emit_fields_type_based_property_signature() {
+        let code = "defineEmits<{ custom: [payload: string]; click: [] }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].emit_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "should extract 2 emit fields: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "custom");
+        assert_eq!(fields[1].name, "click");
+        // Verify spans point to event name keys
+        assert_eq!(
+            &code[fields[0].span.start as usize..fields[0].span.end as usize],
+            "custom"
+        );
+        assert_eq!(
+            &code[fields[1].span.start as usize..fields[1].span.end as usize],
+            "click"
+        );
+    }
+
+    #[test]
+    fn emit_fields_type_based_call_signature() {
+        let code = "defineEmits<{ (e: 'change', id: number): void }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].emit_fields;
+        assert_eq!(
+            fields.len(),
+            1,
+            "should extract 1 emit field from call signature: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "change");
+    }
+
+    #[test]
+    fn emit_fields_type_based_mixed_signatures() {
+        let code = "defineEmits<{ (e: 'change', id: number): void; custom: [payload: string] }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].emit_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "should extract 2 emit fields from mixed signatures: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "change");
+        assert_eq!(fields[1].name, "custom");
+    }
+
+    #[test]
+    fn emit_fields_runtime_array() {
+        let code = "defineEmits(['custom', 'click'])";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].emit_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "should extract 2 runtime array emit fields: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "custom");
+        assert_eq!(fields[1].name, "click");
+    }
+
+    #[test]
+    fn emit_fields_runtime_object() {
+        let code = "defineEmits({ custom: null })";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].emit_fields;
+        assert_eq!(
+            fields.len(),
+            1,
+            "should extract 1 runtime object emit field: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "custom");
+    }
+
+    #[test]
+    fn emit_fields_non_define_emits_empty() {
+        let code = "defineProps<{ count: number }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        assert!(
+            macros[0].emit_fields.is_empty(),
+            "defineProps should have no emit fields"
+        );
+    }
+
+    #[test]
+    fn emit_fields_type_reference_empty() {
+        // Interface reference — can't resolve inline, emit_fields is empty
+        let code = "defineEmits<MyEvents>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        assert!(
+            macros[0].emit_fields.is_empty(),
+            "type reference should yield empty emit fields"
         );
     }
 

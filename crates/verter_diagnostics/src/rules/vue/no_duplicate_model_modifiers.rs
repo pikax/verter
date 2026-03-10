@@ -108,6 +108,7 @@ mod tests {
             model_name: model_name.map(|s| s.to_string()),
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: Span::new(span_start, span_end),
         }
     }

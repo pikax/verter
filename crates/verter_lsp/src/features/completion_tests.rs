@@ -2168,3 +2168,160 @@ fn test_template_completions_vfor_destructured_pattern() {
         "raw pattern must not appear as completion"
     );
 }
+
+// =========================================================================
+// Component Prop/Event Completions via Macro Fallback
+// =========================================================================
+
+#[test]
+fn test_component_prop_completions_from_macros() {
+    // Parent SFC: <template><MyChild |></template>
+    // The cursor `|` is after `<MyChild ` in attribute position
+    let source = "<template>\n  <MyChild >\n</template>\n<script setup>\nimport MyChild from './MyChild.vue'\n</script>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    // Parent analysis: has a component usage for MyChild
+    let parent_analysis = FileAnalysisSnapshot {
+        bindings: vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::Ref,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
+        }],
+        template: Some(
+            (verter_analysis::TemplateAnalysisSnapshot {
+                components: vec![verter_analysis::template::TemplateComponentUsage {
+                    name: "MyChild".to_string(),
+                    import_source: Some("./MyChild.vue".to_string()),
+                    is_dynamic: false,
+                    props: vec![],
+                    has_spread: false,
+                    slots_used: vec![],
+                    static_classes: vec![],
+                    has_dynamic_class: false,
+                    dynamic_classes: vec![],
+                    v_models: vec![],
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        ..Default::default()
+    };
+
+    // Child analysis: has defineProps with prop_fields and defineEmits with emit_fields
+    // but empty template.prop_definitions / emit_definitions (the normal state)
+    let child_analysis = FileAnalysisSnapshot {
+        macros: std::sync::Arc::new(vec![
+            AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec![],
+                binding_name: None,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: vec![
+                    verter_analysis::AnalyzedPropField {
+                        name: "foo".to_string(),
+                        span: verter_span::Span::new(0, 3),
+                    },
+                    verter_analysis::AnalyzedPropField {
+                        name: "barBaz".to_string(),
+                        span: verter_span::Span::new(10, 16),
+                    },
+                ],
+                emit_fields: vec![],
+                span: verter_span::Span::new(0, 0),
+            },
+            AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineEmits,
+                is_type_based: true,
+                type_references: vec![],
+                binding_name: None,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: vec![],
+                emit_fields: vec![verter_analysis::AnalyzedEmitField {
+                    name: "custom".to_string(),
+                    span: verter_span::Span::new(0, 6),
+                }],
+                span: verter_span::Span::new(0, 0),
+            },
+        ]),
+        template: Some((verter_analysis::TemplateAnalysisSnapshot::default()).into()),
+        ..Default::default()
+    };
+
+    // Cursor at `<MyChild |>` — right before `>`
+    let cursor_pos = source.find("<MyChild >").unwrap() + "<MyChild ".len();
+    let pos = line_index.offset_to_position(cursor_pos as u32).unwrap();
+
+    let resolve: Box<dyn Fn(&str) -> Option<FileAnalysisSnapshot>> =
+        Box::new(move |source_path: &str| {
+            if source_path == "./MyChild.vue" {
+                Some(child_analysis.clone())
+            } else {
+                None
+            }
+        });
+
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&parent_analysis),
+        &line_index,
+        Some(&*resolve),
+        None,
+        None,
+    );
+
+    assert!(result.is_some(), "should return component prop completions");
+    let items = result.unwrap().items;
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    // Positive: child's props should be offered as kebab-case
+    assert!(
+        labels.contains(&"foo"),
+        "should contain prop 'foo', got: {:?}",
+        labels
+    );
+    assert!(
+        labels.contains(&"bar-baz"),
+        "should contain prop 'bar-baz' (kebab-case), got: {:?}",
+        labels
+    );
+
+    // Positive: child's emits should be offered with @ prefix
+    assert!(
+        labels.contains(&"@custom"),
+        "should contain event '@custom', got: {:?}",
+        labels
+    );
+
+    // Negative: parent's script bindings must NOT leak
+    assert!(
+        !labels.iter().any(|l| *l == "count"),
+        "parent binding 'count' must not appear in component prop completions"
+    );
+
+    // Negative: no internal symbols
+    assert!(
+        !labels
+            .iter()
+            .any(|l| l.contains("___VERTER___") || l.contains("$V_") || l.contains("__props")),
+        "internal symbols must not leak: {:?}",
+        labels
+    );
+
+    // Verify kind is PROPERTY for props
+    let foo_item = items.iter().find(|i| i.label == "foo").unwrap();
+    assert_eq!(foo_item.kind, Some(CompletionItemKind::PROPERTY));
+}

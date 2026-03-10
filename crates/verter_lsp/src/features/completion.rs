@@ -1165,7 +1165,6 @@ fn component_prop_completions(
     // Resolve the component's analysis
     let resolve_fn = resolve_component?;
     let child_analysis = resolve_fn(import_source)?;
-    let child_template = child_analysis.template.as_deref()?;
 
     let mut items = Vec::new();
 
@@ -1173,61 +1172,114 @@ fn component_prop_completions(
     let used_props: std::collections::HashSet<String> =
         comp_usage.props.iter().map(|p| p.name.clone()).collect();
 
-    // Props from child component's defineProps
-    for prop_def in &child_template.prop_definitions {
-        if used_props.contains(&prop_def.name) {
-            continue;
-        }
-        let label = to_kebab_case(&prop_def.name);
-        let mut detail_parts = Vec::new();
-        if let Some(ref ty) = prop_def.type_annotation {
-            detail_parts.push(ty.clone());
-        }
-        if prop_def.is_required {
-            detail_parts.push("required".to_string());
-        }
-        if prop_def.has_default {
-            detail_parts.push("has default".to_string());
-        }
+    // --- Props ---
+    // Try template.prop_definitions first (future type-provider enrichment),
+    // fall back to macro prop_fields from defineProps.
+    let child_template = child_analysis.template.as_deref();
+    let has_prop_defs = child_template.is_some_and(|t| !t.prop_definitions.is_empty());
 
-        let insert_text = if prop_def.is_boolean {
-            // Boolean props can be used without value: <Comp disabled />
-            Some(label.clone())
-        } else {
-            // Suggest binding syntax for non-boolean: :prop="$1"
-            Some(format!(":{}=\"$1\"", label))
-        };
+    if has_prop_defs {
+        let child_template = child_template.unwrap();
+        for prop_def in &child_template.prop_definitions {
+            if used_props.contains(&prop_def.name) {
+                continue;
+            }
+            let label = to_kebab_case(&prop_def.name);
+            let mut detail_parts = Vec::new();
+            if let Some(ref ty) = prop_def.type_annotation {
+                detail_parts.push(ty.clone());
+            }
+            if prop_def.is_required {
+                detail_parts.push("required".to_string());
+            }
+            if prop_def.has_default {
+                detail_parts.push("has default".to_string());
+            }
 
-        items.push(CompletionItem {
-            label: label.clone(),
-            kind: Some(CompletionItemKind::PROPERTY),
-            detail: if detail_parts.is_empty() {
-                Some("prop".to_string())
+            let insert_text = if prop_def.is_boolean {
+                Some(label.clone())
             } else {
-                Some(detail_parts.join(", "))
-            },
-            insert_text,
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
-            sort_text: Some(format!("0{}", label)), // Props sort before events
-            ..Default::default()
-        });
+                Some(format!(":{}=\"$1\"", label))
+            };
+
+            items.push(CompletionItem {
+                label: label.clone(),
+                kind: Some(CompletionItemKind::PROPERTY),
+                detail: if detail_parts.is_empty() {
+                    Some("prop".to_string())
+                } else {
+                    Some(detail_parts.join(", "))
+                },
+                insert_text,
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                sort_text: Some(format!("0{}", label)),
+                ..Default::default()
+            });
+        }
+    } else {
+        // Fall back to macro prop_fields
+        for m in child_analysis.macros.iter() {
+            if m.kind == verter_analysis::AnalyzedMacroKind::DefineProps {
+                for field in &m.prop_fields {
+                    if used_props.contains(&field.name) {
+                        continue;
+                    }
+                    let label = to_kebab_case(&field.name);
+                    items.push(CompletionItem {
+                        label: label.clone(),
+                        kind: Some(CompletionItemKind::PROPERTY),
+                        detail: Some("prop".to_string()),
+                        insert_text: Some(format!(":{}=\"$1\"", label)),
+                        insert_text_format: Some(InsertTextFormat::SNIPPET),
+                        sort_text: Some(format!("0{}", label)),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
     }
 
-    // Events from child component's defineEmits
-    for emit_def in &child_template.emit_definitions {
-        let event_name = &emit_def.event_name;
-        let label = format!("@{}", to_kebab_case(event_name));
-        let insert_text = Some(format!("@{}=\"$1\"", to_kebab_case(event_name)));
+    // --- Events ---
+    // Try template.emit_definitions first, fall back to macro emit_fields.
+    let has_emit_defs = child_template.is_some_and(|t| !t.emit_definitions.is_empty());
 
-        items.push(CompletionItem {
-            label,
-            kind: Some(CompletionItemKind::EVENT),
-            detail: Some("event".to_string()),
-            insert_text,
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
-            sort_text: Some(format!("1{}", event_name)), // Events sort after props
-            ..Default::default()
-        });
+    if has_emit_defs {
+        let child_template = child_template.unwrap();
+        for emit_def in &child_template.emit_definitions {
+            let event_name = &emit_def.event_name;
+            let label = format!("@{}", to_kebab_case(event_name));
+            let insert_text = Some(format!("@{}=\"$1\"", to_kebab_case(event_name)));
+
+            items.push(CompletionItem {
+                label,
+                kind: Some(CompletionItemKind::EVENT),
+                detail: Some("event".to_string()),
+                insert_text,
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                sort_text: Some(format!("1{}", event_name)),
+                ..Default::default()
+            });
+        }
+    } else {
+        // Fall back to macro emit_fields
+        for m in child_analysis.macros.iter() {
+            if m.kind == verter_analysis::AnalyzedMacroKind::DefineEmits {
+                for field in &m.emit_fields {
+                    let label = format!("@{}", to_kebab_case(&field.name));
+                    let insert_text = Some(format!("@{}=\"$1\"", to_kebab_case(&field.name)));
+
+                    items.push(CompletionItem {
+                        label,
+                        kind: Some(CompletionItemKind::PROPERTY),
+                        detail: Some("event".to_string()),
+                        insert_text,
+                        insert_text_format: Some(InsertTextFormat::SNIPPET),
+                        sort_text: Some(format!("1{}", field.name)),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
     }
 
     if items.is_empty() {

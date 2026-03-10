@@ -144,6 +144,7 @@ fn b1_no_action_when_define_slots_exists() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(24, 42),
         }],
     );
@@ -265,6 +266,7 @@ fn b2_no_action_when_all_emits_declared() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -316,6 +318,7 @@ fn b4_add_missing_emit_to_existing_type_based() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -383,6 +386,7 @@ fn b4_add_missing_emit_to_runtime_array() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(24, 57),
         }],
     );
@@ -821,6 +825,7 @@ fn b3_detects_missing_slot() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(24, 68),
         }],
     );
@@ -894,6 +899,7 @@ fn b3_no_action_when_all_present() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(24, 92),
         }],
     );
@@ -939,6 +945,7 @@ fn b5_missing_prop_detected() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(24, 80),
         }],
     );
@@ -987,6 +994,7 @@ fn b5_no_action_when_props_match() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(24, 80),
         }],
     );
@@ -1104,6 +1112,7 @@ fn cursor_on_define_slots_macro_shows_augmentation_actions() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );

@@ -215,6 +215,7 @@ mod tests {
                         span: Span::new(0, 0),
                     })
                     .collect(),
+                emit_fields: vec![],
                 span: Span::new(0, 50),
             }],
             ..Default::default()

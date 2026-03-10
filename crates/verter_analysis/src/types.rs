@@ -729,6 +729,16 @@ pub struct AnalyzedPropField {
     pub span: Span,
 }
 
+/// An individual emit field from `defineEmits`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedEmitField {
+    /// Event name as declared (e.g., `"custom"` from `defineEmits<{ custom: [payload: string] }>()`).
+    pub name: String,
+    /// SFC-absolute byte span of the event name in the declaration.
+    pub span: Span,
+}
+
 /// A Vue compiler macro call found in `<script setup>` (e.g., `defineProps`, `defineEmits`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedMacro {
@@ -747,6 +757,9 @@ pub struct AnalyzedMacro {
     /// Individual prop fields from `defineProps` (type-based and runtime).
     /// Each field has the prop name and the SFC-absolute span of the property key.
     pub prop_fields: Vec<AnalyzedPropField>,
+    /// Individual emit fields from `defineEmits` (type-based and runtime).
+    /// Each field has the event name and the SFC-absolute span of the event name key.
+    pub emit_fields: Vec<AnalyzedEmitField>,
     /// SFC-absolute byte span of the macro call.
     pub span: Span,
 }
@@ -754,8 +767,10 @@ pub struct AnalyzedMacro {
 impl serde::Serialize for AnalyzedMacro {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let count =
-            7 + usize::from(self.model_name.is_some()) + usize::from(!self.prop_fields.is_empty());
+        let count = 7
+            + usize::from(self.model_name.is_some())
+            + usize::from(!self.prop_fields.is_empty())
+            + usize::from(!self.emit_fields.is_empty());
         let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("isTypeBased", &self.is_type_based)?;
@@ -767,6 +782,9 @@ impl serde::Serialize for AnalyzedMacro {
         s.serialize_field("hasInheritAttrsFalse", &self.has_inherit_attrs_false)?;
         if !self.prop_fields.is_empty() {
             s.serialize_field("propFields", &self.prop_fields)?;
+        }
+        if !self.emit_fields.is_empty() {
+            s.serialize_field("emitFields", &self.emit_fields)?;
         }
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
@@ -790,6 +808,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             #[serde(default)]
             prop_fields: Vec<AnalyzedPropField>,
             #[serde(default)]
+            emit_fields: Vec<AnalyzedEmitField>,
+            #[serde(default)]
             span_start: u32,
             #[serde(default)]
             span_end: u32,
@@ -803,6 +823,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             model_name: w.model_name,
             has_inherit_attrs_false: w.has_inherit_attrs_false,
             prop_fields: w.prop_fields,
+            emit_fields: w.emit_fields,
             span: Span::new(w.span_start, w.span_end),
         })
     }

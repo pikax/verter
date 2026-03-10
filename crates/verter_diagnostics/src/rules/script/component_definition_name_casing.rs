@@ -83,6 +83,7 @@ mod tests {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: Span::new(10, 50),
         }
     }

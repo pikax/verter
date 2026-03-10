@@ -70,12 +70,12 @@ pub use template::{
 };
 pub use types::hash_16;
 pub use types::{
-    AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedExportedFunction, AnalyzedImport,
-    AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, AnalyzedModuleReference,
-    AnalyzedPropField, BindingInitializer, ComposableInfo, ComposableReturn, ComposableReturnField,
-    CssVarManipulation, CssVarManipulationKind, DomQueryCallSite, DomQueryKind, ExportSignature,
-    FunctionParam, Hash16, ImportSourceInfo, LiteralKind, MacroTypeDep,
-    ModuleReferenceAnalyzability, ModuleReferenceSemantics, ModuleReferenceSyntax, ReactivityKind,
-    ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot, ScriptTypeEnhancements,
-    VueApiClassification,
+    AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedEmitField,
+    AnalyzedExportedFunction, AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro,
+    AnalyzedMacroKind, AnalyzedModuleReference, AnalyzedPropField, BindingInitializer,
+    ComposableInfo, ComposableReturn, ComposableReturnField, CssVarManipulation,
+    CssVarManipulationKind, DomQueryCallSite, DomQueryKind, ExportSignature, FunctionParam, Hash16,
+    ImportSourceInfo, LiteralKind, MacroTypeDep, ModuleReferenceAnalyzability,
+    ModuleReferenceSemantics, ModuleReferenceSyntax, ReactivityKind, ResolvedTypeInfo,
+    ReturnReactivity, ScriptAnalysisSnapshot, ScriptTypeEnhancements, VueApiClassification,
 };

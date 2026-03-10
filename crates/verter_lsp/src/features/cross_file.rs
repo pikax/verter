@@ -223,6 +223,7 @@ mod tests {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
+                emit_fields: vec![],
                 span: verter_span::Span::new(24, 60),
             }])
             .into(),
@@ -397,6 +398,7 @@ mod tests {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
+                emit_fields: vec![],
                 span: verter_span::Span::new(24, 57), // past the closing `)`
             }])
             .into(),
@@ -428,6 +430,7 @@ mod tests {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
+                emit_fields: vec![],
                 span: verter_span::Span::new(15, 35),
             }])
             .into(),
