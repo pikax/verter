@@ -20,7 +20,6 @@ const nexusUiRoot = process.env.VERTER_NEXUS_UI_ROOT ?? defaultNexusUiRoot;
 const nexusUiPackageDir = path.resolve(nexusUiRoot, "packages", "ui");
 const nexusUiDistDir = path.resolve(nexusUiPackageDir, "dist");
 const nexusUiTimeoutMs = 60_000;
-const runDirectStyleCheck = process.env.VERTER_RUN_DIRECT_STYLE_REGRESSION === "1";
 const runNexusUiCheck = process.env.VERTER_RUN_NEXUS_UI === "1";
 
 const viteBin = path.resolve(unpluginDir, "node_modules", "vite", "bin", "vite.js");
@@ -225,18 +224,12 @@ async function main() {
     );
   }
 
-  if (runDirectStyleCheck) {
-    console.log("[exit-regression] running direct SCSS virtual-style repro");
-    const directResult = await runDirectStyleRegression();
-    printResult(directResult);
-    if (!directResult.ok) {
-      throw new Error(
-        "Direct SCSS virtual-style regression failed. Fix the style pipeline before shipping the exit-hang change.",
-      );
-    }
-  } else {
-    console.log(
-      "[exit-regression] direct SCSS virtual-style repro skipped by default; set VERTER_RUN_DIRECT_STYLE_REGRESSION=1 to run it",
+  console.log("[exit-regression] running direct SCSS virtual-style repro");
+  const directResult = await runDirectStyleRegression();
+  printResult(directResult);
+  if (!directResult.ok) {
+    throw new Error(
+      "Direct SCSS virtual-style regression failed. Fix the style pipeline before shipping the exit-hang change.",
     );
   }
 

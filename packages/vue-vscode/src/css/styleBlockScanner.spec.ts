@@ -62,6 +62,116 @@ describe("scanStyleBlocks", () => {
   });
 });
 
+describe("langAttributeRange", () => {
+  // @ai-generated - Tests langAttributeRange for various attribute formats
+  it("is absent for plain <style> without lang attribute", () => {
+    const source = `<style>
+.foo { color: red; }
+</style>`;
+    const blocks = scanStyleBlocks(source);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].langAttributeRange).toBeUndefined();
+  });
+
+  it("covers the full lang=\"scss\" attribute text with double quotes", () => {
+    const source = `<style lang="scss">
+.foo { color: red; }
+</style>`;
+    const blocks = scanStyleBlocks(source);
+    expect(blocks).toHaveLength(1);
+    const range = blocks[0].langAttributeRange;
+    expect(range).toBeDefined();
+    // <style lang="scss"> is on line 0
+    expect(range!.startLine).toBe(0);
+    expect(range!.endLine).toBe(0);
+    // Extract the text covered by the range
+    const line = source.split("\n")[0];
+    const text = line.slice(range!.startCol, range!.endCol);
+    expect(text).toBe('lang="scss"');
+  });
+
+  it("covers the full lang='sass' attribute text with single quotes", () => {
+    const source = `<style lang='sass'>
+.foo
+  color: red
+</style>`;
+    const blocks = scanStyleBlocks(source);
+    expect(blocks).toHaveLength(1);
+    const range = blocks[0].langAttributeRange;
+    expect(range).toBeDefined();
+    const line = source.split("\n")[0];
+    const text = line.slice(range!.startCol, range!.endCol);
+    expect(text).toBe("lang='sass'");
+  });
+
+  it("covers lang=stylus attribute text without quotes", () => {
+    const source = `<style lang=stylus>
+.foo
+  color red
+</style>`;
+    const blocks = scanStyleBlocks(source);
+    expect(blocks).toHaveLength(1);
+    const range = blocks[0].langAttributeRange;
+    expect(range).toBeDefined();
+    const line = source.split("\n")[0];
+    const text = line.slice(range!.startCol, range!.endCol);
+    expect(text).toBe("lang=stylus");
+  });
+
+  it("works alongside scoped attribute", () => {
+    const source = `<style scoped lang="less">
+.foo { color: red; }
+</style>`;
+    const blocks = scanStyleBlocks(source);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].scoped).toBe(true);
+    expect(blocks[0].lang).toBe("less");
+    const range = blocks[0].langAttributeRange;
+    expect(range).toBeDefined();
+    const line = source.split("\n")[0];
+    const text = line.slice(range!.startCol, range!.endCol);
+    expect(text).toBe('lang="less"');
+  });
+
+  it("handles lang attribute after template on next line", () => {
+    const source = `<template><div>hello</div></template>
+<style lang="sass">
+.foo
+  color: red
+</style>`;
+    const blocks = scanStyleBlocks(source);
+    expect(blocks).toHaveLength(1);
+    const range = blocks[0].langAttributeRange;
+    expect(range).toBeDefined();
+    // The style tag is on line 1
+    expect(range!.startLine).toBe(1);
+    expect(range!.endLine).toBe(1);
+    const line = source.split("\n")[1];
+    const text = line.slice(range!.startCol, range!.endCol);
+    expect(text).toBe('lang="sass"');
+  });
+
+  it("second style block has correct langAttributeRange", () => {
+    const source = `<style>
+.a { color: red; }
+</style>
+<style lang="scss" scoped>
+.b { color: blue; }
+</style>`;
+    const blocks = scanStyleBlocks(source);
+    expect(blocks).toHaveLength(2);
+    // First block: no lang attribute
+    expect(blocks[0].langAttributeRange).toBeUndefined();
+    // Second block: has lang attribute
+    const range = blocks[1].langAttributeRange;
+    expect(range).toBeDefined();
+    expect(range!.startLine).toBe(3);
+    const line = source.split("\n")[3];
+    const text = line.slice(range!.startCol, range!.endCol);
+    expect(text).toBe('lang="scss"');
+  });
+});
+
 describe("findStyleBlockAt", () => {
   it("finds SCSS block when cursor is inside it", () => {
     const source = `<template><div></div></template>

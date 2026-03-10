@@ -23,25 +23,48 @@ export interface StyleBlockInfo {
   contentStartOffset: number;
   /** UTF-16 offset of the character just past the last content character (`<` of `</style>`). */
   contentEndOffset: number;
+  /**
+   * Range of the `lang="..."` attribute text (including key, `=`, and quotes)
+   * within the SFC source. Present only when a `lang` attribute exists.
+   * All values are 0-based.
+   */
+  langAttributeRange?: {
+    startLine: number;
+    startCol: number;
+    endLine: number;
+    endCol: number;
+  };
 }
 
 const STYLE_TAG_RE = /<style\b([^>]*)>/g;
 const STYLE_CLOSE_RE = /<\/style\s*>/g;
 
-function parseLang(attrs: string): StyleLang {
+interface ParsedLang {
+  lang: StyleLang;
+  /** Offset of the `lang` attribute within the attrs string, or -1 if absent. */
+  matchStart: number;
+  /** Length of the full `lang="..."` attribute match. */
+  matchLength: number;
+}
+
+function parseLang(attrs: string): ParsedLang {
   const m = /\blang\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/.exec(attrs);
-  if (!m) return "css";
+  if (!m) return { lang: "css", matchStart: -1, matchLength: 0 };
   const raw = (m[1] ?? m[2] ?? m[3]).toLowerCase();
+  let lang: StyleLang;
   switch (raw) {
     case "scss":
     case "less":
     case "sass":
     case "stylus":
     case "postcss":
-      return raw;
+      lang = raw;
+      break;
     default:
-      return "css";
+      lang = "css";
+      break;
   }
+  return { lang, matchStart: m.index, matchLength: m[0].length };
 }
 
 function hasAttr(attrs: string, name: string): boolean {
@@ -95,15 +118,36 @@ export function scanStyleBlocks(source: string): StyleBlockInfo[] {
 
     const contentEndOffset = closeMatch.index;
     const { line, col } = offsetToLineCol(contentStartOffset);
+    const parsed = parseLang(attrs);
+
+    // Compute langAttributeRange if the lang attribute was found
+    let langAttributeRange: StyleBlockInfo["langAttributeRange"];
+    if (parsed.matchStart >= 0) {
+      // The attrs string starts after "<style" in the source.
+      // openMatch[0] is e.g. `<style lang="scss">`. The attrs capture group
+      // starts at openMatch.index + "<style".length (6).
+      const attrsOffset = openMatch.index + 6; // length of "<style"
+      const langAbsStart = attrsOffset + parsed.matchStart;
+      const langAbsEnd = langAbsStart + parsed.matchLength;
+      const start = offsetToLineCol(langAbsStart);
+      const end = offsetToLineCol(langAbsEnd);
+      langAttributeRange = {
+        startLine: start.line,
+        startCol: start.col,
+        endLine: end.line,
+        endCol: end.col,
+      };
+    }
 
     results.push({
       index,
-      lang: parseLang(attrs),
+      lang: parsed.lang,
       scoped: hasAttr(attrs, "scoped"),
       contentStartLine: line,
       contentStartColumn: col,
       contentStartOffset,
       contentEndOffset,
+      langAttributeRange,
     });
 
     index++;

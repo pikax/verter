@@ -72,6 +72,10 @@ async function main() {
     throw new Error("Style virtual transform lost the compiled Sass output.");
   }
 
+  // Tear down the plugin — this kills the preprocessor child process,
+  // preventing leaked Sass workers from holding the parent alive.
+  await plugin.closeBundle?.();
+
   console.log("[direct-style-exit-repro] scoped CSS generated successfully");
 }
 

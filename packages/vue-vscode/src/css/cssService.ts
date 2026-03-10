@@ -81,6 +81,8 @@ export class CssService {
   private preprocessors: PreprocessorCache = {};
   /** Track which preprocessor warnings have been shown (show at most once per session). */
   private warnedMissing = new Set<string>();
+  /** Inline diagnostics for missing preprocessor packages (sass, stylus). */
+  private diagnostics = vscode.languages.createDiagnosticCollection("verter-preprocessor");
 
   constructor(
     private getClient: () => PatchClient<LanguageClient>,
@@ -297,6 +299,7 @@ export class CssService {
 
   dispose(): void {
     this.cache.clear();
+    this.diagnostics.dispose();
   }
 
   // ── Internal helpers ───────────────────────────────────────────
@@ -448,6 +451,9 @@ export class CssService {
     }
 
     // Transpile preprocessors if needed (resolved from workspace node_modules)
+    // Collect missing-preprocessor diagnostics for this URI atomically.
+    const missingDiags: vscode.Diagnostic[] = [];
+
     for (const block of blocks) {
       if (block.lang !== "sass" && block.lang !== "stylus") continue;
 
@@ -470,15 +476,41 @@ export class CssService {
 
         // Send transpiled CSS back to the host for analysis
         await this.applyStyleOverride(uri, block.index, result);
-      } else if (!this.warnedMissing.has(block.lang)) {
-        // Warn user once per preprocessor that it's not installed
-        this.warnedMissing.add(block.lang);
-        vscode.window.showWarningMessage(
-          `Verter: "${block.lang}" is not installed in the workspace. ` +
-          `CSS intellisense for <style lang="${block.lang}"> blocks requires ` +
-          `"${block.lang}" to be installed as a project dependency.`,
-        );
+      } else {
+        // Emit an inline diagnostic on the lang="..." attribute
+        if (block.langAttributeRange) {
+          const range = new vscode.Range(
+            new vscode.Position(block.langAttributeRange.startLine, block.langAttributeRange.startCol),
+            new vscode.Position(block.langAttributeRange.endLine, block.langAttributeRange.endCol),
+          );
+          const diag = new vscode.Diagnostic(
+            range,
+            `"${block.lang}" is not installed. CSS intellisense for <style lang="${block.lang}"> ` +
+            `requires "${block.lang}" as a project dependency.`,
+            vscode.DiagnosticSeverity.Error,
+          );
+          diag.source = "verter";
+          missingDiags.push(diag);
+        }
+
+        // Show a one-time warning message as secondary guidance
+        if (!this.warnedMissing.has(block.lang)) {
+          this.warnedMissing.add(block.lang);
+          vscode.window.showWarningMessage(
+            `Verter: "${block.lang}" is not installed in the workspace. ` +
+            `CSS intellisense for <style lang="${block.lang}"> blocks requires ` +
+            `"${block.lang}" to be installed as a project dependency.`,
+          );
+        }
       }
+    }
+
+    // Update diagnostics atomically for this URI (clears stale entries)
+    try {
+      const vscodeUri = vscode.Uri.parse(uri);
+      this.diagnostics.set(vscodeUri, missingDiags);
+    } catch {
+      // URI parsing may fail for non-file URIs; ignore
     }
 
     const entry: DocumentCache = {

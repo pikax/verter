@@ -10,6 +10,7 @@ import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-re
 import { hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
 import { preprocessBlock } from "./core/preprocessor";
+import { PreprocessorSession } from "./core/preprocessor-session";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
 
@@ -153,12 +154,18 @@ async function applyPreprocessorRequests(
   profile: HostCompileProfile | undefined,
   viteConfig: unknown | null,
   customBlocks?: Record<string, BlockPreprocessor>,
+  preprocessorSession?: PreprocessorSession | null,
 ): Promise<void> {
   if (!upsertResult.preprocessorRequests?.length) return;
 
   const overrides: NativeBlockOverrideEntry[] = [];
   for (const req of upsertResult.preprocessorRequests) {
-    const result = await preprocessBlock(req, filename, viteConfig, customBlocks);
+    let result;
+    if (preprocessorSession) {
+      result = await preprocessorSession.process(req, filename, customBlocks);
+    } else {
+      result = await preprocessBlock(req, filename, viteConfig, customBlocks);
+    }
     if (result) {
       overrides.push({
         blockType: req.blockType,
@@ -204,6 +211,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 ) => {
   const opts = options ?? {};
   let viteConfig: ResolvedConfig | null = null;
+  let session: PreprocessorSession | null = null;
   const hmrStrategy = getHmrStrategy(meta.framework);
   const filter = createFilter(opts.include);
 
@@ -360,7 +368,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 
         // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
         await applyPreprocessorRequests(
-          host, filename, upsertResult, profile, viteConfig, opts.customBlocks,
+          host, filename, upsertResult, profile, viteConfig, opts.customBlocks, session,
         );
 
         const main = host.getVirtualFile({
@@ -470,7 +478,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 
       // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
       await applyPreprocessorRequests(
-        host, filename, upsertResult, profile, viteConfig, opts.customBlocks,
+        host, filename, upsertResult, profile, viteConfig, opts.customBlocks, session,
       );
       const t2 = timing ? performance.now() : 0;
 
@@ -525,11 +533,14 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       return { code: main.code, map: null };
     },
 
-    closeBundle() {
+    async closeBundle() {
+      await session?.close();
+      session = null;
       resetHost();
     },
 
-    buildEnd() {
+    async buildEnd() {
+      await session?.close();
       if (!timing) return;
       const transformTotal = tUpsertMs + tDepsMs + tCompileMs;
       const lines = [
@@ -561,6 +572,13 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
     vite: {
       configResolved(resolvedConfig) {
         viteConfig = resolvedConfig;
+        // Create the preprocessor session from resolved Vite config.
+        // Style preprocessing runs in a child process to isolate leaked Sass workers.
+        session = new PreprocessorSession({
+          configFile: resolvedConfig.configFile || undefined,
+          root: resolvedConfig.root,
+          cssOptions: resolvedConfig.css as Record<string, unknown>,
+        });
       },
 
       handleHotUpdate({ file, server, modules }) {

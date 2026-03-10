@@ -41,7 +41,7 @@ export async function preprocessBlock(
   }
 }
 
-async function preprocessTemplate(
+export async function preprocessTemplate(
   lang: string,
   content: string,
   _filename: string,
@@ -66,7 +66,7 @@ async function preprocessTemplate(
   return null;
 }
 
-async function preprocessScript(
+export async function preprocessScript(
   lang: string,
   content: string,
   _filename: string,
@@ -101,7 +101,7 @@ async function preprocessScript(
   return null;
 }
 
-async function preprocessStyle(
+export async function preprocessStyle(
   lang: string,
   content: string,
   filename: string,
@@ -135,7 +135,7 @@ async function preprocessStyle(
   return null;
 }
 
-async function preprocessCustom(
+export async function preprocessCustom(
   lang: string,
   content: string,
   filename: string,
