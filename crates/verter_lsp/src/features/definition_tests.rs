@@ -449,10 +449,7 @@ fn test_go_to_component_definition_from_template() {
         None,
     );
     // With .vue fallback, navigates to file top even without export resolver
-    assert!(
-        result.is_some(),
-        "should navigate to .vue file as fallback"
-    );
+    assert!(result.is_some(), "should navigate to .vue file as fallback");
     if let Some(GotoDefinitionResponse::Scalar(loc)) = &result {
         assert!(loc.uri.as_str().contains("ChildComp.vue"));
         assert_eq!(loc.range, Range::default());
@@ -1096,10 +1093,7 @@ fn test_path_alias_resolution_on_binding() {
         Some(&resolver),
         None,
     );
-    assert!(
-        result.is_some(),
-        "should navigate to .vue file as fallback"
-    );
+    assert!(result.is_some(), "should navigate to .vue file as fallback");
     if let Some(GotoDefinitionResponse::Scalar(loc)) = &result {
         assert!(loc.uri.as_str().contains("Foo.vue"));
         assert_eq!(loc.range, Range::default());
@@ -1599,10 +1593,7 @@ fn test_path_alias_resolution_on_component_tag() {
         Some(&resolver),
         None,
     );
-    assert!(
-        result.is_some(),
-        "should navigate to .vue file as fallback"
-    );
+    assert!(result.is_some(), "should navigate to .vue file as fallback");
     if let Some(GotoDefinitionResponse::Scalar(loc)) = &result {
         assert!(loc.uri.as_str().contains("FooComp.vue"));
         assert_eq!(loc.range, Range::default());
@@ -2409,7 +2400,10 @@ fn test_vue_default_import_retries_with_default_binding() {
     assert!(result.is_some(), "should resolve via 'default' fallback");
     if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
         assert!(loc.uri.as_str().contains("Child.vue"));
-        assert_eq!(loc.range.start.line, 2, "should use precise location from resolver");
+        assert_eq!(
+            loc.range.start.line, 2,
+            "should use precise location from resolver"
+        );
     } else {
         panic!("expected scalar location");
     }
@@ -2537,7 +2531,10 @@ fn test_component_tag_default_fallback() {
         Some(&export_resolver),
     );
 
-    assert!(result.is_some(), "should resolve component via 'default' fallback");
+    assert!(
+        result.is_some(),
+        "should resolve component via 'default' fallback"
+    );
     if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
         assert!(loc.uri.as_str().contains("WrappedBtn.vue"));
         assert_eq!(loc.range.start.line, 1);
@@ -2605,7 +2602,10 @@ fn test_script_context_vue_import_default_fallback() {
         Some(&export_resolver),
     );
 
-    assert!(result.is_some(), "should resolve via 'default' fallback in script");
+    assert!(
+        result.is_some(),
+        "should resolve via 'default' fallback in script"
+    );
     if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
         assert!(loc.uri.as_str().contains("Comp.vue"));
         assert_eq!(loc.range.start.line, 3);

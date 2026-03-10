@@ -184,7 +184,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     };
     let transition = prepare_sync_transition(&deps.provider_sync_states, canonical_id, next_state);
     close_stale_paths(&deps.project_sync, &transition.stale_paths).await;
-    let mut committed_state = transition.next;
+    let committed_state = transition.next;
     if let Some(ide) = ide {
         tracing::info!("sync_coordinator: HOST_GET_IDE_DONE {canonical_id}");
         let Some(ide_path) = committed_state.ide_path.clone() else {

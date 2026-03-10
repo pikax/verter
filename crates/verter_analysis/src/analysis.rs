@@ -2832,7 +2832,7 @@ fn collect_usages_in_expression(
                     ObjectPropertyKind::ObjectProperty(p) => {
                         if p.computed {
                             collect_usages_in_expression(
-                                &p.key.to_expression(),
+                                p.key.to_expression(),
                                 binding_names,
                                 binding_spans,
                                 occurrences,

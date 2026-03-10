@@ -506,7 +506,7 @@ fn pack_position(line: u32, character: u32) -> u32 {
 fn position_to_offset(content: &str, line: u32, character: u32) -> u32 {
     let idx = LineIndex::new_utf16(content);
     idx.position_to_offset(&tower_lsp_server::ls_types::Position { line, character })
-        .unwrap_or_else(|| {
+        .unwrap_or({
             // Fallback: clamp to content length
             content.len() as u32
         })

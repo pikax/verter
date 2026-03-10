@@ -1320,10 +1320,7 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
             '>' | ')' | ']' | '}' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
                 let segment = generic_params[segment_start..idx].trim();
-                if let Some(name) = segment
-                    .split(|c: char| c == ' ' || c == ':' || c == '=')
-                    .find(|part| !part.is_empty())
-                {
+                if let Some(name) = segment.split([' ', ':', '=']).find(|part| !part.is_empty()) {
                     names.push(name.to_string());
                 }
                 segment_start = idx + 1;
@@ -1334,7 +1331,7 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
 
     let trailing = generic_params[segment_start..].trim();
     if let Some(name) = trailing
-        .split(|c: char| c == ' ' || c == ':' || c == '=')
+        .split([' ', ':', '='])
         .find(|part| !part.is_empty())
     {
         names.push(name.to_string());

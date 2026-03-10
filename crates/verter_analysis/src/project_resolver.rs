@@ -136,20 +136,15 @@ pub struct IdeProjectCompilerOptions {
     pub paths: Vec<(String, Vec<String>)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ProjectMembership {
+    #[default]
     MatchAll,
     IncludeExclude {
         files: Vec<String>,
         include: Vec<String>,
         exclude: Vec<String>,
     },
-}
-
-impl Default for ProjectMembership {
-    fn default() -> Self {
-        Self::MatchAll
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,7 +222,7 @@ pub struct NativeProjectResolver {
 impl NativeProjectResolver {
     pub fn new(projects: Vec<IdeProjectConfig>) -> Self {
         let mut projects = projects;
-        projects.sort_by(|a, b| compare_projects(a, b));
+        projects.sort_by(compare_projects);
         Self { projects }
     }
 

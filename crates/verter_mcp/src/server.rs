@@ -997,7 +997,7 @@ impl VerterMcpServer {
             .filter(|(id, _)| {
                 root_resolved
                     .as_ref()
-                    .map_or(true, |root| id.starts_with(root) || id == root)
+                    .is_none_or(|root| id.starts_with(root) || id == root)
             })
             .map(|(id, _)| id.as_str())
             .collect();
