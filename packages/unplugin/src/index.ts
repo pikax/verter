@@ -7,6 +7,7 @@ import type { HostCompileProfile, HostUpdateResult, NativeBlockOverrideEntry, Ho
 import type { VerterHost } from "@verter/native";
 import { loadHost, generateComponentId, processStyle, resetHost } from "./core/compiler";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
+import { hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
 import { preprocessBlock } from "./core/preprocessor";
 
@@ -347,6 +348,13 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
         );
 
+        // Hydrate macro type dependencies (package-backed .d.ts files)
+        await hydrateMacroTypeDeps(
+          host,
+          filename,
+          typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
+        );
+
         // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
         await applyPreprocessorRequests(
           host, filename, upsertResult, profile, viteConfig, opts.customBlocks,
@@ -447,6 +455,13 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         host,
         filename,
         upsertResult,
+        typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
+      );
+
+      // Hydrate macro type dependencies (package-backed .d.ts files)
+      await hydrateMacroTypeDeps(
+        host,
+        filename,
         typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
       );
 

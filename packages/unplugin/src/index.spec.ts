@@ -931,3 +931,169 @@ describe("bundler entry points", () => {
     expect(typeof mod.default).toBe("function");
   });
 });
+
+describe("macro type hydration", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = join(
+      tmpdir(),
+      `verter-macro-hydrate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(tempDir, { recursive: true });
+    resetHost();
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+    resetHost();
+  });
+
+  function createPlugin() {
+    return unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+  }
+
+  it("transform hydrates package-backed macro type deps via resolve hook + package.json types", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // Create a fake package with type declarations.
+    // The bundler resolve hook returns the runtime entry (.js), but the
+    // hydration helper must discover and load the .d.ts from package.json "types".
+    const pkgDir = join(tempDir, "node_modules", "my-animation-lib");
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "my-animation-lib",
+        main: "./index.js",
+        types: "./index.d.ts",
+      }),
+    );
+    writeFileSync(
+      join(pkgDir, "index.d.ts"),
+      "export interface AnimationOptions { duration?: number; easing?: string; }\n",
+    );
+    writeFileSync(
+      join(pkgDir, "index.js"),
+      "module.exports = {};\n",
+    );
+
+    // defineProps<AnimationOptions>() — the entire type is imported.
+    // The host MUST resolve AnimationOptions from the package .d.ts
+    // to discover prop names (duration, easing).
+    const sfc = `<script setup lang="ts">
+import type { AnimationOptions } from "my-animation-lib"
+defineProps<AnimationOptions>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    // Resolve hook returns the JS runtime file.
+    // The hydration helper should walk up to package.json, find "types",
+    // and upsert the .d.ts file instead.
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "my-animation-lib") {
+        return { id: join(pkgDir, "index.js").replace(/\\/g, "/") };
+      }
+      return null;
+    });
+
+    const result = await plugin.transform.call(
+      { resolve: resolveSpy },
+      sfc,
+      filename,
+    );
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: the host resolved the type and extracted prop names
+    expect(code).toContain("duration");
+    expect(code).toContain("easing");
+    // Negative: no HOST_MISSING_MACRO_TYPE_DEP compile error
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("transform with relative type deps works via hydration (existing behavior preserved)", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+    const typeFile = join(tempDir, "types.ts").replace(/\\/g, "/");
+
+    writeFileSync(
+      join(tempDir, "types.ts"),
+      "export interface MyProps { name: string; count: number; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { MyProps } from "./types"
+defineProps<MyProps>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "./types") return { id: typeFile };
+      return null;
+    });
+
+    const result = await plugin.transform.call(
+      { resolve: resolveSpy },
+      sfc,
+      filename,
+    );
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: resolved props should appear
+    expect(code).toContain("name");
+    expect(code).toContain("count");
+    // Negative: no missing type dep error
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("recursive relative imports inside hydrated type files are upserted", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+    const typeFile = join(tempDir, "types.ts").replace(/\\/g, "/");
+    const baseFile = join(tempDir, "base.ts").replace(/\\/g, "/");
+
+    writeFileSync(
+      join(tempDir, "base.ts"),
+      "export interface BaseProps { id: string; }\n",
+    );
+    writeFileSync(
+      join(tempDir, "types.ts"),
+      "import { BaseProps } from './base';\nexport interface MyProps extends BaseProps { name: string; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { MyProps } from "./types"
+defineProps<MyProps>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "./types") return { id: typeFile };
+      if (source === "./base") return { id: baseFile };
+      return null;
+    });
+
+    const result = await plugin.transform.call(
+      { resolve: resolveSpy },
+      sfc,
+      filename,
+    );
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: both base and derived type props should resolve
+    expect(code).toContain("name");
+    expect(code).toContain("id");
+    // Negative: no missing type dep
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+});
