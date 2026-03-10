@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod capabilities;
+pub mod compile_blockers;
 pub mod config;
 pub mod css;
 pub mod documents;

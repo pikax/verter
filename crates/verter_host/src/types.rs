@@ -442,6 +442,15 @@ pub struct FileAnalysisSnapshot {
     pub script_binding_occurrences: Arc<Vec<verter_analysis::types::ScriptBindingOccurrence>>,
 }
 
+/// Compile-time dependencies that must be available before a Vue SFC can codegen.
+#[derive(Debug, Clone, Default)]
+pub struct CompileBlockersSnapshot {
+    /// External `src="..."` blocks referenced by the SFC.
+    pub external_source_requests: Vec<ExternalSourceRequest>,
+    /// Macro type dependencies referenced from the SFC script.
+    pub macro_type_deps: Arc<Vec<verter_analysis::MacroTypeDep>>,
+}
+
 /// Helper for `skip_serializing_if` on `Arc<Vec<T>>`.
 fn arc_vec_is_empty<T>(v: &Arc<Vec<T>>) -> bool {
     v.is_empty()

@@ -161,6 +161,35 @@ fn missing_style_src_produces_compile_error_and_no_outputs() {
 }
 
 #[test]
+fn external_src_can_compile_via_owner_dependency_mapping() {
+    let host = strict_host();
+    let source =
+        "<template src=\"@/partials/panel.html\"></template>\n<script setup>const n = 1</script>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    upsert_non_sfc(&host, "/src/partials/panel.html", "<div>{{ n }}</div>");
+    host.set_import_dependencies("/src/Comp.vue", vec!["/src/partials/panel.html".to_string()]);
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed when the real external source is registered as a dep");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "resolved external src should not keep missing-source diagnostics"
+    );
+    assert!(
+        response.code.contains("render"),
+        "resolved compile should produce render code, got: {}",
+        response.code
+    );
+}
+
+#[test]
 fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
     let host = strict_host();
     let source = "<script setup lang=\"ts\">\nimport type { Props } from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div/></template>";

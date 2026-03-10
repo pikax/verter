@@ -658,7 +658,20 @@ impl VerterHost {
                 let files = read_lock(&self.files);
                 let mut map = HashMap::new();
                 for req in &snapshot.external_requests {
-                    if let Some(dep_entry) = files.get(&req.resolved_canonical_id) {
+                    let resolved_dep_id = files
+                        .contains_key(&req.resolved_canonical_id)
+                        .then(|| req.resolved_canonical_id.clone())
+                        .or_else(|| {
+                            self.resolve_loaded_dependency_canonical(
+                                &files,
+                                &snapshot.canonical_id,
+                                &req.specifier,
+                            )
+                        });
+                    if let Some(dep_entry) = resolved_dep_id
+                        .as_deref()
+                        .and_then(|canonical_id| files.get(canonical_id))
+                    {
                         map.insert(req.resolved_canonical_id.clone(), dep_entry.source.clone());
                     }
                 }

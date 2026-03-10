@@ -162,8 +162,17 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         );
         return;
     };
+    let reader = crate::compile_blockers::HostFsProjectResolverReader::new(deps.documents.host());
+    crate::compile_blockers::hydrate_vue_compile_blockers(
+        deps.documents.host(),
+        &snapshot.resolver,
+        &reader,
+        canonical_id,
+    );
     // Sync IDE (TSX) output to type provider
     let profile = deps.documents.tsx_profile.read().clone();
+    let _ =
+        tokio::task::block_in_place(|| deps.documents.host.ensure_compiled(canonical_id, &profile));
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
     let ide = tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);

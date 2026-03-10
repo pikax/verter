@@ -363,6 +363,14 @@ async fn sync_file_to_provider(
     let Some(snapshot) = resolver_snapshot.read().clone() else {
         return;
     };
+    let reader = crate::compile_blockers::HostFsProjectResolverReader::new(host);
+    crate::compile_blockers::hydrate_vue_compile_blockers(
+        host,
+        &snapshot.resolver,
+        &reader,
+        canonical_id,
+    );
+    let _ = host.ensure_compiled(canonical_id, profile);
     let ide = host.get_ide(canonical_id, profile);
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
     let Some(next_state) =

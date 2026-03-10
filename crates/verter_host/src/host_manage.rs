@@ -97,6 +97,27 @@ impl VerterHost {
         Some(snapshot)
     }
 
+    /// Returns the compile-blocking dependencies for a Vue SFC.
+    ///
+    /// This exposes the SFC's external `src` blocks and macro type dependencies
+    /// so embedding environments can resolve/load them before triggering codegen.
+    pub fn get_compile_blockers(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Option<CompileBlockersSnapshot> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let files = read_lock(&self.files);
+        let entry = files.get(&canonical)?;
+        if entry.file_kind != FileKind::VueSfc {
+            return None;
+        }
+
+        Some(CompileBlockersSnapshot {
+            external_source_requests: entry.external_requests.clone(),
+            macro_type_deps: Arc::clone(&entry.arc_script_cache.macro_type_deps),
+        })
+    }
+
     /// Returns analysis snapshots for multiple files in a single lock acquisition.
     ///
     /// More efficient than calling `get_analysis()` in a loop: acquires the

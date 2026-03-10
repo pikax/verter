@@ -694,6 +694,9 @@ impl VerterLanguageServer {
             .statistics
             .timer("ide_sync", Some(uri.as_str().to_string()));
         if let Some(sync) = &self.project_sync {
+            if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+                self.hydrate_vue_compile_blockers_for_canonical_id(&canonical_id);
+            }
             if let Some(ide) = self.documents.get_ide(uri) {
                 let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
                     return;
@@ -733,6 +736,7 @@ impl VerterLanguageServer {
                 Some(id) => id,
                 None => return,
             };
+            self.hydrate_vue_compile_blockers_for_canonical_id(&canonical_id);
             let Some(transition) = self
                 .documents
                 .get_ide(uri)
@@ -1055,6 +1059,7 @@ impl VerterLanguageServer {
             tracing::info!("ide_context: no canonical_id for {}", uri.as_str());
             return None;
         }
+        self.hydrate_vue_compile_blockers_for_canonical_id(canonical_id.as_deref()?);
         let ide = self.documents.get_ide(uri);
         if ide.is_none() {
             tracing::info!(
@@ -1076,6 +1081,20 @@ impl VerterLanguageServer {
 
     fn resolver_snapshot(&self) -> Option<ResolverSnapshot> {
         self.resolver_snapshot.read().clone()
+    }
+
+    fn hydrate_vue_compile_blockers_for_canonical_id(&self, canonical_id: &str) {
+        let Some(snapshot) = self.resolver_snapshot() else {
+            return;
+        };
+        let reader =
+            crate::compile_blockers::HostFsProjectResolverReader::new(self.documents.host());
+        crate::compile_blockers::hydrate_vue_compile_blockers(
+            self.documents.host(),
+            &snapshot.resolver,
+            &reader,
+            canonical_id,
+        );
     }
 
     /// Generate the IDE file path (.tsx or .jsx) for a given Vue file URI.
@@ -1525,6 +1544,8 @@ impl VerterLanguageServer {
                 aliases: Vec::new(),
             });
 
+            self.hydrate_vue_compile_blockers_for_canonical_id(canonical_id);
+
             // Compile
             let profile = self.documents.tsx_profile.read().clone();
             if self
@@ -1619,6 +1640,9 @@ impl VerterLanguageServer {
             Err(_) => return Ok(None),
         };
 
+        if let Some(canonical_id) = self.documents.get_canonical_id(&parsed_uri) {
+            self.hydrate_vue_compile_blockers_for_canonical_id(&canonical_id);
+        }
         let tsx = self.documents.get_ide(&parsed_uri);
 
         Ok(tsx.map(|tsx| CompiledCodeResponse {
@@ -1685,6 +1709,9 @@ impl VerterLanguageServer {
             Err(_) => return Ok(None),
         };
 
+        if let Some(canonical_id) = self.documents.get_canonical_id(&parsed_uri) {
+            self.hydrate_vue_compile_blockers_for_canonical_id(&canonical_id);
+        }
         let response = self.documents.get_virtual_files(&parsed_uri);
         tracing::info!("getVirtualFiles EXIT {uri}");
         Ok(response)
@@ -2228,10 +2255,22 @@ impl<'a> LspProjectResolverReader<'a> {
     }
 }
 
+fn normalize_reader_fs_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    if let Some(stripped) = normalized.strip_prefix("//?/UNC/") {
+        return format!("//{stripped}");
+    }
+    normalized
+        .strip_prefix("//?/")
+        .unwrap_or(normalized.as_str())
+        .to_string()
+}
+
 impl crate::project_resolver::ProjectResolverReader for LspProjectResolverReader<'_> {
     fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.documents.host().get_source(canonical_id).or_else(|| {
-            std::fs::read_to_string(canonical_id)
+            let normalized = normalize_reader_fs_path(canonical_id);
+            std::fs::read_to_string(&normalized)
                 .ok()
                 .map(Arc::<str>::from)
         })
@@ -2239,17 +2278,17 @@ impl crate::project_resolver::ProjectResolverReader for LspProjectResolverReader
 
     fn file_exists(&self, canonical_id: &str) -> bool {
         self.documents.host().get_source(canonical_id).is_some()
-            || std::path::Path::new(canonical_id).is_file()
+            || std::path::Path::new(&normalize_reader_fs_path(canonical_id)).is_file()
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         if self.documents.host().get_source(canonical_id).is_some() {
-            return Some(canonical_id.replace('\\', "/"));
+            return Some(normalize_reader_fs_path(canonical_id));
         }
 
-        std::fs::canonicalize(canonical_id)
+        std::fs::canonicalize(normalize_reader_fs_path(canonical_id))
             .ok()
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .map(|path| normalize_reader_fs_path(&path.to_string_lossy()))
     }
 }
 
@@ -3163,7 +3202,15 @@ async fn sync_pending_vue_provider_file(
     canonical_id: &str,
     is_tsgo: bool,
 ) -> bool {
+    let reader = crate::compile_blockers::HostFsProjectResolverReader::new(documents.host());
+    crate::compile_blockers::hydrate_vue_compile_blockers(
+        documents.host(),
+        &snapshot.resolver,
+        &reader,
+        canonical_id,
+    );
     let profile = documents.tsx_profile.read().clone();
+    let _ = tokio::task::block_in_place(|| documents.host.ensure_compiled(canonical_id, &profile));
     let ide = tokio::task::block_in_place(|| documents.host.get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
     let Some(next_state) =
@@ -6896,6 +6943,164 @@ mod tests {
                 MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
             )),
             "drain should sync the open Vue IDE file through the synthetic TSX path"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src/partials")).expect("create partials dir");
+        std::fs::write(workspace.join("tsconfig.app.json"), "{}").expect("write tsconfig");
+        std::fs::write(
+            workspace.join("src/partials/panel.html"),
+            "<div>{{ props.msg }}</div>",
+        )
+        .expect("write external template");
+        std::fs::write(
+            workspace.join("src/types.ts"),
+            "import type { Nested } from '@/nested'\nexport interface Props { msg: Nested }",
+        )
+        .expect("write types dependency");
+        std::fs::write(workspace.join("src/nested.ts"), "export type Nested = string")
+            .expect("write nested dependency");
+
+        let workspace_id = workspace.to_string_lossy().replace('\\', "/");
+        let app_id = workspace
+            .join("src/App.vue")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>".to_string(),
+        });
+        let blockers = host
+            .get_compile_blockers(&app_id)
+            .expect("App.vue should expose compile blockers");
+
+        assert!(
+            documents.get_ide(&uri).is_none(),
+            "DocumentRegistry alone should still miss IDE output before server hydration"
+        );
+
+        let mut project = crate::project_resolver::IdeProjectConfig::new(
+            workspace_id.clone(),
+            workspace_id.clone(),
+            Some(format!("{workspace_id}/tsconfig.app.json")),
+        );
+        project.compiler_options = crate::project_resolver::IdeProjectCompilerOptions {
+            base_url: Some(workspace_id.clone()),
+            paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
+        };
+        let snapshot = ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
+        };
+        let reader = crate::compile_blockers::HostFsProjectResolverReader::new(documents.host());
+        let external_resolved = snapshot.resolver.resolve_with_reader(
+            &reader,
+            &crate::project_resolver::ResolveRequest {
+                importer_id: app_id.clone(),
+                specifier: "@/partials/panel.html".to_string(),
+                kind: crate::project_resolver::ResolveRequestKind::SfcSrcAttr,
+                phase: crate::project_resolver::ResolvePhase::CodegenBlocker,
+            },
+        );
+        let type_resolved = snapshot.resolver.resolve_with_reader(
+            &reader,
+            &crate::project_resolver::ResolveRequest {
+                importer_id: app_id.clone(),
+                specifier: "@/types".to_string(),
+                kind: crate::project_resolver::ResolveRequestKind::TypeImport,
+                phase: crate::project_resolver::ResolvePhase::CodegenBlocker,
+            },
+        );
+        assert!(
+            external_resolved.is_some(),
+            "external src specifier should resolve through the native resolver"
+        );
+        assert!(
+            type_resolved.is_some(),
+            "macro type specifier should resolve through the native resolver"
+        );
+        let external_resolved = external_resolved.expect("external resolve result");
+        let type_resolved = type_resolved.expect("type resolve result");
+        assert!(
+            external_resolved.source_id.ends_with("/src/partials/panel.html"),
+            "external src should resolve to the real template file: {:?}",
+            external_resolved
+        );
+        assert!(
+            type_resolved.source_id.ends_with("/src/types.ts"),
+            "macro type dep should resolve to the real types file: {:?}",
+            type_resolved
+        );
+        assert!(
+            reader.read_text(&external_resolved.source_id).is_some(),
+            "reader should load external src text from {:?}",
+            external_resolved
+        );
+        assert!(
+            reader.read_text(&type_resolved.source_id).is_some(),
+            "reader should load macro type text from {:?}",
+            type_resolved
+        );
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let provider_sync_states = DashMap::new();
+
+        let synced = sync_pending_vue_provider_file(
+            &sync,
+            &documents,
+            &snapshot,
+            &provider_sync_states,
+            &app_id,
+            false,
+        )
+        .await;
+
+        assert!(synced, "pending Vue sync should succeed after blocker hydration");
+        assert!(
+            host.get_source(&format!("{workspace_id}/src/partials/panel.html"))
+                .is_some(),
+            "external src files should be loaded into the host during hydration; blockers={blockers:?} files={:?}",
+            host.list_files()
+        );
+        assert!(
+            host.get_source(&format!("{workspace_id}/src/types.ts")).is_some(),
+            "macro type dependencies should be loaded into the host during hydration"
+        );
+        assert!(
+            host.get_source(&format!("{workspace_id}/src/nested.ts")).is_some(),
+            "transitive codegen dependencies should be loaded into the host during hydration"
+        );
+
+        let profile = documents.tsx_profile.read().clone();
+        assert!(
+            host.get_ide(&app_id, &profile).is_some(),
+            "hydrated pending sync should restore IDE output for the Vue file"
+        );
+
+        let calls = provider.file_sync_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::UpdateFile { path, .. } if path.ends_with(".vue.ts")
+            )),
+            "pending sync should push the provider-facing Vue API file"
+        );
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
+            )),
+            "pending sync should push the hydrated TSX output"
         );
     }
 }
