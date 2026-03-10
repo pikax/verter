@@ -992,6 +992,33 @@ const msg = ref('hello')
         assert!(host.resolve_import("Parent.vue", "lodash").is_none());
     }
 
+    #[test]
+    fn resolve_import_public_method_handles_relative_full_paths() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/project/src/components/BarrelComp.vue",
+            "<script setup>\nconst emit = defineEmits<{ custom: [] }>()\n</script>\n",
+        );
+        upsert_ts(
+            &host,
+            "/project/src/components/index.ts",
+            "export { default as BarrelComp } from './BarrelComp.vue'",
+        );
+        upsert_vue(
+            &host,
+            "/project/src/App.vue",
+            "<script setup>\nimport { BarrelComp } from './components'\n</script>\n<template><BarrelComp /></template>",
+        );
+
+        assert_eq!(
+            host.resolve_import("/project/src/components/index.ts", "./BarrelComp.vue")
+                .as_deref(),
+            Some("/project/src/components/BarrelComp.vue"),
+            "relative imports from full-path barrel files should resolve to the child SFC"
+        );
+    }
+
     fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
         host.upsert(UpsertRequest {
             canonical_id: None,
@@ -1106,6 +1133,39 @@ const { x, y, reset } = useMouse()
             canonical_id, "index.ts",
             "must NOT return the barrel file itself"
         );
+    }
+
+    #[test]
+    fn get_export_span_follows_reexport_to_vue_full_paths() {
+        let host = make_host();
+
+        upsert_vue(
+            &host,
+            "/project/src/components/BarrelComp.vue",
+            "<script setup>\nconst emit = defineEmits<{ custom: [] }>()\n</script>\n",
+        );
+        upsert_ts(
+            &host,
+            "/project/src/components/index.ts",
+            "export { default as BarrelComp } from './BarrelComp.vue'",
+        );
+
+        let result = host.get_export_span_follow_reexports(
+            "/project/src/components/index.ts",
+            "BarrelComp",
+            5,
+        );
+
+        assert!(
+            result.is_some(),
+            "should follow full-path barrel re-export to BarrelComp.vue"
+        );
+        let (canonical_id, start, end) = result.unwrap();
+        assert_eq!(
+            canonical_id, "/project/src/components/BarrelComp.vue",
+            "should resolve to the full child Vue canonical ID"
+        );
+        assert!(start < end, "should return a valid span in BarrelComp.vue");
     }
 
     #[test]

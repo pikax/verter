@@ -129,6 +129,12 @@ pub fn definition_at_position(
                                 if (offset as u32) >= arg_span.start
                                     && (offset as u32) < arg_span.end
                                 {
+                                    if el.is_component {
+                                        // Component event names resolve through the child
+                                        // component's emits/props, not the parent handler.
+                                        return None;
+                                    }
+
                                     // Find matching event handler with a named binding
                                     if let Some(handler) =
                                         template.event_handlers.iter().find(|h| {

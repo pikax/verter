@@ -251,6 +251,7 @@ fn test_go_to_macro_binding_from_template() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );
@@ -1861,6 +1862,96 @@ fn test_go_to_definition_inline_event_no_binding() {
     );
 }
 
+#[test]
+fn test_go_to_definition_component_event_name_defers_to_server() {
+    use verter_analysis::template::*;
+
+    let source = "<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n\n<script setup>\nfunction handleCustom() {}\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let event_offset = source.find("@custom").unwrap();
+    let handler_offset = source.find("handleCustom").unwrap();
+
+    let analysis = FileAnalysisSnapshot {
+        bindings: vec![AnalyzedBinding {
+            name: "handleCustom".to_string(),
+            kind: AnalyzedBindingKind::Function,
+            is_reactive: false,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(
+                handler_offset as u32,
+                (handler_offset + "handleCustom".len()) as u32,
+            ),
+            used_in_script: true,
+            used_in_style: false,
+        }],
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                elements: vec![TemplateElement {
+                    tag: "MyComp".into(),
+                    is_component: true,
+                    is_self_closing: true,
+                    namespace: ElementNamespace::Html,
+                    attributes: vec![],
+                    directives: vec![TemplateDirective {
+                        name: "on".into(),
+                        raw_name: "@custom".into(),
+                        argument: Some("custom".into()),
+                        modifiers: vec![],
+                        expression: Some("handleCustom".into()),
+                        span: verter_span::Span::new(
+                            event_offset as u32,
+                            (event_offset + "@custom=\"handleCustom\"".len()) as u32,
+                        ),
+                        name_end: (event_offset + "@custom".len()) as u32,
+                        arg_span: Some(verter_span::Span::new(
+                            (event_offset + 1) as u32,
+                            (event_offset + "@custom".len()) as u32,
+                        )),
+                        expression_span: None,
+                        modifier_spans: vec![],
+                    }],
+                    span: verter_span::Span::new(11, 44),
+                    tag_span_end: 44,
+                    content_end: 0,
+                    ..Default::default()
+                }],
+                event_handlers: vec![TemplateEventHandler {
+                    event_name: "custom".into(),
+                    handler_binding: Some("handleCustom".into()),
+                    is_inline: false,
+                    target_tag: "MyComp".into(),
+                    span: verter_span::Span::new(11, 44),
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        ..Default::default()
+    };
+
+    let pos = line_index
+        .offset_to_position((event_offset + 1) as u32)
+        .unwrap();
+    let result = definition_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
+
+    assert!(
+        result.is_none(),
+        "component event names should defer to server-side child resolution"
+    );
+}
+
 // ========================================================================
 // Fix 4: $props navigation (Bug 10)
 // ========================================================================
@@ -1884,6 +1975,7 @@ fn test_go_to_definition_dollar_props() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(define_offset as u32, (define_offset + 30) as u32),
         }])
         .into(),
@@ -1942,6 +2034,7 @@ fn test_go_to_definition_dollar_emit() {
             model_name: None,
             has_inherit_attrs_false: false,
             prop_fields: vec![],
+            emit_fields: vec![],
             span: verter_span::Span::new(define_offset as u32, (define_offset + 22) as u32),
         }])
         .into(),
@@ -2051,6 +2144,7 @@ fn definition_prop_field_type_based() {
                 name: "count".to_string(),
                 span: verter_span::Span::new(type_count_offset as u32, type_count_end as u32),
             }],
+            emit_fields: vec![],
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 45) as u32,
@@ -2120,6 +2214,7 @@ fn definition_prop_field_runtime() {
                 name: "name".to_string(),
                 span: verter_span::Span::new(runtime_name_offset as u32, runtime_name_end as u32),
             }],
+            emit_fields: vec![],
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 28) as u32,
@@ -2195,6 +2290,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
                 name: "count".to_string(),
                 span: verter_span::Span::new(100, 105),
             }],
+            emit_fields: vec![],
             span: verter_span::Span::new(90, 140),
         }],
     );

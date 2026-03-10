@@ -234,12 +234,13 @@ impl VerterHost {
 /// Uses multiple strategies in order of specificity:
 /// 1. Direct match in file map
 /// 2. Normalized (strip `./`) match
-/// 3. Host alias map (for tsconfig paths, vite aliases like `@/`, `#/`, `~/`)
-/// 4. Parent's resolved dependencies (match raw import source suffix against
+/// 3. Relative resolution against the parent file's canonical ID
+/// 4. Host alias map (for tsconfig paths, vite aliases like `@/`, `#/`, `~/`)
+/// 5. Parent's resolved dependencies (match raw import source suffix against
 ///    canonical dependency paths — handles `@/components/Child.vue` when the
 ///    parent's dependency set already contains `/project/src/components/Child.vue`)
-/// 5. Basename match (test helper — files registered by basename only)
-/// 6. Extension guessing (`.vue`, `/index.vue`)
+/// 6. Basename match (test helper — files registered by basename only)
+/// 7. Extension guessing (`.vue`, `/index.vue`)
 pub(crate) fn resolve_import_to_canonical(
     files: &std::collections::HashMap<String, crate::types::FileEntry>,
     alias_map: &std::collections::HashMap<String, String>,
@@ -255,6 +256,13 @@ pub(crate) fn resolve_import_to_canonical(
     let normalized = import_source.strip_prefix("./").unwrap_or(import_source);
     if normalized != import_source && files.contains_key(normalized) {
         return Some(normalized.to_string());
+    }
+
+    if import_source.starts_with('.') {
+        let relative = crate::id::resolve_external(&parent_entry.canonical_id, import_source);
+        if files.contains_key(relative.as_str()) {
+            return Some(relative);
+        }
     }
 
     // Host alias map (tsconfig paths, vite aliases)
