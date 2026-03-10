@@ -147,6 +147,7 @@ fn render_provider_project_config(plan: &ProviderProjectPlan) -> String {
             "jsx": "preserve",
             "jsxImportSource": "vue",
             "allowJs": true,
+            "checkJs": true,
             "strict": true,
             "allowArbitraryExtensions": true,
             "allowSyntheticDefaultImports": true,

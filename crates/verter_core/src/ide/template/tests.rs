@@ -4293,3 +4293,210 @@ fn kebab_event_inline_expr_no_dollar_event_wraps_with_no_param() {
         "should preserve kebab-case event name: {result}"
     );
 }
+
+// ── Fix 1: Broken interpolation recovery ──────────────────────────
+
+#[test]
+fn broken_interpolation_preserves_identifiers() {
+    // Broken expression: {{ count + }} — OXC can't parse it, but identifiers must survive
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div>{{ count + }}</div></template>"#,
+        &[("count", BindingType::SetupRef)],
+    );
+    eprintln!("broken interpolation output: {}", result);
+    // Positive: identifiers preserved
+    assert!(
+        result.contains("count"),
+        "broken expression should preserve identifiers: {result}"
+    );
+    // Positive: mustache delimiters converted
+    assert!(
+        result.contains("{count") || result.contains("{ count"),
+        "mustache should be converted to JSX expression: {result}"
+    );
+    // Negative: no raw mustache delimiters
+    assert!(
+        !result.contains("{{") && !result.contains("}}"),
+        "mustache delimiters must be converted to JSX: {result}"
+    );
+}
+
+#[test]
+fn valid_interpolations_unaffected_by_broken_expr_handling() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div>{{ count }}</div></template>"#,
+        &[("count", BindingType::SetupRef)],
+    );
+    // Valid expression should still work normally (whitespace from source is preserved)
+    assert!(
+        result.contains("{ count }") || result.contains("{count}"),
+        "valid interpolation should produce {{count}}: {result}"
+    );
+    assert!(
+        !result.contains("{{") && !result.contains("}}"),
+        "no raw mustache delimiters: {result}"
+    );
+}
+
+#[test]
+fn mixed_broken_and_valid_interpolations() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div>{{ count + }}<span>{{ count }}</span></div></template>"#,
+        &[("count", BindingType::SetupRef)],
+    );
+    eprintln!("mixed output: {}", result);
+    // Valid expression should be fully patched (whitespace from source is preserved)
+    assert!(
+        result.contains("{ count }") || result.contains("{count}"),
+        "valid interpolation should be patched: {result}"
+    );
+    // Broken expression: identifiers preserved
+    assert!(
+        result.contains("count +"),
+        "broken expression identifiers preserved: {result}"
+    );
+    // No raw mustache delimiters anywhere
+    assert!(
+        !result.contains("{{") && !result.contains("}}"),
+        "no raw mustache delimiters: {result}"
+    );
+}
+
+// ── Fix 3: v-slot scoped parameter typing ─────────────────────────
+
+#[test]
+fn v_slot_params_arrow_wrapper() {
+    // Component v-slot with params: should generate IIFE with extractArgumentsFromRenderSlot
+    let result = gen_tsx_template(
+        r#"<template><MyComp v-slot="{ slotItem }"><span>{{ slotItem }}</span></MyComp></template>"#,
+    );
+    eprintln!("v-slot params output: {}", result);
+    // Positive: should have arrow function wrapper for slot params
+    assert!(
+        result.contains("{ slotItem }") || result.contains("{slotItem}"),
+        "should contain slot params in arrow function: {result}"
+    );
+    assert!(
+        result.contains("extractArgumentsFromRenderSlot"),
+        "should use extractArgumentsFromRenderSlot for slot typing: {result}"
+    );
+    assert!(
+        result.contains("instantiateComponent"),
+        "should use instantiateComponent for component instance: {result}"
+    );
+    assert!(
+        result.contains(r#""default""#),
+        "should reference default slot name: {result}"
+    );
+    // Negative: v-slot attribute must not appear
+    assert!(
+        !result.contains("v-slot"),
+        "v-slot attribute must be removed: {result}"
+    );
+}
+
+#[test]
+fn v_slot_named_template_params() {
+    // <template #header="{ title }"> should generate typed wrapper with "header"
+    let result = gen_tsx_template(
+        r#"<template><MyComp><template #header="{ title }"><span>{{ title }}</span></template></MyComp></template>"#,
+    );
+    eprintln!("named template v-slot output: {}", result);
+    assert!(
+        result.contains("extractArgumentsFromRenderSlot"),
+        "should use extractArgumentsFromRenderSlot: {result}"
+    );
+    assert!(
+        result.contains(r#""header""#),
+        "should reference header slot name: {result}"
+    );
+    // Negative
+    assert!(
+        !result.contains("#header") && !result.contains("v-slot:header"),
+        "v-slot directive must be removed: {result}"
+    );
+}
+
+#[test]
+fn v_slot_default_template_params() {
+    // <template v-slot="{ data }"> should use "default" slot name
+    let result = gen_tsx_template(
+        r#"<template><MyComp><template v-slot="{ data }"><span>{{ data }}</span></template></MyComp></template>"#,
+    );
+    eprintln!("default template v-slot output: {}", result);
+    assert!(
+        result.contains("extractArgumentsFromRenderSlot"),
+        "should use extractArgumentsFromRenderSlot: {result}"
+    );
+    assert!(
+        result.contains(r#""default""#),
+        "should use default slot name: {result}"
+    );
+}
+
+#[test]
+fn v_slot_multiple_named_templates() {
+    // Multiple named slots — each gets independent IIFE, params don't leak
+    let result = gen_tsx_template(
+        r#"<template><MyComp><template #header="{ x }"><span>{{ x }}</span></template><template #footer="{ y }"><span>{{ y }}</span></template></MyComp></template>"#,
+    );
+    eprintln!("multi-slot output: {}", result);
+    assert!(
+        result.contains(r#""header""#) && result.contains(r#""footer""#),
+        "should reference both slot names: {result}"
+    );
+    // Count extractArgumentsFromRenderSlot calls — should be 2
+    let count = result.matches("extractArgumentsFromRenderSlot").count();
+    assert_eq!(
+        count, 2,
+        "should have 2 extractArgumentsFromRenderSlot calls: {result}"
+    );
+}
+
+#[test]
+fn v_slot_no_params_unchanged() {
+    // v-slot without params: no wrapper needed
+    let result =
+        gen_tsx_template(r#"<template><MyComp v-slot><span>content</span></MyComp></template>"#);
+    eprintln!("v-slot no params output: {}", result);
+    assert!(
+        !result.contains("extractArgumentsFromRenderSlot"),
+        "no wrapper for v-slot without params: {result}"
+    );
+    assert!(
+        !result.contains("v-slot"),
+        "v-slot attribute must be removed: {result}"
+    );
+}
+
+#[test]
+fn v_slot_params_no_instance_prefix() {
+    // Slot params must NOT get ___VERTER___instance. prefix
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><MyComp v-slot="{ slotItem }"><span>{{ slotItem }}</span></MyComp></template>"#,
+        &[("slotItem", BindingType::SetupConst)], // Even if in bindings, slot takes priority
+    );
+    assert!(
+        !result.contains("___VERTER___instance.slotItem"),
+        "slot param must NOT get instance prefix: {result}"
+    );
+}
+
+#[test]
+fn v_slot_with_v_for() {
+    // v-for wraps element, slot wraps children — both should work
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><MyComp v-for="item in items" :key="item.id" v-slot="{ data }"><span>{{ data }}</span></MyComp></template>"#,
+        &[("items", BindingType::SetupConst)],
+    );
+    eprintln!("v-for + v-slot output: {}", result);
+    // Both v-for map and v-slot IIFE should be present
+    assert!(
+        result.contains(".map("),
+        "v-for should produce .map(): {result}"
+    );
+    assert!(
+        result.contains("extractArgumentsFromRenderSlot"),
+        "v-slot should produce extractArgumentsFromRenderSlot: {result}"
+    );
+}

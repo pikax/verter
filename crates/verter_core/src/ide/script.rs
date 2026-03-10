@@ -3593,6 +3593,7 @@ declare module "@verter/types" {
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
   export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
+  export declare function extractArgumentsFromRenderSlot<T extends { $slots: { [K in N]: any } }, N extends string>(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
 }
 "#;
 
@@ -3617,6 +3618,7 @@ export declare function extractRenderComponent<T extends string>(t: T): ExtractR
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
 export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
 export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
+export declare function extractArgumentsFromRenderSlot<T extends { $slots: { [K in N]: any } }, N extends string>(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
 "#;
 
 /// Collect Vue built-in component names used in the template AST.
@@ -3701,7 +3703,7 @@ fn emit_helper_imports(
     // Runtime imports from @verter/types
     writeln!(
         imports,
-        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent }} from \"{}\";",
+        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent, extractArgumentsFromRenderSlot as {P}extractArgumentsFromRenderSlot }} from \"{}\";",
         options.types_module_name,
         P = PREFIX,
     )

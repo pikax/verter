@@ -460,9 +460,34 @@ fn walk_element<'a, 'alloc>(
         }
     }
 
+    // ── v-slot scoped parameter IIFE wrapping ────────────────────────
+    // When v-slot has parameters (e.g., `v-slot="{ slotItem }"`), wrap children
+    // in an IIFE that types the slot params via extractArgumentsFromRenderSlot.
+    //
+    // Component: <MyComp v-slot="{ slotItem }">children</MyComp>
+    //   → <MyComp>{(({ slotItem }) => (<>children</>))(CALL)}</MyComp>
+    //
+    // Template: <template #header="{ title }">children</template>
+    //   → <>{"header"}{(({ title }) => (<>children</>))(CALL)}</>
+    let slot_iife_info = build_slot_iife_info(id, el, ctx.source, ctx.ast);
+    if let Some(ref slot_info) = slot_iife_info {
+        // Emit slot IIFE opening: {((params) => (<>
+        ctx.out.prepend_alloc(el.tag_open.end, &slot_info.open_text);
+    }
+
     // Walk children — children inherit the condition scopes from this element
     if let Some(content) = &el.content {
         walk_children_with_iife_tracking(&content.children, ctx, &full_scopes);
+    }
+
+    // Close slot IIFE: </>)(extractArgumentsFromRenderSlot(...))}
+    if let Some(ref slot_info) = slot_iife_info {
+        let close_pos = el
+            .tag_close
+            .as_ref()
+            .map(|tc| tc.start)
+            .unwrap_or(el.tag_open.end);
+        ctx.out.prepend_alloc(close_pos, &slot_info.close_text);
     }
 
     // Fix closing tag case mismatch: Vue is case-insensitive for closing tags
@@ -510,6 +535,81 @@ fn walk_element<'a, 'alloc>(
     if has_v_for {
         directives::emit_v_for_close(el, ctx.source, ctx.out);
     }
+}
+
+/// Info for generating a v-slot scoped parameter IIFE wrapper.
+struct SlotIifeInfo {
+    /// Text to prepend after the open tag: `{((params) => (<>`
+    open_text: String,
+    /// Text to prepend before the close tag: `</>)(___VERTER___extractArgumentsFromRenderSlot(...))}`
+    close_text: String,
+}
+
+/// Build slot IIFE info for an element with v-slot parameters.
+///
+/// Returns `Some(SlotIifeInfo)` when the element's v-slot has parameters (value_start/end),
+/// indicating that children should be wrapped in a typed IIFE.
+///
+/// For components: `<MyComp v-slot="{ item }">` → uses MyComp as the tag
+/// For templates: `<template #header="{ title }">` → looks up parent component tag
+fn build_slot_iife_info(
+    id: NodeId,
+    el: &ElementNode,
+    source: &str,
+    ast: &crate::ast::types::TemplateAst,
+) -> Option<SlotIifeInfo> {
+    let v_slot = el.v_slot.as_ref()?;
+    let (vs, ve) = match (v_slot.value_start, v_slot.value_end) {
+        (Some(s), Some(e)) if s < e => (s, e),
+        _ => return None, // No params
+    };
+
+    let params = &source[vs as usize..ve as usize];
+
+    // Determine the slot name
+    let slot_name = if let (Some(arg_start), Some(arg_end)) = (v_slot.arg_start, v_slot.arg_end) {
+        &source[arg_start as usize..arg_end as usize]
+    } else {
+        "default"
+    };
+
+    // Determine the component tag name for instantiateComponent
+    let comp_tag = if el.tag_type == TagType::Template {
+        // For <template v-slot>, look up the parent component
+        find_parent_component_tag(id, source, ast)?
+    } else {
+        // For component v-slot (e.g., <MyComp v-slot="...">)
+        source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize].to_string()
+    };
+
+    let open_text = format!("{{(function({params}){{ return (<>");
+    let close_text = format!(
+        "</>) }})(___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent({comp_tag}, {{}}), \"{slot_name}\"))}}",
+    );
+
+    Some(SlotIifeInfo {
+        open_text,
+        close_text,
+    })
+}
+
+/// Find the parent component tag name for a <template v-slot> element.
+fn find_parent_component_tag(
+    id: NodeId,
+    source: &str,
+    ast: &crate::ast::types::TemplateAst,
+) -> Option<String> {
+    let node = &ast.nodes[id.0];
+    let parent_id = node.parent?;
+    let parent_node = &ast.nodes[parent_id.0];
+    if let AstNodeKind::Element(ref parent_el) = parent_node.kind {
+        if parent_el.tag_type == TagType::Component {
+            let tag = &source
+                [(parent_el.tag_open.start + 1) as usize..parent_el.tag_open.name_end as usize];
+            return Some(tag.to_string());
+        }
+    }
+    None
 }
 
 /// Scan forward from `start_idx + 1`, skipping whitespace-only text nodes and comments,
