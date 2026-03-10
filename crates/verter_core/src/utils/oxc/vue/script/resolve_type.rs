@@ -17,6 +17,7 @@
 
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
+use rustc_hash::FxHashMap;
 
 use crate::common::Span;
 
@@ -497,6 +498,7 @@ pub fn extract_companion_types(
                     &ctx,
                     &mut guard,
                 );
+                resolved.root_runtime_types = vec![RuntimeType::Object];
                 types.insert(name, resolved);
             }
             Statement::ExportNamedDeclaration(export) => {
@@ -524,6 +526,7 @@ pub fn extract_companion_types(
                                 &ctx,
                                 &mut guard,
                             );
+                            resolved.root_runtime_types = vec![RuntimeType::Object];
                             types.insert(name, resolved);
                         }
                         _ => {}
@@ -566,7 +569,8 @@ pub fn resolve_type_elements_with_ctx<'ctx, 'a: 'ctx>(
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner_with_ctx(node, base_offset, &mut result, ctx);
-    result.root_runtime_types = infer_runtime_type(node);
+    result.root_runtime_types =
+        resolve_root_runtime_type_with_ctx(node, ctx).unwrap_or_else(|| infer_runtime_type(node));
     result
 }
 
@@ -585,8 +589,108 @@ pub fn resolve_type_elements_with_ctx_ref<'ctx, 'a: 'ctx>(
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner_with_ctx_ref(node, base_offset, &mut result, ctx);
-    result.root_runtime_types = infer_runtime_type(node);
+    result.root_runtime_types = resolve_root_runtime_type_with_ctx_ref(node, ctx)
+        .unwrap_or_else(|| infer_runtime_type(node));
     result
+}
+
+fn inferred_root_runtime_type_for_companion(companion: &ResolvedElements) -> Vec<RuntimeType> {
+    if !companion.root_runtime_types.is_empty() {
+        return companion.root_runtime_types.clone();
+    }
+    if !companion.props.is_empty() || !companion.emits.is_empty() {
+        return vec![RuntimeType::Object];
+    }
+    if companion.has_call_signature {
+        return vec![RuntimeType::Function];
+    }
+    vec![RuntimeType::Unknown]
+}
+
+fn resolve_root_runtime_type_with_ctx<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<Vec<RuntimeType>> {
+    match node {
+        TSType::TSTypeReference(type_ref) => {
+            let type_name = get_type_reference_name(&type_ref.type_name);
+            let type_name_bytes = type_name.as_bytes();
+
+            if let Some(aliased_type) = ctx.find_type_alias(type_name_bytes) {
+                return Some(
+                    resolve_root_runtime_type_with_ctx(aliased_type, ctx)
+                        .unwrap_or_else(|| infer_runtime_type(aliased_type)),
+                );
+            }
+
+            if ctx.find_interface(type_name_bytes).is_some() {
+                return Some(vec![RuntimeType::Object]);
+            }
+
+            if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
+                return Some(
+                    resolve_root_runtime_type_with_ctx(constraint, ctx)
+                        .unwrap_or_else(|| infer_runtime_type(constraint)),
+                );
+            }
+
+            ctx.companion_types
+                .get(type_name.as_str())
+                .map(inferred_root_runtime_type_for_companion)
+        }
+        TSType::TSTypeQuery(query) => {
+            let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name else {
+                return None;
+            };
+            ctx.companion_types
+                .get(ident.name.as_str())
+                .map(inferred_root_runtime_type_for_companion)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_root_runtime_type_with_ctx_ref<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<Vec<RuntimeType>> {
+    match node {
+        TSType::TSTypeReference(type_ref) => {
+            let type_name = get_type_reference_name(&type_ref.type_name);
+            let type_name_bytes = type_name.as_bytes();
+
+            if let Some(aliased_type) = ctx.find_type_alias(type_name_bytes) {
+                return Some(
+                    resolve_root_runtime_type_with_ctx_ref(aliased_type, ctx)
+                        .unwrap_or_else(|| infer_runtime_type(aliased_type)),
+                );
+            }
+
+            if ctx.find_interface(type_name_bytes).is_some() {
+                return Some(vec![RuntimeType::Object]);
+            }
+
+            if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
+                return Some(
+                    resolve_root_runtime_type_with_ctx_ref(constraint, ctx)
+                        .unwrap_or_else(|| infer_runtime_type(constraint)),
+                );
+            }
+
+            ctx.companion_types
+                .get(type_name.as_str())
+                .map(inferred_root_runtime_type_for_companion)
+        }
+        TSType::TSTypeQuery(query) => {
+            let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name else {
+                return None;
+            };
+            ctx.companion_types
+                .get(ident.name.as_str())
+                .map(inferred_root_runtime_type_for_companion)
+        }
+        _ => None,
+    }
 }
 
 fn resolve_type_elements_inner(
@@ -1524,6 +1628,56 @@ pub fn resolve_external_type(
     dep_source: &str,
     allocator: &oxc_allocator::Allocator,
 ) -> Option<ResolvedElements> {
+    resolve_external_type_with_companion(type_name, dep_source, &FxHashMap::default(), allocator)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedTypeBinding {
+    pub local_name: String,
+    pub imported_name: String,
+    pub source: String,
+}
+
+pub fn extract_imported_type_bindings(
+    dep_source: &str,
+    allocator: &oxc_allocator::Allocator,
+) -> Vec<ImportedTypeBinding> {
+    let source_type = oxc_span::SourceType::ts();
+    let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
+
+    if parsed.panicked {
+        return Vec::new();
+    }
+
+    let mut bindings = Vec::new();
+    for stmt in &parsed.program.body {
+        let Statement::ImportDeclaration(import_decl) = stmt else {
+            continue;
+        };
+        let Some(specifiers) = &import_decl.specifiers else {
+            continue;
+        };
+        for specifier in specifiers {
+            let ImportDeclarationSpecifier::ImportSpecifier(import_spec) = specifier else {
+                continue;
+            };
+            bindings.push(ImportedTypeBinding {
+                local_name: import_spec.local.name.to_string(),
+                imported_name: import_spec.imported.name().to_string(),
+                source: import_decl.source.value.to_string(),
+            });
+        }
+    }
+
+    bindings
+}
+
+pub fn resolve_external_type_with_companion(
+    type_name: &str,
+    dep_source: &str,
+    companion_types: &FxHashMap<String, ResolvedElements>,
+    allocator: &oxc_allocator::Allocator,
+) -> Option<ResolvedElements> {
     let source_type = oxc_span::SourceType::ts();
     let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
 
@@ -1532,7 +1686,12 @@ pub fn resolve_external_type(
     }
 
     let source_bytes = dep_source.as_bytes();
-    let ctx = build_type_context(&parsed.program, source_bytes, 0);
+    let mut ctx = build_type_context(&parsed.program, source_bytes, 0);
+    for (name, resolved) in companion_types {
+        ctx.companion_types
+            .entry(name.clone())
+            .or_insert_with(|| resolved.clone());
+    }
 
     let name_bytes = type_name.as_bytes();
 
@@ -1557,6 +1716,7 @@ pub fn resolve_external_type(
                 &ctx,
                 &mut guard,
             );
+            r.root_runtime_types = vec![RuntimeType::Object];
             result = Some(r);
         }
     }
@@ -1569,25 +1729,30 @@ pub fn resolve_external_type(
 
     // Populate key_name on all props since spans reference the external file,
     // not the consuming SFC. Consumers use key_name when available.
-    if let Some(ref mut resolved) = result {
-        for prop in &mut resolved.props {
-            let start = prop.key.start as usize;
-            let end = prop.key.end as usize;
-            if end <= source_bytes.len() {
-                if let Ok(name) = std::str::from_utf8(&source_bytes[start..end]) {
-                    prop.key_name = Some(name.to_string());
-                }
+    result.map(|resolved| finalize_external_resolution(resolved, source_bytes))
+}
+
+fn finalize_external_resolution(
+    mut resolved: ResolvedElements,
+    source_bytes: &[u8],
+) -> ResolvedElements {
+    for prop in &mut resolved.props {
+        let start = prop.key.start as usize;
+        let end = prop.key.end as usize;
+        if prop.key_name.is_none() && start < end && end <= source_bytes.len() {
+            if let Ok(name) = std::str::from_utf8(&source_bytes[start..end]) {
+                prop.key_name = Some(name.to_string());
             }
-            prop.map_local = false;
-            prop.span_is_absolute = false;
         }
-        for emit in &mut resolved.emits {
-            emit.map_local = false;
-            emit.span_is_absolute = false;
-        }
+        prop.map_local = false;
+        prop.span_is_absolute = false;
+    }
+    for emit in &mut resolved.emits {
+        emit.map_local = false;
+        emit.span_is_absolute = false;
     }
 
-    result
+    resolved
 }
 
 /// Hash the resolved type shape for cache comparison (SHA-256, truncated to 16 bytes).
@@ -2118,6 +2283,26 @@ type Test = A & B;"#;
     }
 
     #[test]
+    fn resolve_external_type_alias_preserves_primitive_root_runtime_type() {
+        let alloc = Allocator::default();
+        let dep = "export type Props = string";
+        let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+
+        assert_eq!(resolved.props.len(), 0);
+        assert_eq!(resolved.root_runtime_types, vec![RuntimeType::String]);
+    }
+
+    #[test]
+    fn resolve_external_type_empty_interface_is_object_like() {
+        let alloc = Allocator::default();
+        let dep = "export interface Props {}";
+        let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+
+        assert_eq!(resolved.props.len(), 0);
+        assert_eq!(resolved.root_runtime_types, vec![RuntimeType::Object]);
+    }
+
+    #[test]
     fn resolve_external_type_not_found() {
         let alloc = Allocator::default();
         let dep = "export interface Other { x: string }";
@@ -2387,6 +2572,84 @@ export interface Props extends B { c: boolean }
             3,
             "Props extends B extends A should have 3 props"
         );
+    }
+
+    /// @ai-generated - resolve_external_type_with_companion supports imported aliases.
+    #[test]
+    fn resolve_external_type_with_companion_import_alias() {
+        let alloc = Allocator::default();
+        let dep = r#"
+import type { BaseAction as LocalBase } from './base'
+
+export interface Props extends LocalBase {
+  label: string
+}
+"#;
+        let mut companion_types = rustc_hash::FxHashMap::default();
+        let mut base = ResolvedElements::default();
+        base.props.push(ResolvedProp {
+            span: Span::new(0, 0),
+            key: Span::new(0, 0),
+            key_name: Some("id".to_string()),
+            optional: false,
+            types: vec![RuntimeType::String],
+            type_span: None,
+            map_local: false,
+            span_is_absolute: false,
+        });
+        companion_types.insert("LocalBase".to_string(), base);
+
+        let resolved =
+            resolve_external_type_with_companion("Props", dep, &companion_types, &alloc).unwrap();
+        assert_eq!(
+            resolved.props.len(),
+            2,
+            "Props should include both imported base props and local props"
+        );
+        assert!(resolved
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("id")));
+        assert!(resolved
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("label")));
+    }
+
+    /// @ai-generated - resolve_external_type_with_companion supports transitive imported emits shapes.
+    #[test]
+    fn resolve_external_type_with_companion_transitive_emits_shape() {
+        let alloc = Allocator::default();
+        let dep = r#"
+import type { BaseEmits } from './base'
+
+export interface Emits extends BaseEmits {
+  confirm: [id: number]
+}
+"#;
+        let mut companion_types = rustc_hash::FxHashMap::default();
+        let mut base = ResolvedElements::default();
+        base.emits.push(ResolvedEmit {
+            span: Span::new(0, 0),
+            name: "submit".to_string(),
+            name_span: None,
+            signature: ResolvedEmitSignature::Call {
+                params_text: "payload: string".to_string(),
+            },
+            map_local: false,
+            span_is_absolute: false,
+        });
+        companion_types.insert("BaseEmits".to_string(), base);
+
+        let resolved =
+            resolve_external_type_with_companion("Emits", dep, &companion_types, &alloc).unwrap();
+        assert_eq!(
+            resolved.emits.len(),
+            2,
+            "Emits should include imported and local emits entries"
+        );
+        assert!(resolved.emits.iter().any(|emit| emit.name == "submit"));
+        assert!(resolved.emits.iter().any(|emit| emit.name == "confirm"));
     }
 
     /// @ai-generated - extract_companion_types handles interface extends

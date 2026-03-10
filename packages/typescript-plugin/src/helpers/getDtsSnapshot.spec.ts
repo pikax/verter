@@ -23,6 +23,53 @@ beforeEach(() => {
 const hasNativeBinary =
   parseFile("/probe.vue", "<template><div /></template>", mockLogger) !== FALLBACK_STUB;
 
+function normalizePath(fileName: string): string {
+  return fileName.replace(/\\/g, "/");
+}
+
+function createInMemoryAccess(
+  files: Record<string, string>,
+): {
+  resolveModule: (containingFile: string, specifier: string) => string | undefined;
+  readSource: (fileName: string) => string | undefined;
+} {
+  const normalizedFiles = new Map(
+    Object.entries(files).map(([fileName, source]) => [normalizePath(fileName), source]),
+  );
+  const extensionCandidates = ["", ".ts", ".tsx", ".d.ts", ".js", ".jsx", ".vue"];
+
+  return {
+    resolveModule(containingFile, specifier) {
+      if (!specifier.startsWith(".")) return undefined;
+
+      const containing = normalizePath(containingFile);
+      const baseDir = containing.slice(0, containing.lastIndexOf("/"));
+      const segments = [...baseDir.split("/"), ...specifier.split("/")];
+      const resolved: string[] = [];
+      for (const segment of segments) {
+        if (!segment || segment === ".") continue;
+        if (segment === "..") {
+          resolved.pop();
+          continue;
+        }
+        resolved.push(segment);
+      }
+      const basePath = "/" + resolved.join("/");
+
+      for (const ext of extensionCandidates) {
+        const candidate = normalizePath(basePath + ext);
+        if (normalizedFiles.has(candidate)) {
+          return candidate;
+        }
+      }
+      return undefined;
+    },
+    readSource(fileName) {
+      return normalizedFiles.get(normalizePath(fileName));
+    },
+  };
+}
+
 describe("parseFile", () => {
   it("compiles a simple SFC with script setup", () => {
     const sfc = `
@@ -221,5 +268,69 @@ defineProps<{ label: string }>()
         length: 1,
       },
     });
+  });
+
+  // @ai-generated - Resolves imported defineEmits types before getPublicApi.
+  it.skipIf(!hasNativeBinary)("hydrates imported defineEmits types before getPublicApi", () => {
+    const entryFile = "/test/src/components/EmitBox/EmitBox.vue";
+    const source = `
+<script setup lang="ts">
+import type { EmitShape } from './types'
+const emit = defineEmits<EmitShape>()
+</script>
+
+<template>
+  <button @click="emit('submit', 'ok')">Send</button>
+</template>
+`;
+    const access = createInMemoryAccess({
+      [entryFile]: source,
+      "/test/src/components/EmitBox/types.ts": `
+export interface EmitShape {
+  (e: 'submit', payload: string): void
+  confirm: [id: number]
+}
+`,
+    });
+
+    const result = parseFile(entryFile, source, mockLogger, access);
+
+    expect(result).not.toBe(FALLBACK_STUB);
+    expect(result).toContain('"onSubmit"?: (payload: string) => void');
+    expect(result).toContain('"onConfirm"?: (...args: [id: number]) => void');
+  });
+
+  // @ai-generated - Refreshes generated public API when an imported emits dependency changes.
+  it.skipIf(!hasNativeBinary)("refreshes imported macro types when the dependency source changes", () => {
+    const entryFile = "/test/src/components/RefreshDeps.vue";
+    const source = `
+<script setup lang="ts">
+import type { Emits } from './types'
+const emit = defineEmits<Emits>()
+</script>
+<template><button @click="emit('submit', 'ok')">Send</button></template>
+`;
+    const files = {
+      [entryFile]: source,
+      "/test/src/components/types.ts": `
+export interface Emits {
+  (e: 'submit', payload: string): void
+}
+`,
+    };
+
+    const first = parseFile(entryFile, source, mockLogger, createInMemoryAccess(files));
+    expect(first).toContain('"onSubmit"?: (payload: string) => void');
+    expect(first).not.toContain('"onConfirm"?: (...args: [id: number]) => void');
+
+    files["/test/src/components/types.ts"] = `
+export interface Emits {
+  confirm: [id: number]
+}
+`;
+
+    const second = parseFile(entryFile, source, mockLogger, createInMemoryAccess(files));
+    expect(second).toContain('"onConfirm"?: (...args: [id: number]) => void');
+    expect(second).not.toContain('"onSubmit"?: (payload: string) => void');
   });
 });

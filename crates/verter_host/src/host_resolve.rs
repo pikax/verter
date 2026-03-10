@@ -28,6 +28,184 @@ use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
 
+type ResolvedExternalTypes =
+    rustc_hash::FxHashMap<String, verter_core::utils::oxc::vue::resolve_type::ResolvedElements>;
+
+type ExternalTypeCache = rustc_hash::FxHashMap<
+    (String, String),
+    Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>,
+>;
+
+impl VerterHost {
+    fn resolve_loaded_dependency_canonical(
+        &self,
+        files: &HashMap<String, FileEntry>,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        let owner_entry = files.get(owner_canonical)?;
+        let direct = crate::id::resolve_external(owner_canonical, import_source);
+        if files.contains_key(direct.as_str()) {
+            return Some(direct);
+        }
+        for ext in &self.config.resolve_extensions {
+            let with_ext = format!("{}{}", direct, ext);
+            if files.contains_key(with_ext.as_str()) {
+                return Some(with_ext);
+            }
+        }
+
+        let normalized = import_source.strip_prefix("./").unwrap_or(import_source);
+        for dep in &owner_entry.dependencies {
+            if !files.contains_key(dep.as_str()) {
+                continue;
+            }
+            if dep.ends_with(import_source) || dep.ends_with(normalized) {
+                return Some(dep.clone());
+            }
+
+            let dep_normalized = dep.replace('\\', "/");
+            if let Some(import_basename) = normalized.rsplit('/').next() {
+                if dep_normalized.rsplit('/').next() == Some(import_basename) {
+                    return Some(dep.clone());
+                }
+                for ext in &self.config.resolve_extensions {
+                    if let Some(dep_stem) = dep_normalized.strip_suffix(ext) {
+                        if dep_stem.rsplit('/').next() == Some(import_basename) {
+                            return Some(dep.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn resolve_external_type_from_loaded_files(
+        &self,
+        files: &HashMap<String, FileEntry>,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        cache: &mut ExternalTypeCache,
+        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+        required_root_dep: bool,
+    ) -> Result<Option<verter_core::utils::oxc::vue::resolve_type::ResolvedElements>, ()> {
+        let Some(dep_canonical) =
+            self.resolve_loaded_dependency_canonical(files, owner_canonical, import_source)
+        else {
+            return if required_root_dep { Err(()) } else { Ok(None) };
+        };
+
+        let cache_key = (dep_canonical.clone(), type_name.to_string());
+        if let Some(cached) = cache.get(&cache_key) {
+            return Ok(cached.clone());
+        }
+        if !visiting.insert(cache_key.clone()) {
+            return Ok(None);
+        }
+
+        let Some(dep_source) = files
+            .get(&dep_canonical)
+            .map(|entry| Arc::clone(&entry.source))
+        else {
+            visiting.remove(&cache_key);
+            return if required_root_dep { Err(()) } else { Ok(None) };
+        };
+
+        let import_alloc = oxc_allocator::Allocator::new();
+        let imported_bindings =
+            verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
+                dep_source.as_ref(),
+                &import_alloc,
+            );
+        let mut companion_types = rustc_hash::FxHashMap::default();
+        for binding in imported_bindings {
+            if let Some(resolved) = self.resolve_external_type_from_loaded_files(
+                files,
+                &dep_canonical,
+                &binding.source,
+                &binding.imported_name,
+                cache,
+                visiting,
+                false,
+            )? {
+                companion_types
+                    .entry(binding.local_name)
+                    .or_insert(resolved);
+            }
+        }
+
+        let resolve_alloc = oxc_allocator::Allocator::new();
+        let resolved =
+            verter_core::utils::oxc::vue::resolve_type::resolve_external_type_with_companion(
+                type_name,
+                dep_source.as_ref(),
+                &companion_types,
+                &resolve_alloc,
+            );
+
+        visiting.remove(&cache_key);
+        cache.insert(cache_key, resolved.clone());
+        Ok(resolved)
+    }
+
+    fn collect_external_types_from_loaded_files(
+        &self,
+        owner_canonical: &str,
+        macro_type_deps: &[verter_analysis::MacroTypeDep],
+        script_imports: &[verter_analysis::AnalyzedImport],
+    ) -> (Option<ResolvedExternalTypes>, Vec<HostDiagnostic>) {
+        let files = read_lock(&self.files);
+        let mut resolved = rustc_hash::FxHashMap::default();
+        let mut missing = Vec::new();
+        let mut cache = rustc_hash::FxHashMap::default();
+        let mut visiting = rustc_hash::FxHashSet::default();
+
+        for dep in macro_type_deps {
+            match self.resolve_external_type_from_loaded_files(
+                &files,
+                owner_canonical,
+                &dep.import_source,
+                &dep.type_name,
+                &mut cache,
+                &mut visiting,
+                true,
+            ) {
+                Ok(Some(elements)) => {
+                    resolved.insert(dep.type_name.clone(), elements);
+                }
+                Ok(None) => {}
+                Err(()) => {
+                    let span = script_imports
+                        .iter()
+                        .find(|import| import.source == dep.import_source)
+                        .map(|import| import.span);
+                    missing.push(HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_MISSING_MACRO_TYPE_DEP".to_string(),
+                        message: format!(
+                            "missing macro type dependency '{}' for type '{}' in '{}'",
+                            dep.import_source, dep.type_name, owner_canonical
+                        ),
+                        span,
+                    });
+                }
+            }
+        }
+
+        (
+            if resolved.is_empty() {
+                None
+            } else {
+                Some(resolved)
+            },
+            missing,
+        )
+    }
+}
+
 impl VerterHost {
     /// Resolve a raw import identifier (bundler query string or LSP `._VERTER_.` format)
     /// to its canonical ID, virtual node kind, and rendered bundler/LSP IDs.
@@ -401,13 +579,14 @@ impl VerterHost {
     /// Returns `None` if the file is not in the host or not a Vue SFC.
     pub fn get_public_api(&self, canonical_id: &str) -> Option<TscResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
-        let (source, file_kind, macro_type_deps) = {
+        let (source, file_kind, macro_type_deps, script_imports) = {
             let files = read_lock(&self.files);
             let entry = files.get(&canonical)?;
             (
                 entry.source.clone(),
                 entry.file_kind,
                 entry.script_analysis.macro_type_deps.clone(),
+                entry.script_analysis.imports.clone(),
             )
         };
         if file_kind != FileKind::VueSfc {
@@ -420,39 +599,11 @@ impl VerterHost {
             .unwrap_or(&canonical)
             .trim_end_matches(".vue")
             .to_string();
-        let external_types = {
-            let files = read_lock(&self.files);
-            let mut resolved = rustc_hash::FxHashMap::default();
-            for dep in &macro_type_deps {
-                let dep_canonical = crate::id::resolve_external(&canonical, &dep.import_source);
-                let dep_source: Option<std::sync::Arc<str>> = files
-                    .get(&*dep_canonical)
-                    .map(|e| e.source.clone())
-                    .or_else(|| {
-                        self.config.resolve_extensions.iter().find_map(|ext| {
-                            let with_ext = format!("{}{}", dep_canonical, ext);
-                            files.get(with_ext.as_str()).map(|e| e.source.clone())
-                        })
-                    });
-                if let Some(dep_source) = dep_source {
-                    let resolve_alloc = oxc_allocator::Allocator::new();
-                    if let Some(elements) =
-                        verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
-                            &dep.type_name,
-                            &dep_source,
-                            &resolve_alloc,
-                        )
-                    {
-                        resolved.insert(dep.type_name.clone(), elements);
-                    }
-                }
-            }
-            if resolved.is_empty() {
-                None
-            } else {
-                Some(resolved)
-            }
-        };
+        let (external_types, _) = self.collect_external_types_from_loaded_files(
+            &canonical,
+            &macro_type_deps,
+            &script_imports,
+        );
         let tsc_out = verter_core::tsc::generate_tsc_output_with_options(
             &source,
             &component_name,
@@ -565,60 +716,13 @@ impl VerterHost {
 
         let mut unresolved_macro_type_diags = Vec::new();
 
-        // Pre-resolve external types for cross-file type resolution in defineProps/defineEmits.
-        // For each macro_type_dep, resolve the import source to a dep file, then call
-        // resolve_external_type() on its source to get the resolved type elements.
-        let external_types = {
-            let files = read_lock(&self.files);
-            let mut resolved = rustc_hash::FxHashMap::default();
-            for dep in &snapshot.macro_type_deps {
-                // Resolve relative import source to canonical dep path
-                let dep_canonical =
-                    crate::id::resolve_external(&snapshot.canonical_id, &dep.import_source);
-                // Try exact match first, then with configured extensions
-                let dep_source: Option<std::sync::Arc<str>> = files
-                    .get(&*dep_canonical)
-                    .map(|e| e.source.clone())
-                    .or_else(|| {
-                        self.config.resolve_extensions.iter().find_map(|ext| {
-                            let with_ext = format!("{}{}", dep_canonical, ext);
-                            files.get(with_ext.as_str()).map(|e| e.source.clone())
-                        })
-                    });
-                if let Some(source) = dep_source {
-                    let resolve_alloc = oxc_allocator::Allocator::new();
-                    if let Some(elements) =
-                        verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
-                            &dep.type_name,
-                            &source,
-                            &resolve_alloc,
-                        )
-                    {
-                        resolved.insert(dep.type_name.clone(), elements);
-                    }
-                } else {
-                    let span = snapshot
-                        .script_imports
-                        .iter()
-                        .find(|import| import.source == dep.import_source)
-                        .map(|import| import.span);
-                    unresolved_macro_type_diags.push(HostDiagnostic {
-                        severity: HostSeverity::Error,
-                        code: "HOST_MISSING_MACRO_TYPE_DEP".to_string(),
-                        message: format!(
-                            "missing macro type dependency '{}' for type '{}' in '{}'",
-                            dep.import_source, dep.type_name, snapshot.canonical_id
-                        ),
-                        span,
-                    });
-                }
-            }
-            if resolved.is_empty() {
-                None
-            } else {
-                Some(resolved)
-            }
-        };
+        let (external_types, missing_macro_type_diags) = self
+            .collect_external_types_from_loaded_files(
+                &snapshot.canonical_id,
+                &snapshot.macro_type_deps,
+                &snapshot.script_imports,
+            );
+        unresolved_macro_type_diags.extend(missing_macro_type_diags);
 
         if !unresolved_macro_type_diags.is_empty() {
             diagnostics =

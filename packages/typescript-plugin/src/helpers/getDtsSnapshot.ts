@@ -1,6 +1,10 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
 import { SourceMap } from "node:module";
 import type { VerterHost } from "@verter/native";
+import {
+  hydrateMacroTypeDependencies,
+  type MacroTypeDependencyAccess,
+} from "./macroTypeHydration";
 
 export const FALLBACK_STUB = "export default {} as any";
 
@@ -138,6 +142,7 @@ export const parseFile = (
   fileName: string,
   content: string,
   logger: tsModule.server.Logger,
+  access?: MacroTypeDependencyAccess,
 ): string => {
   logger.info(`[Verter] parsing ${fileName}`);
 
@@ -150,6 +155,7 @@ export const parseFile = (
 
   try {
     h.upsert({ inputId: fileName, source: content });
+    hydrateMacroTypeDependencies(h, fileName, access);
 
     // getPublicApi() performs macro-only extraction (fast path — no full template compilation).
     // The generated code includes a //# sourceMappingURL= for Go-to-Definition support.

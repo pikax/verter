@@ -7,10 +7,18 @@ import {
   FALLBACK_STUB,
   remapVirtualSpan,
 } from "./helpers/getDtsSnapshot";
+import type { MacroTypeDependencyAccess } from "./helpers/macroTypeHydration";
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
 
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/");
+}
+
+function normalizeSourcePath(fileName: string): string {
+  const normalized = normalizePath(fileName);
+  if (normalized.endsWith(".vue.d.ts")) return normalized.slice(0, -5);
+  if (normalized.endsWith(".vue.ts")) return normalized.slice(0, -3);
+  return normalized;
 }
 
 const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
@@ -160,7 +168,41 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     };
 
     // Patch file system on the shared server host for virtual file support.
+    const _fileExists = info.serverHost.fileExists.bind(info.serverHost);
     const _readFile = info.serverHost.readFile.bind(info.serverHost);
+    const macroTypeAccess: MacroTypeDependencyAccess = {
+      resolveModule(containingFile, specifier) {
+        const resolved = ts.resolveModuleName(
+          specifier,
+          normalizeSourcePath(containingFile),
+          info.project.getCompilerOptions(),
+          {
+            fileExists: _fileExists,
+            readFile: _readFile,
+            directoryExists: info.serverHost.directoryExists?.bind(info.serverHost),
+            getCurrentDirectory: () => directory,
+            getDirectories: info.serverHost.getDirectories?.bind(info.serverHost),
+            realpath: info.serverHost.realpath?.bind(info.serverHost),
+            useCaseSensitiveFileNames: () => info.serverHost.useCaseSensitiveFileNames,
+          },
+        );
+        return resolved.resolvedModule
+          ? normalizeSourcePath(resolved.resolvedModule.resolvedFileName)
+          : undefined;
+      },
+      readSource(fileName) {
+        const normalized = normalizeSourcePath(fileName);
+        const snapshot =
+          info.languageServiceHost.getScriptSnapshot?.(normalized) ??
+          (normalized !== fileName
+            ? info.languageServiceHost.getScriptSnapshot?.(fileName)
+            : undefined);
+        if (snapshot) {
+          return snapshot.getText(0, snapshot.getLength());
+        }
+        return _readFile(normalized) ?? (normalized !== fileName ? _readFile(fileName) : undefined);
+      },
+    };
     info.serverHost.readFile = (fileName: string) => {
       if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
         return VERTER_TYPES_STUB;
@@ -169,26 +211,25 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (fileName.endsWith(".vue.d.ts")) {
         const vuePath = fileName.slice(0, -5); // strip ".d.ts"
         const file = _readFile(vuePath);
-        if (file) return parseFile(vuePath, file, logger);
+        if (file) return parseFile(vuePath, file, logger, macroTypeAccess);
         return FALLBACK_STUB;
       }
       // .vue.ts virtual file → same as .vue.d.ts (IDE codegen uses .vue.ts suffix)
       if (fileName.endsWith(".vue.ts")) {
         const vuePath = fileName.slice(0, -3); // strip ".ts"
         const file = _readFile(vuePath);
-        if (file) return parseFile(vuePath, file, logger);
+        if (file) return parseFile(vuePath, file, logger, macroTypeAccess);
         return FALLBACK_STUB;
       }
       // Direct .vue reads (for other TS operations)
       const file = _readFile(fileName);
       if (isVue(fileName) && file) {
         logger.info("[Verter] readFile - " + fileName + " -- " + file!.length);
-        return parseFile(fileName, file, logger);
+        return parseFile(fileName, file, logger, macroTypeAccess);
       }
       return file;
     };
 
-    const _fileExists = info.serverHost.fileExists.bind(info.serverHost);
     info.serverHost.fileExists = (fileName: string) => {
       if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
         return true;

@@ -60,6 +60,13 @@ fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::Diagnosti
     }
 }
 
+fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
+    host.get_public_api(canonical_id)
+        .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
+        .code
+        .to_string()
+}
+
 fn find_diag<'a>(diagnostics: &'a crate::DiagnosticsSnapshot, code: &str) -> &'a HostDiagnostic {
     diagnostics
         .diagnostics
@@ -280,5 +287,72 @@ fn missing_macro_type_dependency_retries_successfully_after_dependency_arrives()
     assert!(
         !response.code.contains("HOST_MISSING_MACRO_TYPE_DEP"),
         "resolved compile output must not contain the previous missing-type error"
+    );
+}
+
+#[test]
+fn public_api_resolves_transitive_imported_define_emits_type() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Emits } from './types'\nconst emit = defineEmits<Emits>()\n</script>\n<template><button @click=\"emit('submit', 'ok')\">Send</button></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { BaseEmits } from './base'\nexport interface Emits extends BaseEmits { confirm: [id: number] }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface BaseEmits { (e: 'submit', payload: string): void }",
+    );
+
+    let code = public_api_code(&host, "/src/Comp.vue");
+    assert!(
+        code.contains("\"onSubmit\"?: (payload: string) => void"),
+        "public api should include transitive imported submit handler props, got: {code}"
+    );
+    assert!(
+        code.contains("\"onConfirm\"?: (...args: [id: number]) => void"),
+        "public api should include local tuple emits handler props, got: {code}"
+    );
+}
+
+#[test]
+fn invalid_imported_define_props_type_keeps_object_like_error() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Props } from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div/></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    upsert_non_sfc(&host, "/src/types.ts", "export type Props = string");
+
+    let diagnostics = compile_main_error(&host, "/src/Comp.vue");
+    let invalid = find_diag(&diagnostics, "XInvalidMacroType");
+    assert!(
+        invalid.message.contains(
+            "defineProps() type argument 'Props' must resolve to an object-like props type."
+        ),
+        "expected object-like props diagnostic, got: {}",
+        invalid.message
+    );
+}
+
+#[test]
+fn invalid_imported_define_emits_type_keeps_emits_shape_error() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Emits } from './types'\nconst emit = defineEmits<Emits>()\n</script>\n<template><div/></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Emits { foo: string }",
+    );
+
+    let diagnostics = compile_main_error(&host, "/src/Comp.vue");
+    let invalid = find_diag(&diagnostics, "XInvalidMacroType");
+    assert!(
+        invalid
+            .message
+            .contains("defineEmits() type argument 'Emits' must resolve to emit call signatures or a named-tuple emits object."),
+        "expected emits-shape diagnostic, got: {}",
+        invalid.message
     );
 }
