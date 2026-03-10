@@ -138,7 +138,11 @@ fn main() {
     let emit_opts = checker::EmitOptions {
         no_emit,
         declaration: emit_decl,
-        declaration_dir: cli.declaration_dir.or_else(|| cli.out_dir.clone()),
+        declaration_dir: cli
+            .declaration_dir
+            .or_else(|| cli.out_dir.clone())
+            .or_else(|| config.declaration_dir.clone())
+            .or_else(|| config.out_dir.clone()),
     };
 
     eprintln!(

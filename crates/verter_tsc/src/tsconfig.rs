@@ -37,6 +37,12 @@ pub struct TsConfig {
     pub vue_files: Vec<PathBuf>,
     /// All `.ts`/`.tsx` files matching the tsconfig include/files patterns.
     pub ts_files: Vec<PathBuf>,
+    /// Resolved `compilerOptions.declarationDir` (absolute path).
+    /// Inherited through the `extends` chain; child overrides parent.
+    pub declaration_dir: Option<PathBuf>,
+    /// Resolved `compilerOptions.outDir` (absolute path).
+    /// Inherited through the `extends` chain; child overrides parent.
+    pub out_dir: Option<PathBuf>,
 }
 
 /// Raw tsconfig.json structure (minimal subset we need).
@@ -50,15 +56,116 @@ struct RawTsConfig {
     #[serde(default)]
     files: Vec<String>,
     #[serde(rename = "extends")]
-    #[allow(dead_code)] // reserved for future extends-chain resolution
     extends: Option<serde_json::Value>,
     #[serde(default)]
     references: Vec<RawReference>,
+    #[serde(default)]
+    compiler_options: Option<RawCompilerOptions>,
+}
+
+/// Minimal compiler options we care about for output dir resolution.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCompilerOptions {
+    declaration_dir: Option<String>,
+    out_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawReference {
     path: String,
+}
+
+/// Resolved output directories from the extends chain.
+struct ResolvedOutputDirs {
+    declaration_dir: Option<PathBuf>,
+    out_dir: Option<PathBuf>,
+}
+
+/// Resolve `compilerOptions.declarationDir` and `compilerOptions.outDir` through
+/// the `extends` chain. Child values override parent. Relative paths are resolved
+/// against the directory of the tsconfig file that declares them.
+fn resolve_output_dirs(tsconfig_path: &Path, depth: usize) -> ResolvedOutputDirs {
+    if depth > 10 {
+        return ResolvedOutputDirs {
+            declaration_dir: None,
+            out_dir: None,
+        };
+    }
+
+    let raw = match load_raw_tsconfig(tsconfig_path) {
+        Ok(r) => r,
+        Err(_) => {
+            return ResolvedOutputDirs {
+                declaration_dir: None,
+                out_dir: None,
+            }
+        }
+    };
+
+    let config_dir = safe_parent(tsconfig_path)
+        .canonicalize()
+        .map(|p| strip_unc_prefix(&p))
+        .unwrap_or_else(|_| safe_parent(tsconfig_path).to_path_buf());
+
+    // Start with values inherited from parent (if extends is set).
+    let mut inherited = if let Some(serde_json::Value::String(extends_path)) = &raw.extends {
+        let parent_path = resolve_extends_path(extends_path, &config_dir);
+        if parent_path.exists() {
+            resolve_output_dirs(&parent_path, depth + 1)
+        } else {
+            ResolvedOutputDirs {
+                declaration_dir: None,
+                out_dir: None,
+            }
+        }
+    } else {
+        ResolvedOutputDirs {
+            declaration_dir: None,
+            out_dir: None,
+        }
+    };
+
+    // Override with values from this config (child overrides parent).
+    if let Some(ref opts) = raw.compiler_options {
+        if let Some(ref decl_dir) = opts.declaration_dir {
+            inherited.declaration_dir = Some(config_dir.join(decl_dir));
+        }
+        if let Some(ref out_dir) = opts.out_dir {
+            inherited.out_dir = Some(config_dir.join(out_dir));
+        }
+    }
+
+    inherited
+}
+
+/// Resolve an `extends` path to an absolute tsconfig path.
+/// Handles relative paths (resolved against config_dir) and bare package names.
+fn resolve_extends_path(extends: &str, config_dir: &Path) -> PathBuf {
+    if extends.starts_with('.') {
+        // Relative path
+        let resolved = config_dir.join(extends);
+        // If it doesn't have a .json extension, try appending it
+        if resolved.extension().is_none() {
+            let with_json = resolved.with_extension("json");
+            if with_json.exists() {
+                return with_json;
+            }
+        }
+        resolved
+    } else {
+        // Bare package name — try node_modules resolution (best effort)
+        let node_modules = config_dir.join("node_modules").join(extends);
+        if node_modules.exists() {
+            return node_modules;
+        }
+        let with_json = node_modules.with_extension("json");
+        if with_json.exists() {
+            return with_json;
+        }
+        // Fall back to treating it as relative (won't exist but avoids panic)
+        config_dir.join(extends)
+    }
 }
 
 /// Load and parse a `tsconfig.json`, returning the resolved file lists.
@@ -75,10 +182,15 @@ pub fn load_tsconfig(tsconfig_path: &Path) -> Result<TsConfig, String> {
             .map_err(|e| format!("cannot resolve tsconfig directory: {e}"))?,
     );
 
+    // Resolve output directories through the extends chain.
+    let output_dirs = resolve_output_dirs(tsconfig_path, 0);
+
     Ok(TsConfig {
         root_dir,
         vue_files,
         ts_files,
+        declaration_dir: output_dirs.declaration_dir,
+        out_dir: output_dirs.out_dir,
     })
 }
 
@@ -600,6 +712,212 @@ mod tests {
         assert!(
             out.contains("hello, world"),
             "commas inside strings should be preserved: {out}"
+        );
+    }
+
+    // ── output dir resolution ─────────────────────────────────────
+
+    #[test]
+    fn parses_leaf_declaration_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let tsconfig = temp.path().join("tsconfig.json");
+        std::fs::write(
+            &tsconfig,
+            r#"{
+                "compilerOptions": { "declarationDir": "dist/types" },
+                "include": ["src"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+
+        let config = load_tsconfig(&tsconfig).unwrap();
+        let expected = strip_unc_prefix(&temp.path().canonicalize().unwrap()).join("dist/types");
+        assert_eq!(
+            config.declaration_dir.as_deref(),
+            Some(expected.as_path()),
+            "declarationDir should be resolved to absolute path"
+        );
+        // Negative: outDir should not be set
+        assert!(
+            config.out_dir.is_none(),
+            "outDir should be None when only declarationDir is set"
+        );
+    }
+
+    #[test]
+    fn parses_leaf_out_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let tsconfig = temp.path().join("tsconfig.json");
+        std::fs::write(
+            &tsconfig,
+            r#"{
+                "compilerOptions": { "outDir": "dist" },
+                "include": ["src"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+
+        let config = load_tsconfig(&tsconfig).unwrap();
+        let expected = strip_unc_prefix(&temp.path().canonicalize().unwrap()).join("dist");
+        assert_eq!(
+            config.out_dir.as_deref(),
+            Some(expected.as_path()),
+            "outDir should be resolved to absolute path"
+        );
+        assert!(
+            config.declaration_dir.is_none(),
+            "declarationDir should be None when only outDir is set"
+        );
+    }
+
+    #[test]
+    fn resolves_relative_paths_against_declaring_tsconfig_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let sub = temp.path().join("packages").join("app");
+        std::fs::create_dir_all(sub.join("src")).unwrap();
+        let tsconfig = sub.join("tsconfig.json");
+        std::fs::write(
+            &tsconfig,
+            r#"{
+                "compilerOptions": { "declarationDir": "./types" },
+                "include": ["src"]
+            }"#,
+        )
+        .unwrap();
+
+        let config = load_tsconfig(&tsconfig).unwrap();
+        let expected = strip_unc_prefix(&sub.canonicalize().unwrap()).join("types");
+        assert_eq!(
+            config.declaration_dir.as_deref(),
+            Some(expected.as_path()),
+            "declarationDir should resolve relative to tsconfig dir, not cwd"
+        );
+    }
+
+    #[test]
+    fn inherits_declaration_dir_through_extends() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+
+        // Base config declares declarationDir
+        std::fs::write(
+            root.join("tsconfig.base.json"),
+            r#"{
+                "compilerOptions": { "declarationDir": "dist/types" }
+            }"#,
+        )
+        .unwrap();
+
+        // Child extends base but doesn't override
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{
+                "extends": "./tsconfig.base.json",
+                "include": ["src"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let config = load_tsconfig(&root.join("tsconfig.json")).unwrap();
+        // Should inherit from base — resolved relative to base's directory
+        let expected = strip_unc_prefix(&root.canonicalize().unwrap()).join("dist/types");
+        assert_eq!(
+            config.declaration_dir.as_deref(),
+            Some(expected.as_path()),
+            "declarationDir should be inherited from base tsconfig"
+        );
+    }
+
+    #[test]
+    fn child_overrides_inherited_declaration_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+
+        std::fs::write(
+            root.join("tsconfig.base.json"),
+            r#"{
+                "compilerOptions": { "declarationDir": "dist/base-types" }
+            }"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{
+                "extends": "./tsconfig.base.json",
+                "compilerOptions": { "declarationDir": "dist/child-types" },
+                "include": ["src"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let config = load_tsconfig(&root.join("tsconfig.json")).unwrap();
+        let expected = strip_unc_prefix(&root.canonicalize().unwrap()).join("dist/child-types");
+        assert_eq!(
+            config.declaration_dir.as_deref(),
+            Some(expected.as_path()),
+            "child declarationDir should override inherited value"
+        );
+        // Negative: should not have the base's path
+        let base_path = strip_unc_prefix(&root.canonicalize().unwrap()).join("dist/base-types");
+        assert_ne!(
+            config.declaration_dir.as_deref(),
+            Some(base_path.as_path()),
+            "base declarationDir should be overridden by child"
+        );
+    }
+
+    #[test]
+    fn missing_compiler_options_leaves_both_none() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let tsconfig = temp.path().join("tsconfig.json");
+        std::fs::write(&tsconfig, r#"{ "include": ["src"] }"#).unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+
+        let config = load_tsconfig(&tsconfig).unwrap();
+        assert!(
+            config.declaration_dir.is_none(),
+            "declarationDir should be None without compilerOptions"
+        );
+        assert!(
+            config.out_dir.is_none(),
+            "outDir should be None without compilerOptions"
+        );
+    }
+
+    #[test]
+    fn inherits_out_dir_through_extends() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+
+        std::fs::write(
+            root.join("tsconfig.base.json"),
+            r#"{
+                "compilerOptions": { "outDir": "dist" }
+            }"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{
+                "extends": "./tsconfig.base.json",
+                "include": ["src"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let config = load_tsconfig(&root.join("tsconfig.json")).unwrap();
+        let expected = strip_unc_prefix(&root.canonicalize().unwrap()).join("dist");
+        assert_eq!(
+            config.out_dir.as_deref(),
+            Some(expected.as_path()),
+            "outDir should be inherited from base tsconfig"
         );
     }
 }

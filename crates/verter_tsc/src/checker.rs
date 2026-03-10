@@ -1989,4 +1989,82 @@ const props = defineProps<{ msg: string }>()
             "emitted files should include the final .vue.d.ts output"
         );
     }
+
+    /// Regression: when no CLI --declarationDir or --outDir is provided, the
+    /// output dir should be resolved from tsconfig.json compilerOptions.
+    /// This mirrors the main.rs fallback chain:
+    ///   cli.declaration_dir → cli.out_dir → config.declaration_dir → config.out_dir
+    #[test]
+    fn run_declaration_with_tsconfig_sourced_output_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        let src_dir = root.join("src");
+        let decl_dir = root.join("dist").join("types");
+
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(
+            src_dir.join("Test.vue"),
+            r#"<script setup lang="ts">
+const props = defineProps<{ msg: string }>()
+</script>
+<template><div>{{ props.msg }}</div></template>
+"#,
+        )
+        .unwrap();
+
+        // The tsconfig declares declarationDir — no CLI flags needed.
+        let tsconfig_path = root.join("tsconfig.json");
+        fs::write(
+            &tsconfig_path,
+            r#"{
+  "compilerOptions": {
+    "strict": true,
+    "declarationDir": "dist/types"
+  },
+  "files": ["src/Test.vue"]
+}"#,
+        )
+        .unwrap();
+        write_mock_tsc(&root, "phase-b-success");
+
+        let config = load_tsconfig(&tsconfig_path).expect("test tsconfig should load");
+
+        // Verify tsconfig resolution produced the declarationDir
+        assert!(
+            config.declaration_dir.is_some(),
+            "tsconfig should resolve declarationDir"
+        );
+
+        // Simulate main.rs fallback: no CLI flags, so use config.declaration_dir
+        let effective_dir = config
+            .declaration_dir
+            .clone()
+            .or_else(|| config.out_dir.clone());
+
+        let result = run(
+            &config,
+            &tsconfig_path,
+            &EmitOptions {
+                no_emit: false,
+                declaration: true,
+                declaration_dir: effective_dir,
+            },
+            TypeCheckerBinary::ForceTsc,
+        );
+
+        let target = decl_dir.join("src/Test.vue.d.ts");
+        assert!(
+            result.diagnostics.is_empty(),
+            "tsconfig-sourced declarationDir should produce no diagnostics: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            target.exists(),
+            "should postprocess .vue.d.ts using tsconfig-sourced declarationDir"
+        );
+        assert!(
+            !result.emitted_files.is_empty(),
+            "emitted_files should not be empty when using tsconfig-sourced output dir"
+        );
+    }
 }
