@@ -23,6 +23,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
+import { buildReviewQueue, buildDiagnosticDiff, normalizeTypeCheckArtifacts } from './diagnostics.mjs';
+import { buildDiscoveryInventory, renderDiscoveryMarkdown, VERTER_EXTENSION_ID } from './discovery.mjs';
 import { projects } from './projects.mjs';
 
 // ── Paths ────────────────────────────────────────────────────────────────────
@@ -34,6 +36,9 @@ const INTEGRATION_DIR = path.join(ROOT, '.integration-tests');
 const REPOS_DIR = path.join(INTEGRATION_DIR, 'repos');
 const TARBALLS_DIR = path.join(INTEGRATION_DIR, 'tarballs');
 const LOGS_DIR = path.join(INTEGRATION_DIR, 'logs');
+const DEFAULT_LOCAL_ROOTS = ['D:\\dev'];
+const DEFAULT_LOCAL_RUNS_DIR = path.join('D:\\dev', 'temp', 'verter-toolchain-runs');
+const LOCAL_SANDBOX_SKIP = ['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.nuxt', '.output', 'out', 'target', '.turbo', 'tmp', 'temp'];
 
 // ── Type-Check Binary Detection ─────────────────────────────────────────────
 
@@ -80,7 +85,7 @@ function findVueTsc(projectRoot) {
 /**
  * Run a type-check tool and measure wall-clock time.
  * Both vue-tsc and verter-tsc use the same invocation: --noEmit --project <tsconfig>
- * @returns {{ ms: number, exitCode: number, errorCount: number, timedOut: boolean }}
+ * @returns {{ ms: number, exitCode: number, errorCount: number, timedOut: boolean, stdout: string, stderr: string }}
  */
 function runTypeCheckTool(bin, args, cwd) {
   const TIMEOUT = 5 * 60_000;
@@ -96,19 +101,33 @@ function runTypeCheckTool(bin, args, cwd) {
   const ms = performance.now() - start;
 
   if (r.error?.message?.includes('ETIMEDOUT') || r.signal === 'SIGTERM') {
-    return { ms, exitCode: -1, errorCount: 0, timedOut: true };
+    return {
+      ms,
+      exitCode: -1,
+      errorCount: 0,
+      timedOut: true,
+      stdout: String(r.stdout ?? ''),
+      stderr: String(r.stderr ?? ''),
+    };
   }
 
   const out = String(r.stdout ?? '') + String(r.stderr ?? '');
   const errorCount = (out.match(/error TS\d+:/g) ?? []).length;
-  return { ms, exitCode: r.status ?? -1, errorCount, timedOut: false };
+  return {
+    ms,
+    exitCode: r.status ?? -1,
+    errorCount,
+    timedOut: false,
+    stdout: String(r.stdout ?? ''),
+    stderr: String(r.stderr ?? ''),
+  };
 }
 
 /**
  * Run type-check benchmarks for a project: 2 passes each of vue-tsc and verter-tsc.
  * Both tools run: --noEmit --project <tsconfig>
  *
- * @returns {{ vueTsc: { cold, warm }, verterTsc: { cold, warm } } | null}
+ * @returns {{ tsconfig: string, vueTsc: { cold, warm }, verterTsc: { cold, warm } } | null}
  */
 function runTypeChecks(project, repoDir) {
   // Find the best tsconfig for type-checking.
@@ -144,6 +163,7 @@ function runTypeChecks(project, repoDir) {
   } catch { /* parse error — try with the root tsconfig anyway */ }
 
   const results = {
+    tsconfig,
     vueTsc: { cold: null, warm: null },
     verterTsc: { cold: null, warm: null },
   };
@@ -186,6 +206,13 @@ function parseArgs() {
     skipBuild: false,
     noClone: false,
     fast: false,
+    discoverLocal: false,
+    discoverOnly: false,
+    localOnly: false,
+    runId: null,
+    out: null,
+    repoFilter: null,
+    roots: [...DEFAULT_LOCAL_ROOTS],
     concurrency: 1,
     projectNames: /** @type {string[]} */ ([]),
   };
@@ -204,6 +231,27 @@ function parseArgs() {
       case '--fast':
         opts.fast = true;
         break;
+      case '--discover-local':
+        opts.discoverLocal = true;
+        break;
+      case '--discover-only':
+        opts.discoverOnly = true;
+        break;
+      case '--local-only':
+        opts.localOnly = true;
+        break;
+      case '--roots':
+        opts.roots = args[++i].split(/[;,]/u).map((value) => value.trim()).filter(Boolean);
+        break;
+      case '--out':
+        opts.out = args[++i];
+        break;
+      case '--repo-filter':
+        opts.repoFilter = args[++i];
+        break;
+      case '--run-id':
+        opts.runId = args[++i];
+        break;
       case '--concurrency':
         opts.concurrency = parseInt(args[++i], 10) || 1;
         break;
@@ -215,8 +263,16 @@ function parseArgs() {
             '',
             'Options:',
             '  --skip-baseline   Skip baseline build/test',
+            '  --fast            Use the debug native build for faster local iteration',
             '  --skip-build      Skip building Verter (reuse tarballs)',
             '  --no-clone        Skip git clone (reuse checkouts)',
+            '  --discover-local  Inventory local Vue repos under the configured roots',
+            '  --discover-only   Write discovery artifacts and exit',
+            '  --local-only      Execute local discovered repos without running the matrix',
+            '  --roots <paths>   Semicolon/comma-separated discovery roots (default: D:\\dev)',
+            '  --out <path>      Output directory for local discovery/execution artifacts',
+            '  --repo-filter <r> Regex filter applied to discovered repo paths',
+            '  --run-id <id>     Override the local run id used in the output path',
             '  --concurrency <n> Run N projects in parallel (default: 1)',
             '  --help            Show this message',
             '',
@@ -347,6 +403,206 @@ function copyRecursive(src, dest, skipNames = []) {
   }
 }
 
+function ensureDir(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function writeJson(filePath, value) {
+  ensureDir(path.dirname(filePath));
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + '\n');
+}
+
+function createRunId() {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+function sanitizeLocalName(project) {
+  const source = project.relativeRoot || project.name || 'project';
+  return source.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
+}
+
+function createLocalRunContext(opts) {
+  const outRoot = opts.out || DEFAULT_LOCAL_RUNS_DIR;
+  const runId = opts.runId || createRunId();
+  const runDir = path.join(outRoot, runId);
+  const sandboxesDir = path.join(runDir, 'sandboxes');
+  const reportsDir = path.join(runDir, 'reports');
+  ensureDir(sandboxesDir);
+  ensureDir(reportsDir);
+  return { outRoot, runId, runDir, sandboxesDir, reportsDir };
+}
+
+function prepareLocalSandbox(project, runContext) {
+  const sandboxDir = path.join(runContext.sandboxesDir, sanitizeLocalName(project));
+  fs.rmSync(sandboxDir, { recursive: true, force: true });
+  copyRecursive(project.repoRoot, sandboxDir, LOCAL_SANDBOX_SKIP);
+  return sandboxDir;
+}
+
+function writeTypeCheckArtifacts(project, repoDir, artifactDir, typeCheck) {
+  if (!typeCheck) return { normalized: null, diff: null, queue: null };
+
+  const normalized = normalizeTypeCheckArtifacts(typeCheck, repoDir);
+  const diff = buildDiagnosticDiff(normalized);
+  const queue = buildReviewQueue(diff, {
+    repoRoot: repoDir,
+    projectName: project.name,
+  });
+
+  const typeDir = path.join(artifactDir, 'typecheck');
+  ensureDir(typeDir);
+  for (const runResult of normalized.runs) {
+    const baseName = `${runResult.tool}-${runResult.pass}.log`;
+    fs.writeFileSync(path.join(typeDir, baseName), [runResult.stdout, runResult.stderr].filter(Boolean).join('\n'));
+  }
+
+  writeJson(path.join(typeDir, 'diagnostics.normalized.json'), normalized);
+  writeJson(path.join(typeDir, 'diagnostics.diff.json'), diff);
+  writeJson(path.join(typeDir, 'review-queue.json'), queue);
+
+  return { normalized, diff, queue };
+}
+
+function writeProjectSummary(project, artifactDir, result, diff, queue) {
+  const lines = [];
+  lines.push(`# ${project.name}`);
+  lines.push('');
+  lines.push(`- Recipe: ${project.replacementRecipe ?? 'matrix'}`);
+  lines.push(`- Tier: ${project.executionTier ?? 'tier1'}`);
+  if (project.repoRoot) lines.push(`- Source: ${project.repoRoot}`);
+  if (project.chosenTsconfig) lines.push(`- Tsconfig: ${project.chosenTsconfig}`);
+  if (project.replacementSteps?.length) lines.push(`- Steps: ${project.replacementSteps.join(', ')}`);
+  if (result.typeCheckCrash) lines.push('- Type-check crash: yes');
+  if (result.error) lines.push(`- Error: ${result.error}`);
+  lines.push('');
+
+  if (diff?.summary) {
+    lines.push('## Diagnostic Diff');
+    lines.push('');
+    for (const [classification, count] of Object.entries(diff.summary)) {
+      lines.push(`- ${classification}: ${count}`);
+    }
+    lines.push('');
+  }
+
+  if (queue?.items?.length) {
+    lines.push('## Review Queue');
+    lines.push('');
+    for (const item of queue.items.slice(0, 25)) {
+      lines.push(`- ${item.status} ${item.classification} ${item.code ?? '-'} ${item.file ?? '-'}:${item.line ?? '-'} ${item.message}`);
+    }
+    lines.push('');
+  }
+
+  fs.writeFileSync(path.join(artifactDir, 'summary.md'), lines.join('\n'));
+}
+
+function replaceEditorTooling(project, repoDir) {
+  const replacements = new Map([
+    ['Vue.volar', VERTER_EXTENSION_ID],
+    ['Vue.vscode-typescript-vue-plugin', VERTER_EXTENSION_ID],
+    ['Vue Official', 'Verter'],
+    ['@vue/typescript-plugin', '@verter/typescript-plugin'],
+  ]);
+
+  const candidates = [
+    ...findFiles(repoDir, (name, full) => name.endsWith('.code-workspace') || (['settings.json', 'extensions.json'].includes(name) && full.includes(`${path.sep}.vscode${path.sep}`))),
+  ];
+
+  const modifiedFiles = [];
+  for (const filePath of candidates) {
+    let content;
+    try {
+      content = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+    let updated = content;
+    for (const [needle, replacement] of replacements) {
+      updated = updated.split(needle).join(replacement);
+    }
+    if (updated !== content) {
+      fs.writeFileSync(filePath, updated);
+      modifiedFiles.push(path.relative(repoDir, filePath));
+    }
+  }
+  return modifiedFiles;
+}
+
+function createVerterTscShim(repoDir) {
+  const binDir = path.join(repoDir, 'node_modules', '.bin');
+  ensureDir(binDir);
+
+  const binary = VERTER_TSC.bin;
+  if (!binary) return;
+
+  const shellBinary = binary.replace(/\\/g, '/');
+  const cmdPath = path.join(binDir, 'verter-tsc.cmd');
+  const shellPath = path.join(binDir, 'verter-tsc');
+  fs.writeFileSync(cmdPath, `@echo off\r\n"${binary}" %*\r\n`);
+  fs.writeFileSync(shellPath, `#!/usr/bin/env sh\n"${shellBinary}" "$@"\n`);
+}
+
+function ensureTypeScriptToolingAccessible(repoDir) {
+  const pluginSrc = path.join(ROOT, 'packages', 'typescript-plugin');
+  const pluginDest = path.join(repoDir, 'node_modules', '@verter', 'typescript-plugin');
+  if (!fs.existsSync(path.join(pluginDest, 'package.json'))) {
+    ensureDir(path.join(repoDir, 'node_modules', '@verter'));
+    copyRecursive(pluginSrc, pluginDest, ['src', 'node_modules']);
+  }
+  createVerterTscShim(repoDir);
+}
+
+function replaceTypeScriptTooling(project, repoDir) {
+  ensureTypeScriptToolingAccessible(repoDir);
+  const modifiedFiles = [];
+
+  const packageJsonPath = path.join(repoDir, 'package.json');
+  if (fs.existsSync(packageJsonPath)) {
+    const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+    let changed = false;
+    if (pkg.scripts && typeof pkg.scripts === 'object') {
+      for (const [name, script] of Object.entries(pkg.scripts)) {
+        if (typeof script === 'string' && script.includes('vue-tsc')) {
+          pkg.scripts[name] = script.split('vue-tsc').join('verter-tsc');
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      fs.writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
+      modifiedFiles.push('package.json');
+    }
+  }
+
+  const configFiles = findFiles(repoDir, (name, full) => {
+    if (name === 'package.json') return false;
+    if (name === 'jsconfig.json' || /^tsconfig(\..+)?\.json$/u.test(name)) return true;
+    if (name.endsWith('.code-workspace')) return true;
+    return ['settings.json', 'extensions.json'].includes(name) && full.includes(`${path.sep}.vscode${path.sep}`);
+  });
+
+  for (const filePath of configFiles) {
+    let content;
+    try {
+      content = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+    const updated = content
+      .split('@vue/typescript-plugin').join('@verter/typescript-plugin')
+      .split('vue-tsc').join('verter-tsc')
+      .split('Vue.vscode-typescript-vue-plugin').join(VERTER_EXTENSION_ID);
+
+    if (updated !== content) {
+      fs.writeFileSync(filePath, updated);
+      modifiedFiles.push(path.relative(repoDir, filePath));
+    }
+  }
+
+  return [...new Set(modifiedFiles)];
+}
+
 // ── Build Verter ─────────────────────────────────────────────────────────────
 
 function buildVerter({ fast = false } = {}) {
@@ -356,6 +612,20 @@ function buildVerter({ fast = false } = {}) {
   if (!native.ok) {
     console.error(native.stderr || native.stdout);
     throw new Error('Failed to build native bindings');
+  }
+
+  log('verter', 'Building typescript plugin...');
+  const tsPlugin = run('pnpm --filter @verter/typescript-plugin build', ROOT);
+  if (!tsPlugin.ok) {
+    console.error(tsPlugin.stderr || tsPlugin.stdout);
+    throw new Error('Failed to build typescript plugin');
+  }
+
+  log('verter', 'Building verter-tsc...');
+  const tscBuild = run('pnpm run build:tsc', ROOT);
+  if (!tscBuild.ok) {
+    console.error(tscBuild.stderr || tscBuild.stdout);
+    throw new Error('Failed to build verter-tsc');
   }
 
   log('verter', 'Building unplugin...');
@@ -1110,15 +1380,144 @@ function runTest(project, repoDir, label) {
   return { ...result, ...counts, label: `${label}-test` };
 }
 
+async function processLocalProject(project, opts, runContext) {
+  const results = {
+    name: project.name,
+    recipe: project.replacementRecipe,
+    executionTier: project.executionTier,
+    baseline: { build: null, test: null },
+    verter: { build: null, test: null, e2e: null },
+    replacement: { modified: [], verified: false, editorModified: [], typeScriptModified: [] },
+    typeCheck: null,
+    typeCheckCrash: false,
+    artifactDir: null,
+    error: null,
+  };
+
+  const artifactDir = path.join(runContext.reportsDir, sanitizeLocalName(project));
+  ensureDir(artifactDir);
+  results.artifactDir = artifactDir;
+  writeJson(path.join(artifactDir, 'project.json'), project);
+
+  try {
+    const repoDir = prepareLocalSandbox(project, runContext);
+    writeJson(path.join(artifactDir, 'sandbox.json'), {
+      repoRoot: project.repoRoot,
+      sandboxDir: repoDir,
+    });
+
+    if (project.replacementRecipe === 'editor_only') {
+      results.replacement.editorModified = replaceEditorTooling(project, repoDir);
+      writeJson(path.join(artifactDir, 'editor-replacement.json'), {
+        modifiedFiles: results.replacement.editorModified,
+        extensionId: VERTER_EXTENSION_ID,
+      });
+      writeProjectSummary(project, artifactDir, results, null, null);
+      return results;
+    }
+
+    if (!['pnpm', 'npm'].includes(project.packageManager || '')) {
+      throw new Error(`Unsupported package manager for local execution: ${project.packageManager ?? 'unknown'}`);
+    }
+
+    installDeps(project, repoDir);
+    fixWindowsScripts(project, repoDir);
+
+    const replacementSteps = new Set(project.replacementSteps || []);
+    const runBuilds = ['full_stack', 'build_only'].includes(project.replacementRecipe);
+    const runTypeChecksForProject = replacementSteps.has('verter-tsc');
+    const replaceTypeScript = replacementSteps.has('typescript-plugin') || replacementSteps.has('verter-tsc');
+
+    if (!opts.skipBaseline && runBuilds && project.buildCmd) {
+      results.baseline.build = runBuild(project, repoDir, 'baseline');
+      fs.writeFileSync(
+        path.join(artifactDir, 'baseline-build.log'),
+        results.baseline.build.stdout + '\n' + results.baseline.build.stderr,
+      );
+
+      results.baseline.test = runTest(project, repoDir, 'baseline');
+      if (results.baseline.test && !results.baseline.test.skipped) {
+        fs.writeFileSync(
+          path.join(artifactDir, 'baseline-test.log'),
+          results.baseline.test.stdout + '\n' + results.baseline.test.stderr,
+        );
+      }
+    }
+
+    if (runTypeChecksForProject) {
+      results.typeCheck = runTypeChecks(project, repoDir);
+    }
+
+    if (project.surfaces?.editor) {
+      results.replacement.editorModified = replaceEditorTooling(project, repoDir);
+    }
+    if (replaceTypeScript) {
+      results.replacement.typeScriptModified = replaceTypeScriptTooling(project, repoDir);
+    }
+
+    if (runBuilds) {
+      const buildProject = { ...project, bundler: project.surfaces?.buildBundler ?? project.bundler };
+      installVerterTarballs(
+        buildProject,
+        repoDir,
+      );
+      const modified =
+        buildProject.bundler === 'nuxt'
+          ? replaceNuxtPlugin(buildProject, repoDir)
+          : replaceVuePlugin(buildProject, repoDir);
+      patchTsdownConfigs(buildProject, repoDir);
+      results.replacement.modified = modified;
+      results.replacement.verified = verifyReplacement(buildProject, repoDir);
+      if (!results.replacement.verified) {
+        throw new Error('Plugin replacement verification failed');
+      }
+    } else {
+      results.replacement.verified = true;
+    }
+
+    if (runBuilds && project.buildCmd) {
+      results.verter.build = runBuild(project, repoDir, 'verter');
+      fs.writeFileSync(
+        path.join(artifactDir, 'verter-build.log'),
+        results.verter.build.stdout + '\n' + results.verter.build.stderr,
+      );
+
+      results.verter.test = runTest(project, repoDir, 'verter');
+      if (results.verter.test && !results.verter.test.skipped) {
+        fs.writeFileSync(
+          path.join(artifactDir, 'verter-test.log'),
+          results.verter.test.stdout + '\n' + results.verter.test.stderr,
+        );
+      }
+    }
+
+    const { diff, queue } = writeTypeCheckArtifacts(project, repoDir, artifactDir, results.typeCheck);
+    results.typeCheckCrash = Boolean(diff?.summary?.tool_crash);
+    writeJson(path.join(artifactDir, 'replacement.json'), results.replacement);
+    writeProjectSummary(project, artifactDir, results, diff, queue);
+  } catch (/** @type {any} */ err) {
+    results.error = err.message;
+    writeJson(path.join(artifactDir, 'error.json'), { error: err.message });
+    writeProjectSummary(project, artifactDir, results, null, null);
+    log(project.name, `ERROR: ${err.message}`);
+  }
+
+  return results;
+}
+
 // ── Process One Project ──────────────────────────────────────────────────────
 
 async function processProject(project, opts) {
   const results = {
     name: project.name,
+    recipe: 'full_stack',
+    executionTier: 'tier1',
     baseline: { build: null, test: null },
     verter: { build: null, test: null, e2e: null },
     replacement: { modified: [], verified: false },
     typeCheck: null,
+    typeCheckCrash: false,
+    artifactDir: path.join(LOGS_DIR, project.name),
     error: null,
   };
 
@@ -1126,6 +1525,8 @@ async function processProject(project, opts) {
     const repoDir = opts.noClone
       ? path.join(REPOS_DIR, project.name)
       : cloneProject(project);
+    const logDir = path.join(LOGS_DIR, project.name);
+    fs.mkdirSync(logDir, { recursive: true });
 
     if (!fs.existsSync(repoDir)) {
       throw new Error(`Project directory does not exist: ${repoDir}`);
@@ -1153,8 +1554,6 @@ async function processProject(project, opts) {
       results.baseline.test = runTest(project, repoDir, 'baseline');
 
       // Save baseline logs
-      const logDir = path.join(LOGS_DIR, project.name);
-      fs.mkdirSync(logDir, { recursive: true });
       if (results.baseline.build) {
         fs.writeFileSync(
           path.join(logDir, 'baseline-build.log'),
@@ -1182,8 +1581,12 @@ async function processProject(project, opts) {
     patchTsdownConfigs(project, repoDir);
     results.replacement.modified = modified;
     results.replacement.verified = verifyReplacement(project, repoDir);
+    const typeArtifacts = writeTypeCheckArtifacts(project, repoDir, logDir, results.typeCheck);
+    results.typeCheckCrash = Boolean(typeArtifacts.diff?.summary?.tool_crash);
 
     if (!results.replacement.verified) {
+      writeJson(path.join(logDir, 'replacement.json'), results.replacement);
+      writeProjectSummary({ ...project, executionTier: 'tier1', replacementRecipe: 'full_stack' }, logDir, results, typeArtifacts.diff, typeArtifacts.queue);
       results.error = 'Plugin replacement verification failed';
       return results;
     }
@@ -1228,8 +1631,6 @@ async function processProject(project, opts) {
     }
 
     // Save verter logs
-    const logDir = path.join(LOGS_DIR, project.name);
-    fs.mkdirSync(logDir, { recursive: true });
     if (results.verter.build) {
       fs.writeFileSync(
         path.join(logDir, 'verter-build.log'),
@@ -1248,6 +1649,10 @@ async function processProject(project, opts) {
         results.verter.e2e.stdout + '\n' + results.verter.e2e.stderr,
       );
     }
+
+    const { diff, queue } = typeArtifacts;
+    writeJson(path.join(logDir, 'replacement.json'), results.replacement);
+    writeProjectSummary({ ...project, executionTier: 'tier1', replacementRecipe: 'full_stack' }, logDir, results, diff, queue);
   } catch (/** @type {any} */ err) {
     results.error = err.message;
     log(project.name, `ERROR: ${err.message}`);
@@ -1316,6 +1721,7 @@ function printSummary(allResults) {
 
     const bBuild = r.baseline.build?.durationMs;
     const vBuild = r.verter.build?.durationMs;
+    const expectsBuild = r.recipe !== 'editor_only' && r.recipe !== 'typecheck_only';
 
     let delta = '-';
     if (bBuild != null && vBuild != null && bBuild > 0) {
@@ -1325,7 +1731,16 @@ function printSummary(allResults) {
     }
 
     let status = 'OK';
-    if (!r.verter.build?.ok) {
+    if (r.recipe === 'editor_only') {
+      status = 'EDITOR ONLY';
+      passed++;
+    } else if (r.typeCheckCrash) {
+      status = 'TSC CRASH';
+      failed++;
+    } else if (!expectsBuild) {
+      status = 'TYPECHECK';
+      passed++;
+    } else if (!r.verter.build?.ok) {
       status = 'BUILD FAIL';
       failed++;
     } else if (r.verter.test && !r.verter.test.skipped && !r.verter.test.ok) {
@@ -1366,7 +1781,19 @@ function printSummary(allResults) {
   console.log('-'.repeat(100));
   console.log(`${passed} passed / ${warnings} warnings / ${failed} failed`);
   console.log('');
-  console.log(`Logs: ${LOGS_DIR}`);
+  const artifactRoots = [...new Set(
+    allResults
+      .map((result) => result.artifactDir ? path.dirname(result.artifactDir) : null)
+      .filter(Boolean),
+  )];
+  if (artifactRoots.length > 0) {
+    console.log('Artifacts:');
+    for (const artifactRoot of artifactRoots) {
+      console.log(`  ${artifactRoot}`);
+    }
+  } else {
+    console.log(`Logs: ${LOGS_DIR}`);
+  }
 
   // ── Type-Check Timing ──
   const tcResults = allResults.filter((r) => r.typeCheck != null);
@@ -1442,78 +1869,175 @@ function printSummary(allResults) {
   return failed > 0 ? 1 : 0;
 }
 
+function writeDiscoveryArtifacts(runContext, inventory) {
+  writeJson(path.join(runContext.runDir, 'discovery.json'), inventory);
+  fs.writeFileSync(path.join(runContext.runDir, 'discovery.md'), renderDiscoveryMarkdown(inventory));
+}
+
+function matchesSelection(project, selectedNames) {
+  if (selectedNames.length === 0) return true;
+  return selectedNames.includes(project.name)
+    || selectedNames.includes(project.id)
+    || selectedNames.includes(project.relativeRoot);
+}
+
+function sortLocalProjects(projectsToRun) {
+  const recipeOrder = ['full_stack', 'typecheck_only', 'build_only', 'editor_only', 'manual_review'];
+  return [...projectsToRun].sort((a, b) => {
+    const recipeDelta = recipeOrder.indexOf(a.replacementRecipe) - recipeOrder.indexOf(b.replacementRecipe);
+    if (recipeDelta !== 0) return recipeDelta;
+    return a.repoRoot.localeCompare(b.repoRoot);
+  });
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
   const opts = parseArgs();
-
-  // Filter projects if names are specified
-  let selected = projects;
-  if (opts.projectNames.length > 0) {
-    selected = projects.filter((p) => opts.projectNames.includes(p.name));
-    const unknown = opts.projectNames.filter((n) => !projects.find((p) => p.name === n));
-    if (unknown.length > 0) {
-      console.error(`Unknown project(s): ${unknown.join(', ')}`);
-      console.error(`Available: ${projects.map((p) => p.name).join(', ')}`);
-      process.exit(1);
-    }
-  }
-
-  console.log(`Running integration tests for ${selected.length} project(s):`);
-  console.log(`  ${selected.map((p) => p.name).join(', ')}`);
-  console.log('');
-
-  // Set up directories
-  fs.mkdirSync(REPOS_DIR, { recursive: true });
-  fs.mkdirSync(TARBALLS_DIR, { recursive: true });
-  fs.mkdirSync(LOGS_DIR, { recursive: true });
-
-  // Create workspace boundary to isolate from the Verter monorepo
-  const workspaceFile = path.join(INTEGRATION_DIR, 'pnpm-workspace.yaml');
-  if (!fs.existsSync(workspaceFile)) {
-    fs.writeFileSync(workspaceFile, 'packages: []\n');
-  }
-
-  // Build Verter
-  if (!opts.skipBuild) {
-    buildVerter({ fast: opts.fast });
-  } else {
-    const tarballs = fs.existsSync(TARBALLS_DIR)
-      ? fs.readdirSync(TARBALLS_DIR).filter((f) => f.endsWith('.tgz'))
-      : [];
-    if (tarballs.length < 2) {
-      console.error('No tarballs found. Run without --skip-build first.');
-      process.exit(1);
-    }
-    log('verter', `Reusing existing tarballs: ${tarballs.join(', ')}`);
-  }
-
-  // Run projects
+  const shouldDiscoverLocal = opts.discoverLocal || opts.discoverOnly || opts.localOnly;
+  const shouldRunLocal = shouldDiscoverLocal && !opts.discoverOnly;
+  const shouldRunMatrix = !opts.localOnly && !opts.discoverOnly;
   const allResults = [];
 
-  if (opts.concurrency <= 1) {
-    // Sequential
-    for (const project of selected) {
-      console.log(`\n${'─'.repeat(80)}`);
-      log(project.name, `Starting (${project.packageManager}, ${project.bundler})`);
-      const result = await processProject(project, opts);
-      allResults.push(result);
+  let inventory = null;
+  let runContext = null;
+  let localSelected = [];
+  let manualReviewSelected = [];
+
+  if (shouldDiscoverLocal) {
+    runContext = createLocalRunContext(opts);
+    inventory = buildDiscoveryInventory({
+      roots: opts.roots,
+      repoFilter: opts.repoFilter,
+      matrixProjects: projects,
+    });
+    writeDiscoveryArtifacts(runContext, inventory);
+
+    const localMatches = inventory.localProjects
+      .filter((project) => matchesSelection(project, opts.projectNames));
+    manualReviewSelected = localMatches.filter((project) => project.replacementRecipe === 'manual_review');
+    localSelected = sortLocalProjects(
+      localMatches.filter((project) => project.executionTier === 'tier2' && project.replacementRecipe !== 'manual_review'),
+    );
+
+    console.log(`Local discovery written to ${runContext.runDir}`);
+    console.log(`  Local repos discovered: ${inventory.localProjects.length}`);
+    console.log(`  Tier 2 repos selected for execution: ${localSelected.length}`);
+    if (manualReviewSelected.length > 0) {
+      console.log(`  Manual review required: ${manualReviewSelected.map((project) => project.relativeRoot).join(', ')}`);
     }
-  } else {
-    // Parallel batches
-    for (let i = 0; i < selected.length; i += opts.concurrency) {
-      const batch = selected.slice(i, i + opts.concurrency);
-      const batchResults = await Promise.all(
-        batch.map((project) => {
-          log(project.name, `Starting (${project.packageManager}, ${project.bundler})`);
-          return processProject(project, opts);
-        }),
-      );
-      allResults.push(...batchResults);
+    console.log('');
+  }
+
+  const selected = projects.filter((project) => matchesSelection(project, opts.projectNames));
+  const unknown = opts.projectNames.filter((name) => {
+    const inMatrix = projects.some((project) => project.name === name);
+    const inLocal = inventory?.localProjects.some((project) => matchesSelection(project, [name])) ?? false;
+    return !inMatrix && !inLocal;
+  });
+  if (unknown.length > 0) {
+    console.error(`Unknown project(s): ${unknown.join(', ')}`);
+    process.exit(1);
+  }
+
+  if (shouldRunMatrix) {
+    console.log(`Running integration tests for ${selected.length} matrix project(s):`);
+    console.log(`  ${selected.map((p) => p.name).join(', ') || '(none)'}`);
+    console.log('');
+  }
+
+  if (shouldRunMatrix || shouldRunLocal) {
+    fs.mkdirSync(REPOS_DIR, { recursive: true });
+    fs.mkdirSync(TARBALLS_DIR, { recursive: true });
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+
+    const workspaceFile = path.join(INTEGRATION_DIR, 'pnpm-workspace.yaml');
+    if (!fs.existsSync(workspaceFile)) {
+      fs.writeFileSync(workspaceFile, 'packages: []\n');
+    }
+
+    if (!opts.skipBuild) {
+      buildVerter({ fast: opts.fast });
+    } else {
+      const needsTarballs = (shouldRunMatrix && selected.length > 0)
+        || localSelected.some((project) => ['full_stack', 'build_only'].includes(project.replacementRecipe));
+      const needsTypecheckBinary = localSelected.some((project) => ['full_stack', 'typecheck_only'].includes(project.replacementRecipe))
+        || (shouldRunMatrix && selected.length > 0);
+      const tarballs = fs.existsSync(TARBALLS_DIR)
+        ? fs.readdirSync(TARBALLS_DIR).filter((f) => f.endsWith('.tgz'))
+        : [];
+      if (needsTarballs && tarballs.length < 2) {
+        console.error('No tarballs found. Run without --skip-build first.');
+        process.exit(1);
+      }
+      if (needsTypecheckBinary && !VERTER_TSC.bin) {
+        console.error('No verter-tsc binary found. Run without --skip-build first.');
+        process.exit(1);
+      }
+      if (needsTarballs || needsTypecheckBinary) {
+        log('verter', `Reusing existing tarballs: ${tarballs.join(', ')}`);
+      } else {
+        log('verter', 'Skipping Verter build: no selected repo needs tarballs or verter-tsc');
+      }
     }
   }
 
-  // Summary
+  if (shouldRunMatrix) {
+    if (opts.concurrency <= 1) {
+      for (const project of selected) {
+        console.log(`\n${'─'.repeat(80)}`);
+        log(project.name, `Starting (${project.packageManager}, ${project.bundler})`);
+        const result = await processProject(project, opts);
+        allResults.push(result);
+      }
+    } else {
+      for (let i = 0; i < selected.length; i += opts.concurrency) {
+        const batch = selected.slice(i, i + opts.concurrency);
+        const batchResults = await Promise.all(
+          batch.map((project) => {
+            log(project.name, `Starting (${project.packageManager}, ${project.bundler})`);
+            return processProject(project, opts);
+          }),
+        );
+        allResults.push(...batchResults);
+      }
+    }
+  }
+
+  if (shouldRunLocal) {
+    console.log(`Running Tier 2 local projects for ${localSelected.length} repo(s):`);
+    console.log(`  ${localSelected.map((project) => project.relativeRoot).join(', ') || '(none)'}`);
+    console.log('');
+
+    if (opts.concurrency <= 1) {
+      for (const project of localSelected) {
+        console.log(`\n${'─'.repeat(80)}`);
+        log(project.name, `Starting local (${project.packageManager ?? 'unknown'}, ${project.surfaces?.buildBundler ?? 'n/a'})`);
+        const result = await processLocalProject(project, opts, runContext);
+        allResults.push(result);
+      }
+    } else {
+      for (let i = 0; i < localSelected.length; i += opts.concurrency) {
+        const batch = localSelected.slice(i, i + opts.concurrency);
+        const batchResults = await Promise.all(
+          batch.map((project) => {
+            log(project.name, `Starting local (${project.packageManager ?? 'unknown'}, ${project.surfaces?.buildBundler ?? 'n/a'})`);
+            return processLocalProject(project, opts, runContext);
+          }),
+        );
+        allResults.push(...batchResults);
+      }
+    }
+  }
+
+  if (opts.discoverOnly && !shouldRunMatrix) {
+    process.exit(0);
+  }
+
+  if (allResults.length === 0) {
+    process.exit(0);
+  }
+
   const exitCode = printSummary(allResults);
   process.exit(exitCode);
 }

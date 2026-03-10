@@ -35,7 +35,24 @@ pnpm integration-test coreui balancer-frontend-v2 slidev
 
 # All projects
 pnpm integration-test
+
+# Inventory local repos under D:\dev and stop
+pnpm integration-test:discover
+
+# Discover local repos and execute non-manual Tier 2 entries in sandboxes
+pnpm integration-test:local
 ```
+
+### Local inventory rules
+
+- Discovery is repo-root based. Nested packages are treated as surfaces inside the git root unless they force `manual_review`.
+- Only deterministic root commands are auto-executed:
+  - build: `scripts.build`
+  - test: `scripts.test` or `scripts["test:unit"]`
+  - typecheck: `tsconfig.json`, then `tsconfig.web.json`, `tsconfig.app.json`, `tsconfig.src.json`
+- Local runs copy the repo to `D:\dev\temp\verter-toolchain-runs\<run-id>\sandboxes\<repo>\` before modifying anything.
+- Reports live beside the sandboxes under `reports/<repo>/` and include `project.json`, `replacement.json`, `summary.md`, and `typecheck/review-queue.json`.
+- Repos classified as `manual_review` must not be auto-executed unless the runner logic is intentionally extended.
 
 ### CI
 
@@ -74,6 +91,14 @@ If "No files contain @verter/unplugin after replacement":
 1. The project may use a non-standard import style
 2. Check how the project imports its Vue plugin (grep for `@vitejs/plugin-vue` or `rollup-plugin-vue`)
 3. The replacement patterns may need to be extended in both `run.mjs` (Node.js `String.replace`) and `integration-test.yml` (bash `sed`)
+
+### Type-check review queue
+
+`vue-tsc` is the baseline. Extra `verter-tsc` diagnostics are persisted, not auto-dismissed:
+- `diagnostics.normalized.json` stores parsed raw output for cold/warm runs
+- `diagnostics.diff.json` groups shared, Vue-only, and Verter-only diagnostics
+- `review-queue.json` stores Verter-only items with statuses like `pending`, `likely_legit`, `verter_bug`, and `env_issue`
+- `tool_crash` entries are failures, not cosmetic diffs
 
 ## Adding a New Project
 

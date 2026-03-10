@@ -1,13 +1,16 @@
 # Integration Tests
 
-Validates Verter's compiler output by building and testing real-world Vue projects with `@verter/unplugin` replacing `@vitejs/plugin-vue` (or `rollup-plugin-vue`).
+Validates Verter against the full Vue toolchain. Tier 1 runs the curated integration matrix, and Tier 2 inventories local Vue repos under `D:\dev` to decide whether Verter should replace editor tooling, `vue-tsc`, the TS plugin, the build plugin, or the Nuxt module.
 
 > [!WARNING]
 > This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
 
 ## Overview
 
-The integration test suite clones open-source Vue projects, builds them once with the stock Vue plugin (baseline), swaps in `@verter/unplugin`, rebuilds and retests, then compares the results. Test pass/fail counts are the primary quality signal for Verter's compiler.
+The integration test suite has two layers:
+
+- **Tier 1**: curated open-source projects cloned into `.integration-tests/repos/`, built once with stock Vue tooling, then re-run with Verter.
+- **Tier 2**: local git repos discovered under configurable roots, classified by recipe, then executed in disposable sandboxes under `D:\dev\temp\verter-toolchain-runs/<run-id>/`.
 
 There are two entry points that share the same project list:
 
@@ -32,6 +35,15 @@ pnpm integration-test --skip-baseline coreui
 
 # Reuse existing tarballs and checkouts
 pnpm integration-test --skip-build --no-clone coreui
+
+# Inventory local repos only
+pnpm integration-test:discover
+
+# Discover + execute Tier 2 local repos in disposable sandboxes
+pnpm integration-test:local
+
+# Limit local discovery to specific roots / repos
+node scripts/integration-test/run.mjs --discover-local --discover-only --roots D:\dev\personal --repo-filter "vue|nuxt"
 ```
 
 ## CLI Options
@@ -41,8 +53,16 @@ node scripts/integration-test/run.mjs [options] [project-names...]
 
 Options:
   --skip-baseline   Skip baseline build/test (faster iteration)
+  --fast            Use the debug native build for faster local iteration
   --skip-build      Skip building Verter (reuse existing tarballs)
   --no-clone        Skip git clone (reuse existing checkouts)
+  --discover-local  Inventory local Vue repos under the configured roots
+  --discover-only   Write discovery artifacts and exit
+  --local-only      Execute local discovered repos without running the matrix
+  --roots <paths>   Semicolon/comma-separated discovery roots (default: D:\dev)
+  --out <path>      Output directory for local discovery/execution artifacts
+  --repo-filter <r> Regex filter applied to discovered repo paths
+  --run-id <id>     Override the local run id used in the output path
   --concurrency <n> Run N projects in parallel (default: 1)
   --help            Show help and available projects
 ```
@@ -64,6 +84,38 @@ For each project:
 10. Compare results
 ```
 
+For local discovery runs:
+
+```
+1. Recursively scan git repos under the configured roots
+2. Detect Vue toolchain surfaces at repo scope
+3. Pick deterministic root commands only:
+   - build: scripts.build
+   - test: scripts.test or scripts["test:unit"]
+   - typecheck: tsconfig.json → tsconfig.web.json → tsconfig.app.json → tsconfig.src.json
+4. Classify each repo into one recipe:
+   - full_stack
+   - typecheck_only
+   - editor_only
+   - build_only
+   - manual_review
+5. Write discovery.json + discovery.md
+6. Execute non-manual repos in sandboxes under D:\dev\temp\verter-toolchain-runs\<run-id>\
+7. Persist baseline logs, Verter logs, normalized diagnostics, diffs, review queue, and summary.md
+```
+
+## Local Discovery Recipes
+
+| Recipe | Meaning |
+|--------|---------|
+| `full_stack` | Replace editor recommendations/settings, TS plugin, `vue-tsc`, and build/Nuxt wiring |
+| `typecheck_only` | Replace `vue-tsc` and TS plugin only |
+| `editor_only` | Replace Vue Official / Volar workspace settings only |
+| `build_only` | Replace Vite/Rollup/Nuxt compiler wiring only |
+| `manual_review` | Vue-related repo found, but the root build/typecheck surface is ambiguous or non-deterministic |
+
+`manual_review` is intentional. The runner will not guess through mixed-bundler monorepos or toolchain workspaces.
+
 ### Plugin Replacement
 
 The script finds all `.ts`, `.js`, `.mjs` files (excluding `node_modules`) that import `@vitejs/plugin-vue` or `rollup-plugin-vue`, then applies these replacements:
@@ -77,6 +129,27 @@ The script finds all `.ts`, `.js`, `.mjs` files (excluding `node_modules`) that 
 ### Workspace Isolation
 
 Cloned projects go into `.integration-tests/repos/` (gitignored). A `pnpm-workspace.yaml` with `packages: []` is placed in `.integration-tests/` to prevent pnpm from linking cloned projects into the Verter monorepo.
+
+Tier 2 local execution never mutates the source repo. Each run copies the repo into a sandbox, runs installs and replacements there, and writes artifacts to a sibling `reports/` directory.
+
+## Local Artifacts
+
+Each local run writes to `D:\dev\temp\verter-toolchain-runs\<run-id>\` by default:
+
+| Path | Purpose |
+|------|---------|
+| `discovery.json` | Machine-readable inventory of Tier 1 + Tier 2 repos |
+| `discovery.md` | Human-readable recipe summary grouped by repo classification |
+| `sandboxes/<repo>/` | Disposable copy of the source repo used for execution |
+| `reports/<repo>/project.json` | Captured manifest entry for that repo |
+| `reports/<repo>/baseline-*.log` | Baseline build/test logs when applicable |
+| `reports/<repo>/verter-*.log` | Verter build/test logs when applicable |
+| `reports/<repo>/typecheck/diagnostics.normalized.json` | Parsed `vue-tsc` / `verter-tsc` diagnostics |
+| `reports/<repo>/typecheck/diagnostics.diff.json` | Shared / Vue-only / Verter-only diagnostic diff |
+| `reports/<repo>/typecheck/review-queue.json` | Persisted triage queue for Verter-only diagnostics |
+| `reports/<repo>/summary.md` | Per-repo execution summary |
+
+Verter-only `.vue` diagnostics are queued for later review instead of failing immediately unless the runner detects a tool crash.
 
 ## Adding a New Project
 
@@ -128,6 +201,8 @@ my-project             30.1s      ERROR                                         
 **Test count shows 0 but tests exist** — The test output parsing only matches `\d+ passed`/`\d+ failed` patterns (vitest/jest). Other test runners may need custom parsing.
 
 **Replacement not found** — The project may use a different import style (e.g., `require()`, dynamic import). Check the project's config file manually and update the replacement patterns if needed.
+
+**Repo landed in `manual_review`** — The root repo is Vue-related but the runner could not pick a single deterministic replacement path. Check `discovery.md` for the recorded reason.
 
 ## Project List
 
