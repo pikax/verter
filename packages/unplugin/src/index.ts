@@ -75,54 +75,57 @@ async function resolveUpsertDependencies(
   if (dependencySpecifiers.length > 0) {
     const fs = await import("fs");
     const path = await import("path");
-    const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
+    const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".d.ts", ".d.mts", ".d.cts"];
 
-    if (resolveId) {
-      for (const specifier of dependencySpecifiers) {
+    for (const specifier of dependencySpecifiers) {
+      // Try bundler resolve hook first (if available)
+      if (resolveId) {
         const resolvedId = resolvedIdFromHookResult(
           await resolveId(specifier, filename, { skipSelf: true }),
         );
-        if (!resolvedId) continue;
-        if (resolvedId.endsWith(".vue")) {
-          resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
-          continue;
-        }
-        try {
-          const depSource = fs.readFileSync(resolvedId);
-          host.upsert({
-            inputId: resolvedId,
-            source: depSource,
-            fileKind: "non_sfc",
-          });
-          resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
-        } catch {
-          continue;
-        }
-      }
-    } else {
-      for (const specifier of dependencySpecifiers) {
-        if (!specifier.startsWith(".")) continue;
-
-        const absBase = path.resolve(path.dirname(filename), specifier);
-        for (const ext of exts) {
-          const fullPath = absBase + ext;
-          if (fullPath.endsWith(".vue") && fs.existsSync(fullPath)) {
-            resolutions.push({ specifier, resolvedCanonicalId: fullPath });
-            break;
+        if (resolvedId) {
+          if (resolvedId.endsWith(".vue")) {
+            resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
+            continue;
           }
-          if (fullPath.endsWith(".vue")) continue;
           try {
-            const depSource = fs.readFileSync(fullPath);
+            const depSource = fs.readFileSync(resolvedId);
             host.upsert({
-              inputId: fullPath,
+              inputId: resolvedId,
               source: depSource,
               fileKind: "non_sfc",
             });
-            resolutions.push({ specifier, resolvedCanonicalId: fullPath });
-            break;
-          } catch {
+            resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
             continue;
+          } catch {
+            // Fall through to filesystem probing
           }
+        }
+        // resolveId returned null or read failed — fall through for relative specifiers
+      }
+
+      // Filesystem probing fallback for relative specifiers
+      if (!specifier.startsWith(".")) continue;
+
+      const absBase = path.resolve(path.dirname(filename), specifier);
+      for (const ext of exts) {
+        const fullPath = absBase + ext;
+        if (fullPath.endsWith(".vue") && fs.existsSync(fullPath)) {
+          resolutions.push({ specifier, resolvedCanonicalId: fullPath });
+          break;
+        }
+        if (fullPath.endsWith(".vue")) continue;
+        try {
+          const depSource = fs.readFileSync(fullPath);
+          host.upsert({
+            inputId: fullPath,
+            source: depSource,
+            fileKind: "non_sfc",
+          });
+          resolutions.push({ specifier, resolvedCanonicalId: fullPath });
+          break;
+        } catch {
+          continue;
         }
       }
     }

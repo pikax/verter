@@ -30,8 +30,14 @@ interface AnalysisImport {
   source: string;
 }
 
+interface AnalysisModuleReference {
+  syntax: string;       // "StaticImport" | "ExportFrom" | "DynamicImport" | "RequireCall"
+  literalSpecifier?: string;
+}
+
 interface FileAnalysisSnapshot {
   imports?: AnalysisImport[];
+  moduleReferences?: AnalysisModuleReference[];
   macroTypeDeps?: MacroTypeDep[];
 }
 
@@ -229,55 +235,36 @@ export async function hydrateMacroTypeDeps(
 
     if (!runtimeEntry) continue;
 
-    // Find the declaration entry from package.json
-    const dtsPath = await findPackageDeclarationEntry(runtimeEntry);
-    if (!dtsPath) {
-      // Fallback: if the runtime entry IS a .ts/.d.ts file, use it directly
-      if (runtimeEntry.endsWith(".ts") || runtimeEntry.endsWith(".d.ts")) {
-        const normalizedId = normalizePath(runtimeEntry);
-        if (!visited.has(normalizedId)) {
-          visited.add(normalizedId);
-          try {
-            const source = fs.readFileSync(runtimeEntry);
-            host.upsert({
-              inputId: normalizedId,
-              source,
-              fileKind: "non_sfc",
-            });
-            resolutions.push({
-              specifier,
-              resolvedCanonicalId: normalizedId,
-            });
-          } catch {
-            // Can't read the file
-          }
-        }
-      }
-      continue;
+    // Find the declaration entry from package.json, or fall back to the
+    // runtime entry itself if it's a .ts/.d.ts file (local project files).
+    let entryPath = await findPackageDeclarationEntry(runtimeEntry);
+    if (!entryPath && (runtimeEntry.endsWith(".ts") || runtimeEntry.endsWith(".d.ts"))) {
+      entryPath = runtimeEntry;
     }
+    if (!entryPath) continue;
 
-    // Upsert the declaration file
-    const normalizedDtsPath = normalizePath(dtsPath);
-    if (visited.has(normalizedDtsPath)) continue;
-    visited.add(normalizedDtsPath);
+    // Upsert the entry file
+    const normalizedEntryPath = normalizePath(entryPath);
+    if (visited.has(normalizedEntryPath)) continue;
+    visited.add(normalizedEntryPath);
 
     try {
-      const source = fs.readFileSync(dtsPath);
+      const source = fs.readFileSync(entryPath);
       host.upsert({
-        inputId: normalizedDtsPath,
+        inputId: normalizedEntryPath,
         source,
         fileKind: "non_sfc",
       });
       resolutions.push({
         specifier,
-        resolvedCanonicalId: normalizedDtsPath,
+        resolvedCanonicalId: normalizedEntryPath,
       });
     } catch {
       continue;
     }
 
-    // Recursively traverse relative imports inside the hydrated .d.ts
-    const queue = [normalizedDtsPath];
+    // Recursively traverse relative imports inside the hydrated file
+    const queue = [normalizedEntryPath];
     while (queue.length > 0) {
       const currentFile = queue.shift()!;
 
@@ -293,10 +280,17 @@ export async function hydrateMacroTypeDeps(
 
       const depResolutions: HostDependencyResolution[] = [];
 
-      for (const imp of depAnalysis.imports ?? []) {
-        if (!isRelativeImport(imp.source)) continue;
+      // Collect sources from imports and export-from re-exports (export * from, export {} from)
+      const importSources = (depAnalysis.imports ?? []).map(imp => imp.source);
+      const reexportSources = (depAnalysis.moduleReferences ?? [])
+        .filter(ref => ref.syntax === "ExportFrom" && ref.literalSpecifier)
+        .map(ref => ref.literalSpecifier!);
+      const allSources = [...new Set([...importSources, ...reexportSources])];
 
-        const absBase = path.resolve(path.dirname(currentFile), imp.source);
+      for (const source of allSources) {
+        if (!isRelativeImport(source)) continue;
+
+        const absBase = path.resolve(path.dirname(currentFile), source);
         // Try common declaration file extensions
         const candidates = [
           absBase + ".d.ts",
@@ -310,12 +304,32 @@ export async function hydrateMacroTypeDeps(
           const normalized = normalizePath(candidate);
           if (visited.has(normalized)) {
             depResolutions.push({
-              specifier: imp.source,
+              specifier: source,
               resolvedCanonicalId: normalized,
             });
             break;
           }
           if (!fs.existsSync(candidate)) continue;
+
+          // .vue files at the end of a barrel chain need their types available
+          // for cross-file resolution. Upsert as SFC (not non_sfc) so script
+          // analysis extracts exported types. The SFC's own transform will
+          // re-upsert with the full source later, which is a no-op if unchanged.
+          // Do NOT traverse further (SFC internal imports are handled separately).
+          if (normalized.endsWith(".vue")) {
+            visited.add(normalized);
+            try {
+              const vueSrc = fs.readFileSync(candidate);
+              host.upsert({ inputId: normalized, source: vueSrc });
+            } catch {
+              // If read fails, just record the resolution without upserting
+            }
+            depResolutions.push({
+              specifier: source,
+              resolvedCanonicalId: normalized,
+            });
+            break;
+          }
 
           visited.add(normalized);
           try {
@@ -326,7 +340,7 @@ export async function hydrateMacroTypeDeps(
               fileKind: "non_sfc",
             });
             depResolutions.push({
-              specifier: imp.source,
+              specifier: source,
               resolvedCanonicalId: normalized,
             });
             queue.push(normalized);

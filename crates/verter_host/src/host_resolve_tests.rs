@@ -753,6 +753,123 @@ fn relative_import_resolves_via_directory_index_file() {
     );
 }
 
+/// Relative import `./type` resolves to `./type.d.ts` via Phase 3 probing.
+#[test]
+fn relative_import_resolves_dts_extension() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Props, Emits } from './type'\nconst props = defineProps<Props>()\ndefineEmits<Emits>()\n</script>\n<template><div>{{ props.order }}</div></template>";
+    upsert_vue(&host, "/src/components/Comp.vue", source);
+    // The dependency is a .d.ts file (common in projects that separate type declarations)
+    upsert_non_sfc(
+        &host,
+        "/src/components/type.d.ts",
+        "export interface Props { order: string | null }\nexport interface Emits { updatePrice: [number]; updateStatus: [string]; }",
+    );
+    // No set_import_dependencies — Phase 3 probing should find /src/components/type.d.ts
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/components/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed via .d.ts extension probing");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        ".d.ts extension resolution should work: {:?}",
+        response.diagnostics
+    );
+    // Positive: prop names should be resolved
+    assert!(
+        response.code.contains("order"),
+        "should resolve 'order' prop from .d.ts"
+    );
+    // Negative: no missing dep errors
+    assert!(
+        !response.code.contains("HOST_MISSING"),
+        "output must not contain error markers"
+    );
+}
+
+/// Barrel file `export * from './Drawer'` chain resolves types through re-exports.
+#[test]
+fn barrel_export_star_resolves_type_through_reexport_chain() {
+    let host = strict_host();
+    // SFC imports from a barrel file
+    let source = "<script setup lang=\"ts\">\nimport type { DrawerEmits } from './base'\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>ok</div></template>";
+    upsert_vue(&host, "/src/components/Comp.vue", source);
+
+    // Barrel file: export * from './Drawer'
+    upsert_non_sfc(&host, "/src/components/base.ts", "export * from './Drawer'");
+
+    // Intermediate file: export { DrawerEmits } from './types'
+    upsert_non_sfc(
+        &host,
+        "/src/components/Drawer.ts",
+        "export type { DrawerEmits } from './drawer-types'",
+    );
+
+    // Final file: defines the actual type
+    upsert_non_sfc(
+        &host,
+        "/src/components/drawer-types.ts",
+        "export interface DrawerEmits { close: []; open: [value: boolean]; }",
+    );
+
+    // Set dependency chain
+    host.set_import_dependencies(
+        "/src/components/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./base".to_string(),
+            resolved_canonical_id: Some("/src/components/base.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/components/base.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./Drawer".to_string(),
+            resolved_canonical_id: Some("/src/components/Drawer.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/components/Drawer.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./drawer-types".to_string(),
+            resolved_canonical_id: Some("/src/components/drawer-types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/components/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed via barrel file re-export chain");
+
+    // Positive: emits should be resolved
+    assert!(
+        !response.diagnostics.has_errors,
+        "barrel file re-export chain should resolve: {:?}",
+        response.diagnostics
+    );
+    // Negative: no error markers
+    assert!(
+        !response.code.contains("HOST_MISSING"),
+        "output must not contain error markers"
+    );
+    assert!(
+        !response.code.contains("XInvalidMacroType"),
+        "output must not contain invalid macro type errors"
+    );
+}
+
 /// Exact resolution to an unloaded file should NOT silently fall back to heuristics.
 #[test]
 fn exact_resolution_to_unloaded_file_reports_error() {
@@ -895,5 +1012,366 @@ fn exact_resolution_invalidates_on_dep_change() {
     assert!(
         entry.compile_slots.is_empty(),
         "compile slots should be cleared after dep change"
+    );
+}
+
+/// Barrel chain ending at a `.vue` SFC resolves the exported type.
+/// Chain: Consumer.vue → base.ts (export *) → Drawer.ts (export type) → drawer.vue (defines type)
+#[test]
+fn barrel_chain_ending_at_vue_sfc_resolves_type() {
+    let host = strict_host();
+
+    // Consumer SFC imports DrawerEmits through a barrel chain
+    let consumer_source = r#"<script setup lang="ts">
+import type { DrawerEmits } from './base'
+defineEmits<DrawerEmits>()
+</script>
+<template><div>ok</div></template>"#;
+    upsert_vue(&host, "/src/Consumer.vue", consumer_source);
+
+    // Barrel file: re-exports everything from Drawer
+    upsert_non_sfc(&host, "/src/base.ts", "export * from './Drawer'");
+
+    // Intermediate: re-exports the type from the .vue SFC
+    upsert_non_sfc(
+        &host,
+        "/src/Drawer.ts",
+        "export type { DrawerEmits } from './drawer.vue'",
+    );
+
+    // The .vue SFC that defines the actual type
+    upsert_vue(
+        &host,
+        "/src/drawer.vue",
+        r#"<script setup lang="ts">
+export interface DrawerEmits { close: []; open: [value: boolean]; }
+</script>
+<template><div>drawer</div></template>"#,
+    );
+
+    // Wire up dependency chain
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./base".to_string(),
+            resolved_canonical_id: Some("/src/base.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/base.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./Drawer".to_string(),
+            resolved_canonical_id: Some("/src/Drawer.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/Drawer.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./drawer.vue".to_string(),
+            resolved_canonical_id: Some("/src/drawer.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Consumer.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed via barrel chain ending at .vue SFC");
+
+    // Positive: emits should be resolved
+    assert!(
+        !response.diagnostics.has_errors,
+        "barrel chain ending at .vue should resolve types: {:?}",
+        response.diagnostics
+    );
+    // Negative: no error markers
+    assert!(
+        !response.code.contains("HOST_MISSING"),
+        "output must not contain HOST_MISSING error markers"
+    );
+    assert!(
+        !response.code.contains("XInvalidMacroType"),
+        "output must not contain XInvalidMacroType errors"
+    );
+}
+
+/// Same as barrel_chain_ending_at_vue_sfc_resolves_type but with a bare specifier
+/// (like `@/components/base`) instead of a relative import, and absolute paths.
+/// This mirrors the JS unplugin test more closely.
+#[test]
+fn barrel_chain_with_bare_specifier_resolves_type() {
+    let host = strict_host();
+
+    // Consumer SFC imports DrawerEmits through a bare specifier (path alias)
+    let consumer_source = r#"<script setup lang="ts">
+import type { DrawerEmits } from "@/components/base"
+defineEmits<DrawerEmits>()
+</script>
+<template><div>ok</div></template>"#;
+    upsert_vue(&host, "/project/src/Consumer.vue", consumer_source);
+
+    // Barrel file: re-exports everything from Drawer
+    upsert_non_sfc(
+        &host,
+        "/project/components/base/index.ts",
+        "export * from './Drawer'",
+    );
+
+    // Intermediate: re-exports the type from the .vue SFC
+    upsert_non_sfc(
+        &host,
+        "/project/components/base/Drawer/index.ts",
+        "export type { DrawerEmits } from './src/index.vue'",
+    );
+
+    // The .vue SFC that defines the actual type
+    upsert_vue(
+        &host,
+        "/project/components/base/Drawer/src/index.vue",
+        r#"<script setup lang="ts">
+export interface DrawerEmits { close: []; open: [value: boolean]; disposed: [] }
+defineEmits<DrawerEmits>()
+</script>
+<template><div>drawer</div></template>"#,
+    );
+
+    // Wire up dependency chain — bare specifier on consumer
+    host.set_import_dependencies(
+        "/project/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "@/components/base".to_string(),
+            resolved_canonical_id: Some("/project/components/base/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/project/components/base/index.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./Drawer".to_string(),
+            resolved_canonical_id: Some("/project/components/base/Drawer/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/project/components/base/Drawer/index.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./src/index.vue".to_string(),
+            resolved_canonical_id: Some(
+                "/project/components/base/Drawer/src/index.vue".to_string(),
+            ),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/project/src/Consumer.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed with bare specifier barrel chain ending at .vue SFC");
+
+    // Positive: emits should be resolved
+    assert!(
+        !response.diagnostics.has_errors,
+        "bare specifier barrel chain ending at .vue should resolve types: {:?}",
+        response.diagnostics
+    );
+    // Negative: no error markers
+    assert!(
+        !response.code.contains("HOST_MISSING"),
+        "output must not contain HOST_MISSING error markers"
+    );
+    assert!(
+        !response.code.contains("XInvalidMacroType"),
+        "output must not contain XInvalidMacroType errors"
+    );
+}
+
+/// Vue SFC with both <script> and <script setup> — types from companion block
+/// should be visible when resolving through a barrel chain.
+#[test]
+fn vue_sfc_companion_script_types_visible_for_setup_resolution() {
+    let host = strict_host();
+
+    // Consumer imports Props through a barrel chain ending at a .vue SFC
+    let consumer_source = r#"<script setup lang="ts">
+import type { Props } from './base'
+defineProps<Props>()
+</script>
+<template><div>consumer</div></template>"#;
+    upsert_vue(&host, "/src/Consumer.vue", consumer_source);
+
+    // Barrel file
+    upsert_non_sfc(&host, "/src/base.ts", "export * from './Widget'");
+
+    // Intermediate re-export
+    upsert_non_sfc(
+        &host,
+        "/src/Widget.ts",
+        "export type { Props } from './widget.vue'",
+    );
+
+    // The .vue SFC with a companion <script> defining a base interface,
+    // and <script setup> defining Props that extends it.
+    upsert_vue(
+        &host,
+        "/src/widget.vue",
+        r#"<script lang="ts">
+export interface Base { foo: string }
+</script>
+<script setup lang="ts">
+export interface Props extends Base { bar: number }
+</script>
+<template><div>widget</div></template>"#,
+    );
+
+    // Wire up dependency chain
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./base".to_string(),
+            resolved_canonical_id: Some("/src/base.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/base.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./Widget".to_string(),
+            resolved_canonical_id: Some("/src/Widget.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/Widget.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./widget.vue".to_string(),
+            resolved_canonical_id: Some("/src/widget.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Consumer.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed with companion script types");
+
+    // Positive: both props from Base and Props should be resolved
+    assert!(
+        !response.diagnostics.has_errors,
+        "companion script types should resolve: {:?}",
+        response.diagnostics
+    );
+    // The output should contain both prop names from the extends chain
+    let code = &response.code;
+    assert!(
+        code.contains("foo") && code.contains("bar"),
+        "both 'foo' (from Base) and 'bar' (from Props) should appear in output: {code}"
+    );
+    // Negative: no error markers
+    assert!(
+        !code.contains("HOST_MISSING"),
+        "output must not contain HOST_MISSING error markers"
+    );
+    assert!(
+        !code.contains("XInvalidMacroType"),
+        "output must not contain XInvalidMacroType errors"
+    );
+}
+
+/// Same barrel chain test but with default HostConfig (dev_mode=true,
+/// DevServeLastKnownGood) and Windows-style paths. This reproduces the
+/// conditions under the NAPI path that fails while strict_host tests pass.
+#[test]
+fn barrel_chain_vue_sfc_with_dev_mode_and_windows_paths() {
+    let host = VerterHost::new(HostConfig::default()); // dev_mode: true, DevServeLastKnownGood
+
+    let consumer_source = r#"<script setup lang="ts">
+import type { DrawerEmits } from "@/components/base"
+defineEmits<DrawerEmits>()
+</script>
+<template><div>ok</div></template>"#;
+    upsert_vue(&host, "c:/Users/test/temp/Consumer.vue", consumer_source);
+
+    upsert_non_sfc(
+        &host,
+        "c:/Users/test/temp/base/index.ts",
+        "export * from './Drawer'",
+    );
+
+    upsert_non_sfc(
+        &host,
+        "c:/Users/test/temp/base/Drawer/index.ts",
+        "export type { DrawerEmits } from './src/index.vue'",
+    );
+
+    upsert_vue(
+        &host,
+        "c:/Users/test/temp/base/Drawer/src/index.vue",
+        r#"<script setup lang="ts">
+export interface DrawerEmits { close: []; open: [value: boolean]; disposed: [] }
+defineEmits<DrawerEmits>()
+</script>
+<template><div>drawer</div></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "c:/Users/test/temp/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "@/components/base".to_string(),
+            resolved_canonical_id: Some("c:/Users/test/temp/base/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "c:/Users/test/temp/base/index.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./Drawer".to_string(),
+            resolved_canonical_id: Some("c:/Users/test/temp/base/Drawer/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "c:/Users/test/temp/base/Drawer/index.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./src/index.vue".to_string(),
+            resolved_canonical_id: Some("c:/Users/test/temp/base/Drawer/src/index.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("c:/Users/test/temp/Consumer.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed with dev_mode and Windows paths");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "dev_mode barrel chain should resolve types: {:?}",
+        response.diagnostics
+    );
+    assert!(
+        !response.code.contains("HOST_MISSING"),
+        "output must not contain HOST_MISSING error markers"
+    );
+    assert!(
+        !response.code.contains("XInvalidMacroType"),
+        "output must not contain XInvalidMacroType errors"
     );
 }

@@ -115,7 +115,6 @@ impl VerterHost {
         else {
             return if required_root_dep { Err(()) } else { Ok(None) };
         };
-
         let cache_key = (dep_canonical.clone(), type_name.to_string());
         if let Some(cached) = cache.get(&cache_key) {
             return Ok(cached.clone());
@@ -124,22 +123,33 @@ impl VerterHost {
             return Ok(None);
         }
 
-        let Some(dep_source) = files
-            .get(&dep_canonical)
-            .map(|entry| Arc::clone(&entry.source))
-        else {
+        let Some(dep_entry) = files.get(&dep_canonical) else {
             visiting.remove(&cache_key);
             return if required_root_dep { Err(()) } else { Ok(None) };
         };
 
+        // For Vue SFC files, extract only <script>/<script setup> content.
+        // The full SFC source contains <template>/<style> that OXC can't parse.
+        let effective_source: String = if dep_entry.file_kind == FileKind::VueSfc {
+            match extract_vue_script_content(dep_entry) {
+                Some(s) => s,
+                None => {
+                    visiting.remove(&cache_key);
+                    cache.insert(cache_key, None);
+                    return Ok(None);
+                }
+            }
+        } else {
+            dep_entry.source.to_string()
+        };
+
         let import_alloc = oxc_allocator::Allocator::new();
-        let imported_bindings =
-            verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
-                dep_source.as_ref(),
-                &import_alloc,
-            );
+        let extracted = verter_core::utils::oxc::vue::resolve_type::extract_imported_type_bindings(
+            &effective_source,
+            &import_alloc,
+        );
         let mut companion_types = rustc_hash::FxHashMap::default();
-        for binding in imported_bindings {
+        for binding in &extracted.bindings {
             if let Some(resolved) = self.resolve_external_type_from_loaded_files(
                 files,
                 &dep_canonical,
@@ -150,19 +160,38 @@ impl VerterHost {
                 false,
             )? {
                 companion_types
-                    .entry(binding.local_name)
+                    .entry(binding.local_name.clone())
                     .or_insert(resolved);
             }
         }
 
         let resolve_alloc = oxc_allocator::Allocator::new();
-        let resolved =
+        let mut resolved =
             verter_core::utils::oxc::vue::resolve_type::resolve_external_type_with_companion(
                 type_name,
-                dep_source.as_ref(),
+                &effective_source,
                 &companion_types,
                 &resolve_alloc,
             );
+
+        // If the type wasn't found directly, try `export * from` wildcard re-export sources.
+        // This handles barrel files like `export * from './Drawer'`.
+        if resolved.is_none() {
+            for source in &extracted.wildcard_reexport_sources {
+                if let Some(found) = self.resolve_external_type_from_loaded_files(
+                    files,
+                    &dep_canonical,
+                    source,
+                    type_name,
+                    cache,
+                    visiting,
+                    false,
+                )? {
+                    resolved = Some(found);
+                    break;
+                }
+            }
+        }
 
         visiting.remove(&cache_key);
         cache.insert(cache_key, resolved.clone());
@@ -1032,6 +1061,40 @@ impl VerterHost {
         });
 
         Ok((outputs, compile_diags, cached_tsx, template_analysis))
+    }
+}
+
+/// Extract concatenated script content from a Vue SFC FileEntry.
+/// Uses `cached_parse` (populated during upsert) to locate `<script>` and
+/// `<script setup>` content spans, then slices the original source.
+fn extract_vue_script_content(entry: &FileEntry) -> Option<String> {
+    let source = entry.source.as_ref();
+    let parsed = entry
+        .cached_parse
+        .as_deref()
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|| {
+            std::borrow::Cow::Owned(verter_core::compile::parse_sfc(source, None, None))
+        });
+
+    let mut combined = String::new();
+    // Concatenate both blocks (setup first, then companion).
+    // Order doesn't matter — type/interface collection is by name.
+    for script in [parsed.script_setup(), parsed.script()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(span) = script.content {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(&source[span.start as usize..span.end as usize]);
+        }
+    }
+    if combined.is_empty() {
+        None
+    } else {
+        Some(combined)
     }
 }
 

@@ -1638,38 +1638,70 @@ pub struct ImportedTypeBinding {
     pub source: String,
 }
 
+/// Result of extracting type bindings from a dependency file.
+/// Includes both named bindings (from `import` and `export {} from`) and
+/// wildcard re-export sources (from `export * from`).
+#[derive(Debug, Clone, Default)]
+pub struct ExtractedTypeBindings {
+    pub bindings: Vec<ImportedTypeBinding>,
+    pub wildcard_reexport_sources: Vec<String>,
+}
+
 pub fn extract_imported_type_bindings(
     dep_source: &str,
     allocator: &oxc_allocator::Allocator,
-) -> Vec<ImportedTypeBinding> {
+) -> ExtractedTypeBindings {
     let source_type = oxc_span::SourceType::ts();
     let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
 
     if parsed.panicked {
-        return Vec::new();
+        return ExtractedTypeBindings::default();
     }
 
-    let mut bindings = Vec::new();
+    let mut result = ExtractedTypeBindings::default();
     for stmt in &parsed.program.body {
-        let Statement::ImportDeclaration(import_decl) = stmt else {
-            continue;
-        };
-        let Some(specifiers) = &import_decl.specifiers else {
-            continue;
-        };
-        for specifier in specifiers {
-            let ImportDeclarationSpecifier::ImportSpecifier(import_spec) = specifier else {
-                continue;
-            };
-            bindings.push(ImportedTypeBinding {
-                local_name: import_spec.local.name.to_string(),
-                imported_name: import_spec.imported.name().to_string(),
-                source: import_decl.source.value.to_string(),
-            });
+        match stmt {
+            Statement::ImportDeclaration(import_decl) => {
+                let Some(specifiers) = &import_decl.specifiers else {
+                    continue;
+                };
+                for specifier in specifiers {
+                    let ImportDeclarationSpecifier::ImportSpecifier(import_spec) = specifier else {
+                        continue;
+                    };
+                    result.bindings.push(ImportedTypeBinding {
+                        local_name: import_spec.local.name.to_string(),
+                        imported_name: import_spec.imported.name().to_string(),
+                        source: import_decl.source.value.to_string(),
+                    });
+                }
+            }
+            Statement::ExportNamedDeclaration(export_decl) => {
+                // `export { X } from './Y'` — named re-export with source
+                let Some(source) = &export_decl.source else {
+                    continue;
+                };
+                for specifier in &export_decl.specifiers {
+                    let local_name = specifier.exported.name().to_string();
+                    let imported_name = specifier.local.name().to_string();
+                    result.bindings.push(ImportedTypeBinding {
+                        local_name,
+                        imported_name,
+                        source: source.value.to_string(),
+                    });
+                }
+            }
+            Statement::ExportAllDeclaration(export_all) => {
+                // `export * from './Drawer'` — wildcard re-export
+                result
+                    .wildcard_reexport_sources
+                    .push(export_all.source.value.to_string());
+            }
+            _ => {}
         }
     }
 
-    bindings
+    result
 }
 
 pub fn resolve_external_type_with_companion(
@@ -1725,6 +1757,14 @@ pub fn resolve_external_type_with_companion(
     // or non-exported `const X: { prop: Type } = ...` (for `typeof X`)
     if result.is_none() {
         result = resolve_value_declaration_type(type_name, &parsed.program, source_bytes, 0, &ctx);
+    }
+
+    // Try companion types directly — handles `export { X } from './y'` re-exports
+    // where X is not defined in this file but was resolved from the import source.
+    if result.is_none() {
+        if let Some(companion) = companion_types.get(type_name) {
+            result = Some(companion.clone());
+        }
     }
 
     // Populate key_name on all props since spans reference the external file,
@@ -2777,6 +2817,54 @@ interface B extends A { b: number }
         assert!(
             !resolved.props.is_empty(),
             "Should resolve at least some props without crashing"
+        );
+    }
+
+    #[test]
+    fn extract_bindings_handles_export_star_and_named_reexports() {
+        let allocator = Allocator::new();
+
+        // export * from './Drawer'
+        let source1 = "export * from './Drawer'";
+        let result1 = extract_imported_type_bindings(source1, &allocator);
+        assert!(result1.bindings.is_empty(), "no named bindings");
+        assert_eq!(
+            result1.wildcard_reexport_sources,
+            vec!["./Drawer"],
+            "should extract wildcard re-export source"
+        );
+
+        let allocator2 = Allocator::new();
+        // export { DrawerEmits } from './src/index.vue'
+        let source2 = "export type { DrawerEmits, DrawerProps } from './src/index.vue'";
+        let result2 = extract_imported_type_bindings(source2, &allocator2);
+        assert_eq!(
+            result2.bindings.len(),
+            2,
+            "should have 2 named re-export bindings"
+        );
+        assert_eq!(result2.bindings[0].local_name, "DrawerEmits");
+        assert_eq!(result2.bindings[0].imported_name, "DrawerEmits");
+        assert_eq!(result2.bindings[0].source, "./src/index.vue");
+        assert_eq!(result2.bindings[1].local_name, "DrawerProps");
+        assert!(
+            result2.wildcard_reexport_sources.is_empty(),
+            "no wildcard re-exports"
+        );
+
+        let allocator3 = Allocator::new();
+        // Mixed: import + export * + export {}
+        let source3 = "import { Base } from './base';\nexport * from './utils';\nexport { Foo } from './foo';";
+        let result3 = extract_imported_type_bindings(source3, &allocator3);
+        assert_eq!(result3.bindings.len(), 2, "Base import + Foo re-export");
+        assert_eq!(result3.bindings[0].local_name, "Base");
+        assert_eq!(result3.bindings[0].source, "./base");
+        assert_eq!(result3.bindings[1].local_name, "Foo");
+        assert_eq!(result3.bindings[1].source, "./foo");
+        assert_eq!(
+            result3.wildcard_reexport_sources,
+            vec!["./utils"],
+            "should have one wildcard"
         );
     }
 }

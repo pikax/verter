@@ -1054,6 +1054,41 @@ defineProps<MyProps>()
     expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
   });
 
+  it("relative .d.ts macro type deps are resolved when resolveId returns null", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // Create a .d.ts file (not .ts) — Vite's resolveId won't resolve these
+    writeFileSync(
+      join(tempDir, "type.d.ts"),
+      "export interface Props { order: string | null }\nexport interface Emits { updatePrice: [number]; updateStatus: [string]; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { Props, Emits } from "./type"
+defineProps<Props>()
+defineEmits<Emits>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    // Resolve hook returns null for ./type (Vite can't resolve .d.ts)
+    const resolveSpy = vi.fn(async () => null);
+
+    const result = await plugin.transform.call(
+      { resolve: resolveSpy },
+      sfc,
+      filename,
+    );
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: the host resolved the types and extracted prop/emit names
+    expect(code).toContain("order");
+    // Negative: no HOST_MISSING_MACRO_TYPE_DEP compile error
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
   it("recursive relative imports inside hydrated type files are upserted", async () => {
     const plugin = createPlugin();
     const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
@@ -1095,5 +1130,197 @@ defineProps<MyProps>()
     expect(code).toContain("id");
     // Negative: no missing type dep
     expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("barrel file export-star re-export chain resolves macro type deps", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // Create a package with barrel file structure internally:
+    //   my-ui-lib/index.d.ts  →  export * from './components/Drawer'
+    //   my-ui-lib/components/Drawer/index.d.ts  →  export type { DrawerEmits } from './types'
+    //   my-ui-lib/components/Drawer/types.d.ts  →  defines DrawerEmits interface
+    const pkgDir = join(tempDir, "node_modules", "my-ui-lib");
+    const drawerDir = join(pkgDir, "components", "Drawer");
+    mkdirSync(drawerDir, { recursive: true });
+
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "my-ui-lib",
+        main: "./index.js",
+        types: "./index.d.ts",
+      }),
+    );
+    writeFileSync(join(pkgDir, "index.js"), "module.exports = {};\n");
+
+    // Barrel entry: export * re-export
+    writeFileSync(
+      join(pkgDir, "index.d.ts"),
+      "export * from './components/Drawer'\n",
+    );
+
+    // Drawer barrel: named re-export
+    writeFileSync(
+      join(drawerDir, "index.d.ts"),
+      "export type { DrawerEmits } from './types'\n",
+    );
+
+    // Actual type definition
+    writeFileSync(
+      join(drawerDir, "types.d.ts"),
+      "export interface DrawerEmits { (e: 'close'): void; (e: 'open'): void; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { DrawerEmits } from "my-ui-lib"
+defineEmits<DrawerEmits>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "my-ui-lib") {
+        return { id: join(pkgDir, "index.js").replace(/\\/g, "/") };
+      }
+      return null;
+    });
+
+    const result = await plugin.transform.call(
+      { resolve: resolveSpy },
+      sfc,
+      filename,
+    );
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: the host followed the barrel chain and resolved the emit type
+    expect(code).toContain("close");
+    expect(code).toContain("open");
+    // Negative: no missing type dep error
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("direct host: barrel chain ending at .vue file resolves type", () => {
+    // Bypasses unplugin transform to test the Rust host directly via NAPI.
+    const host = loadHost();
+
+    const consumerPath = join(tempDir, "Consumer.vue").replace(/\\/g, "/");
+    const basePath = join(tempDir, "base", "index.ts").replace(/\\/g, "/");
+    const drawerPath = join(tempDir, "base", "Drawer", "index.ts").replace(/\\/g, "/");
+    const vuePath = join(tempDir, "base", "Drawer", "src", "index.vue").replace(/\\/g, "/");
+
+    const baseDir = join(tempDir, "base");
+    const drawerDir = join(baseDir, "Drawer");
+    const drawerSrcDir = join(drawerDir, "src");
+    mkdirSync(drawerSrcDir, { recursive: true });
+
+    writeFileSync(join(baseDir, "index.ts"), "export * from './Drawer'\n");
+    writeFileSync(join(drawerDir, "index.ts"), "export type { DrawerEmits } from './src/index.vue'\n");
+    writeFileSync(join(drawerSrcDir, "index.vue"),
+      `<script setup lang="ts">\nexport interface DrawerEmits {\n  open: []\n  close: []\n  disposed: []\n}\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>drawer</div></template>\n`);
+
+    // Upsert all files
+    host.upsert({ inputId: consumerPath, source: `<script setup lang="ts">\nimport type { DrawerEmits } from "@/components/base"\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>hello</div></template>\n` });
+    host.upsert({ inputId: basePath, source: "export * from './Drawer'\n", fileKind: "non_sfc" });
+    host.upsert({ inputId: drawerPath, source: "export type { DrawerEmits } from './src/index.vue'\n", fileKind: "non_sfc" });
+    host.upsert({ inputId: vuePath, source: `<script setup lang="ts">\nexport interface DrawerEmits {\n  open: []\n  close: []\n  disposed: []\n}\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>drawer</div></template>\n` });
+
+    // Wire up dependency chain (same as the Rust unit test)
+    host.setImportDependencies(consumerPath, [
+      { specifier: "@/components/base", resolvedCanonicalId: basePath },
+    ]);
+    host.setImportDependencies(basePath, [
+      { specifier: "./Drawer", resolvedCanonicalId: drawerPath },
+    ]);
+    host.setImportDependencies(drawerPath, [
+      { specifier: "./src/index.vue", resolvedCanonicalId: vuePath },
+    ]);
+
+    // Compile
+    const result = host.getVirtualFile({
+      rawId: consumerPath,
+      compileProfile: {
+        filename: consumerPath,
+        ssr: false,
+        isProduction: false,
+        componentId: "test",
+        hmrStrategy: "vite",
+        sourceMap: false,
+        forceJs: false,
+      },
+    });
+
+    expect(result.code).not.toContain("XInvalidMacroType");
+    expect(result.code).not.toContain("HOST_MISSING");
+    expect(result.code).toContain("open");
+    expect(result.code).toContain("close");
+    expect(result.code).toContain("disposed");
+  });
+
+  it("barrel chain ending at .vue file resolves exported type via alias", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "Consumer.vue").replace(/\\/g, "/");
+
+    // Simulates @/components/base path alias → barrel chain ending at .vue:
+    //   base/index.ts  →  export * from './Drawer'
+    //   base/Drawer/index.ts  →  export type { DrawerEmits } from './src/index.vue'
+    //   base/Drawer/src/index.vue  →  defines DrawerEmits in <script setup>
+    const baseDir = join(tempDir, "base");
+    const drawerDir = join(baseDir, "Drawer");
+    const drawerSrcDir = join(drawerDir, "src");
+    mkdirSync(drawerSrcDir, { recursive: true });
+
+    writeFileSync(
+      join(baseDir, "index.ts"),
+      "export * from './Drawer'\n",
+    );
+    writeFileSync(
+      join(drawerDir, "index.ts"),
+      "export type { DrawerEmits } from './src/index.vue'\n",
+    );
+    writeFileSync(
+      join(drawerSrcDir, "index.vue"),
+      `<script setup lang="ts">
+export interface DrawerEmits {
+  open: []
+  close: []
+  disposed: []
+}
+defineEmits<DrawerEmits>()
+</script>
+<template><div>drawer</div></template>
+`,
+    );
+
+    // Use path alias (@/components/base) — not relative, so hydrateMacroTypeDeps processes it
+    const sfc = `<script setup lang="ts">
+import type { DrawerEmits } from "@/components/base"
+defineEmits<DrawerEmits>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    // Resolve hook maps the alias to the absolute path (simulates Vite alias resolution)
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "@/components/base") return { id: join(baseDir, "index.ts").replace(/\\/g, "/") };
+      return null;
+    });
+
+    const result = await plugin.transform.call(
+      { resolve: resolveSpy },
+      sfc,
+      filename,
+    );
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: emit names from the .vue file's exported interface
+    expect(code).toContain("open");
+    expect(code).toContain("close");
+    expect(code).toContain("disposed");
+    // Negative: no unresolved type errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+    expect(code).not.toContain("XInvalidMacroType");
   });
 });
