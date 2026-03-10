@@ -435,7 +435,7 @@ fn test_go_to_component_definition_from_template() {
         ..Default::default()
     };
 
-    // Click on "ChildComp" in template — without export resolver, returns None
+    // Click on "ChildComp" in template — without export resolver, falls back to file navigation
     let offset = source.find("ChildComp").unwrap();
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
@@ -448,10 +448,17 @@ fn test_go_to_component_definition_from_template() {
         None,
         None,
     );
+    // With .vue fallback, navigates to file top even without export resolver
     assert!(
-        result.is_none(),
-        "should return None without export resolver"
+        result.is_some(),
+        "should navigate to .vue file as fallback"
     );
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = &result {
+        assert!(loc.uri.as_str().contains("ChildComp.vue"));
+        assert_eq!(loc.range, Range::default());
+    } else {
+        panic!("expected scalar location");
+    }
 
     // With export resolver, navigates to precise location
     let export_resolver = |canonical_id: &str, _binding_name: &str| -> Option<Location> {
@@ -1072,7 +1079,7 @@ fn test_path_alias_resolution_on_binding() {
     let foo_offset = source.find("Foo").unwrap();
     let position = line_index.offset_to_position(foo_offset as u32).unwrap();
 
-    // With path resolver but no export resolver: returns None (type provider handles)
+    // With path resolver but no export resolver: falls back to .vue file navigation
     let resolver = |specifier: &str| -> Option<String> {
         if specifier == "@/components/Foo.vue" {
             Some("/project/src/components/Foo.vue".to_string())
@@ -1090,9 +1097,15 @@ fn test_path_alias_resolution_on_binding() {
         None,
     );
     assert!(
-        result.is_none(),
-        "should return None without export resolver"
+        result.is_some(),
+        "should navigate to .vue file as fallback"
     );
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = &result {
+        assert!(loc.uri.as_str().contains("Foo.vue"));
+        assert_eq!(loc.range, Range::default());
+    } else {
+        panic!("expected scalar location");
+    }
 
     // With both resolvers: navigates to precise location
     let export_resolver = |canonical_id: &str, binding_name: &str| -> Option<Location> {
@@ -1576,7 +1589,7 @@ fn test_path_alias_resolution_on_component_tag() {
             None
         }
     };
-    // Without export resolver: returns None (type provider handles)
+    // Without export resolver: falls back to .vue file navigation
     let result = definition_at_position(
         &position,
         source,
@@ -1587,9 +1600,15 @@ fn test_path_alias_resolution_on_component_tag() {
         None,
     );
     assert!(
-        result.is_none(),
-        "should return None without export resolver"
+        result.is_some(),
+        "should navigate to .vue file as fallback"
     );
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = &result {
+        assert!(loc.uri.as_str().contains("FooComp.vue"));
+        assert_eq!(loc.range, Range::default());
+    } else {
+        panic!("expected scalar location");
+    }
 
     // With export resolver: navigates to precise location
     let export_resolver = |canonical_id: &str, _binding_name: &str| -> Option<Location> {
@@ -2319,6 +2338,277 @@ fn definition_binding_takes_precedence_over_prop_field() {
             loc.range.start, binding_start,
             "binding should take precedence over prop field"
         );
+    } else {
+        panic!("expected scalar location");
+    }
+}
+
+// =============================================================================
+// "default" fallback for .vue imports
+// =============================================================================
+
+/// @ai-generated - Tests that default import of .vue file retries with "default" export name
+#[test]
+fn test_vue_default_import_retries_with_default_binding() {
+    // When the resolver can't match the local name but CAN match "default", returns the result
+    let source = "<script setup>\nimport MyComp from './Child.vue'\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis(
+        vec![],
+        vec![AnalyzedImport {
+            source: "./Child.vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "MyComp".to_string(),
+                is_type_only: false,
+                vue_api: None,
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: Some("/project/Child.vue".to_string()),
+        }],
+        vec![],
+    );
+
+    // Resolver only matches "default", not "MyComp"
+    let export_resolver = |canonical_id: &str, binding_name: &str| -> Option<Location> {
+        if canonical_id == "/project/Child.vue" && binding_name == "default" {
+            Some(Location {
+                uri: "file:///project/Child.vue".parse().unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 2,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 2,
+                        character: 10,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+
+    let offset = source.find("MyComp").unwrap();
+    let position = line_index.offset_to_position(offset as u32).unwrap();
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        Some(&export_resolver),
+    );
+
+    assert!(result.is_some(), "should resolve via 'default' fallback");
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
+        assert!(loc.uri.as_str().contains("Child.vue"));
+        assert_eq!(loc.range.start.line, 2, "should use precise location from resolver");
+    } else {
+        panic!("expected scalar location");
+    }
+}
+
+/// @ai-generated - Named import from non-.vue file still returns None without resolver
+#[test]
+fn test_named_import_non_vue_no_default_fallback() {
+    let source = "<script setup>\nimport { helper } from './utils'\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis(
+        vec![],
+        vec![AnalyzedImport {
+            source: "./utils".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "helper".to_string(),
+                is_type_only: false,
+                vue_api: None,
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: Some("/project/utils.ts".to_string()),
+        }],
+        vec![],
+    );
+
+    let offset = source.find("helper").unwrap();
+    let position = line_index.offset_to_position(offset as u32).unwrap();
+
+    // Without export resolver, non-.vue targets still return None
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
+    assert!(
+        result.is_none(),
+        "non-.vue imports should not get file fallback"
+    );
+}
+
+/// @ai-generated - Component tag in template uses "default" fallback for .vue imports
+#[test]
+fn test_component_tag_default_fallback() {
+    let source = "<template>\n  <WrappedBtn />\n</template>\n\n<script setup>\nimport WrappedBtn from './WrappedBtn.vue'\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    use verter_analysis::template::*;
+
+    let analysis = FileAnalysisSnapshot {
+        imports: vec![AnalyzedImport {
+            source: "./WrappedBtn.vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "WrappedBtn".to_string(),
+                is_type_only: false,
+                vue_api: None,
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: Some("/project/WrappedBtn.vue".to_string()),
+        }],
+        template: Some(
+            (TemplateAnalysisSnapshot {
+                components: vec![TemplateComponentUsage {
+                    name: "WrappedBtn".to_string(),
+                    import_source: Some("./WrappedBtn.vue".to_string()),
+                    is_dynamic: false,
+                    props: vec![],
+                    has_spread: false,
+                    slots_used: vec![],
+                    static_classes: vec![],
+                    has_dynamic_class: false,
+                    dynamic_classes: vec![],
+                    v_models: vec![],
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        ..Default::default()
+    };
+
+    // Resolver only matches "default"
+    let export_resolver = |canonical_id: &str, binding_name: &str| -> Option<Location> {
+        if canonical_id == "/project/WrappedBtn.vue" && binding_name == "default" {
+            Some(Location {
+                uri: "file:///project/WrappedBtn.vue".parse().unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 1,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 1,
+                        character: 5,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+
+    // Click on "WrappedBtn" in template tag
+    let offset = source.find("WrappedBtn").unwrap();
+    let position = line_index.offset_to_position(offset as u32).unwrap();
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        Some(&export_resolver),
+    );
+
+    assert!(result.is_some(), "should resolve component via 'default' fallback");
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
+        assert!(loc.uri.as_str().contains("WrappedBtn.vue"));
+        assert_eq!(loc.range.start.line, 1);
+    } else {
+        panic!("expected scalar location");
+    }
+}
+
+/// @ai-generated - Script-context import binding uses "default" fallback for .vue imports
+#[test]
+fn test_script_context_vue_import_default_fallback() {
+    let source = "<script setup>\nimport Comp from './Comp.vue'\nconst x = 1\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis(
+        vec![],
+        vec![AnalyzedImport {
+            source: "./Comp.vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Comp".to_string(),
+                is_type_only: false,
+                vue_api: None,
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: Some("/project/Comp.vue".to_string()),
+        }],
+        vec![],
+    );
+
+    // Resolver only matches "default"
+    let export_resolver = |canonical_id: &str, binding_name: &str| -> Option<Location> {
+        if canonical_id == "/project/Comp.vue" && binding_name == "default" {
+            Some(Location {
+                uri: "file:///project/Comp.vue".parse().unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 3,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 3,
+                        character: 5,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+
+    // Click on "Comp" in the import statement (script context)
+    let offset = source.find("Comp").unwrap();
+    let position = line_index.offset_to_position(offset as u32).unwrap();
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        Some(&export_resolver),
+    );
+
+    assert!(result.is_some(), "should resolve via 'default' fallback in script");
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
+        assert!(loc.uri.as_str().contains("Comp.vue"));
+        assert_eq!(loc.range.start.line, 3);
     } else {
         panic!("expected scalar location");
     }

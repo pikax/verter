@@ -79,7 +79,18 @@ pub fn definition_at_position(
                         ) {
                             return Some(result);
                         }
-                        // Can't resolve to exact location → let type provider handle it
+                        // Default import of .vue file: the local name won't match script
+                        // bindings, so retry with "default" which handles Vue SFC exports.
+                        if canonical_id.ends_with(".vue") {
+                            if let Some(result) = try_precise_cross_file(
+                                canonical_id,
+                                "default",
+                                resolve_export_location,
+                            ) {
+                                return Some(result);
+                            }
+                            return resolved_import_definition(canonical_id);
+                        }
                         return None;
                     }
                     // Try path alias resolution (tsconfig paths)
@@ -91,6 +102,16 @@ pub fn definition_at_position(
                             resolve_export_location,
                         ) {
                             return Some(result);
+                        }
+                        if resolved.ends_with(".vue") {
+                            if let Some(result) = try_precise_cross_file(
+                                &resolved,
+                                "default",
+                                resolve_export_location,
+                            ) {
+                                return Some(result);
+                            }
+                            return resolved_import_definition(&resolved);
                         }
                         return None;
                     }
@@ -232,6 +253,16 @@ pub fn definition_at_position(
                                         ) {
                                             return Some(result);
                                         }
+                                        if cid.ends_with(".vue") {
+                                            if let Some(result) = try_precise_cross_file(
+                                                cid,
+                                                "default",
+                                                resolve_export_location,
+                                            ) {
+                                                return Some(result);
+                                            }
+                                            return resolved_import_definition(cid);
+                                        }
                                         return None;
                                     }
                                     if let Some(resolved) =
@@ -243,6 +274,16 @@ pub fn definition_at_position(
                                             resolve_export_location,
                                         ) {
                                             return Some(result);
+                                        }
+                                        if resolved.ends_with(".vue") {
+                                            if let Some(result) = try_precise_cross_file(
+                                                &resolved,
+                                                "default",
+                                                resolve_export_location,
+                                            ) {
+                                                return Some(result);
+                                            }
+                                            return resolved_import_definition(&resolved);
                                         }
                                         return None;
                                     }
@@ -302,6 +343,16 @@ pub fn definition_at_position(
                             ) {
                                 return Some(result);
                             }
+                            if canonical_id.ends_with(".vue") {
+                                if let Some(result) = try_precise_cross_file(
+                                    canonical_id,
+                                    "default",
+                                    resolve_export_location,
+                                ) {
+                                    return Some(result);
+                                }
+                                return resolved_import_definition(canonical_id);
+                            }
                             return None;
                         }
                         if let Some(resolved) =
@@ -313,6 +364,16 @@ pub fn definition_at_position(
                                 resolve_export_location,
                             ) {
                                 return Some(result);
+                            }
+                            if resolved.ends_with(".vue") {
+                                if let Some(result) = try_precise_cross_file(
+                                    &resolved,
+                                    "default",
+                                    resolve_export_location,
+                                ) {
+                                    return Some(result);
+                                }
+                                return resolved_import_definition(&resolved);
                             }
                             return None;
                         }

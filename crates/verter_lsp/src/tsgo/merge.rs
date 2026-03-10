@@ -619,7 +619,15 @@ pub fn merge_definitions(
             .filter_map(|loc| {
                 // TypeProvider returns paths; convert to URIs
                 // For .vue files, strip virtual suffixes (.tsx or .d.ts)
-                let file_path = normalize_vue_path(&loc.path);
+                // Also strip .verter/ide/<hash>/ prefix if present
+                let normalized = normalize_vue_path(&loc.path);
+                let file_path_owned;
+                let file_path = if let Some(stripped) = strip_verter_ide_prefix_owned(normalized) {
+                    file_path_owned = stripped;
+                    &file_path_owned
+                } else {
+                    normalized
+                };
                 let uri = path_to_uri(file_path)?;
                 // Map TSX byte offsets back to Vue positions for .vue.tsx targets
                 // (.vue.d.ts targets use Range::default — no position mapping available)
@@ -688,6 +696,31 @@ fn normalize_vue_path(path: &str) -> &str {
 /// Used by server.rs for inline path normalization.
 pub fn normalize_vue_path_owned(path: &str) -> String {
     normalize_vue_path(path).to_string()
+}
+
+/// Strip `.verter/ide/<hash>/` prefix from a provider path.
+///
+/// Resolves paths like `/project/.verter/ide/a1b2c3d4e5f6g7h8/src/App.vue.tsx`
+/// back to `/project/src/App.vue.tsx`.
+fn strip_verter_ide_prefix_owned(path: &str) -> Option<String> {
+    let marker_fwd = "/.verter/ide/";
+    let marker_win = "\\.verter\\ide\\";
+    let (pos, marker_len, sep) = if let Some(p) = path.find(marker_fwd) {
+        (p, marker_fwd.len(), "/")
+    } else if let Some(p) = path.find(marker_win) {
+        (p, marker_win.len(), "\\")
+    } else {
+        return None;
+    };
+
+    let after = &path[pos + marker_len..];
+    // Skip the 16-char hex hash + separator
+    if after.len() > 17 && (after.as_bytes()[16] == b'/' || after.as_bytes()[16] == b'\\') {
+        let relative = &after[17..];
+        let root = &path[..pos];
+        return Some(format!("{root}{sep}{relative}"));
+    }
+    None
 }
 
 /// Convert a file path to a `file://` URI.
@@ -2154,6 +2187,45 @@ mod tests {
     fn normalize_vue_path_passthrough_plain_ts() {
         // Non-.vue .ts files should NOT be stripped
         assert_eq!(normalize_vue_path("/src/utils.ts"), "/src/utils.ts");
+    }
+
+    // ── strip_verter_ide_prefix tests ────────────────────────────────
+
+    /// @ai-generated - Strips .verter/ide/<hash>/ prefix from provider paths
+    #[test]
+    fn strip_verter_ide_prefix_valid_unix() {
+        let path = "/project/.verter/ide/a1b2c3d4e5f6g7h8/src/App.vue";
+        let result = strip_verter_ide_prefix_owned(path);
+        assert_eq!(result, Some("/project/src/App.vue".to_string()));
+    }
+
+    #[test]
+    fn strip_verter_ide_prefix_valid_windows() {
+        let path = "D:\\project\\.verter\\ide\\a1b2c3d4e5f6g7h8\\src\\App.vue";
+        let result = strip_verter_ide_prefix_owned(path);
+        assert_eq!(result, Some("D:\\project\\src\\App.vue".to_string()));
+    }
+
+    #[test]
+    fn strip_verter_ide_prefix_no_marker() {
+        let path = "/project/src/App.vue";
+        let result = strip_verter_ide_prefix_owned(path);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn strip_verter_ide_prefix_short_hash() {
+        // Hash too short (< 16 chars) — should return None
+        let path = "/project/.verter/ide/abc123/src/App.vue";
+        let result = strip_verter_ide_prefix_owned(path);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn strip_verter_ide_prefix_with_vue_tsx_suffix() {
+        let path = "/project/.verter/ide/a1b2c3d4e5f6g7h8/src/App.vue.tsx";
+        let result = strip_verter_ide_prefix_owned(path);
+        assert_eq!(result, Some("/project/src/App.vue.tsx".to_string()));
     }
 
     // ── .vue.d.ts definition tests ──────────────────────────────────
