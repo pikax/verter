@@ -18,6 +18,10 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use verter_host::{CompileProfile, FileKind, UpsertRequest, VerterHost};
 
+use crate::provider_sync::{
+    commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
+    ResolverSnapshot,
+};
 use crate::tsgo::project_sync::ProjectSync;
 
 /// Handle for communicating with the background workspace scanner.
@@ -58,8 +62,10 @@ pub struct WorkspaceScannerConfig {
     pub host: Arc<VerterHost>,
     /// Optional project sync for sending files to the type provider.
     pub project_sync: Option<ProjectSync>,
-    /// Tracks which files were synced as background files (shared with server).
-    pub background_synced_files: Arc<DashMap<String, ()>>,
+    /// Resolver snapshot used to materialize owner-aware provider paths.
+    pub resolver_snapshot: Arc<parking_lot::RwLock<Option<ResolverSnapshot>>>,
+    /// Tracks provider materialization per source file (shared with server).
+    pub provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     /// Whether the type provider is TSGO (affects sync strategy).
     pub is_tsgo: bool,
     /// Compile profile for IDE output.
@@ -322,8 +328,9 @@ async fn scanner_loop(
                     &config.host,
                     &config.tsx_profile,
                     sync,
+                    &config.resolver_snapshot,
                     config.is_tsgo,
-                    &config.background_synced_files,
+                    &config.provider_sync_states,
                 )
                 .await;
             }
@@ -349,31 +356,63 @@ async fn sync_file_to_provider(
     host: &VerterHost,
     profile: &CompileProfile,
     sync: &ProjectSync,
+    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
     is_tsgo: bool,
-    bg_files: &DashMap<String, ()>,
+    sync_states: &DashMap<String, ProviderSyncState>,
 ) {
+    let Some(snapshot) = resolver_snapshot.read().clone() else {
+        return;
+    };
+    let ide = host.get_ide(canonical_id, profile);
+    let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
+    let Some(next_state) =
+        crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)
+    else {
+        return;
+    };
+    let transition = prepare_sync_transition(sync_states, canonical_id, next_state);
+    close_stale_paths(sync, &transition.stale_paths).await;
+    let mut committed_state = transition.next;
+
     // Sync DTS (both TSGO and tsserver)
     if let Some(api) = host.get_public_api(canonical_id) {
-        let base = canonical_id.strip_suffix(".vue").unwrap_or(canonical_id);
-        let dts_path = format!("{base}.vue.ts");
+        let Some(dts_path) = committed_state.api_path.clone() else {
+            return;
+        };
         let result = if is_tsgo {
             sync.open_dts(&dts_path, &api.code).await
         } else {
             sync.load_dts(&dts_path, &api.code).await
         };
         if result.is_ok() {
-            bg_files.insert(dts_path, ());
+            committed_state.set_background_loaded(ProviderPathKind::Api, true);
         }
     }
 
     // Sync IDE (tsserver only — TSGO resolves via DTS)
     if !is_tsgo {
-        if let Some(ide) = host.get_ide(canonical_id, profile) {
-            let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-            let tsx_path = format!("{canonical_id}{ext}");
+        if let Some(ide) = ide {
+            let Some(tsx_path) = committed_state.ide_path.clone() else {
+                return;
+            };
             if sync.load_tsx(&tsx_path, &ide.code).await.is_ok() {
-                bg_files.insert(tsx_path, ());
+                committed_state.set_background_loaded(ProviderPathKind::Ide, true);
             }
+        }
+    }
+
+    commit_sync_transition(sync_states, canonical_id, committed_state);
+}
+
+async fn close_stale_paths(sync: &ProjectSync, stale_paths: &[(ProviderPathKind, String)]) {
+    for (kind, path) in stale_paths {
+        let result = match kind {
+            ProviderPathKind::Ide => sync.close_tsx(path).await,
+            ProviderPathKind::Api => sync.close_dts(path).await,
+            ProviderPathKind::Shadow => sync.close_file(path).await,
+        };
+        if let Err(error) = result {
+            tracing::warn!("workspace_scanner: failed to close stale provider path {path}: {error}");
         }
     }
 }
@@ -381,6 +420,8 @@ async fn sync_file_to_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tsgo::mock::MockTypeProvider;
+    use crate::ProjectSyncMode;
     use std::fs;
     use tempfile::TempDir;
 
@@ -669,5 +710,130 @@ mod tests {
 
         // With no tsconfig patterns, everything is Other
         assert_eq!(classified[0].1, Tier::Other);
+    }
+
+    #[tokio::test]
+    async fn scanner_assigns_each_vue_to_exactly_one_owner_project() {
+        let host = VerterHost::new(verter_host::HostConfig::default());
+        let canonical_id = "/workspace/pkg-a/src/App.vue";
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::<str>::from("<template><div>App</div></template>"),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        });
+        let profile = CompileProfile::default();
+        assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
+
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace/pkg-a".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/pkg-a/tsconfig.json".to_string()),
+            ),
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                None,
+            ),
+        ]);
+        let snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
+            generation: 1,
+            resolver,
+        }));
+        let sync_states = DashMap::new();
+        let sync = ProjectSync::new(
+            Arc::new(MockTypeProvider::new()),
+            ProjectSyncMode::FullProject,
+        );
+
+        sync_file_to_provider(
+            canonical_id,
+            &host,
+            &profile,
+            &sync,
+            &snapshot,
+            false,
+            &sync_states,
+        )
+        .await;
+
+        let state = sync_states
+            .get(canonical_id)
+            .expect("scanner should commit a source-keyed provider state");
+        assert_eq!(
+            state.owner_tsconfig_path.as_deref(),
+            Some("/workspace/pkg-a/tsconfig.json")
+        );
+        assert!(
+            state
+                .provider_root
+                .as_deref()
+                .unwrap_or_default()
+                .contains("/workspace/pkg-a/.verter/ide/"),
+            "matched Vue files should sync into their owner project root"
+        );
+    }
+
+    #[tokio::test]
+    async fn scanner_routes_unmatched_files_to_workspace_project_only() {
+        let host = VerterHost::new(verter_host::HostConfig::default());
+        let canonical_id = "/workspace/scripts/Tool.vue";
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::<str>::from("<template><div>Tool</div></template>"),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        });
+        let profile = CompileProfile::default();
+        assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
+
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace/src".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                None,
+            ),
+        ]);
+        let snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
+            generation: 1,
+            resolver,
+        }));
+        let sync_states = DashMap::new();
+        let sync = ProjectSync::new(
+            Arc::new(MockTypeProvider::new()),
+            ProjectSyncMode::FullProject,
+        );
+
+        sync_file_to_provider(
+            canonical_id,
+            &host,
+            &profile,
+            &sync,
+            &snapshot,
+            false,
+            &sync_states,
+        )
+        .await;
+
+        let state = sync_states
+            .get(canonical_id)
+            .expect("unmatched Vue files should still sync to the workspace project");
+        assert_eq!(state.owner_tsconfig_path, None);
+        assert!(
+            state
+                .provider_root
+                .as_deref()
+                .unwrap_or_default()
+                .contains("/workspace/.verter/ide/"),
+            "unmatched Vue files should only materialize under the synthetic workspace project"
+        );
     }
 }

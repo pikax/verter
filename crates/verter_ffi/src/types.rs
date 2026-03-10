@@ -173,6 +173,24 @@ pub struct FfiScriptImportInfo {
     pub bindings: Vec<String>,
 }
 
+/// Summary of a single module reference found in a script block.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiModuleReference {
+    pub syntax: String,
+    pub semantics: String,
+    pub is_type_only: bool,
+    pub raw_text: String,
+    pub literal_specifier: Option<String>,
+    pub finite_specifiers: Vec<String>,
+    pub static_prefix: Option<String>,
+    pub analyzability: String,
+    pub span_start: u32,
+    pub span_end: u32,
+    pub expr_span_start: u32,
+    pub expr_span_end: u32,
+}
+
 /// A block that needs external preprocessing before compilation.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -203,6 +221,7 @@ pub struct FfiUpdateResult {
     pub diagnostics: FfiDiagnosticsSnapshot,
     pub external_source_requests: Vec<FfiExternalSourceRequest>,
     pub import_specifiers: Vec<FfiScriptImportInfo>,
+    pub module_references: Vec<FfiModuleReference>,
     pub preprocessor_requests: Vec<FfiPreprocessorRequest>,
     pub parse_duration_ms: f64,
 }

@@ -4,6 +4,7 @@ pub mod config;
 pub mod css;
 pub mod documents;
 pub mod features;
+pub mod provider_sync;
 pub mod project_resolver;
 pub mod server;
 pub mod statistics;

@@ -45,6 +45,22 @@ describe("VerterHost", () => {
     expect(mainFile.code).toContain("_sfc_main");
   });
 
+  it("should expose moduleReferences in upsert results", () => {
+    const host = new VerterHost();
+    const result = host.upsert({
+      inputId: "Deps.vue",
+      source: `<script setup lang="ts">
+const view = import('./Foo.vue')
+</script>
+<template><div>{{ view }}</div></template>`,
+    });
+
+    expect(result.moduleReferences).toHaveLength(1);
+    expect(result.moduleReferences[0].syntax).toBe("dynamicImport");
+    expect(result.moduleReferences[0].analyzability).toBe("exact");
+    expect(result.moduleReferences[0].literalSpecifier).toBe("./Foo.vue");
+  });
+
   it("should strip TypeScript when forceJs is set in compile profile", () => {
     const host = new VerterHost();
     host.upsert({

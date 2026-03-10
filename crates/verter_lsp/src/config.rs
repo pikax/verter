@@ -46,7 +46,7 @@ struct PathAliasReplacement {
 /// Resolves import specifiers using tsconfig.json `compilerOptions.paths`.
 ///
 /// This is the current alias-only resolver. It is intentionally narrower than
-/// the planned native `ProjectResolver`, which will need to cover tsconfig,
+/// the native project resolver, which needs to cover tsconfig,
 /// Node/package resolution, and provider-target mapping without assuming direct
 /// provider disk access.
 #[derive(Debug, Default)]
@@ -999,6 +999,16 @@ impl ProjectConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderProjectPlan {
+    pub root: String,
+    pub workspace_root: String,
+    pub tsconfig_path: Option<String>,
+    pub provider_root: String,
+    pub config_path: String,
+    pub reference_config_paths: Vec<String>,
+}
+
 /// Registry of per-project configurations for a multi-root workspace.
 ///
 /// Projects are sorted by root prefix length (longest first) so that
@@ -1009,6 +1019,27 @@ pub struct ProjectRegistry {
 }
 
 impl ProjectRegistry {
+    fn provider_plan_from_project(
+        project: &ProjectConfig,
+        config_paths_by_tsconfig: &std::collections::HashMap<String, String>,
+    ) -> ProviderProjectPlan {
+        let ide_project = project.to_ide_project_config();
+        ProviderProjectPlan {
+            config_path: crate::provider_sync::project_config_path_for_provider_root(
+                &ide_project.provider_root,
+            ),
+            reference_config_paths: ide_project
+                .references
+                .iter()
+                .filter_map(|reference| config_paths_by_tsconfig.get(reference).cloned())
+                .collect(),
+            provider_root: ide_project.provider_root,
+            root: ide_project.root,
+            workspace_root: ide_project.workspace_root,
+            tsconfig_path: ide_project.tsconfig_path,
+        }
+    }
+
     /// Build a registry from workspace roots by discovering tsconfigs, vite configs,
     /// and lint configs.
     ///
@@ -1057,9 +1088,11 @@ impl ProjectRegistry {
                             );
                             workspace_aliases = vite_aliases
                                 .iter()
-                                .map(|(find, replacement)| crate::project_resolver::WorkspaceAlias {
-                                    find: find.clone(),
-                                    replacement: replacement.clone(),
+                                .map(|(find, replacement)| {
+                                    crate::project_resolver::WorkspaceAlias {
+                                        find: find.clone(),
+                                        replacement: replacement.clone(),
+                                    }
                                 })
                                 .collect();
                             resolver.merge_vite_aliases(vite_aliases);
@@ -1229,6 +1262,50 @@ impl ProjectRegistry {
         )
     }
 
+    pub fn provider_project_plans(&self) -> Vec<ProviderProjectPlan> {
+        let ide_projects = self
+            .projects
+            .iter()
+            .map(ProjectConfig::to_ide_project_config)
+            .collect::<Vec<_>>();
+        let config_paths_by_tsconfig = ide_projects
+            .iter()
+            .filter_map(|project| {
+                project.tsconfig_path.as_ref().map(|tsconfig_path| {
+                    let config_path =
+                        crate::provider_sync::project_config_path_for_provider_root(
+                            &project.provider_root,
+                        );
+                    (tsconfig_path.clone(), config_path)
+                })
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        self.projects
+            .iter()
+            .map(|project| Self::provider_plan_from_project(project, &config_paths_by_tsconfig))
+            .collect()
+    }
+
+    pub fn provider_project_plan_for(&self, file_path: &str) -> Option<ProviderProjectPlan> {
+        let config_paths_by_tsconfig = self
+            .projects
+            .iter()
+            .filter_map(|project| {
+                let ide_project = project.to_ide_project_config();
+                ide_project.tsconfig_path.map(|tsconfig_path| {
+                    let config_path =
+                        crate::provider_sync::project_config_path_for_provider_root(
+                            &ide_project.provider_root,
+                        );
+                    (tsconfig_path, config_path)
+                })
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        self.find_project(file_path)
+            .map(|project| Self::provider_plan_from_project(project, &config_paths_by_tsconfig))
+    }
+
     /// Get all project roots.
     pub fn project_roots(&self) -> Vec<&str> {
         self.projects.iter().map(|p| p.root.as_str()).collect()
@@ -1317,7 +1394,9 @@ fn load_project_membership(tsconfig_path: &Path) -> crate::project_resolver::Pro
         .unwrap_or(crate::project_resolver::ProjectMembership::MatchAll)
 }
 
-fn load_compiler_options(tsconfig_path: &Path) -> crate::project_resolver::IdeProjectCompilerOptions {
+fn load_compiler_options(
+    tsconfig_path: &Path,
+) -> crate::project_resolver::IdeProjectCompilerOptions {
     load_compiler_options_inner(tsconfig_path, 0).unwrap_or_default()
 }
 
@@ -1346,11 +1425,17 @@ fn load_compiler_options_inner(
         return Some(compiler_options);
     };
 
-    if let Some(base_url) = raw_compiler_options.get("baseUrl").and_then(|value| value.as_str()) {
+    if let Some(base_url) = raw_compiler_options
+        .get("baseUrl")
+        .and_then(|value| value.as_str())
+    {
         compiler_options.base_url = Some(resolve_path_value(tsconfig_dir, base_url));
     }
 
-    if let Some(paths) = raw_compiler_options.get("paths").and_then(|value| value.as_object()) {
+    if let Some(paths) = raw_compiler_options
+        .get("paths")
+        .and_then(|value| value.as_object())
+    {
         let base_url = compiler_options
             .base_url
             .clone()
@@ -1424,7 +1509,9 @@ fn load_project_membership_inner(
     }
 
     let (mut files, mut include, mut exclude) = match inherited {
-        crate::project_resolver::ProjectMembership::MatchAll => (Vec::new(), Vec::new(), Vec::new()),
+        crate::project_resolver::ProjectMembership::MatchAll => {
+            (Vec::new(), Vec::new(), Vec::new())
+        }
         crate::project_resolver::ProjectMembership::IncludeExclude {
             files,
             include,
@@ -2716,6 +2803,106 @@ export default {{
         assert_eq!(
             project.root, root,
             "synthetic workspace project should use the workspace root"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_builds_one_provider_project_plan_per_tsconfig() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_provider_plans");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::create_dir_all(tmp.join("tests")).unwrap();
+
+        std::fs::write(
+            tmp.join("tsconfig.json"),
+            r#"{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.test.json" }
+  ]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("tsconfig.app.json"),
+            r#"{
+  "include": ["src/**/*"]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("tsconfig.test.json"),
+            r#"{
+  "include": ["tests/**/*"]
+}"#,
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let plans = registry.provider_project_plans();
+        let tsconfig_plans = plans
+            .iter()
+            .filter(|plan| plan.tsconfig_path.is_some())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            tsconfig_plans.len(),
+            3,
+            "solution root + each member tsconfig should have exactly one provider plan"
+        );
+        assert_eq!(
+            tsconfig_plans
+                .iter()
+                .map(|plan| plan.provider_root.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "each tsconfig-backed project should get its own provider root"
+        );
+        assert!(
+            tsconfig_plans
+                .iter()
+                .all(|plan| plan.config_path.ends_with("/tsconfig.json")),
+            "every tsconfig-backed provider plan should materialize a synthetic tsconfig path"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_builds_single_workspace_provider_plan_for_unmatched_files() {
+        let tmp = std::env::temp_dir().join("verter_test_registry_workspace_provider_plan");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::create_dir_all(tmp.join("scripts")).unwrap();
+
+        std::fs::write(
+            tmp.join("tsconfig.app.json"),
+            r#"{
+  "include": ["src/**/*"]
+}"#,
+        )
+        .unwrap();
+
+        let root = tmp.to_string_lossy().replace('\\', "/");
+        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let unmatched = format!("{root}/scripts/tool.ts");
+        let matched = registry
+            .provider_project_plan_for(&unmatched)
+            .expect("unmatched file should still produce a workspace provider plan");
+
+        assert_eq!(
+            matched.tsconfig_path, None,
+            "unmatched files should stay on the synthetic workspace provider plan"
+        );
+        assert_eq!(matched.root, root);
+        assert!(
+            matched.provider_root.contains("/.verter/ide/"),
+            "workspace provider plan should still use a synthetic provider root"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

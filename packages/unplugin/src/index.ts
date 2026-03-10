@@ -6,6 +6,7 @@ import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 import type { HostCompileProfile, HostUpdateResult, NativeBlockOverrideEntry } from "@verter/native";
 import type { VerterHost } from "@verter/native";
 import { loadHost, generateComponentId, processStyle, resetHost } from "./core/compiler";
+import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
 import { parseVueRequest } from "./core/utils";
 import { preprocessBlock } from "./core/preprocessor";
 
@@ -42,18 +43,26 @@ async function resolveUpsertDependencies(
     }
   }
 
-  // Upsert type-dependency .ts files so compile_entry() can resolve external types
-  // (e.g., `import type { Props } from './types'` in a .vue script setup).
-  if (upsertResult.importSpecifiers.length > 0) {
+  // Resolve exact and finite-set module references, then feed the canonical
+  // results back to the host without speculating on unknown dynamic imports.
+  const resolvedDependencyIds = new Set<string>();
+  const dependencySpecifiers = collectResolvableModuleReferenceSpecifiers(
+    upsertResult.moduleReferences ?? [],
+  );
+  if (dependencySpecifiers.length > 0) {
     const fs = await import("fs");
     const path = await import("path");
     const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
-    for (const imp of upsertResult.importSpecifiers) {
-      if (!imp.source.startsWith(".")) continue; // skip bare specifiers (node_modules)
+    for (const specifier of dependencySpecifiers) {
+      if (!specifier.startsWith(".")) continue; // bundler-owned aliases/bare imports stay delegated
 
-      const absBase = path.resolve(path.dirname(filename), imp.source);
+      const absBase = path.resolve(path.dirname(filename), specifier);
       for (const ext of exts) {
         const fullPath = absBase + ext;
+        if (fullPath.endsWith(".vue") && fs.existsSync(fullPath)) {
+          resolvedDependencyIds.add(fullPath);
+          break;
+        }
         // Skip .vue files â€” they'll be properly upserted as VueSfc when
         // Vite's module graph processes them via transform(). Upserting
         // them as non_sfc here would clobber their SFC-specific metadata
@@ -66,6 +75,7 @@ async function resolveUpsertDependencies(
             source: depSource,
             fileKind: "non_sfc",
           });
+          resolvedDependencyIds.add(fullPath);
           break;
         } catch {
           continue;
@@ -73,6 +83,7 @@ async function resolveUpsertDependencies(
       }
     }
   }
+  host.setImportDependencies(filename, [...resolvedDependencyIds]);
 }
 
 /**

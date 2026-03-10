@@ -382,7 +382,7 @@ const x: Ref<number> = ref(0)
 
   // @ai-generated - Mixed import `import { Ref, ref }` — Ref is type-only but
   // NOT marked with `type` keyword. Tests the actual Bug 2 scenario.
-  it("implicit type-only import (Ref without type keyword) in mixed import", async () => {
+  it("implicit type-only import (Ref without type keyword) is pruned from emitted JS", async () => {
     const plugin = unpluginFactory(undefined, {
       framework: "rollup",
       versions: { unplugin: "0.0.0", rollup: "0.0.0" },
@@ -397,9 +397,10 @@ const x: Ref<number> = ref(0)
     expect(result).toBeDefined();
     const code = result!.code;
 
-    // Ref is NOT marked with `type` keyword, so forceJs=true preserves it
-    // in the import statement (Verter only strips explicit `type` specifiers).
-    expect(code).toContain("import { Ref, ref }");
+    // The generated JS keeps the runtime import but prunes the type-only symbol.
+    expect(code).toContain("import { ref } from 'vue'");
+    expect(code).not.toContain("Ref, ref");
+    expect(code).not.toContain("Ref<number>");
 
     // filter_setup_return removes Ref from setup return (template doesn't use $setup.Ref)
     expect(code).not.toContain("return { Ref");
@@ -462,23 +463,38 @@ describe("mixed import dependency upsert", () => {
   }
 
   // @ai-generated - Mixed imports (value + type) should not crash the transform
-  it("mixed import with type and value specifiers does not crash", async () => {
+  it("mixed import with type and value specifiers resolves exact module references", async () => {
     const plugin = createPlugin();
+    const testDir = join(
+      tmpdir(),
+      `verter-mixed-import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(testDir, { recursive: true });
     const sfc = `<script setup lang="ts">
-import { type Props, ref } from './types'
+import { type Props, helper } from './types'
 defineProps<Props>()
-const count = ref(0)
+const count = helper()
 </script>
 
 <template>
   <div>{{ count }}</div>
 </template>
 `;
-    // The dep file ./types.ts won't exist, so the readFileSync will fail silently.
-    // This test verifies the transform doesn't crash on mixed imports.
-    const result = await plugin.transform(sfc, "/test/MixedImport.vue");
-    expect(result).toBeDefined();
-    expect(result.code).toContain("count");
+    const filename = join(testDir, "MixedImport.vue").replace(/\\/g, "/");
+
+    writeFileSync(
+      join(testDir, "types.ts"),
+      `export interface Props { count?: number }\nexport const helper = () => 1\n`,
+    );
+
+    try {
+      const result = await plugin.transform(sfc, filename);
+      expect(result).toBeDefined();
+      expect(result.code).toContain("count");
+      expect(result.code).toContain("helper");
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 });
 

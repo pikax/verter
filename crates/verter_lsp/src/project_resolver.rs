@@ -145,7 +145,9 @@ impl IdeProjectConfig {
 
                 if files
                     .iter()
-                    .map(|candidate| normalize_project_membership_entry(&self.root, candidate, false))
+                    .map(|candidate| {
+                        normalize_project_membership_entry(&self.root, candidate, false)
+                    })
                     .any(|candidate| candidate == normalized_file)
                 {
                     return true;
@@ -174,7 +176,9 @@ impl NativeProjectResolver {
     }
 
     pub fn owner_for_file(&self, file_id: &str) -> Option<&IdeProjectConfig> {
-        self.projects.iter().find(|project| project.matches_file(file_id))
+        self.projects
+            .iter()
+            .find(|project| project.matches_file(file_id))
     }
 
     pub fn provider_id_for_source(&self, source_id: &str) -> Option<String> {
@@ -392,27 +396,6 @@ impl NativeProjectResolver {
     }
 }
 
-/// Placeholder seam for the native resolver.
-pub trait ProjectResolver: Send + Sync {
-    fn resolve(&self, request: &ResolveRequest) -> Option<ResolveResult>;
-}
-
-impl ProjectResolver for NativeProjectResolver {
-    fn resolve(&self, _request: &ResolveRequest) -> Option<ResolveResult> {
-        None
-    }
-}
-
-/// Default no-op implementation until the native resolver lands.
-#[derive(Debug, Default)]
-pub struct UnconfiguredProjectResolver;
-
-impl ProjectResolver for UnconfiguredProjectResolver {
-    fn resolve(&self, _request: &ResolveRequest) -> Option<ResolveResult> {
-        None
-    }
-}
-
 fn normalized_starts_with(path: &str, prefix: &str) -> bool {
     let normalized = normalize_canonical_id(path);
     let prefix = normalize_canonical_id(prefix);
@@ -430,7 +413,9 @@ fn build_provider_root(root: &str, tsconfig_path: Option<&str>) -> String {
 
 fn shadow_file_name(relative: &str) -> String {
     let path = Path::new(relative);
-    let parent = path.parent().map(|p| p.to_string_lossy().replace('\\', "/"));
+    let parent = path
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"));
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -531,7 +516,12 @@ fn apply_tsconfig_target(base_url: &str, target: &str, captured: &str) -> String
 
 fn sorted_workspace_aliases(aliases: &[WorkspaceAlias]) -> Vec<&WorkspaceAlias> {
     let mut aliases = aliases.iter().collect::<Vec<_>>();
-    aliases.sort_by(|a, b| b.find.len().cmp(&a.find.len()).then_with(|| a.find.cmp(&b.find)));
+    aliases.sort_by(|a, b| {
+        b.find
+            .len()
+            .cmp(&a.find.len())
+            .then_with(|| a.find.cmp(&b.find))
+    });
     aliases
 }
 
@@ -576,7 +566,9 @@ fn resolve_existing_path(reader: &dyn ProjectResolverReader, candidate: &str) ->
 }
 
 fn probe_extensions() -> &'static [&'static str] {
-    &[".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs", ".vue"]
+    &[
+        ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs", ".vue",
+    ]
 }
 
 fn probe_index_files() -> &'static [&'static str] {
@@ -627,12 +619,16 @@ fn join_paths(base: &str, path: &str) -> String {
         return collapse_path(path);
     }
 
-    let normalized_base = normalize_canonical_id(base).trim_end_matches('/').to_string();
+    let normalized_base = normalize_canonical_id(base)
+        .trim_end_matches('/')
+        .to_string();
     let normalized_path = normalize_canonical_id(path);
     collapse_path(&format!(
         "{}/{}",
         normalized_base,
-        normalized_path.trim_start_matches("./").trim_start_matches('/')
+        normalized_path
+            .trim_start_matches("./")
+            .trim_start_matches('/')
     ))
 }
 
@@ -727,7 +723,11 @@ fn split_path_parts(path: &str) -> Vec<String> {
         .collect()
 }
 
-fn normalize_project_membership_entry(root: &str, value: &str, allow_directory_glob: bool) -> String {
+fn normalize_project_membership_entry(
+    root: &str,
+    value: &str,
+    allow_directory_glob: bool,
+) -> String {
     let normalized_value = normalize_canonical_id(value);
     let resolved = if Path::new(&normalized_value).is_absolute()
         || normalized_value.as_bytes().get(1) == Some(&b':')
@@ -803,7 +803,10 @@ fn resolve_package_imports(
         let Some(package_json) = read_json(reader, &join_paths(&directory, "package.json")) else {
             continue;
         };
-        let Some(imports) = package_json.get("imports").and_then(|value| value.as_object()) else {
+        let Some(imports) = package_json
+            .get("imports")
+            .and_then(|value| value.as_object())
+        else {
             continue;
         };
         let Some((entry, captured)) = match_package_mapping(imports, specifier) else {
@@ -930,9 +933,9 @@ fn resolve_package_target(
         serde_json::Value::String(target) => {
             probe_path(reader, &resolve_package_path(package_dir, target, captured))
         }
-        serde_json::Value::Array(items) => items.iter().find_map(|item| {
-            resolve_package_target(reader, package_dir, item, captured, kind)
-        }),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|item| resolve_package_target(reader, package_dir, item, captured, kind)),
         serde_json::Value::Object(map) => {
             for condition in package_conditions(kind) {
                 let Some(entry) = map.get(*condition) else {
@@ -976,7 +979,8 @@ fn resolve_package_path(package_dir: &str, target: &str, captured: Option<&str>)
 }
 
 fn split_package_specifier(specifier: &str) -> Option<(String, &str)> {
-    if specifier.is_empty() || is_relative_specifier(specifier) || is_absolute_specifier(specifier) {
+    if specifier.is_empty() || is_relative_specifier(specifier) || is_absolute_specifier(specifier)
+    {
         return None;
     }
 
@@ -1101,7 +1105,9 @@ mod tests {
 
     impl ProjectResolverReader for TestReader {
         fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
-            self.texts.get(&normalize_canonical_id(canonical_id)).cloned()
+            self.texts
+                .get(&normalize_canonical_id(canonical_id))
+                .cloned()
         }
 
         fn file_exists(&self, canonical_id: &str) -> bool {
@@ -1117,19 +1123,6 @@ mod tests {
                         .then(|| normalize_canonical_id(canonical_id))
                 })
         }
-    }
-
-    #[test]
-    fn unconfigured_project_resolver_returns_none() {
-        let resolver = UnconfiguredProjectResolver;
-        let request = ResolveRequest {
-            importer_id: "/src/App.vue".to_string(),
-            specifier: "./child".to_string(),
-            kind: ResolveRequestKind::TypeImport,
-            phase: ResolvePhase::CodegenBlocker,
-        };
-
-        assert_eq!(resolver.resolve(&request), None);
     }
 
     #[test]
@@ -1378,7 +1371,10 @@ mod tests {
         );
         app_project.compiler_options = IdeProjectCompilerOptions {
             base_url: Some("/workspace/src".to_string()),
-            paths: vec![("shared".to_string(), vec!["../generated/shared".to_string()])],
+            paths: vec![(
+                "shared".to_string(),
+                vec!["../generated/shared".to_string()],
+            )],
         };
         let resolver = NativeProjectResolver::new(vec![app_project]);
         let reader =
@@ -1399,7 +1395,10 @@ mod tests {
         assert_eq!(resolved.source_id, "/workspace/generated/shared.ts");
         assert_eq!(resolved.resolution_kind, ResolutionKind::TsConfigPath);
         assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
-        assert_eq!(resolved.provider_specifier, "../generated/shared.__verter__.ts");
+        assert_eq!(
+            resolved.provider_specifier,
+            "../generated/shared.__verter__.ts"
+        );
         assert!(
             !resolved.provider_id.ends_with("/src/shared.__verter__.ts"),
             "baseUrl fallback must not win when tsconfig paths has a match: {}",
@@ -1449,7 +1448,10 @@ mod tests {
             ProjectMembership::MatchAll,
         )]);
         let mut reader = TestReader::with_files(&["/workspace/src/linked/util.ts"]);
-        reader.add_realpath("/workspace/src/linked/util.ts", "/workspace/src/shared/util.ts");
+        reader.add_realpath(
+            "/workspace/src/linked/util.ts",
+            "/workspace/src/shared/util.ts",
+        );
 
         let resolved = resolver
             .resolve_with_reader(
@@ -1468,7 +1470,9 @@ mod tests {
         assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
         assert_eq!(resolved.provider_specifier, "./shared/util.__verter__.ts");
         assert!(
-            resolved.provider_id.ends_with("/src/shared/util.__verter__.ts"),
+            resolved
+                .provider_id
+                .ends_with("/src/shared/util.__verter__.ts"),
             "provider path should be derived from the canonical realpath target: {}",
             resolved.provider_id
         );
@@ -1521,7 +1525,10 @@ mod tests {
             .provider_id_for_source("/workspace/packages/app/src/App.ts")
             .expect("importer should receive a provider path");
 
-        assert_eq!(resolved.source_id, "/workspace/packages/shared/src/index.ts");
+        assert_eq!(
+            resolved.source_id,
+            "/workspace/packages/shared/src/index.ts"
+        );
         assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
         assert_eq!(resolved.provider_id, expected_provider_id);
         assert_eq!(
@@ -1609,7 +1616,10 @@ mod tests {
             )
             .expect("package exports should resolve package root imports");
 
-        assert_eq!(resolved.source_id, "/workspace/node_modules/lib/dist/index.d.ts");
+        assert_eq!(
+            resolved.source_id,
+            "/workspace/node_modules/lib/dist/index.d.ts"
+        );
         assert_eq!(resolved.resolution_kind, ResolutionKind::PackageExports);
         assert_eq!(resolved.provider_target, ProviderTarget::SourceFile);
         assert_eq!(resolved.provider_specifier, "lib");
@@ -1664,8 +1674,14 @@ mod tests {
             )
             .expect("require call should resolve package exports");
 
-        assert_eq!(esm.source_id, "/workspace/node_modules/lib/dist/feature.mjs");
-        assert_eq!(require.source_id, "/workspace/node_modules/lib/dist/feature.cjs");
+        assert_eq!(
+            esm.source_id,
+            "/workspace/node_modules/lib/dist/feature.mjs"
+        );
+        assert_eq!(
+            require.source_id,
+            "/workspace/node_modules/lib/dist/feature.cjs"
+        );
         assert_eq!(esm.resolution_kind, ResolutionKind::PackageExports);
         assert_eq!(require.resolution_kind, ResolutionKind::PackageExports);
         assert_ne!(
@@ -1706,7 +1722,10 @@ mod tests {
             )
             .expect("legacy package resolution should prefer typings before main");
 
-        assert_eq!(resolved.source_id, "/workspace/node_modules/legacy/dist/index.d.ts");
+        assert_eq!(
+            resolved.source_id,
+            "/workspace/node_modules/legacy/dist/index.d.ts"
+        );
         assert_eq!(resolved.resolution_kind, ResolutionKind::NodeModules);
         assert_eq!(resolved.provider_target, ProviderTarget::SourceFile);
         assert_eq!(resolved.provider_specifier, "legacy");
@@ -1741,7 +1760,10 @@ mod tests {
             )
             .expect("legacy package resolution should fall back to main when no types exist");
 
-        assert_eq!(resolved.source_id, "/workspace/node_modules/legacy-main/dist/index.js");
+        assert_eq!(
+            resolved.source_id,
+            "/workspace/node_modules/legacy-main/dist/index.js"
+        );
         assert_eq!(resolved.resolution_kind, ResolutionKind::NodeModules);
         assert_eq!(resolved.provider_target, ProviderTarget::SourceFile);
         assert_eq!(resolved.provider_specifier, "legacy-main");

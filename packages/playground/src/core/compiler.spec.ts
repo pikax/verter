@@ -6,7 +6,13 @@ import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
-import { mergeRenderIntoComponent, formatDiagnostics, applyTsxOutput } from "./compiler";
+import {
+  mergeRenderIntoComponent,
+  formatDiagnostics,
+  applyTsxOutput,
+  resolveKnownModuleReferenceDependencies,
+  type HostModuleReference,
+} from "./compiler";
 import { File } from "./types";
 import { combineSourceMaps, lookupGenerated, lookupSource, parseMappings } from "./sourcemap";
 
@@ -87,6 +93,7 @@ declare module "@verter/types" {
   export type ExtractRenderComponent<T> = T extends { new (): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
   export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
+  export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
 }
 `;
@@ -191,6 +198,61 @@ describe("formatDiagnostics", () => {
     expect(result).toHaveLength(2);
     expect(result[0]).toBe("[error] first");
     expect(result[1]).toBe("[warning] second (1:2)");
+  });
+});
+
+describe("resolveKnownModuleReferenceDependencies", () => {
+  it("keeps exact and finite known files while skipping unknown dynamic references", () => {
+    const files = {
+      "src/App.vue": new File("src/App.vue"),
+      "src/exact.ts": new File("src/exact.ts"),
+      "src/components/Foo.vue": new File("src/components/Foo.vue"),
+      "src/utils/index.ts": new File("src/utils/index.ts"),
+    };
+    const moduleReferences: HostModuleReference[] = [
+      {
+        syntax: "staticImport",
+        semantics: "import",
+        isTypeOnly: false,
+        rawText: "'./exact'",
+        literalSpecifier: "./exact",
+        finiteSpecifiers: [],
+        analyzability: "exact",
+        spanStart: 0,
+        spanEnd: 8,
+        exprSpanStart: 0,
+        exprSpanEnd: 8,
+      },
+      {
+        syntax: "dynamicImport",
+        semantics: "import",
+        isTypeOnly: false,
+        rawText: "`./${name}`",
+        finiteSpecifiers: ["./components/Foo.vue", "./utils", "./exact"],
+        analyzability: "finiteSet",
+        spanStart: 10,
+        spanEnd: 24,
+        exprSpanStart: 10,
+        exprSpanEnd: 24,
+      },
+      {
+        syntax: "dynamicImport",
+        semantics: "import",
+        isTypeOnly: false,
+        rawText: "`./${name}.vue`",
+        finiteSpecifiers: [],
+        staticPrefix: "./",
+        analyzability: "unknownDynamic",
+        spanStart: 26,
+        spanEnd: 42,
+        exprSpanStart: 26,
+        exprSpanEnd: 42,
+      },
+    ];
+
+    expect(
+      resolveKnownModuleReferenceDependencies("src/App.vue", moduleReferences, files),
+    ).toEqual(["src/exact.ts", "src/components/Foo.vue", "src/utils/index.ts"]);
   });
 });
 
@@ -387,6 +449,67 @@ describe("applyTsxOutput", () => {
   });
 });
 
+describe("moduleReferences dependency syncing", () => {
+  it("manual host sync resolves exact type dependencies from the in-memory file map", async () => {
+    const host = await loadWasmHost();
+    const uniqueId = `module-refs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const app = new File(
+      `fixtures/${uniqueId}/App.vue`,
+      `<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>ok</div></template>`,
+    );
+    const types = new File(
+      `fixtures/${uniqueId}/types.ts`,
+      `export interface Props {
+  name: string
+  count: number
+}
+`,
+    );
+    const files = {
+      [app.filename]: app,
+      [types.filename]: types,
+    };
+    const profile = { sourceMap: true, target: "bundler" };
+
+    const upsert = host.upsert({
+      inputId: app.filename,
+      source: app.code,
+      fileKind: "vue",
+      aliases: [],
+      compileProfile: profile,
+    });
+    const deps = resolveKnownModuleReferenceDependencies(
+      app.filename,
+      upsert.moduleReferences,
+      files,
+    );
+
+    expect(deps).toEqual([types.filename]);
+
+    host.upsert({
+      inputId: types.filename,
+      source: types.code,
+      fileKind: "non_sfc",
+      aliases: [],
+      compileProfile: profile,
+    });
+    host.setImportDependencies(app.filename, deps);
+
+    const main = host.getVirtualFile({
+      rawId: app.filename,
+      compileProfile: profile,
+    });
+
+    expect(main.diagnostics.diagnostics).toEqual([]);
+    expect(main.code).toContain("name");
+    expect(main.code).toContain("count");
+  });
+});
+
 describe("generated TSX TypeScript semantics", () => {
   it("type-checks v-on object syntax after key rewrite", async () => {
     const source = `<script setup lang="ts">
@@ -525,6 +648,11 @@ const msg = 'hello'
 interface VirtualFile {
   code: string;
   sourceMap?: string;
+  diagnostics: { diagnostics: Array<unknown> };
+}
+
+interface WasmHostUpsertResult {
+  moduleReferences?: HostModuleReference[];
 }
 
 interface WasmHost {
@@ -534,12 +662,13 @@ interface WasmHost {
     fileKind: string;
     aliases: string[];
     compileProfile: Record<string, unknown>;
-  }): unknown;
+  }): WasmHostUpsertResult;
   getVirtualFile(query: {
     rawId: string;
     compileProfile?: Record<string, unknown>;
   }): VirtualFile;
   listVirtualFiles(canonicalId: string): Array<{ kind: string; index?: number }>;
+  setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void;
 }
 
 async function loadWasmHost(): Promise<WasmHost> {

@@ -15,7 +15,24 @@ const mockCompile = vi.fn(() => MOCK_RESULT);
 const mockCompileBytes = vi.fn(() => MOCK_RESULT);
 const mockInit = vi.fn(async () => {});
 const mockHostResolve = vi.fn(() => null);
-const mockHostUpsert = vi.fn(() => ({ changed: true }));
+const mockHostUpsert = vi.fn(() => ({
+  changed: true,
+  moduleReferences: [
+    {
+      syntax: "dynamicImport",
+      semantics: "import",
+      isTypeOnly: false,
+      rawText: "'./Foo.vue'",
+      literalSpecifier: "./Foo.vue",
+      finiteSpecifiers: [],
+      analyzability: "exact",
+      spanStart: 0,
+      spanEnd: 10,
+      exprSpanStart: 0,
+      exprSpanEnd: 10,
+    },
+  ],
+}));
 const mockHostApplyStyleOverrides = vi.fn(() => ({ changed: true }));
 const mockHostGetVirtualFile = vi.fn(() => ({ code: "virtual", diagnostics: { diagnostics: [] } }));
 const mockHostListVirtualFiles = vi.fn(() => []);
@@ -132,12 +149,13 @@ describe("Uint8Array input support", () => {
       const host = await createHost({ devMode: true });
 
       host.resolve("Comp.vue");
-      host.upsert({ inputId: "Comp.vue", source: "<template/>", fileKind: "vue" });
+      const upsert = host.upsert({ inputId: "Comp.vue", source: "<template/>", fileKind: "vue" });
       host.applyStyleOverrides({ canonicalId: "Comp.vue", overrides: [] });
       host.getVirtualFile({ rawId: "Comp.vue" });
       host.listVirtualFiles("Comp.vue");
       host.remove("Comp.vue");
 
+      expect(upsert.moduleReferences[0].literalSpecifier).toBe("./Foo.vue");
       expect(mockHostCtor).toHaveBeenCalledWith({ devMode: true });
       expect(mockHostResolve).toHaveBeenCalledWith("Comp.vue");
       expect(mockHostUpsert).toHaveBeenCalled();

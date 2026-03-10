@@ -34,6 +34,10 @@ use crate::features::organize_imports::organize_imports_actions;
 use crate::features::references::references_at_position;
 use crate::features::rename::{prepare_rename, rename_at_position};
 use crate::features::workspace_symbol::workspace_symbols;
+use crate::provider_sync::{
+    commit_sync_transition, prepare_sync_transition, remove_sync_state, ProviderPathKind,
+    ProviderSyncState, ResolverSnapshot,
+};
 use crate::project_resolver::ProjectResolverReader;
 use crate::statistics::Statistics;
 use crate::tsgo::merge;
@@ -377,6 +381,13 @@ struct TypeProviderContext {
     vue_line_index: LineIndex,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedNonVueProviderSync {
+    provider_path: String,
+    rewritten: String,
+    resolved_dependencies: Vec<crate::project_resolver::ResolveResult>,
+}
+
 /// The Verter language server implementation.
 ///
 /// Wraps `verter_host` for SFC analysis and optionally a `TypeProvider`
@@ -404,6 +415,9 @@ pub struct VerterLanguageServer {
     /// Initialized during `initialized()` from workspace roots.
     /// Arc-wrapped so background init can commit the registry without &self.
     project_registry: Arc<parking_lot::RwLock<Option<crate::config::ProjectRegistry>>>,
+    /// The current native resolver snapshot used by all provider-path and dependency sync work.
+    /// Swapped atomically after background initialization completes.
+    resolver_snapshot: Arc<parking_lot::RwLock<Option<ResolverSnapshot>>>,
     /// Fallback linter for files outside any project. Uses default config.
     /// Arc-wrapped so background init can update it without &self.
     fallback_linter: Arc<parking_lot::RwLock<verter_diagnostics::Linter>>,
@@ -420,12 +434,8 @@ pub struct VerterLanguageServer {
     /// for the same document version. Arc-wrapped so the SyncCoordinator can read
     /// cached verter diagnostics when publishing merged diagnostics after sync.
     cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
-    /// Set of TSX paths (e.g., "C:/project/src/Foo.vue.tsx") that were synced to the
-    /// type provider as background files during workspace scan.  When `did_open()` is
-    /// called for one of these files, we use `sync_tsx()` (update) instead of
-    /// `open_tsx()` to avoid "already open" errors.  When `did_close()` fires, we keep
-    /// the file alive in the provider instead of closing it.
-    background_synced_files: Arc<DashMap<String, ()>>,
+    /// Source-keyed provider materialization state shared across background/live sync.
+    provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     /// Which type provider backend is active (TSGO, tsserver, or none).
     type_provider_kind: crate::TypeProviderKind,
     /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
@@ -437,6 +447,9 @@ pub struct VerterLanguageServer {
     /// Canonical IDs of files needing provider sync (set in did_change, cleared after sync).
     /// Prevents flooding the type provider with updates during rapid typing.
     needs_provider_sync: Arc<DashSet<String>>,
+    /// Source IDs whose provider sync depends on a resolver snapshot that is not ready yet.
+    /// Drained after background initialization commits a new snapshot.
+    pending_snapshot_provider_sync: Arc<DashSet<String>>,
     /// Handle for the SyncCoordinator — replaces the spawn-per-keystroke debounce.
     /// Signals are sent per keystroke; the coordinator coalesces them and syncs
     /// after 300ms of silence. `None` when no type provider is connected.
@@ -483,9 +496,12 @@ impl VerterLanguageServer {
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
         let project_registry = Arc::new(parking_lot::RwLock::new(None));
+        let resolver_snapshot = Arc::new(parking_lot::RwLock::new(None));
         let fallback_linter = Arc::new(parking_lot::RwLock::new(
             verter_diagnostics::Linter::default(),
         ));
+        let provider_sync_states = Arc::new(DashMap::new());
+        let pending_snapshot_provider_sync = Arc::new(DashSet::new());
 
         // Create SyncCoordinator if a type provider is connected.
         // The coordinator's debounced loop replaces the old spawn-per-keystroke pattern.
@@ -499,6 +515,8 @@ impl VerterLanguageServer {
                     type_provider: config.type_provider.clone(),
                     cached_verter_diags: Arc::clone(&cached_verter_diags),
                     position_encoding: Arc::clone(&position_encoding),
+                    resolver_snapshot: Arc::clone(&resolver_snapshot),
+                    provider_sync_states: Arc::clone(&provider_sync_states),
                     project_registry: Arc::clone(&project_registry),
                     fallback_linter: Arc::clone(&fallback_linter),
                 },
@@ -514,17 +532,19 @@ impl VerterLanguageServer {
             statistics: Arc::new(Statistics::new(500)),
             position_encoding,
             project_registry,
+            resolver_snapshot,
             fallback_linter,
             action_engine: verter_actions::ActionEngine::default(),
             init_lint_options: tokio::sync::Mutex::new(None),
             vite_config_enabled: std::sync::atomic::AtomicBool::new(true),
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             cached_verter_diags,
-            background_synced_files: Arc::new(DashMap::new()),
+            provider_sync_states,
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
             completion_generation: std::sync::atomic::AtomicU64::new(0),
             needs_provider_sync,
+            pending_snapshot_provider_sync,
             sync_coordinator,
             last_change_ms: std::sync::atomic::AtomicU64::new(0),
             did_change_mutex: tokio::sync::Mutex::new(()),
@@ -675,11 +695,29 @@ impl VerterLanguageServer {
             .timer("ide_sync", Some(uri.as_str().to_string()));
         if let Some(sync) = &self.project_sync {
             if let Some(ide) = self.documents.get_ide(uri) {
-                let ide_path = self.ide_path_for_uri(uri);
+                let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+                    return;
+                };
+                let Some(transition) =
+                    self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                else {
+                    self.pending_snapshot_provider_sync.insert(canonical_id);
+                    tracing::debug!(
+                        "sync_ide: resolver snapshot unavailable for {}",
+                        uri.as_str()
+                    );
+                    return;
+                };
+                self.close_provider_paths(&transition.stale_paths).await;
+                let mut committed_state = transition.next;
+                let Some(ide_path) = committed_state.ide_path.clone() else {
+                    return;
+                };
                 tracing::info!("sync_ide: {} ({} bytes)", ide_path, ide.code.len());
                 if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
                     tracing::warn!("sync_ide: failed for {ide_path}: {e}");
                 } else {
+                    self.commit_provider_sync_state(&canonical_id, committed_state.clone());
                     tracing::info!("sync_ide: ok for {}", ide_path);
                 }
             } else {
@@ -691,14 +729,26 @@ impl VerterLanguageServer {
     /// Sync the public API (.vue.ts) to the type provider for cross-file component resolution.
     async fn sync_api_to_provider(&self, uri: &Uri) {
         if let Some(sync) = &self.project_sync {
-            if let Some(dts_path) = self.dts_path_for_uri(uri) {
-                let canonical_id = match self.documents.get_canonical_id(uri) {
-                    Some(id) => id,
-                    None => return,
-                };
+            let canonical_id = match self.documents.get_canonical_id(uri) {
+                Some(id) => id,
+                None => return,
+            };
+            let Some(mut transition) = self
+                .documents
+                .get_ide(uri)
+                .and_then(|ide| self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx))
+                .or_else(|| self.prepare_vue_provider_sync_transition(&canonical_id, self.documents.is_jsx(uri)))
+            else {
+                self.pending_snapshot_provider_sync.insert(canonical_id);
+                return;
+            };
+            self.close_provider_paths(&transition.stale_paths).await;
+            if let Some(dts_path) = transition.next.api_path.clone() {
                 if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
                     if let Err(e) = sync.sync_dts(&dts_path, &api.code).await {
                         tracing::warn!("sync_api: failed for {dts_path}: {e}");
+                    } else {
+                        self.commit_provider_sync_state(&canonical_id, transition.next.clone());
                     }
                 }
             }
@@ -711,6 +761,84 @@ impl VerterLanguageServer {
         } else {
             self.resync_background_vue_file(canonical_id).await;
         }
+    }
+
+    async fn sync_non_vue_file_to_provider(
+        &self,
+        snapshot: &ResolverSnapshot,
+        canonical_id: &str,
+        source: Arc<str>,
+        module_references: &[verter_host::ScriptModuleReference],
+    ) {
+        let reader = LspProjectResolverReader::new(&self.documents);
+        let Some(prepared) = prepare_non_vue_provider_sync(
+            Some(snapshot),
+            &reader,
+            canonical_id,
+            &source,
+            module_references,
+        ) else {
+            return;
+        };
+
+        if let Some(sync) = &self.project_sync {
+            if let Some(transition) = self.prepare_non_vue_provider_sync_transition(canonical_id) {
+                self.close_provider_paths(&transition.stale_paths).await;
+                if let Err(error) = sync
+                    .sync_file(&prepared.provider_path, &prepared.rewritten)
+                    .await
+                {
+                    tracing::warn!(
+                        "failed to sync provider shadow file {}: {error}",
+                        prepared.provider_path
+                    );
+                } else {
+                    self.commit_provider_sync_state(canonical_id, transition.next);
+                }
+            } else if let Err(error) = sync
+                .sync_file(&prepared.provider_path, &prepared.rewritten)
+                .await
+            {
+                tracing::warn!(
+                    "failed to sync provider shadow file {}: {error}",
+                    prepared.provider_path
+                );
+            }
+        }
+
+        if !prepared.resolved_dependencies.is_empty() {
+            self.documents.host.set_import_dependencies(
+                canonical_id,
+                prepared
+                    .resolved_dependencies
+                    .iter()
+                    .map(|entry| entry.source_id.clone())
+                    .collect(),
+            );
+        }
+
+        let vue_targets = prepared
+            .resolved_dependencies
+            .iter()
+            .filter(|dependency| dependency.file_kind == verter_host::FileKind::VueSfc)
+            .map(|dependency| dependency.source_id.clone())
+            .collect::<Vec<_>>();
+        for vue_target in vue_targets {
+            self.sync_vue_public_api_by_canonical_id(&vue_target).await;
+        }
+
+        let non_vue_targets = prepared
+            .resolved_dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency.file_kind == verter_host::FileKind::NonSfc
+                    && dependency.provider_target
+                        == crate::project_resolver::ProviderTarget::ShadowSourceFile
+            })
+            .map(|dependency| dependency.source_id.clone())
+            .collect::<Vec<_>>();
+        self.sync_non_vue_provider_graph(&snapshot.resolver, non_vue_targets)
+            .await;
     }
 
     async fn sync_non_vue_provider_graph(
@@ -748,27 +876,43 @@ impl VerterLanguageServer {
                 .map(|result| result.module_references)
                 .unwrap_or_default();
 
-            let rewritten = rewrite_non_vue_source_for_provider_with_resolver(
-                resolver,
+            let Some(prepared) = prepare_non_vue_provider_sync(
+                Some(&ResolverSnapshot {
+                    generation: 0,
+                    resolver: resolver.clone(),
+                }),
                 &reader,
                 &canonical_id,
                 &source,
                 &module_references,
-            );
-            let provider_path = resolver
-                .provider_id_for_source(&canonical_id)
-                .unwrap_or_else(|| canonical_id.clone());
+            ) else {
+                continue;
+            };
 
-            if let Err(e) = sync.sync_file(&provider_path, &rewritten).await {
-                tracing::warn!("failed to sync provider shadow file {provider_path}: {e}");
+            if let Some(transition) = self.prepare_non_vue_provider_sync_transition(&canonical_id) {
+                self.close_provider_paths(&transition.stale_paths).await;
+                if let Err(error) = sync
+                    .sync_file(&prepared.provider_path, &prepared.rewritten)
+                    .await
+                {
+                    tracing::warn!(
+                        "failed to sync provider shadow file {}: {error}",
+                        prepared.provider_path
+                    );
+                } else {
+                    self.commit_provider_sync_state(&canonical_id, transition.next);
+                }
+            } else if let Err(error) = sync
+                .sync_file(&prepared.provider_path, &prepared.rewritten)
+                .await
+            {
+                tracing::warn!(
+                    "failed to sync provider shadow file {}: {error}",
+                    prepared.provider_path
+                );
             }
 
-            let resolved_dependencies = collect_resolved_provider_dependencies(
-                resolver,
-                &reader,
-                &canonical_id,
-                &module_references,
-            );
+            let resolved_dependencies = prepared.resolved_dependencies;
             if !resolved_dependencies.is_empty() {
                 self.documents.host.set_import_dependencies(
                     &canonical_id,
@@ -799,16 +943,39 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(&uri) else {
             return;
         };
-        let resolver = self.native_project_resolver();
-        let Some(dts_path) = provider_api_path_for_source(resolver.as_ref(), &canonical_id) else {
+        if self.resolver_snapshot().is_none() {
+            self.pending_snapshot_provider_sync.insert(canonical_id);
+            return;
+        }
+        let Some(transition) = self.prepare_vue_provider_sync_transition(&canonical_id, self.documents.is_jsx(&uri)) else {
+            self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
         };
+        let dts_path = match transition.next.api_path.clone() {
+            Some(path) => path,
+            None => return,
+        };
         let host = self.documents.host_arc();
+        let provider_sync_states = Arc::clone(&self.provider_sync_states);
         tokio::spawn(async move {
+            for (kind, path) in &transition.stale_paths {
+                let result = match kind {
+                    ProviderPathKind::Ide => sync.close_tsx(path).await,
+                    ProviderPathKind::Api => sync.close_dts(path).await,
+                    ProviderPathKind::Shadow => sync.close_file(path).await,
+                };
+                if let Err(error) = result {
+                    tracing::warn!(
+                        "sync_api(background): failed to close stale provider path {path}: {error}"
+                    );
+                }
+            }
             let api = tokio::task::block_in_place(|| host.get_public_api(&canonical_id));
             if let Some(api) = api {
                 if let Err(e) = sync.sync_dts(&dts_path, &api.code).await {
                     tracing::warn!("sync_api(background): failed for {dts_path}: {e}");
+                } else {
+                    commit_sync_transition(&provider_sync_states, &canonical_id, transition.next);
                 }
             }
         });
@@ -819,6 +986,12 @@ impl VerterLanguageServer {
     /// before making a query. Uses a tight timeout to avoid blocking interactive requests.
     async fn ensure_provider_synced(&self, uri: &Uri) {
         if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+            if self.resolver_snapshot().is_none() {
+                self.pending_snapshot_provider_sync
+                    .insert(canonical_id.clone());
+                self.needs_provider_sync.insert(canonical_id);
+                return;
+            }
             if self.needs_provider_sync.remove(&canonical_id).is_some() {
                 tracing::info!(
                     "ensure_provider_synced: flushing pending sync for {}",
@@ -886,28 +1059,22 @@ impl VerterLanguageServer {
             tracing::info!("ide_context: no position mapper for {}", uri.as_str());
             return None;
         }
-        let ide_path = self.ide_path_for_uri(uri);
+        let ide_path = self.ide_path_for_uri(uri)?;
         Some((ide_path, ide.code, mapper.unwrap()))
     }
 
-    fn native_project_resolver(&self) -> Option<crate::project_resolver::NativeProjectResolver> {
-        let registry = self.project_registry.read();
-        registry
-            .as_ref()
-            .map(crate::config::ProjectRegistry::to_native_project_resolver)
+    fn resolver_snapshot(&self) -> Option<ResolverSnapshot> {
+        self.resolver_snapshot.read().clone()
     }
 
     /// Generate the IDE file path (.tsx or .jsx) for a given Vue file URI.
-    fn ide_path_for_uri(&self, uri: &Uri) -> String {
+    fn ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
         let canonical = self
             .documents
             .get_canonical_id(uri)
             .unwrap_or_else(|| uri.as_str().to_string());
-        provider_ide_path_for_source(
-            self.native_project_resolver().as_ref(),
-            &canonical,
-            self.documents.is_jsx(uri),
-        )
+        let snapshot = self.resolver_snapshot()?;
+        provider_ide_path_for_source(&snapshot.resolver, &canonical, self.documents.is_jsx(uri))
     }
 
     /// Generate the DTS declaration file path (.vue.ts) for a given Vue file URI.
@@ -915,13 +1082,14 @@ impl VerterLanguageServer {
     /// `import('./Comp.vue')` resolves to `./Comp.vue.ts`
     fn dts_path_for_uri(&self, uri: &Uri) -> Option<String> {
         let canonical = self.documents.get_canonical_id(uri)?;
-        provider_api_path_for_source(self.native_project_resolver().as_ref(), &canonical)
+        let snapshot = self.resolver_snapshot()?;
+        provider_api_path_for_source(&snapshot.resolver, &canonical)
     }
 
     /// Get IDE content and mapper by IDE path (reverse lookup).
     fn ide_context_by_path(&self, ide_path: &str) -> Option<(String, Arc<str>, PositionMapper)> {
-        let binding = self.native_project_resolver();
-        let canonical_id = source_id_from_provider_vue_path(binding.as_ref(), ide_path)?;
+        let snapshot = self.resolver_snapshot()?;
+        let canonical_id = source_id_from_provider_vue_path(&snapshot.resolver, ide_path)?;
         let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
         self.ide_context(&uri)
     }
@@ -1026,8 +1194,8 @@ impl VerterLanguageServer {
         let (_tsx_path, tsx_content, mapper) = self.ide_context_by_path(ide_path)?;
         let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
         // Get the Vue file's line index
-        let binding = self.native_project_resolver();
-        let canonical_id = source_id_from_provider_vue_path(binding.as_ref(), ide_path)?;
+        let snapshot = self.resolver_snapshot()?;
+        let canonical_id = source_id_from_provider_vue_path(&snapshot.resolver, ide_path)?;
         let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
         let doc = self.documents.get(&uri)?;
         Some(merge::ExternalIdeContext {
@@ -1056,9 +1224,88 @@ impl VerterLanguageServer {
 
     /// Find the Vue URI corresponding to an IDE path.
     fn vue_uri_from_ide_path(&self, ide_path: &str) -> Option<Uri> {
-        let binding = self.native_project_resolver();
-        let canonical_id = source_id_from_provider_vue_path(binding.as_ref(), ide_path)?;
+        let snapshot = self.resolver_snapshot()?;
+        let canonical_id = source_id_from_provider_vue_path(&snapshot.resolver, ide_path)?;
         self.documents.canonical_id_to_uri(&canonical_id)
+    }
+
+    fn queue_snapshot_provider_sync(&self, canonical_id: impl Into<String>) {
+        self.pending_snapshot_provider_sync
+            .insert(canonical_id.into());
+    }
+
+    fn provider_sync_state_for_source(&self, canonical_id: &str) -> Option<ProviderSyncState> {
+        self.provider_sync_states
+            .get(canonical_id)
+            .map(|entry| entry.clone())
+    }
+
+    fn prepare_vue_provider_sync_transition(
+        &self,
+        canonical_id: &str,
+        is_jsx: bool,
+    ) -> Option<crate::provider_sync::ProviderSyncTransition> {
+        let snapshot = self.resolver_snapshot()?;
+        let next_state =
+            crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)?;
+        Some(prepare_sync_transition(
+            &self.provider_sync_states,
+            canonical_id,
+            next_state,
+        ))
+    }
+
+    fn prepare_non_vue_provider_sync_transition(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::provider_sync::ProviderSyncTransition> {
+        let snapshot = self.resolver_snapshot()?;
+        let next_state =
+            crate::provider_sync::non_vue_sync_state_for_source(&snapshot.resolver, canonical_id)?;
+        Some(prepare_sync_transition(
+            &self.provider_sync_states,
+            canonical_id,
+            next_state,
+        ))
+    }
+
+    fn commit_provider_sync_state(&self, canonical_id: &str, state: ProviderSyncState) {
+        commit_sync_transition(&self.provider_sync_states, canonical_id, state);
+    }
+
+    fn remove_provider_sync_state(&self, canonical_id: &str) -> Option<ProviderSyncState> {
+        remove_sync_state(&self.provider_sync_states, canonical_id)
+    }
+
+    fn is_background_loaded_for_source_kind(
+        &self,
+        canonical_id: &str,
+        kind: ProviderPathKind,
+    ) -> bool {
+        self.provider_sync_state_for_source(canonical_id)
+            .map(|state| state.background_loaded_for_kind(kind))
+            .unwrap_or(false)
+    }
+
+    async fn close_provider_paths(&self, paths: &[(ProviderPathKind, String)]) {
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+        for (kind, path) in paths {
+            let result = match kind {
+                ProviderPathKind::Ide => sync.close_tsx(path).await,
+                ProviderPathKind::Api => sync.close_dts(path).await,
+                ProviderPathKind::Shadow => sync.close_file(path).await,
+            };
+            if let Err(error) = result {
+                tracing::warn!("failed to close provider path {path}: {error}");
+            }
+        }
+    }
+
+    async fn close_provider_state(&self, state: &ProviderSyncState) {
+        let paths = state.active_paths();
+        self.close_provider_paths(&paths).await;
     }
 
     /// Resolve a child component's analysis from an import source path.
@@ -1135,7 +1382,7 @@ impl VerterLanguageServer {
         let source_uri: Uri = source_uri_str.parse().ok()?;
 
         // Get the TSX path from the source .vue file
-        let tsx_path = self.ide_path_for_uri(&source_uri);
+        let tsx_path = self.ide_path_for_uri(&source_uri)?;
 
         // Build LineIndex from the virtual file's content (for offset conversion)
         let doc = self.documents.get(uri)?;
@@ -1186,92 +1433,16 @@ impl VerterLanguageServer {
                 .map(|result| result.module_references)
                 .unwrap_or_default();
 
-            let native_resolver = {
-                let registry_guard = self.project_registry.read();
-                registry_guard
-                    .as_ref()
-                    .map(crate::config::ProjectRegistry::to_native_project_resolver)
-            };
-            let reader = LspProjectResolverReader::new(&self.documents);
-            let (provider_path, rewritten, resolved_dependencies) =
-                if let Some(resolver) = native_resolver.as_ref() {
-                    (
-                        resolver
-                            .provider_id_for_source(&path)
-                            .unwrap_or_else(|| path.clone()),
-                        rewrite_non_vue_source_for_provider_with_resolver(
-                            resolver,
-                            &reader,
-                            &path,
-                            &last.text,
-                            &module_references,
-                        ),
-                        collect_resolved_provider_dependencies(
-                            resolver,
-                            &reader,
-                            &path,
-                            &module_references,
-                        ),
-                    )
-                } else {
-                    (
-                        path.clone(),
-                        rewrite_non_vue_source_for_provider(&last.text, &module_references),
-                        Vec::new(),
-                    )
-                };
-
-            if let Some(sync) = &self.project_sync {
-                if let Err(e) = sync.sync_file(&provider_path, &rewritten).await {
-                    tracing::warn!("failed to sync file in type provider: {e}");
-                }
-            }
-
-            let vue_targets: Vec<String> = if resolved_dependencies.is_empty() {
-                collect_exact_and_finite_vue_specifiers(&module_references)
-                    .into_iter()
-                    .filter_map(|specifier| {
-                        resolve_vue_specifier_target(&self.project_registry, &path, &specifier)
-                    })
-                    .collect()
+            if let Some(snapshot) = self.resolver_snapshot() {
+                self.sync_non_vue_file_to_provider(
+                    &snapshot,
+                    &path,
+                    Arc::from(last.text.as_str()),
+                    &module_references,
+                )
+                .await;
             } else {
-                resolved_dependencies
-                    .iter()
-                    .filter(|dependency| dependency.file_kind == verter_host::FileKind::VueSfc)
-                    .map(|dependency| dependency.source_id.clone())
-                    .collect()
-            };
-
-            let resolved_workspace_deps: Vec<String> = if resolved_dependencies.is_empty() {
-                vue_targets.clone()
-            } else {
-                resolved_dependencies
-                    .iter()
-                    .map(|dependency| dependency.source_id.clone())
-                    .collect()
-            };
-
-            if !resolved_workspace_deps.is_empty() {
-                self.documents
-                    .host
-                    .set_import_dependencies(&path, resolved_workspace_deps);
-            }
-
-            for vue_target in vue_targets {
-                self.sync_vue_public_api_by_canonical_id(&vue_target).await;
-            }
-
-            if let Some(resolver) = native_resolver.as_ref() {
-                let non_vue_targets = resolved_dependencies
-                    .iter()
-                    .filter(|dependency| {
-                        dependency.file_kind == verter_host::FileKind::NonSfc
-                            && dependency.provider_target
-                                == crate::project_resolver::ProviderTarget::ShadowSourceFile
-                    })
-                    .map(|dependency| dependency.source_id.clone())
-                    .collect::<Vec<_>>();
-                self.sync_non_vue_provider_graph(resolver, non_vue_targets).await;
+                self.queue_snapshot_provider_sync(path);
             }
         }
     }
@@ -1297,30 +1468,17 @@ impl VerterLanguageServer {
                 }
                 "delete" => {
                     // Close TSX/DTS in the type provider and clean up.
-                    if let Some(sync) = &self.project_sync {
-                        let is_tsgo =
-                            matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
-                        if !is_tsgo {
+                    if let Some(state) = self
+                        .remove_provider_sync_state(&canonical_id)
+                        .or_else(|| {
                             let profile = self.documents.tsx_profile.read().clone();
-                            if let Some(ide) = self.documents.host.get_ide(&canonical_id, &profile)
-                            {
-                                let resolver = self.native_project_resolver();
-                                let tsx_path = provider_ide_path_for_source(
-                                    resolver.as_ref(),
-                                    &canonical_id,
-                                    ide.is_jsx,
-                                );
-                                let _ = sync.close_tsx(&tsx_path).await;
-                                self.background_synced_files.remove(&tsx_path);
-                            }
-                        }
-                        if let Some(dts_path) = provider_api_path_for_source(
-                            self.native_project_resolver().as_ref(),
-                            &canonical_id,
-                        ) {
-                            let _ = sync.close_dts(&dts_path).await;
-                            self.background_synced_files.remove(&dts_path);
-                        }
+                            self.documents.host.get_ide(&canonical_id, &profile).and_then(|ide| {
+                                self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                                    .map(|transition| transition.next)
+                            })
+                        })
+                    {
+                        self.close_provider_state(&state).await;
                     }
                     self.documents.host.remove(&canonical_id);
                 }
@@ -1381,21 +1539,28 @@ impl VerterLanguageServer {
         // For tsserver: sync IDE files (TS plugin resolves .vue → .vue.tsx).
         if let Some(sync) = &self.project_sync {
             let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
-            let resolver = self.native_project_resolver();
+            let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) else {
+                return;
+            };
+            let Some(transition) = self.prepare_vue_provider_sync_transition(canonical_id, ide.is_jsx) else {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return;
+            };
+            self.close_provider_paths(&transition.stale_paths).await;
+            let mut committed_state = transition.next;
 
             if !is_tsgo {
                 // tsserver: sync IDE output
-                if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
-                    let tsx_path =
-                        provider_ide_path_for_source(resolver.as_ref(), canonical_id, ide.is_jsx);
-                    let is_bg = self.background_synced_files.contains_key(&tsx_path);
+                if let Some(tsx_path) = committed_state.ide_path.clone() {
+                    let is_bg =
+                        self.is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Ide);
                     let result = if is_bg {
                         sync.sync_tsx(&tsx_path, &ide.code).await
                     } else {
                         sync.open_tsx(&tsx_path, &ide.code).await
                     };
                     if result.is_ok() {
-                        self.background_synced_files.insert(tsx_path, ());
+                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                     } else if let Err(e) = result {
                         tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
                     }
@@ -1404,12 +1569,11 @@ impl VerterLanguageServer {
 
             // Sync .vue.ts for cross-file component type resolution
             if let Some(api) = self.documents.host.get_public_api(canonical_id) {
-                let Some(dts_path) =
-                    provider_api_path_for_source(resolver.as_ref(), canonical_id)
-                else {
+                let Some(dts_path) = committed_state.api_path.clone() else {
                     return;
                 };
-                let is_bg = self.background_synced_files.contains_key(&dts_path);
+                let is_bg =
+                    self.is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Api);
                 let result = if is_tsgo {
                     // TSGO: open/update DTS so it's in TSGO's virtual FS
                     if is_bg {
@@ -1420,8 +1584,9 @@ impl VerterLanguageServer {
                 } else {
                     sync.sync_dts(&dts_path, &api.code).await
                 };
-                if result.is_ok() && is_tsgo {
-                    self.background_synced_files.insert(dts_path, ());
+                if result.is_ok() {
+                    committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                    self.commit_provider_sync_state(canonical_id, committed_state);
                 }
             }
         }
@@ -2019,43 +2184,25 @@ fn quote_wrapped_specifier(raw_text: &str, specifier: &str) -> String {
 }
 
 fn provider_ide_path_for_source(
-    resolver: Option<&crate::project_resolver::NativeProjectResolver>,
+    resolver: &crate::project_resolver::NativeProjectResolver,
     canonical_id: &str,
     is_jsx: bool,
-) -> String {
-    resolver
-        .and_then(|resolver| resolver.provider_ide_id_for_source(canonical_id, is_jsx))
-        .unwrap_or_else(|| {
-            let ext = if is_jsx { ".jsx" } else { ".tsx" };
-            format!("{canonical_id}{ext}")
-        })
+) -> Option<String> {
+    resolver.provider_ide_id_for_source(canonical_id, is_jsx)
 }
 
 fn provider_api_path_for_source(
-    resolver: Option<&crate::project_resolver::NativeProjectResolver>,
+    resolver: &crate::project_resolver::NativeProjectResolver,
     canonical_id: &str,
 ) -> Option<String> {
-    resolver
-        .and_then(|resolver| resolver.provider_id_for_source(canonical_id))
-        .or_else(|| {
-            let base = canonical_id.strip_suffix(".vue")?;
-            Some(format!("{base}.vue.ts"))
-        })
+    resolver.provider_id_for_source(canonical_id)
 }
 
 fn source_id_from_provider_vue_path(
-    resolver: Option<&crate::project_resolver::NativeProjectResolver>,
+    resolver: &crate::project_resolver::NativeProjectResolver,
     provider_path: &str,
 ) -> Option<String> {
-    resolver
-        .and_then(|resolver| resolver.source_id_from_provider_id(provider_path))
-        .or_else(|| {
-            provider_path
-                .strip_suffix(".tsx")
-                .or_else(|| provider_path.strip_suffix(".jsx"))
-                .or_else(|| provider_path.strip_suffix(".ts"))
-                .map(str::to_string)
-        })
+    resolver.source_id_from_provider_id(provider_path)
 }
 
 struct LspProjectResolverReader<'a> {
@@ -2070,10 +2217,11 @@ impl<'a> LspProjectResolverReader<'a> {
 
 impl crate::project_resolver::ProjectResolverReader for LspProjectResolverReader<'_> {
     fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.documents
-            .host()
-            .get_source(canonical_id)
-            .or_else(|| std::fs::read_to_string(canonical_id).ok().map(Arc::<str>::from))
+        self.documents.host().get_source(canonical_id).or_else(|| {
+            std::fs::read_to_string(canonical_id)
+                .ok()
+                .map(Arc::<str>::from)
+        })
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
@@ -2092,44 +2240,7 @@ impl crate::project_resolver::ProjectResolverReader for LspProjectResolverReader
     }
 }
 
-fn rewrite_non_vue_source_for_provider(
-    source: &str,
-    module_references: &[verter_host::ScriptModuleReference],
-) -> String {
-    let mut rewritten = source.to_string();
-    let mut replacements: Vec<(usize, usize, String)> = module_references
-        .iter()
-        .filter_map(|reference| {
-            if reference.analyzability != verter_analysis::ModuleReferenceAnalyzability::Exact {
-                return None;
-            }
-
-            let literal = reference.literal_specifier.as_ref()?;
-            if !literal.ends_with(".vue") {
-                return None;
-            }
-
-            let start = reference.expr_span.start as usize;
-            let end = reference.expr_span.end as usize;
-            source.get(start..end)?;
-
-            Some((
-                start,
-                end,
-                quote_wrapped_specifier(&reference.raw_text, &format!("{literal}.ts")),
-            ))
-        })
-        .collect();
-
-    replacements.sort_by(|a, b| b.0.cmp(&a.0));
-    for (start, end, replacement) in replacements {
-        rewritten.replace_range(start..end, &replacement);
-    }
-
-    rewritten
-}
-
-fn rewrite_non_vue_source_for_provider_with_resolver(
+fn rewrite_non_vue_source_with_resolver(
     resolver: &crate::project_resolver::NativeProjectResolver,
     reader: &dyn crate::project_resolver::ProjectResolverReader,
     importer_id: &str,
@@ -2173,6 +2284,36 @@ fn rewrite_non_vue_source_for_provider_with_resolver(
     }
 
     rewritten
+}
+
+fn prepare_non_vue_provider_sync(
+    snapshot: Option<&ResolverSnapshot>,
+    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    importer_id: &str,
+    source: &str,
+    module_references: &[verter_host::ScriptModuleReference],
+) -> Option<PreparedNonVueProviderSync> {
+    let snapshot = snapshot?;
+    let provider_path = snapshot.resolver.provider_id_for_source(importer_id)?;
+    let rewritten = rewrite_non_vue_source_with_resolver(
+        &snapshot.resolver,
+        reader,
+        importer_id,
+        source,
+        module_references,
+    );
+    let resolved_dependencies = collect_resolved_provider_dependencies(
+        &snapshot.resolver,
+        reader,
+        importer_id,
+        module_references,
+    );
+
+    Some(PreparedNonVueProviderSync {
+        provider_path,
+        rewritten,
+        resolved_dependencies,
+    })
 }
 
 fn collect_resolved_provider_dependencies(
@@ -2235,53 +2376,23 @@ fn module_reference_request_kind(
 ) -> crate::project_resolver::ResolveRequestKind {
     if reference.is_type_only {
         crate::project_resolver::ResolveRequestKind::TypeImport
+    } else if reference.semantics == verter_analysis::ModuleReferenceSemantics::Require {
+        crate::project_resolver::ResolveRequestKind::RequireCall
     } else {
         crate::project_resolver::ResolveRequestKind::EsmImport
     }
 }
 
-fn collect_exact_and_finite_vue_specifiers(
-    module_references: &[verter_host::ScriptModuleReference],
-) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut specifiers = Vec::new();
-
-    for reference in module_references {
-        if reference.analyzability == verter_analysis::ModuleReferenceAnalyzability::Exact {
-            if let Some(specifier) = &reference.literal_specifier {
-                if specifier.ends_with(".vue") && seen.insert(specifier.clone()) {
-                    specifiers.push(specifier.clone());
-                }
-            }
-        }
-
-        if reference.analyzability == verter_analysis::ModuleReferenceAnalyzability::FiniteSet {
-            for specifier in &reference.finite_specifiers {
-                if specifier.ends_with(".vue") && seen.insert(specifier.clone()) {
-                    specifiers.push(specifier.clone());
-                }
-            }
-        }
+fn analyzed_module_reference_request_kind(
+    reference: &verter_analysis::AnalyzedModuleReference,
+) -> crate::project_resolver::ResolveRequestKind {
+    if reference.is_type_only {
+        crate::project_resolver::ResolveRequestKind::TypeImport
+    } else if reference.semantics == verter_analysis::ModuleReferenceSemantics::Require {
+        crate::project_resolver::ResolveRequestKind::RequireCall
+    } else {
+        crate::project_resolver::ResolveRequestKind::EsmImport
     }
-
-    specifiers
-}
-
-fn resolve_vue_specifier_target(
-    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
-    importer_path: &str,
-    specifier: &str,
-) -> Option<String> {
-    if specifier.starts_with('.') || specifier.starts_with('/') {
-        let resolved = verter_host::resolve_external(importer_path, specifier);
-        return resolved.ends_with(".vue").then_some(resolved);
-    }
-
-    let registry = project_registry.read();
-    registry
-        .as_ref()
-        .and_then(|projects| projects.resolve_alias(importer_path, specifier))
-        .filter(|resolved| resolved.ends_with(".vue"))
 }
 
 /// Check if a resolved import path matches a target file path.
@@ -2413,6 +2524,47 @@ fn collect_imported_vue_priority_ids_from_imports(
         }
         if seen.insert(canonical_id.clone()) {
             ids.push(canonical_id.clone());
+        }
+    }
+
+    ids
+}
+
+fn collect_priority_vue_targets_from_module_references(
+    snapshot: Option<&ResolverSnapshot>,
+    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    importer_id: &str,
+    module_references: &[verter_analysis::AnalyzedModuleReference],
+) -> Vec<String> {
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+
+    for reference in module_references {
+        let specifiers = if let Some(specifier) = reference.literal_specifier.as_deref() {
+            vec![specifier.to_string()]
+        } else {
+            reference.finite_specifiers.clone()
+        };
+
+        for specifier in specifiers {
+            let request = crate::project_resolver::ResolveRequest {
+                importer_id: importer_id.to_string(),
+                specifier,
+                kind: analyzed_module_reference_request_kind(reference),
+                phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+            };
+            let Some(resolved) = snapshot.resolver.resolve_with_reader(reader, &request) else {
+                continue;
+            };
+            if resolved.file_kind == verter_host::FileKind::VueSfc
+                && seen.insert(resolved.source_id.clone())
+            {
+                ids.push(resolved.source_id);
+            }
         }
     }
 
@@ -2624,13 +2776,15 @@ struct BackgroundInitArgs {
     client: Client,
     type_provider: Option<Arc<dyn TypeProvider>>,
     project_registry: Arc<parking_lot::RwLock<Option<crate::config::ProjectRegistry>>>,
+    resolver_snapshot: Arc<parking_lot::RwLock<Option<ResolverSnapshot>>>,
     fallback_linter: Arc<parking_lot::RwLock<verter_diagnostics::Linter>>,
     workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
     init_generation: Arc<std::sync::atomic::AtomicU64>,
     project_sync: Option<ProjectSync>,
     documents: Arc<DocumentRegistry>,
-    background_synced_files: Arc<DashMap<String, ()>>,
+    provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
+    pending_snapshot_provider_sync: Arc<DashSet<String>>,
     is_tsgo: bool,
     cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
     position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
@@ -2657,12 +2811,14 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         client,
         type_provider,
         project_registry,
+        resolver_snapshot,
         fallback_linter,
         workspace_scanner,
         init_generation,
         project_sync,
         documents,
-        background_synced_files,
+        provider_sync_states,
+        pending_snapshot_provider_sync,
         is_tsgo,
         cached_verter_diags,
         position_encoding,
@@ -2768,7 +2924,29 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         tracing::info!("init gen={my_gen} superseded, discarding registry");
         return Ok(());
     }
+    let resolver = registry.to_native_project_resolver();
+    let provider_project_plans = registry.provider_project_plans();
+    *resolver_snapshot.write() = Some(ResolverSnapshot {
+        generation: my_gen,
+        resolver,
+    });
     *project_registry.write() = Some(registry);
+
+    if let Some(sync) = &project_sync {
+        if let Err(error) = sync.ensure_provider_projects(&provider_project_plans) {
+            tracing::warn!("failed to materialize synthetic provider projects: {error}");
+        }
+    }
+
+    drain_pending_snapshot_provider_sync(
+        project_sync.as_ref(),
+        &documents,
+        &resolver_snapshot,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        is_tsgo,
+    )
+    .await;
 
     // 5. Materialize @verter/types (spawn_blocking — blocking FS)
     let roots_for_types = roots.clone();
@@ -2802,7 +2980,8 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             root_paths,
             host: Arc::clone(&host),
             project_sync: project_sync.clone(),
-            background_synced_files: Arc::clone(&background_synced_files),
+            resolver_snapshot: Arc::clone(&resolver_snapshot),
+            provider_sync_states: Arc::clone(&provider_sync_states),
             is_tsgo,
             tsx_profile: tsx_profile.read().clone(),
             tsconfig_patterns,
@@ -2847,17 +3026,12 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 let ide = documents.host.get_ide(&canonical_id, &profile);
 
                 if let Some(ide) = ide {
-                    let native_resolver = {
-                        let registry = project_registry.read();
-                        registry
-                            .as_ref()
-                            .map(crate::config::ProjectRegistry::to_native_project_resolver)
+                    let snapshot = resolver_snapshot.read().clone();
+                    let Some(tsx_path) = snapshot.as_ref().and_then(|snapshot| {
+                        provider_ide_path_for_source(&snapshot.resolver, &canonical_id, ide.is_jsx)
+                    }) else {
+                        continue;
                     };
-                    let tsx_path = provider_ide_path_for_source(
-                        native_resolver.as_ref(),
-                        &canonical_id,
-                        ide.is_jsx,
-                    );
                     let encoding = position_encoding.read().clone();
                     let tsx_li =
                         crate::documents::line_index::LineIndex::new(&ide.code, encoding.clone());
@@ -2898,6 +3072,250 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
     tracing::info!("background init complete (gen={my_gen})");
     Ok(())
+}
+
+async fn drain_pending_snapshot_provider_sync(
+    project_sync: Option<&ProjectSync>,
+    documents: &DocumentRegistry,
+    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    pending_snapshot_provider_sync: &DashSet<String>,
+    is_tsgo: bool,
+) {
+    let Some(sync) = project_sync else {
+        pending_snapshot_provider_sync.clear();
+        return;
+    };
+    let Some(snapshot) = resolver_snapshot.read().clone() else {
+        return;
+    };
+
+    let pending_ids: Vec<String> = pending_snapshot_provider_sync
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+
+    for canonical_id in pending_ids {
+        let synced = sync_pending_snapshot_provider_file(
+            sync,
+            documents,
+            &snapshot,
+            provider_sync_states,
+            &canonical_id,
+            is_tsgo,
+        )
+        .await;
+
+        if synced || documents.host.get_source(&canonical_id).is_none() {
+            pending_snapshot_provider_sync.remove(&canonical_id);
+        }
+    }
+}
+
+async fn sync_pending_snapshot_provider_file(
+    sync: &ProjectSync,
+    documents: &DocumentRegistry,
+    snapshot: &ResolverSnapshot,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    canonical_id: &str,
+    is_tsgo: bool,
+) -> bool {
+    if canonical_id.ends_with(".vue") {
+        sync_pending_vue_provider_file(
+            sync,
+            documents,
+            snapshot,
+            provider_sync_states,
+            canonical_id,
+            is_tsgo,
+        )
+        .await
+    } else {
+        sync_pending_non_vue_provider_file(
+            sync,
+            documents,
+            snapshot,
+            provider_sync_states,
+            canonical_id,
+        )
+        .await
+    }
+}
+
+async fn sync_pending_vue_provider_file(
+    sync: &ProjectSync,
+    documents: &DocumentRegistry,
+    snapshot: &ResolverSnapshot,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    canonical_id: &str,
+    is_tsgo: bool,
+) -> bool {
+    let profile = documents.tsx_profile.read().clone();
+    let ide = tokio::task::block_in_place(|| documents.host.get_ide(canonical_id, &profile));
+    let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
+    let Some(next_state) =
+        crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)
+    else {
+        return false;
+    };
+
+    let transition = prepare_sync_transition(provider_sync_states, canonical_id, next_state);
+    close_stale_provider_paths(sync, &transition.stale_paths, "pending_snapshot").await;
+
+    let mut committed_state = transition.next;
+    let is_open = documents.canonical_id_to_uri(canonical_id).is_some();
+    let mut synced_any = false;
+
+    if let Some(api) = tokio::task::block_in_place(|| documents.host.get_public_api(canonical_id)) {
+        let Some(dts_path) = committed_state.api_path.clone() else {
+            return false;
+        };
+        let result = if is_open {
+            sync.sync_dts(&dts_path, &api.code).await
+        } else if is_tsgo {
+            if committed_state.api_background_loaded {
+                sync.sync_dts(&dts_path, &api.code).await
+            } else {
+                sync.open_dts(&dts_path, &api.code).await
+            }
+        } else if committed_state.api_background_loaded {
+            sync.sync_dts(&dts_path, &api.code).await
+        } else {
+            sync.load_dts(&dts_path, &api.code).await
+        };
+
+        match result {
+            Ok(()) => {
+                if !is_open {
+                    committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                }
+                synced_any = true;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "pending_snapshot: failed to sync provider API path {dts_path}: {error}"
+                );
+            }
+        }
+    }
+
+    if !is_tsgo {
+        if let Some(ide) = ide {
+            let Some(ide_path) = committed_state.ide_path.clone() else {
+                return false;
+            };
+            let result = if is_open {
+                sync.sync_tsx(&ide_path, &ide.code).await
+            } else if committed_state.ide_background_loaded {
+                sync.sync_tsx(&ide_path, &ide.code).await
+            } else {
+                sync.load_tsx(&ide_path, &ide.code).await
+            };
+
+            match result {
+                Ok(()) => {
+                    if !is_open {
+                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                    }
+                    synced_any = true;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "pending_snapshot: failed to sync provider IDE path {ide_path}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    if synced_any {
+        commit_sync_transition(provider_sync_states, canonical_id, committed_state);
+    }
+    synced_any
+}
+
+async fn sync_pending_non_vue_provider_file(
+    sync: &ProjectSync,
+    documents: &DocumentRegistry,
+    snapshot: &ResolverSnapshot,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    canonical_id: &str,
+) -> bool {
+    let Some(source) = documents.host.get_source(canonical_id) else {
+        return false;
+    };
+    let module_references = tokio::task::block_in_place(|| {
+        documents
+            .host
+            .upsert(verter_host::UpsertRequest {
+                canonical_id: Some(canonical_id.to_string()),
+                input_id: canonical_id.to_string(),
+                source: source.clone(),
+                file_kind: verter_host::FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .map(|result| result.module_references)
+            .unwrap_or_default()
+    });
+    let reader = LspProjectResolverReader::new(documents);
+    let Some(prepared) = prepare_non_vue_provider_sync(
+        Some(snapshot),
+        &reader,
+        canonical_id,
+        &source,
+        &module_references,
+    ) else {
+        return false;
+    };
+    let Some(next_state) =
+        crate::provider_sync::non_vue_sync_state_for_source(&snapshot.resolver, canonical_id)
+    else {
+        return false;
+    };
+
+    let transition = prepare_sync_transition(provider_sync_states, canonical_id, next_state);
+    close_stale_provider_paths(sync, &transition.stale_paths, "pending_snapshot").await;
+
+    let mut committed_state = transition.next;
+    match sync.sync_file(&prepared.provider_path, &prepared.rewritten).await {
+        Ok(()) => {
+            committed_state.set_background_loaded(ProviderPathKind::Shadow, true);
+            commit_sync_transition(provider_sync_states, canonical_id, committed_state);
+            documents.host.set_import_dependencies(
+                canonical_id,
+                prepared
+                    .resolved_dependencies
+                    .iter()
+                    .map(|entry| entry.source_id.clone())
+                    .collect(),
+            );
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                "pending_snapshot: failed to sync provider shadow path {}: {error}",
+                prepared.provider_path
+            );
+            false
+        }
+    }
+}
+
+async fn close_stale_provider_paths(
+    sync: &ProjectSync,
+    stale_paths: &[(ProviderPathKind, String)],
+    context: &str,
+) {
+    for (kind, path) in stale_paths {
+        let result = match kind {
+            ProviderPathKind::Ide => sync.close_tsx(path).await,
+            ProviderPathKind::Api => sync.close_dts(path).await,
+            ProviderPathKind::Shadow => sync.close_file(path).await,
+        };
+        if let Err(error) = result {
+            tracing::warn!("{context}: failed to close stale provider path {path}: {error}");
+        }
+    }
 }
 
 /// Materialise `@verter/types` in all workspace roots that don't already have it.
@@ -3168,12 +3586,14 @@ impl LanguageServer for VerterLanguageServer {
             client: self.client.clone(),
             type_provider: self.type_provider.clone(),
             project_registry: Arc::clone(&self.project_registry),
+            resolver_snapshot: Arc::clone(&self.resolver_snapshot),
             fallback_linter: Arc::clone(&self.fallback_linter),
             workspace_scanner: Arc::clone(&self.workspace_scanner),
             init_generation: Arc::clone(&self.init_generation),
             project_sync: self.project_sync.clone(),
             documents: Arc::clone(&self.documents),
-            background_synced_files: Arc::clone(&self.background_synced_files),
+            provider_sync_states: Arc::clone(&self.provider_sync_states),
+            pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
             is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
             cached_verter_diags: Arc::clone(&self.cached_verter_diags),
             position_encoding: Arc::clone(&self.position_encoding),
@@ -3217,8 +3637,22 @@ impl LanguageServer for VerterLanguageServer {
         let startup_policy = did_open_startup_policy();
         let imported_vue_priority_ids = self
             .documents
-            .get_analysis(uri)
-            .map(|analysis| collect_imported_vue_priority_ids_from_imports(&analysis.imports))
+            .get_canonical_id(uri)
+            .map(|canonical_id| {
+                let snapshot = self.resolver_snapshot();
+                let reader = LspProjectResolverReader::new(&self.documents);
+                self.documents
+                    .get_analysis(uri)
+                    .map(|analysis| {
+                        collect_priority_vue_targets_from_module_references(
+                            snapshot.as_ref(),
+                            &reader,
+                            &canonical_id,
+                            &analysis.module_references,
+                        )
+                    })
+                    .unwrap_or_default()
+            })
             .unwrap_or_default();
         // Signal the background scanner to prioritize this file's directory
         if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
@@ -3232,12 +3666,8 @@ impl LanguageServer for VerterLanguageServer {
 
         if startup_policy.sync_imported_vue_files {
             for import_id in &imported_vue_priority_ids {
-                let should_sync = provider_api_path_for_source(
-                    self.native_project_resolver().as_ref(),
-                    import_id,
-                )
-                .map(|dts_path| !self.background_synced_files.contains_key(&dts_path))
-                .unwrap_or(true);
+                let should_sync =
+                    !self.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
                 if should_sync {
                     self.resync_background_vue_file(import_id).await;
                 }
@@ -3351,38 +3781,46 @@ impl LanguageServer for VerterLanguageServer {
         let uri = &params.text_document.uri;
         tracing::info!("did_close: {}", uri.as_str());
         // Virtual files don't have TSX in the provider
-        if self.documents.get_virtual_source_uri(uri).is_none() {
-            if let Some(sync) = &self.project_sync {
-                // Only close in TSGO if this was a Vue SFC with IDE output
-                // (only .vue files get the .tsx/.jsx suffix and are synced to TSGO)
-                if self.documents.get_ide(uri).is_some() {
-                    let tsx_path = self.ide_path_for_uri(uri);
-                    let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+        if self.documents.get_virtual_source_uri(uri).is_none()
+            && self.project_sync.is_some()
+            && self.documents.get_ide(uri).is_some()
+        {
+            let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+                self.documents.did_close(uri);
+                self.cached_verter_diags.remove(uri.as_str());
+                return;
+            };
+            let state = self
+                .provider_sync_state_for_source(&canonical_id)
+                .or_else(|| {
+                    self.documents.get_ide(uri).and_then(|ide| {
+                        self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                            .map(|transition| transition.next)
+                    })
+                });
+            let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
-                    if is_tsgo {
+            if let Some(state) = state {
+                if is_tsgo {
                         // TSGO: always close IDE (.vue.tsx) — it was only opened for
                         // internal type checking of this file. DTS stays alive for imports.
-                        if let Err(e) = sync.close_tsx(&tsx_path).await {
-                            tracing::warn!("did_close: failed to close TSX in provider: {e}");
-                        }
-                    } else if self.background_synced_files.contains_key(&tsx_path) {
+                    if let Some(path) = state.ide_path.as_ref() {
+                        self.close_provider_paths(&[(ProviderPathKind::Ide, path.clone())])
+                            .await;
+                    }
+                } else if state.ide_background_loaded {
                         // tsserver: keep background-synced TSX alive for cross-file resolution.
                         tracing::debug!(
                             "did_close: keeping background-synced file in provider: {}",
-                            tsx_path
+                            state.ide_path.as_deref().unwrap_or("<missing>")
                         );
                     } else {
                         // tsserver: close TSX and DTS for non-background files.
-                        if let Err(e) = sync.close_tsx(&tsx_path).await {
-                            tracing::warn!("did_close: failed to close TSX in provider: {e}");
-                        }
-                        if let Some(dts_path) = self.dts_path_for_uri(uri) {
-                            let _ = sync.close_dts(&dts_path).await;
-                        }
+                        self.close_provider_state(&state).await;
+                        self.remove_provider_sync_state(&canonical_id);
                     }
                 }
             }
-        }
         self.documents.did_close(uri);
         self.cached_verter_diags.remove(uri.as_str());
     }
@@ -3459,12 +3897,14 @@ impl LanguageServer for VerterLanguageServer {
             client: self.client.clone(),
             type_provider: self.type_provider.clone(),
             project_registry: Arc::clone(&self.project_registry),
+            resolver_snapshot: Arc::clone(&self.resolver_snapshot),
             fallback_linter: Arc::clone(&self.fallback_linter),
             workspace_scanner: Arc::clone(&self.workspace_scanner),
             init_generation: Arc::clone(&self.init_generation),
             project_sync: self.project_sync.clone(),
             documents: Arc::clone(&self.documents),
-            background_synced_files: Arc::clone(&self.background_synced_files),
+            provider_sync_states: Arc::clone(&self.provider_sync_states),
+            pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
             is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
             cached_verter_diags: Arc::clone(&self.cached_verter_diags),
             position_encoding: Arc::clone(&self.position_encoding),
@@ -3518,25 +3958,17 @@ impl LanguageServer for VerterLanguageServer {
                 Err(_) => continue,
             };
             let canonical_id = uri_to_canonical_id(&uri);
-            // Close TSX and DTS in the type provider
-            if let Some(sync) = &self.project_sync {
-                let profile = self.documents.tsx_profile.read().clone();
-                if let Some(ide) = self.documents.host().get_ide(&canonical_id, &profile) {
-                    let tsx_path = provider_ide_path_for_source(
-                        self.native_project_resolver().as_ref(),
-                        &canonical_id,
-                        ide.is_jsx,
-                    );
-                    let _ = sync.close_tsx(&tsx_path).await;
-                    self.background_synced_files.remove(&tsx_path);
-                }
-                if let Some(dts_path) = provider_api_path_for_source(
-                    self.native_project_resolver().as_ref(),
-                    &canonical_id,
-                ) {
-                    let _ = sync.close_dts(&dts_path).await;
-                    self.background_synced_files.remove(&dts_path);
-                }
+            if let Some(state) = self
+                .remove_provider_sync_state(&canonical_id)
+                .or_else(|| {
+                    let profile = self.documents.tsx_profile.read().clone();
+                    self.documents.host().get_ide(&canonical_id, &profile).and_then(|ide| {
+                        self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                            .map(|transition| transition.next)
+                    })
+                })
+            {
+                self.close_provider_state(&state).await;
             }
             self.documents.host().remove(&canonical_id);
             self.cached_verter_diags.remove(uri.as_str());
@@ -5486,11 +5918,13 @@ mod tests {
     use futures_util::StreamExt;
     use verter_host::{HostConfig, VerterHost};
 
+    use crate::tsgo::mock::{MockCall, MockTypeProvider};
     use crate::tsgo::protocol::{
         CompletionResult, HoverInfo, InlayHint, RenameLocation, SemanticToken, SignatureHelp,
         TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation,
     };
     use crate::tsgo::traits::{ProviderFuture, TypeProvider};
+    use crate::ProjectSyncMode;
 
     #[derive(Default)]
     struct SlowConfigurePathsProvider {
@@ -5730,6 +6164,55 @@ mod tests {
         }
     }
 
+    fn test_module_reference_with_semantics(
+        raw_text: &str,
+        literal_specifier: Option<&str>,
+        finite_specifiers: &[&str],
+        analyzability: verter_analysis::ModuleReferenceAnalyzability,
+        expr_start: usize,
+        expr_end: usize,
+        semantics: verter_analysis::ModuleReferenceSemantics,
+        is_type_only: bool,
+    ) -> verter_host::ScriptModuleReference {
+        verter_host::ScriptModuleReference {
+            semantics,
+            is_type_only,
+            ..test_module_reference(
+                raw_text,
+                literal_specifier,
+                finite_specifiers,
+                analyzability,
+                expr_start,
+                expr_end,
+            )
+        }
+    }
+
+    fn test_analyzed_module_reference(
+        raw_text: &str,
+        literal_specifier: Option<&str>,
+        finite_specifiers: &[&str],
+        analyzability: verter_analysis::ModuleReferenceAnalyzability,
+        expr_start: usize,
+        expr_end: usize,
+    ) -> verter_analysis::AnalyzedModuleReference {
+        verter_analysis::AnalyzedModuleReference {
+            syntax: verter_analysis::ModuleReferenceSyntax::StaticImport,
+            semantics: verter_analysis::ModuleReferenceSemantics::Import,
+            is_type_only: false,
+            raw_text: raw_text.to_string(),
+            literal_specifier: literal_specifier.map(str::to_string),
+            finite_specifiers: finite_specifiers
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            static_prefix: None,
+            analyzability,
+            span: verter_span::Span::new(expr_start as u32, expr_end as u32),
+            expr_span: verter_span::Span::new(expr_start as u32, expr_end as u32),
+        }
+    }
+
     #[derive(Default)]
     struct TestResolverReader {
         files: HashSet<String>,
@@ -5766,52 +6249,40 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_non_vue_source_for_provider_rewrites_exact_vue_specifiers() {
-        let source = "import Foo from './Foo.vue';\nconst load = () => import(\"./Bar.vue\");\nconst keep = import(`./${name}.vue`);\n";
-        let foo_expr = "'./Foo.vue'";
-        let bar_expr = "\"./Bar.vue\"";
-        let dynamic_expr = "`./${name}.vue`";
-        let foo_start = source.find(foo_expr).unwrap();
-        let bar_start = source.find(bar_expr).unwrap();
-        let dynamic_start = source.find(dynamic_expr).unwrap();
-
-        let rewritten = rewrite_non_vue_source_for_provider(
-            source,
-            &[
-                test_module_reference(
-                    foo_expr,
-                    Some("./Foo.vue"),
-                    &[],
-                    verter_analysis::ModuleReferenceAnalyzability::Exact,
-                    foo_start,
-                    foo_start + foo_expr.len(),
-                ),
-                test_module_reference(
-                    bar_expr,
-                    Some("./Bar.vue"),
-                    &[],
-                    verter_analysis::ModuleReferenceAnalyzability::Exact,
-                    bar_start,
-                    bar_start + bar_expr.len(),
-                ),
-                test_module_reference(
-                    dynamic_expr,
-                    None,
-                    &[],
-                    verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic,
-                    dynamic_start,
-                    dynamic_start + dynamic_expr.len(),
-                ),
-            ],
+    fn module_reference_request_kind_uses_require_semantics() {
+        let require_reference = test_module_reference_with_semantics(
+            "'pkg'",
+            Some("pkg"),
+            &[],
+            verter_analysis::ModuleReferenceAnalyzability::Exact,
+            0,
+            5,
+            verter_analysis::ModuleReferenceSemantics::Require,
+            false,
+        );
+        assert_eq!(
+            module_reference_request_kind(&require_reference),
+            crate::project_resolver::ResolveRequestKind::RequireCall
         );
 
-        assert!(rewritten.contains("'./Foo.vue.ts'"));
-        assert!(rewritten.contains("\"./Bar.vue.ts\""));
-        assert!(rewritten.contains("import(`./${name}.vue`)"));
+        let type_reference = test_module_reference_with_semantics(
+            "'pkg'",
+            Some("pkg"),
+            &[],
+            verter_analysis::ModuleReferenceAnalyzability::Exact,
+            0,
+            5,
+            verter_analysis::ModuleReferenceSemantics::Import,
+            true,
+        );
+        assert_eq!(
+            module_reference_request_kind(&type_reference),
+            crate::project_resolver::ResolveRequestKind::TypeImport
+        );
     }
 
     #[test]
-    fn rewrite_non_vue_source_for_provider_with_resolver_rewrites_workspace_targets() {
+    fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
         let source =
             "import Foo from './Foo.vue';\nimport util from './util';\nconst keep = import(`./${name}.vue`);\n";
         let foo_expr = "'./Foo.vue'";
@@ -5821,20 +6292,11 @@ mod tests {
         let util_start = source.find(util_expr).unwrap();
         let dynamic_start = source.find(dynamic_expr).unwrap();
 
-        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                "/workspace".to_string(),
-                "/workspace".to_string(),
-                Some("/workspace/tsconfig.app.json".to_string()),
-            ),
-        ]);
-        let reader = TestResolverReader::with_files(&[
-            "/workspace/src/Foo.vue",
-            "/workspace/src/util.ts",
-        ]);
+        let reader =
+            TestResolverReader::with_files(&["/workspace/src/Foo.vue", "/workspace/src/util.ts"]);
 
-        let rewritten = rewrite_non_vue_source_for_provider_with_resolver(
-            &resolver,
+        let prepared = prepare_non_vue_provider_sync(
+            None,
             &reader,
             "/workspace/src/App.ts",
             source,
@@ -5865,17 +6327,14 @@ mod tests {
                 ),
             ],
         );
-
-        assert!(rewritten.contains("'./Foo.vue.ts'"));
-        assert!(rewritten.contains("'./util.__verter__.ts'"));
         assert!(
-            rewritten.contains("import(`./${name}.vue`)"),
-            "finite-set dynamics must keep the original expression text"
+            prepared.is_none(),
+            "provider sync should be deferred until a resolver snapshot exists"
         );
     }
 
     #[test]
-    fn collect_resolved_provider_dependencies_resolves_exact_and_finite_targets() {
+    fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
         let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 "/workspace".to_string(),
@@ -5883,36 +6342,56 @@ mod tests {
                 Some("/workspace/tsconfig.app.json".to_string()),
             ),
         ]);
-        let reader = TestResolverReader::with_files(&[
-            "/workspace/src/Foo.vue",
-            "/workspace/src/util.ts",
-        ]);
+        let reader =
+            TestResolverReader::with_files(&["/workspace/src/Foo.vue", "/workspace/src/util.ts"]);
+        let source =
+            "import Foo from './Foo.vue';\nimport util from './util';\nconst keep = import(`./${name}.vue`);\n";
+        let foo_expr = "'./Foo.vue'";
+        let util_expr = "'./util'";
+        let dynamic_expr = "`./${name}.vue`";
+        let foo_start = source.find(foo_expr).unwrap();
+        let util_start = source.find(util_expr).unwrap();
+        let dynamic_start = source.find(dynamic_expr).unwrap();
 
-        let resolved = collect_resolved_provider_dependencies(
-            &resolver,
+        let prepared = prepare_non_vue_provider_sync(
+            Some(&ResolverSnapshot {
+                generation: 1,
+                resolver,
+            }),
             &reader,
             "/workspace/src/App.ts",
+            source,
             &[
                 test_module_reference(
-                    "'./Foo.vue'",
+                    foo_expr,
                     Some("./Foo.vue"),
                     &[],
                     verter_analysis::ModuleReferenceAnalyzability::Exact,
-                    0,
-                    11,
+                    foo_start,
+                    foo_start + foo_expr.len(),
                 ),
                 test_module_reference(
-                    "expr",
+                    util_expr,
+                    Some("./util"),
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::Exact,
+                    util_start,
+                    util_start + util_expr.len(),
+                ),
+                test_module_reference(
+                    dynamic_expr,
                     None,
                     &["./Foo.vue", "./util"],
                     verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
-                    0,
-                    4,
+                    dynamic_start,
+                    dynamic_start + dynamic_expr.len(),
                 ),
             ],
-        );
+        )
+        .expect("resolver snapshot should prepare provider sync");
 
-        let resolved_sources = resolved
+        let resolved_sources = prepared
+            .resolved_dependencies
             .iter()
             .map(|entry| entry.source_id.as_str())
             .collect::<Vec<_>>();
@@ -5922,14 +6401,30 @@ mod tests {
             "exact and finite-set dependencies should resolve through the native resolver"
         );
         assert!(
-            resolved.iter().any(|entry| entry.provider_specifier == "./Foo.vue.ts"),
+            prepared
+                .resolved_dependencies
+                .iter()
+                .any(|entry| entry.provider_specifier == "./Foo.vue.ts"),
             "Vue dependencies should target their provider API paths"
         );
         assert!(
-            resolved
+            prepared
+                .resolved_dependencies
                 .iter()
                 .any(|entry| entry.provider_specifier == "./util.__verter__.ts"),
             "non-Vue workspace dependencies should target provider shadow files"
+        );
+        assert!(
+            prepared.rewritten.contains("'./Foo.vue.ts'"),
+            "exact Vue imports should rewrite through the resolved provider specifier"
+        );
+        assert!(
+            prepared.rewritten.contains("'./util.__verter__.ts'"),
+            "non-Vue workspace imports should rewrite through the resolved shadow provider specifier"
+        );
+        assert!(
+            prepared.rewritten.contains("import(`./${name}.vue`)"),
+            "finite-set dynamics must keep the original expression text"
         );
     }
 
@@ -5943,9 +6438,9 @@ mod tests {
             ),
         ]);
 
-        let ide_path = provider_ide_path_for_source(Some(&resolver), "/workspace/src/App.vue", false);
-        let api_path =
-            provider_api_path_for_source(Some(&resolver), "/workspace/src/App.vue").unwrap();
+        let ide_path =
+            provider_ide_path_for_source(&resolver, "/workspace/src/App.vue", false).unwrap();
+        let api_path = provider_api_path_for_source(&resolver, "/workspace/src/App.vue").unwrap();
 
         assert!(
             ide_path.contains("/.verter/ide/"),
@@ -5966,7 +6461,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_vue_path_helpers_round_trip_source_ids() {
+    fn provider_path_helpers_round_trip_only_through_resolver() {
         let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 "/workspace".to_string(),
@@ -5975,50 +6470,22 @@ mod tests {
             ),
         ]);
 
-        let ide_path = provider_ide_path_for_source(Some(&resolver), "/workspace/src/App.vue", true);
-        let api_path =
-            provider_api_path_for_source(Some(&resolver), "/workspace/src/App.vue").unwrap();
+        let ide_path =
+            provider_ide_path_for_source(&resolver, "/workspace/src/App.vue", true).unwrap();
+        let api_path = provider_api_path_for_source(&resolver, "/workspace/src/App.vue").unwrap();
 
         assert_eq!(
-            source_id_from_provider_vue_path(Some(&resolver), &ide_path).as_deref(),
+            source_id_from_provider_vue_path(&resolver, &ide_path).as_deref(),
             Some("/workspace/src/App.vue")
         );
         assert_eq!(
-            source_id_from_provider_vue_path(Some(&resolver), &api_path).as_deref(),
+            source_id_from_provider_vue_path(&resolver, &api_path).as_deref(),
             Some("/workspace/src/App.vue")
         );
-    }
-
-    #[test]
-    fn collect_exact_and_finite_vue_specifiers_dedupes_and_filters() {
-        let collected = collect_exact_and_finite_vue_specifiers(&[
-            test_module_reference(
-                "'./Foo.vue'",
-                Some("./Foo.vue"),
-                &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
-                0,
-                11,
-            ),
-            test_module_reference(
-                "'ignored'",
-                Some("./not-vue.ts"),
-                &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
-                0,
-                9,
-            ),
-            test_module_reference(
-                "expr",
-                None,
-                &["./Foo.vue", "@/Bar.vue", "./not-vue.ts"],
-                verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
-                0,
-                4,
-            ),
-        ]);
-
-        assert_eq!(collected, vec!["./Foo.vue", "@/Bar.vue"]);
+        assert!(
+            source_id_from_provider_vue_path(&resolver, "/workspace/src/App.vue.tsx").is_none(),
+            "raw workspace-path suffix stripping must no longer be used"
+        );
     }
 
     #[test]
@@ -6257,6 +6724,162 @@ mod tests {
         assert!(
             !ids.iter().any(|id| id.ends_with(".ts")),
             "non-Vue imports must be excluded"
+        );
+    }
+
+    #[test]
+    fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+        let reader = TestResolverReader::with_files(&[
+            "/workspace/src/Foo.vue",
+            "/workspace/src/Bar.vue",
+            "/workspace/src/util.ts",
+        ]);
+        let targets = collect_priority_vue_targets_from_module_references(
+            Some(&ResolverSnapshot {
+                generation: 1,
+                resolver,
+            }),
+            &reader,
+            "/workspace/src/App.vue",
+            &[
+                test_analyzed_module_reference(
+                    "'./Foo.vue'",
+                    Some("./Foo.vue"),
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::Exact,
+                    0,
+                    10,
+                ),
+                test_analyzed_module_reference(
+                    "`./${name}.vue`",
+                    None,
+                    &["./Bar.vue", "./util"],
+                    verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                    11,
+                    27,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            targets,
+            vec![
+                "/workspace/src/Foo.vue".to_string(),
+                "/workspace/src/Bar.vue".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_dynamic_imports_sync_no_provider_dependencies() {
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+        let reader = TestResolverReader::with_files(&["/workspace/src/Foo.vue"]);
+        let targets = collect_priority_vue_targets_from_module_references(
+            Some(&ResolverSnapshot {
+                generation: 1,
+                resolver,
+            }),
+            &reader,
+            "/workspace/src/App.vue",
+            &[test_analyzed_module_reference(
+                "`./${name}.vue`",
+                None,
+                &[],
+                verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic,
+                0,
+                15,
+            )],
+        );
+
+        assert!(
+            targets.is_empty(),
+            "unknown dynamic imports must not speculate provider dependencies"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file() {
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<template><div /></template>".to_string(),
+        });
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let resolver_snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+                crate::project_resolver::IdeProjectConfig::new(
+                    "/workspace".to_string(),
+                    "/workspace".to_string(),
+                    Some("/workspace/tsconfig.app.json".to_string()),
+                ),
+            ]),
+        }));
+        let provider_sync_states = DashMap::new();
+        let pending_snapshot_provider_sync = DashSet::new();
+        pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+        drain_pending_snapshot_provider_sync(
+            Some(&sync),
+            &documents,
+            &resolver_snapshot,
+            &provider_sync_states,
+            &pending_snapshot_provider_sync,
+            false,
+        )
+        .await;
+
+        assert!(
+            !pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+            "drained open Vue files should be removed from the pending snapshot queue"
+        );
+
+        let state = provider_sync_states
+            .get("/workspace/src/App.vue")
+            .map(|entry| entry.clone())
+            .expect("drained sync should commit owner-aware provider state");
+        assert!(
+            state
+                .provider_root
+                .as_deref()
+                .unwrap_or_default()
+                .contains("/workspace/.verter/ide/"),
+            "drain must use synthetic owner-aware provider roots"
+        );
+
+        let calls = provider.file_sync_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::UpdateFile { path, .. } if path.ends_with(".vue.ts")
+            )),
+            "drain should sync the Vue public API through .vue.ts"
+        );
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
+            )),
+            "drain should sync the open Vue IDE file through the synthetic TSX path"
         );
     }
 }

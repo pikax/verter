@@ -399,8 +399,25 @@ pub struct NapiUpdateResult {
     pub diagnostics: NapiDiagnosticsSnapshot,
     pub externalSourceRequests: Vec<NapiExternalSourceRequest>,
     pub importSpecifiers: Vec<NapiScriptImportInfo>,
+    pub moduleReferences: Vec<NapiModuleReference>,
     pub preprocessorRequests: Vec<NapiPreprocessorRequest>,
     pub parseDurationMs: f64,
+}
+
+#[napi(object)]
+pub struct NapiModuleReference {
+    pub syntax: String,
+    pub semantics: String,
+    pub isTypeOnly: bool,
+    pub rawText: String,
+    pub literalSpecifier: Option<String>,
+    pub finiteSpecifiers: Vec<String>,
+    pub staticPrefix: Option<String>,
+    pub analyzability: String,
+    pub spanStart: u32,
+    pub spanEnd: u32,
+    pub exprSpanStart: u32,
+    pub exprSpanEnd: u32,
 }
 
 #[napi(object)]
@@ -695,6 +712,53 @@ fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
     }
 }
 
+fn host_module_reference_syntax_to_str(
+    syntax: verter_analysis::ModuleReferenceSyntax,
+) -> &'static str {
+    match syntax {
+        verter_analysis::ModuleReferenceSyntax::StaticImport => "staticImport",
+        verter_analysis::ModuleReferenceSyntax::ExportFrom => "exportFrom",
+        verter_analysis::ModuleReferenceSyntax::DynamicImport => "dynamicImport",
+        verter_analysis::ModuleReferenceSyntax::RequireCall => "requireCall",
+    }
+}
+
+fn host_module_reference_semantics_to_str(
+    semantics: verter_analysis::ModuleReferenceSemantics,
+) -> &'static str {
+    match semantics {
+        verter_analysis::ModuleReferenceSemantics::Import => "import",
+        verter_analysis::ModuleReferenceSemantics::Require => "require",
+    }
+}
+
+fn host_module_reference_analyzability_to_str(
+    analyzability: verter_analysis::ModuleReferenceAnalyzability,
+) -> &'static str {
+    match analyzability {
+        verter_analysis::ModuleReferenceAnalyzability::Exact => "exact",
+        verter_analysis::ModuleReferenceAnalyzability::FiniteSet => "finiteSet",
+        verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic => "unknownDynamic",
+    }
+}
+
+fn host_module_reference_to_napi(input: host::ScriptModuleReference) -> NapiModuleReference {
+    NapiModuleReference {
+        syntax: host_module_reference_syntax_to_str(input.syntax).to_string(),
+        semantics: host_module_reference_semantics_to_str(input.semantics).to_string(),
+        isTypeOnly: input.is_type_only,
+        rawText: input.raw_text,
+        literalSpecifier: input.literal_specifier,
+        finiteSpecifiers: input.finite_specifiers,
+        staticPrefix: input.static_prefix,
+        analyzability: host_module_reference_analyzability_to_str(input.analyzability).to_string(),
+        spanStart: input.span.start,
+        spanEnd: input.span.end,
+        exprSpanStart: input.expr_span.start,
+        exprSpanEnd: input.expr_span.end,
+    }
+}
+
 fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> NapiUpdateResult {
     NapiUpdateResult {
         canonicalId: input.canonical_id,
@@ -751,6 +815,11 @@ fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> N
                 isTypeOnly: imp.is_type_only,
                 bindings: imp.bindings,
             })
+            .collect(),
+        moduleReferences: input
+            .module_references
+            .into_iter()
+            .map(host_module_reference_to_napi)
             .collect(),
         preprocessorRequests: input
             .preprocessor_requests
@@ -1783,6 +1852,34 @@ pub fn compile_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_update_to_napi_exposes_module_references() {
+        let result = host_update_to_napi(
+            host::HostUpdateResult {
+                module_references: vec![host::ScriptModuleReference {
+                    syntax: verter_analysis::ModuleReferenceSyntax::DynamicImport,
+                    semantics: verter_analysis::ModuleReferenceSemantics::Import,
+                    is_type_only: false,
+                    raw_text: "`./${name}.vue`".to_string(),
+                    literal_specifier: None,
+                    finite_specifiers: vec!["./Foo.vue".to_string()],
+                    static_prefix: Some("./".to_string()),
+                    analyzability: verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                    span: verter_span::Span::new(4, 22),
+                    expr_span: verter_span::Span::new(11, 21),
+                }],
+                ..host::HostUpdateResult::no_change("/test/App.vue".to_string())
+            },
+            Some("const x = import(`./${name}.vue`)"),
+        );
+
+        assert_eq!(result.moduleReferences.len(), 1);
+        assert_eq!(result.moduleReferences[0].syntax, "dynamicImport");
+        assert_eq!(result.moduleReferences[0].analyzability, "finiteSet");
+        assert_eq!(result.moduleReferences[0].exprSpanStart, 11);
+        assert_eq!(result.moduleReferences[0].finiteSpecifiers, vec!["./Foo.vue"]);
+    }
 
     // @ai-generated — Tests compile_batch_files() helper: multi-file parallel compilation
 

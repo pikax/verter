@@ -81,8 +81,24 @@ interface HostDiagnosticsSnapshot {
   hasErrors: boolean;
 }
 
+export interface HostModuleReference {
+  syntax: "staticImport" | "exportFrom" | "dynamicImport" | "requireCall";
+  semantics: "import" | "require";
+  isTypeOnly: boolean;
+  rawText: string;
+  literalSpecifier?: string;
+  finiteSpecifiers: string[];
+  staticPrefix?: string;
+  analyzability: "exact" | "finiteSet" | "unknownDynamic";
+  spanStart: number;
+  spanEnd: number;
+  exprSpanStart: number;
+  exprSpanEnd: number;
+}
+
 interface HostUpdateResult {
   diagnostics: HostDiagnosticsSnapshot;
+  moduleReferences?: HostModuleReference[];
   parseDurationMs?: number;
 }
 
@@ -96,7 +112,7 @@ interface HostBinding {
   upsert(request: {
     inputId: string;
     source: string;
-    fileKind: "vue";
+    fileKind: "vue" | "non_sfc";
     aliases?: string[];
     compileProfile?: HostCompileProfile;
   }): HostUpdateResult;
@@ -115,6 +131,7 @@ interface HostBinding {
   getLintRuleMetadata?(): HostLintRuleMetadata[];
   getDocumentSymbols?(canonicalOrAlias: string): HostDocumentSymbol[];
   matchCssSelectors?(canonicalOrAlias: string): HostSelectorMatchResult[];
+  setImportDependencies?(canonicalOrAlias: string, resolvedDeps: string[]): void;
 }
 
 /** Convert structured host diagnostics to display strings. */
@@ -175,6 +192,171 @@ function collectUniqueHostDiagnostics(
     }
   }
   return diagnostics;
+}
+
+type KnownFiles = Readonly<Record<string, File>>;
+
+const PLAYGROUND_RESOLVE_EXTENSIONS = [
+  "",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mts",
+  ".mjs",
+  ".vue",
+] as const;
+
+function normalizeModuleFileId(fileId: string): string {
+  const segments: string[] = [];
+  for (const segment of fileId.replace(/\\/g, "/").split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return segments.join("/");
+}
+
+function resolveRelativeModuleFileId(fromFile: string, specifier: string): string | null {
+  if (!specifier.startsWith(".")) return null;
+
+  const baseSegments = normalizeModuleFileId(fromFile).split("/").filter(Boolean);
+  baseSegments.pop();
+
+  for (const segment of specifier.replace(/\\/g, "/").split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      baseSegments.pop();
+      continue;
+    }
+    baseSegments.push(segment);
+  }
+
+  return baseSegments.join("/");
+}
+
+function buildKnownFileIndex(knownFiles: KnownFiles): Map<string, File> {
+  const index = new Map<string, File>();
+  for (const file of Object.values(knownFiles)) {
+    index.set(normalizeModuleFileId(file.filename), file);
+  }
+  return index;
+}
+
+function collectResolvableModuleReferenceSpecifiers(
+  moduleReferences: readonly HostModuleReference[] | undefined,
+): string[] {
+  const seen = new Set<string>();
+  const specifiers: string[] = [];
+
+  for (const reference of moduleReferences ?? []) {
+    const candidates =
+      reference.analyzability === "exact"
+        ? reference.literalSpecifier
+          ? [reference.literalSpecifier]
+          : []
+        : reference.analyzability === "finiteSet"
+          ? reference.finiteSpecifiers
+          : [];
+
+    for (const specifier of candidates) {
+      if (!specifier || seen.has(specifier)) continue;
+      seen.add(specifier);
+      specifiers.push(specifier);
+    }
+  }
+
+  return specifiers;
+}
+
+function resolveKnownDependencyFile(
+  ownerFilename: string,
+  specifier: string,
+  knownIndex: ReadonlyMap<string, File>,
+): File | null {
+  const resolvedBase = resolveRelativeModuleFileId(ownerFilename, specifier);
+  if (!resolvedBase) return null;
+
+  const candidates = new Set<string>();
+  candidates.add(resolvedBase);
+  for (const ext of PLAYGROUND_RESOLVE_EXTENSIONS) {
+    if (ext) {
+      candidates.add(`${resolvedBase}${ext}`);
+      candidates.add(`${resolvedBase}/index${ext}`);
+    }
+  }
+
+  for (const candidate of candidates) {
+    const match = knownIndex.get(candidate);
+    if (match) return match;
+  }
+
+  return null;
+}
+
+export function resolveKnownModuleReferenceDependencies(
+  ownerFilename: string,
+  moduleReferences: readonly HostModuleReference[] | undefined,
+  knownFiles: KnownFiles,
+): string[] {
+  const knownIndex = buildKnownFileIndex(knownFiles);
+  const ownerId = normalizeModuleFileId(ownerFilename);
+  const resolved: string[] = [];
+  const seen = new Set<string>();
+
+  for (const specifier of collectResolvableModuleReferenceSpecifiers(moduleReferences)) {
+    const match = resolveKnownDependencyFile(ownerFilename, specifier, knownIndex);
+    if (!match) continue;
+
+    const matchId = normalizeModuleFileId(match.filename);
+    if (matchId === ownerId || seen.has(matchId)) continue;
+
+    seen.add(matchId);
+    resolved.push(match.filename);
+  }
+
+  return resolved;
+}
+
+function syncKnownModuleReferenceDependencies(
+  ownerFilename: string,
+  moduleReferences: readonly HostModuleReference[] | undefined,
+  knownFiles: KnownFiles,
+): void {
+  if (!wasmHost || typeof wasmHost.setImportDependencies !== "function") return;
+
+  const knownIndex = buildKnownFileIndex(knownFiles);
+  const pending = resolveKnownModuleReferenceDependencies(ownerFilename, moduleReferences, knownFiles);
+  wasmHost.setImportDependencies(ownerFilename, pending);
+
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const depFilename = pending.shift()!;
+    const depId = normalizeModuleFileId(depFilename);
+    if (visited.has(depId)) continue;
+    visited.add(depId);
+
+    const depFile = knownIndex.get(depId);
+    if (!depFile) continue;
+
+    const depResult = wasmHost.upsert({
+      inputId: depFile.filename,
+      source: depFile.code,
+      fileKind: depFile.filename.endsWith(".vue") ? "vue" : "non_sfc",
+      aliases: [],
+    });
+
+    const childDeps = resolveKnownModuleReferenceDependencies(
+      depFile.filename,
+      depResult.moduleReferences,
+      knownFiles,
+    );
+    wasmHost.setImportDependencies(depFile.filename, childDeps);
+    pending.push(...childDeps);
+  }
 }
 
 export async function initCompilers(): Promise<void> {
@@ -292,7 +474,12 @@ export function relintFile(file: File, disabledRules?: ReadonlySet<string>): num
   }
 }
 
-function compileVueWithHost(file: File, options: CompilerOptions | undefined, disabledRules?: ReadonlySet<string>): CompileTiming {
+function compileVueWithHost(
+  file: File,
+  options: CompilerOptions | undefined,
+  disabledRules?: ReadonlySet<string>,
+  knownFiles?: KnownFiles,
+): CompileTiming {
   const start = performance.now();
   // Always compile client output with ssr: false
   const profile = toHostProfile(file, options);
@@ -305,6 +492,10 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined, di
     aliases: [],
     compileProfile: profile,
   });
+
+  if (knownFiles) {
+    syncKnownModuleReferenceDependencies(file.filename, upsertResult.moduleReferences, knownFiles);
+  }
 
   const nodes = wasmHost!.listVirtualFiles(file.filename);
   const nodeKinds = new Set(nodes.map((node) => node.kind));
@@ -501,7 +692,12 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined, di
   };
 }
 
-function compileTsWithHost(file: File, options: CompilerOptions | undefined, disabledRules?: ReadonlySet<string>): CompileTiming {
+function compileTsWithHost(
+  file: File,
+  options: CompilerOptions | undefined,
+  disabledRules?: ReadonlySet<string>,
+  knownFiles?: KnownFiles,
+): CompileTiming {
   const start = performance.now();
   const vueFilename = file.filename.replace(/\.ts$/, ".vue");
   const sfc = `<script setup lang="ts">\n${file.code}\n</script>`;
@@ -515,6 +711,10 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined, dis
     aliases: [],
     compileProfile: profile,
   });
+
+  if (knownFiles) {
+    syncKnownModuleReferenceDependencies(vueFilename, upsertResult.moduleReferences, knownFiles);
+  }
 
   const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [upsertResult.diagnostics];
 
@@ -594,6 +794,7 @@ export async function compileFile(
   file: File,
   options?: CompilerOptions,
   disabledRules?: ReadonlySet<string>,
+  knownFiles?: KnownFiles,
 ): Promise<CompileTiming> {
   await initCompilers();
   const timing: CompileTiming = { verterNewJs: null, parseDurationMs: null, scriptMs: null, templateMs: null, styleMs: null, tsxMs: null, tscMs: null, lintMs: null };
@@ -603,14 +804,14 @@ export async function compileFile(
       file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
       return timing;
     }
-    return compileVueWithHost(file, options, disabledRules);
+    return compileVueWithHost(file, options, disabledRules, knownFiles);
   } else if (file.filename.endsWith(".ts")) {
     if (!wasmHost) {
       file.compiled.js = "";
       file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
       return timing;
     }
-    return compileTsWithHost(file, options, disabledRules);
+    return compileTsWithHost(file, options, disabledRules, knownFiles);
   } else if (file.filename.endsWith(".js")) {
     file.compiled.js = file.code;
     file.compiled.errors = [];

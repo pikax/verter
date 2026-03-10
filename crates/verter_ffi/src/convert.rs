@@ -297,6 +297,54 @@ pub fn host_preprocessor_request_to_ffi(req: &host::PreprocessorRequest) -> FfiP
     }
 }
 
+fn host_module_reference_syntax_to_string(syntax: impl std::fmt::Debug) -> String {
+    match format!("{syntax:?}").as_str() {
+        "StaticImport" => "staticImport".to_string(),
+        "ExportFrom" => "exportFrom".to_string(),
+        "DynamicImport" => "dynamicImport".to_string(),
+        "RequireCall" => "requireCall".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn host_module_reference_semantics_to_string(semantics: impl std::fmt::Debug) -> String {
+    match format!("{semantics:?}").as_str() {
+        "Import" => "import".to_string(),
+        "Require" => "require".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn host_module_reference_analyzability_to_string(
+    analyzability: impl std::fmt::Debug,
+) -> String {
+    match format!("{analyzability:?}").as_str() {
+        "Exact" => "exact".to_string(),
+        "FiniteSet" => "finiteSet".to_string(),
+        "UnknownDynamic" => "unknownDynamic".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn host_module_reference_to_ffi(
+    input: host::ScriptModuleReference,
+) -> FfiModuleReference {
+    FfiModuleReference {
+        syntax: host_module_reference_syntax_to_string(input.syntax),
+        semantics: host_module_reference_semantics_to_string(input.semantics),
+        is_type_only: input.is_type_only,
+        raw_text: input.raw_text,
+        literal_specifier: input.literal_specifier,
+        finite_specifiers: input.finite_specifiers,
+        static_prefix: input.static_prefix,
+        analyzability: host_module_reference_analyzability_to_string(input.analyzability),
+        span_start: input.span.start,
+        span_end: input.span.end,
+        expr_span_start: input.expr_span.start,
+        expr_span_end: input.expr_span.end,
+    }
+}
+
 /// Convert FFI virtual query to host virtual query.
 pub fn ffi_virtual_query_to_host(
     input: FfiVirtualQuery,
@@ -480,6 +528,11 @@ pub fn host_update_to_ffi(input: host::HostUpdateResult, source: Option<&str>) -
                 is_type_only: imp.is_type_only,
                 bindings: imp.bindings,
             })
+            .collect(),
+        module_references: input
+            .module_references
+            .into_iter()
+            .map(host_module_reference_to_ffi)
             .collect(),
         preprocessor_requests: input
             .preprocessor_requests
@@ -1410,7 +1463,16 @@ mod tests {
                 is_type_only: false,
                 bindings: vec!["ref".to_string(), "computed".to_string()],
             }],
-            module_references: Vec::new(),
+            module_references: host::VerterHost::new(host::HostConfig::default())
+                .upsert(host::UpsertRequest {
+                    canonical_id: Some("/src/dynamic.ts".to_string()),
+                    input_id: "/src/dynamic.ts".to_string(),
+                    source: std::sync::Arc::from("const mod = import('./Foo.vue');"),
+                    file_kind: host::FileKind::NonSfc,
+                    aliases: Vec::new(),
+                })
+                .expect("upsert should extract module references")
+                .module_references,
             preprocessor_requests: Vec::new(),
             parse_duration_ms: 1.5,
         };
@@ -1462,6 +1524,16 @@ mod tests {
         assert_eq!(ffi.import_specifiers[0].source, "vue");
         assert!(!ffi.import_specifiers[0].is_type_only);
         assert_eq!(ffi.import_specifiers[0].bindings, vec!["ref", "computed"]);
+
+        assert_eq!(ffi.module_references.len(), 1);
+        assert_eq!(ffi.module_references[0].syntax, "dynamicImport");
+        assert_eq!(ffi.module_references[0].analyzability, "exact");
+        assert_eq!(
+            ffi.module_references[0].literal_specifier.as_deref(),
+            Some("./Foo.vue")
+        );
+        assert_eq!(ffi.module_references[0].expr_span_start, 19);
+        assert_eq!(ffi.module_references[0].expr_span_end, 30);
 
         assert_eq!(ffi.parse_duration_ms, 1.5);
     }

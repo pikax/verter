@@ -202,7 +202,7 @@ export function useStore(): Store {
       lintMs: null,
     };
     for (const file of Object.values(files.value)) {
-      lastTiming = await compileFile(file, compilerOptions, disabledRules);
+      lastTiming = await compileFile(file, compilerOptions, disabledRules, files.value);
     }
     Object.assign(compileTiming, lastTiming);
     loading.value = false;
@@ -213,7 +213,7 @@ export function useStore(): Store {
       async () => {
         if (activeFilename.value === IMPORT_MAP_FILENAME) return;
         if (autoSave.value && activeFile.value) {
-          const timing = await compileFile(activeFile.value, compilerOptions);
+          const timing = await compileFile(activeFile.value, compilerOptions, undefined, files.value);
           Object.assign(compileTiming, timing);
           errors.value = activeFile.value.compiled.errors;
           clearTsxOverride();
@@ -228,7 +228,7 @@ export function useStore(): Store {
         if (activeFilename.value === IMPORT_MAP_FILENAME) return;
         const file = activeFile.value;
         if (file) {
-          const timing = await compileFile(file, compilerOptions, disabledRules);
+          const timing = await compileFile(file, compilerOptions, disabledRules, files.value);
           Object.assign(compileTiming, timing);
           errors.value = file.compiled.errors;
           clearTsxOverride();
@@ -358,7 +358,7 @@ export function useStore(): Store {
     if (activeFilename.value === IMPORT_MAP_FILENAME) return;
     const file = activeFile.value;
     if (file) {
-      const timing = await compileFile(file, compilerOptions, disabledRules);
+      const timing = await compileFile(file, compilerOptions, disabledRules, files.value);
       Object.assign(compileTiming, timing);
       errors.value = file.compiled.errors;
     }
@@ -428,7 +428,7 @@ export function useStore(): Store {
       lintMs: null,
     };
     for (const file of Object.values(files.value)) {
-      lastTiming = await compileFile(file, compilerOptions, disabledRules);
+      lastTiming = await compileFile(file, compilerOptions, disabledRules, files.value);
     }
     Object.assign(compileTiming, lastTiming);
   }

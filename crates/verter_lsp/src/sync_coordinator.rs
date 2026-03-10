@@ -22,6 +22,10 @@ use crate::config::ProjectRegistry;
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
 use crate::documents::DocumentRegistry;
+use crate::provider_sync::{
+    commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
+    ResolverSnapshot,
+};
 use crate::server::compute_verter_diagnostics_for;
 use crate::tsgo::merge;
 use crate::tsgo::project_sync::ProjectSync;
@@ -68,6 +72,10 @@ pub struct SyncCoordinatorDeps {
     pub cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
     /// Negotiated position encoding for building line indexes.
     pub position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
+    /// Resolver snapshot for owner-aware provider path materialization.
+    pub resolver_snapshot: Arc<parking_lot::RwLock<Option<ResolverSnapshot>>>,
+    /// Source-keyed provider materialization state shared with the server.
+    pub provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     /// Per-project configuration registry.
     pub project_registry: Arc<parking_lot::RwLock<Option<ProjectRegistry>>>,
     /// Fallback linter for files outside any project.
@@ -148,14 +156,30 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
 /// Perform the actual sync: sync TSX/DTS to the type provider.
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
+    let Some(snapshot) = deps.resolver_snapshot.read().clone() else {
+        tracing::debug!("sync_coordinator: deferring sync without resolver snapshot {canonical_id}");
+        return;
+    };
     // Sync IDE (TSX) output to type provider
     let profile = deps.documents.tsx_profile.read().clone();
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
     let ide = tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
+    let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
+    let Some(next_state) =
+        crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)
+    else {
+        tracing::debug!("sync_coordinator: no owner-aware provider state for {canonical_id}");
+        return;
+    };
+    let transition = prepare_sync_transition(&deps.provider_sync_states, canonical_id, next_state);
+    close_stale_paths(&deps.project_sync, &transition.stale_paths).await;
+    let mut committed_state = transition.next;
     if let Some(ide) = ide {
         tracing::info!("sync_coordinator: HOST_GET_IDE_DONE {canonical_id}");
-        let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-        let ide_path = format!("{canonical_id}{ext}");
+        let Some(ide_path) = committed_state.ide_path.clone() else {
+            tracing::debug!("sync_coordinator: no owner-aware IDE path for {canonical_id}");
+            return;
+        };
         tracing::info!("sync_coordinator: TSX_SYNC_START {ide_path}");
         if let Err(e) = deps.project_sync.sync_tsx(&ide_path, &ide.code).await {
             tracing::warn!("sync_coordinator: tsx sync failed for {ide_path}: {e}");
@@ -170,8 +194,10 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     let api = tokio::task::block_in_place(|| deps.documents.host.get_public_api(canonical_id));
     if let Some(api) = api {
         tracing::info!("sync_coordinator: HOST_GET_API_DONE {canonical_id}");
-        let base = canonical_id.strip_suffix(".vue").unwrap_or(canonical_id);
-        let dts_path = format!("{base}.vue.ts");
+        let Some(dts_path) = committed_state.api_path.clone() else {
+            tracing::debug!("sync_coordinator: no owner-aware API path for {canonical_id}");
+            return;
+        };
         if let Err(e) = deps.project_sync.sync_dts(&dts_path, &api.code).await {
             tracing::warn!("sync_coordinator: dts sync failed for {dts_path}: {e}");
         }
@@ -179,7 +205,21 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         tracing::info!("sync_coordinator: HOST_GET_API_DONE (none) {canonical_id}");
     }
 
+    commit_sync_transition(&deps.provider_sync_states, canonical_id, committed_state);
     tracing::info!("sync_coordinator: SYNC_DONE {canonical_id}");
+}
+
+async fn close_stale_paths(sync: &ProjectSync, stale_paths: &[(ProviderPathKind, String)]) {
+    for (kind, path) in stale_paths {
+        let result = match kind {
+            ProviderPathKind::Ide => sync.close_tsx(path).await,
+            ProviderPathKind::Api => sync.close_dts(path).await,
+            ProviderPathKind::Shadow => sync.close_file(path).await,
+        };
+        if let Err(error) = result {
+            tracing::warn!("sync_coordinator: failed to close stale provider path {path}: {error}");
+        }
+    }
 }
 
 /// Publish merged (Verter lint + TypeScript type) diagnostics for a synced file.
@@ -209,8 +249,17 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
             tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
 
         if let Some(ide) = ide {
-            let ext = if ide.is_jsx { ".jsx" } else { ".tsx" };
-            let tsx_path = format!("{canonical_id}{ext}");
+            let snapshot = deps.resolver_snapshot.read().clone();
+            let Some(tsx_path) = snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .resolver
+                    .provider_ide_id_for_source(canonical_id, ide.is_jsx)
+            }) else {
+                return deps
+                    .client
+                    .publish_diagnostics(uri, verter_diags, None)
+                    .await;
+            };
             let encoding = deps.position_encoding.read().clone();
             let tsx_li = LineIndex::new(&ide.code, encoding.clone());
 
@@ -263,6 +312,8 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tsgo::mock::{MockCall, MockTypeProvider};
+    use crate::ProjectSyncMode;
 
     #[tokio::test]
     async fn sync_coordinator_coalesces_rapid_changes() {
@@ -320,6 +371,64 @@ mod tests {
             elapsed >= debounce,
             "debounce should fire after silence (elapsed: {:?})",
             elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_coordinator_closes_stale_owner_ids_when_owner_changes() {
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::FullProject);
+        let states = DashMap::new();
+        states.insert(
+            "/workspace/src/App.vue".to_string(),
+            ProviderSyncState {
+                ide_path: Some("/workspace/.verter/ide/old/src/App.vue.tsx".to_string()),
+                api_path: Some("/workspace/.verter/ide/old/src/App.vue.ts".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let transition = prepare_sync_transition(
+            &states,
+            "/workspace/src/App.vue",
+            ProviderSyncState {
+                ide_path: Some("/workspace/.verter/ide/new/src/App.vue.tsx".to_string()),
+                api_path: Some("/workspace/.verter/ide/new/src/App.vue.ts".to_string()),
+                ..Default::default()
+            },
+        );
+
+        close_stale_paths(&sync, &transition.stale_paths).await;
+        commit_sync_transition(&states, "/workspace/src/App.vue", transition.next);
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(calls.len(), 2, "owner change should close both stale provider ids");
+        assert!(
+            matches!(
+                &calls[0],
+                MockCall::CloseFile { path }
+                    if path == "/workspace/.verter/ide/old/src/App.vue.tsx"
+            ),
+            "first stale close should target the old IDE id: {:?}",
+            calls[0]
+        );
+        assert!(
+            matches!(
+                &calls[1],
+                MockCall::CloseFile { path }
+                    if path == "/workspace/.verter/ide/old/src/App.vue.ts"
+            ),
+            "second stale close should target the old API id: {:?}",
+            calls[1]
+        );
+        assert_eq!(
+            states
+                .get("/workspace/src/App.vue")
+                .expect("new owner state should be committed")
+                .provider_root
+                .as_deref(),
+            None,
+            "test transition only cares about stale close behavior"
         );
     }
 }

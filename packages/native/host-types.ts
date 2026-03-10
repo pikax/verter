@@ -83,6 +83,21 @@ export interface HostScriptImportInfo {
   bindings: string[];
 }
 
+export interface HostModuleReference {
+  syntax: "staticImport" | "exportFrom" | "dynamicImport" | "requireCall";
+  semantics: "import" | "require";
+  isTypeOnly: boolean;
+  rawText: string;
+  literalSpecifier?: string;
+  finiteSpecifiers: string[];
+  staticPrefix?: string;
+  analyzability: "exact" | "finiteSet" | "unknownDynamic";
+  spanStart: number;
+  spanEnd: number;
+  exprSpanStart: number;
+  exprSpanEnd: number;
+}
+
 export interface HostPreprocessorRequest {
   /** Block type: "template", "script", "style", or "custom". */
   blockType: "template" | "script" | "style" | "custom";
@@ -124,6 +139,7 @@ export interface HostUpdateResult {
   diagnostics: HostDiagnosticsSnapshot;
   externalSourceRequests: HostExternalSourceRequest[];
   importSpecifiers: HostScriptImportInfo[];
+  moduleReferences: HostModuleReference[];
   preprocessorRequests: HostPreprocessorRequest[];
   parseDurationMs: number;
 }

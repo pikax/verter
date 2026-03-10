@@ -558,6 +558,9 @@ impl TsserverTypeProvider {
     /// Find the best project root for a file path (longest prefix match).
     /// Falls back to the global `workspace_root` if no project root matches.
     fn project_root_for(&self, file: &str) -> String {
+        if let Some(provider_root) = synthetic_provider_root(file) {
+            return provider_root;
+        }
         let roots = self.project_roots.read();
         for root in roots.iter() {
             if file.starts_with(root.as_str()) {
@@ -566,6 +569,15 @@ impl TsserverTypeProvider {
         }
         self.workspace_root.clone()
     }
+}
+
+fn synthetic_provider_root(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let marker = "/.verter/ide/";
+    let marker_idx = normalized.find(marker)?;
+    let after_marker = &normalized[marker_idx + marker.len()..];
+    let hash_end = after_marker.find('/')?;
+    Some(normalized[..marker_idx + marker.len() + hash_end].to_string())
 }
 
 impl TypeProvider for TsserverTypeProvider {
@@ -1670,6 +1682,16 @@ fn format_quickinfo_hover(kind: &str, display: &str, docs: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthetic_provider_root_uses_owner_specific_provider_root() {
+        let path = "/workspace/pkg-a/.verter/ide/abc123/src/App.vue.tsx";
+        assert_eq!(
+            synthetic_provider_root(path).as_deref(),
+            Some("/workspace/pkg-a/.verter/ide/abc123")
+        );
+        assert_eq!(synthetic_provider_root("/workspace/src/App.vue.tsx"), None);
+    }
 
     #[test]
     fn test_byte_offset_to_tsserver_pos() {

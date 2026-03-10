@@ -352,7 +352,7 @@ impl WasmVerterHost {
 
     /// Records the resolved import dependencies for a file.
     ///
-    /// Called after resolving the `importSpecifiers` returned by
+    /// Called after resolving the exact/finite `moduleReferences` returned by
     /// [`upsert`](Self::upsert). This enables cross-file type resolution
     /// (e.g. following `import type { Props } from './types'` chains) when
     /// recompiling dependent files.

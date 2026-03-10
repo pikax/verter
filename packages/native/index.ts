@@ -143,6 +143,7 @@ export type {
   HostDiagnosticsSnapshot,
   HostExternalSourceRequest,
   HostScriptImportInfo,
+  HostModuleReference,
   HostPreprocessorRequest,
   HostBlockOverrideEntry,
   HostBlockOverrideRequest,
