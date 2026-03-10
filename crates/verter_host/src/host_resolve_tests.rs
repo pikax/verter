@@ -536,3 +536,133 @@ defineProps<{ b: number }>()
         );
     }
 }
+
+#[test]
+fn public_api_cache_cleared_on_template_change() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/test/TplChange.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    // Populate cache
+    let _api = host.get_public_api("/test/TplChange.vue");
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("/test/TplChange.vue").expect("entry");
+        assert!(
+            entry.cached_tsc_extract.is_some(),
+            "cache should be populated after first get_public_api call"
+        );
+    }
+
+    // Upsert with changed template only (script unchanged)
+    upsert_vue(
+        &host,
+        "/test/TplChange.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><span /></template>"#,
+    );
+
+    // Cache should be cleared because root_element_tag is template-derived
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("/test/TplChange.vue").expect("entry");
+        assert!(
+            entry.cached_tsc_extract.is_none(),
+            "cached_tsc_extract should be cleared after template change"
+        );
+    }
+}
+
+#[test]
+fn public_api_output_updates_after_template_root_change() {
+    let host = strict_host();
+
+    // Start with <div> root — should produce HTMLAttributes for $attrs
+    upsert_vue(
+        &host,
+        "/test/RootTag.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div /></template>"#,
+    );
+    let api1 = public_api_code(&host, "/test/RootTag.vue");
+    assert!(
+        api1.contains("HTMLAttributes"),
+        "div root should produce HTMLAttributes in $attrs: {api1}"
+    );
+
+    // Change template root from <div> to no-template (component-only)
+    // Using a component tag (PascalCase) as root means root_element_tag = None
+    upsert_vue(
+        &host,
+        "/test/RootTag.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><MyChild /></template>"#,
+    );
+    let api2 = public_api_code(&host, "/test/RootTag.vue");
+
+    // After fix: output should differ because root_element_tag changes
+    assert_ne!(
+        api1, api2,
+        "public API output must change when template root element changes"
+    );
+    assert!(
+        !api2.contains("HTMLAttributes"),
+        "component root should NOT produce HTMLAttributes: {api2}"
+    );
+}
+
+#[test]
+fn public_api_cache_cleared_on_descriptor_change() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/test/DescChange.vue",
+        r#"<script setup lang="ts" generic="T">
+defineProps<{ x: T }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    // Populate cache
+    let _api = host.get_public_api("/test/DescChange.vue");
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("/test/DescChange.vue").expect("entry");
+        assert!(
+            entry.cached_tsc_extract.is_some(),
+            "cache should be populated after first get_public_api call"
+        );
+    }
+
+    // Upsert with changed generic attribute (script content identical, descriptor different)
+    upsert_vue(
+        &host,
+        "/test/DescChange.vue",
+        r#"<script setup lang="ts" generic="T, U">
+defineProps<{ x: T }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    // Cache should be cleared because generic_params is descriptor-derived
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("/test/DescChange.vue").expect("entry");
+        assert!(
+            entry.cached_tsc_extract.is_none(),
+            "cached_tsc_extract should be cleared after descriptor change (generic attr)"
+        );
+    }
+}

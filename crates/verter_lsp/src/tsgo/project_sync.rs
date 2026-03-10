@@ -591,6 +591,41 @@ mod tests {
         );
     }
 
+    /// Regression: open_dts propagates provider errors.
+    ///
+    /// `sync_imported_vue_api_lightweight` calls `open_dts` for TSGO when the file
+    /// hasn't been background-loaded yet. The server must handle the returned error
+    /// (log + queue for retry), not silently drop it.
+    #[tokio::test]
+    async fn open_dts_propagates_provider_errors() {
+        let failing =
+            FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
+
+        let result = sync.open_dts("App.vue.ts", "export default App;").await;
+        assert!(
+            result.is_err(),
+            "open_dts should propagate provider error, not silently succeed"
+        );
+    }
+
+    /// Regression: sync_dts propagates provider errors.
+    ///
+    /// `sync_imported_vue_api_lightweight` calls `sync_dts` for non-TSGO or
+    /// already-background-loaded files. The server must handle the returned error.
+    #[tokio::test]
+    async fn sync_dts_propagates_provider_errors() {
+        let failing =
+            FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
+
+        let result = sync.sync_dts("App.vue.ts", "export default App;").await;
+        assert!(
+            result.is_err(),
+            "sync_dts should propagate provider error, not silently succeed"
+        );
+    }
+
     /// @ai-generated — Multiple consecutive errors don't cause panic or unexpected state.
     /// Simulates repeated operations after tsgo crashes.
     #[tokio::test]

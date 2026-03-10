@@ -189,10 +189,14 @@ impl VerterHost {
             entry.export_signatures = new_export_signatures.clone();
             entry.style_analyses = Arc::new(snapshot.style_analyses);
             entry.cached_parse = cached_parse.map(Arc::new);
-            // Clear TSC extract cache when script content changes, since the
-            // extracted macro state depends on the script setup source text.
+            // Clear TSC extract cache when script, template, or descriptor changes,
+            // since the extracted state includes template-derived (root_element_tag)
+            // and descriptor-derived (generic_params, attrs_type) data.
             if changes.changed
-                && (changes.slice_changes.script_changed || changes.slice_changes.structure_changed)
+                && (changes.slice_changes.script_changed
+                    || changes.slice_changes.structure_changed
+                    || changes.slice_changes.template_changed
+                    || changes.slice_changes.descriptor_changed)
             {
                 entry.cached_tsc_extract = None;
             }

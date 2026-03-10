@@ -1903,6 +1903,11 @@ impl VerterLanguageServer {
                     if result.is_ok() {
                         committed_state.set_background_loaded(ProviderPathKind::Api, true);
                         self.commit_provider_sync_state(canonical_id, committed_state);
+                    } else if let Err(e) = result {
+                        tracing::warn!(
+                            "sync_imported_vue_api_lightweight: failed for {dts_path}: {e}"
+                        );
+                        self.queue_snapshot_provider_sync(canonical_id.to_string());
                     }
                 }
             }

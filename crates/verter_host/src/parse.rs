@@ -162,7 +162,10 @@ pub(crate) fn parse_vue_snapshot(
                 resolved_canonical_id: resolved,
             });
         }
-        script_attrs_fp.push(normalize_attr_map(&attrs, &["setup", "lang", "src"]));
+        script_attrs_fp.push(normalize_attr_map(
+            &attrs,
+            &["setup", "lang", "src", "generic", "attrs"],
+        ));
     }
 
     let script_hash = if script_hashes.is_empty() {
