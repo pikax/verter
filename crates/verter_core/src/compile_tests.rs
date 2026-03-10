@@ -2824,6 +2824,42 @@ const props = withDefaults(defineProps<Props>(), getDefaults())
 
 /// @ai-generated — withDefaults + unresolvable type without any defaults
 /// should emit empty props `{}`
+/// @ai-generated - unresolved imported defineProps inside withDefaults should not
+/// surface XInvalidMacroType when fallback props codegen can still synthesize
+/// runtime props from the defaults expression.
+#[test]
+fn with_defaults_unresolvable_imported_type_with_defaults_has_no_error() {
+    let result = compile_sfc(
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+import { getDefaults } from './defaults'
+
+const props = withDefaults(defineProps<Props>(), getDefaults())
+</script>
+<template><div>{{ props.foo }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        script.code.contains("props:"),
+        "should have props section.\nOutput:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("getDefaults()"),
+        "should reference the defaults function.\nOutput:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("defineProps<Props>()"),
+        "defineProps call should be lowered.\nOutput:\n{}",
+        script.code
+    );
+}
+
+/// @ai-generated â€” withDefaults + unresolvable type without any defaults
+/// should emit empty props `{}`
 #[test]
 fn with_defaults_unresolvable_type_no_defaults() {
     let result = compile_sfc(

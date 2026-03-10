@@ -281,12 +281,22 @@ fn collect_invalid_macro_type_diagnostics(
             }
             ScriptMacro::WithDefaults {
                 define_props_type_params,
+                defaults,
+                defaults_arg_span,
                 ..
             } => {
                 if let Some(type_params) = define_props_type_params {
                     let type_text = content_str
                         [type_params.type_span.start as usize..type_params.type_span.end as usize]
                         .trim();
+                    let has_defaults_fallback = defaults.is_some() || defaults_arg_span.is_some();
+                    let skip_unresolved_import_error = has_defaults_fallback
+                        && type_params.unresolved_type_ref
+                        && is_simple_type_reference(type_text)
+                        && imported_type_names.contains(type_text);
+                    if skip_unresolved_import_error {
+                        continue;
+                    }
                     validate_imported_macro_type(
                         "defineProps",
                         type_params,

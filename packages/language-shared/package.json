@@ -14,8 +14,7 @@
   "main": "dist/index.js",
   "module": "dist/index.js",
   "scripts": {
-    "build": "tsc -b",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc -b"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

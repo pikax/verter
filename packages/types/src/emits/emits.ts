@@ -1,4 +1,4 @@
-import { Camelize, Hyphenate } from "../name/name";
+import { Camelize } from "../name/name";
 import { ExtractHidden, IntersectionFunctionToObject } from "../helpers";
 
 /**
@@ -14,7 +14,7 @@ export type EmitsToProps<T> = T extends () => any
           [K in keyof E as K extends string
             ? K extends `${string}:${string}`
               ? `on${Capitalize<K>}`
-              : `on${Capitalize<K>}` | `on${Capitalize<Camelize<K>>}` | `on${Capitalize<Hyphenate<K>>}`
+              : `on${Capitalize<K>}` | `on${Capitalize<Camelize<K>>}`
             : never]?: (...args: E[K]) => void;
         }
       : {}

@@ -684,6 +684,25 @@ describe('"emits" helper', () => {
         props["onClickItem"]?.("test");
       });
 
+      it("camelCase event produces single key, no duplicate", () => {
+        const component = defineComponent({
+          emits: {
+            myEvent: (value: number) => true,
+          },
+        });
+
+        type Component = typeof component;
+        type Props = ComponentEmitsToProps<Component>;
+
+        const props = {} as Props;
+        props.onMyEvent;
+        props.onMyEvent?.(42);
+        // @ts-expect-error wrong arg type
+        props.onMyEvent?.("test");
+        // @ts-expect-error non-existent kebab form
+        props["onMy-event"];
+      });
+
       it("multiple arguments", () => {
         const component = defineComponent({
           emits: {

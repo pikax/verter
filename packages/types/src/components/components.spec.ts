@@ -633,8 +633,6 @@ describe("components helpers", () => {
   });
 
   describe("instantiateComponent", () => {
-    type instantiateComponent<T, P> = import("./components").instantiateComponent<T, P>;
-
     it("returns instance type for class-based component", () => {
       type MockInstance = { $props: { msg: string }; $emit: () => void };
       type MockConstructor = { new (): MockInstance };
@@ -662,7 +660,11 @@ describe("components helpers", () => {
       type FnComp = (props: { hidden?: boolean }) => void;
 
       type Result = ReturnType<typeof import("./components").instantiateComponent<FnComp, { hidden?: boolean }>>;
-      assertType<Result>({} as void);
+      assertType<Result>(undefined as void);
+      assertType<void>(undefined as Result);
+
+      // @ts-expect-error - Result is not any/unknown
+      assertType<Result>({} as { unrelated: true });
     });
 
     it("returns T for non-component types", () => {
