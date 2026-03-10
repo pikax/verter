@@ -171,6 +171,7 @@ impl VerterHost {
                     latest_diagnostics: HashMap::new(),
                     generation: 0,
                     cached_parse: None,
+                    cached_tsc_extract: None,
                 });
 
             entry.file_kind = req.file_kind;
@@ -188,6 +189,13 @@ impl VerterHost {
             entry.export_signatures = new_export_signatures.clone();
             entry.style_analyses = Arc::new(snapshot.style_analyses);
             entry.cached_parse = cached_parse.map(Arc::new);
+            // Clear TSC extract cache when script content changes, since the
+            // extracted macro state depends on the script setup source text.
+            if changes.changed
+                && (changes.slice_changes.script_changed || changes.slice_changes.structure_changed)
+            {
+                entry.cached_tsc_extract = None;
+            }
             entry.generation = entry.generation.saturating_add(1);
             entry.aliases = alias_set.clone();
             entry.dependencies = new_deps.clone();

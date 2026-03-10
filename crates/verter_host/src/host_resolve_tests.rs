@@ -444,3 +444,95 @@ fn testing_public_api_ignores_define_expose_narrowing() {
         "testing mode should not narrow the debug instance to defineExpose: {testing}"
     );
 }
+
+// ── TSC extract cache tests ──────────────────────────────────────────────
+
+#[test]
+fn public_api_cache_populated_on_first_call() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/test/Cached.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    // First call should populate the cache
+    let api = host.get_public_api("/test/Cached.vue");
+    assert!(api.is_some(), "should produce public API output");
+
+    // Verify cache is populated
+    let files = read_lock(&host.files);
+    let entry = files.get("/test/Cached.vue").expect("entry exists");
+    assert!(
+        entry.cached_tsc_extract.is_some(),
+        "cached_tsc_extract should be populated after first get_public_api call"
+    );
+}
+
+#[test]
+fn public_api_cache_reused_on_second_call() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/test/Reuse.vue",
+        r#"<script setup lang="ts">
+defineProps<{ x: number }>()
+defineEmits<{ (e: 'click'): void }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let api1 = host.get_public_api("/test/Reuse.vue").expect("first call");
+    let api2 = host.get_public_api("/test/Reuse.vue").expect("second call");
+    assert_eq!(
+        api1.code, api2.code,
+        "two consecutive calls must produce identical code"
+    );
+}
+
+#[test]
+fn public_api_cache_cleared_on_source_change() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/test/Clear.vue",
+        r#"<script setup lang="ts">
+defineProps<{ a: string }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    // Populate cache
+    let _api = host.get_public_api("/test/Clear.vue");
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("/test/Clear.vue").expect("entry");
+        assert!(
+            entry.cached_tsc_extract.is_some(),
+            "cache should be populated"
+        );
+    }
+
+    // Upsert with changed source
+    upsert_vue(
+        &host,
+        "/test/Clear.vue",
+        r#"<script setup lang="ts">
+defineProps<{ b: number }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    // Cache should be cleared
+    {
+        let files = read_lock(&host.files);
+        let entry = files.get("/test/Clear.vue").expect("entry");
+        assert!(
+            entry.cached_tsc_extract.is_none(),
+            "cached_tsc_extract should be cleared after source change"
+        );
+    }
+}

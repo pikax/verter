@@ -1873,6 +1873,46 @@ impl VerterLanguageServer {
     }
 
     /// Re-read a non-open .vue file from disk, upsert, compile, and sync to TSGO.
+    /// Lightweight API sync for imported .vue files during `did_open`.
+    ///
+    /// Tries to generate and sync the public API (.vue.ts) without disk I/O:
+    /// if the host already has the file in memory, `get_public_api` avoids
+    /// re-reading from disk. Falls back to `resync_background_vue_file` when
+    /// the file hasn't been upserted yet.
+    async fn sync_imported_vue_api_lightweight(&self, canonical_id: &str) {
+        // Fast path: host already has the file — generate API and sync DTS only.
+        if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+            if let Some(sync) = &self.project_sync {
+                let Some(transition) =
+                    self.prepare_vue_provider_sync_transition(canonical_id, false)
+                else {
+                    self.queue_snapshot_provider_sync(canonical_id.to_string());
+                    return;
+                };
+                self.close_provider_paths(&transition.stale_paths).await;
+                let mut committed_state = transition.next;
+                if let Some(dts_path) = committed_state.api_path.clone() {
+                    let is_bg = self
+                        .is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Api);
+                    let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+                    let result = if is_tsgo && !is_bg {
+                        sync.open_dts(&dts_path, &api.code).await
+                    } else {
+                        sync.sync_dts(&dts_path, &api.code).await
+                    };
+                    if result.is_ok() {
+                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                        self.commit_provider_sync_state(canonical_id, committed_state);
+                    }
+                }
+            }
+            return;
+        }
+
+        // Slow path: file not in host yet — full disk read + upsert + compile + sync.
+        self.resync_background_vue_file(canonical_id).await;
+    }
+
     async fn resync_background_vue_file(&self, canonical_id: &str) {
         tracing::info!(
             "resync_background: START {canonical_id} thread={:?}",
@@ -3021,9 +3061,11 @@ struct DidOpenProviderSyncPolicy {
     background_api_sync: bool,
 }
 
-fn did_open_startup_policy() -> DidOpenStartupPolicy {
+fn did_open_startup_policy(kind: crate::TypeProviderKind) -> DidOpenStartupPolicy {
     DidOpenStartupPolicy {
-        sync_imported_vue_files: false,
+        // When a type provider is active, eagerly sync imported .vue files so that
+        // hover/completions/go-to-definition work on <ChildComponent> immediately.
+        sync_imported_vue_files: !matches!(kind, crate::TypeProviderKind::None),
         publish_diagnostics: false,
     }
 }
@@ -4191,7 +4233,7 @@ impl LanguageServer for VerterLanguageServer {
                 uri.as_str(),
             );
         }
-        let startup_policy = did_open_startup_policy();
+        let startup_policy = did_open_startup_policy(self.type_provider_kind);
         let imported_vue_priority_ids = self
             .documents
             .get_canonical_id(uri)
@@ -4226,7 +4268,7 @@ impl LanguageServer for VerterLanguageServer {
                 let should_sync =
                     !self.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
                 if should_sync {
-                    self.resync_background_vue_file(import_id).await;
+                    self.sync_imported_vue_api_lightweight(import_id).await;
                 }
             }
         }
@@ -7356,15 +7398,38 @@ mod tests {
     }
 
     #[test]
-    fn did_open_startup_policy_skips_eager_import_sync_and_inline_diagnostics() {
-        let policy = did_open_startup_policy();
+    fn did_open_startup_policy_enables_sync_for_tsgo_and_tsserver() {
+        let tsgo = did_open_startup_policy(crate::TypeProviderKind::Tsgo);
         assert!(
-            !policy.sync_imported_vue_files,
-            "cold open should not eagerly resync imported Vue files"
+            tsgo.sync_imported_vue_files,
+            "TSGO should eagerly sync imported .vue files"
         );
         assert!(
-            !policy.publish_diagnostics,
-            "cold open should not publish diagnostics inline"
+            !tsgo.publish_diagnostics,
+            "should not publish diagnostics inline"
+        );
+
+        let tsserver = did_open_startup_policy(crate::TypeProviderKind::Tsserver);
+        assert!(
+            tsserver.sync_imported_vue_files,
+            "tsserver should eagerly sync imported .vue files"
+        );
+        assert!(
+            !tsserver.publish_diagnostics,
+            "should not publish diagnostics inline"
+        );
+    }
+
+    #[test]
+    fn did_open_startup_policy_skips_sync_for_no_provider() {
+        let none = did_open_startup_policy(crate::TypeProviderKind::None);
+        assert!(
+            !none.sync_imported_vue_files,
+            "no type provider should not eagerly sync imported .vue files"
+        );
+        assert!(
+            !none.publish_diagnostics,
+            "should not publish diagnostics inline"
         );
     }
 

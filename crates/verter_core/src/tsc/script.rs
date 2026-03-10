@@ -86,6 +86,7 @@ pub struct TscGenOptions {
 // ── Internal state ───────────────────────────────────────────────────────────
 
 /// TypeScript type representation for props (from `defineProps`).
+#[derive(Clone)]
 enum PropsTs {
     /// Type reference (name only) — from `defineProps<ImportedType>()`.
     /// The corresponding `import type { ... }` is in `TscMacroState::type_import_stmts`.
@@ -96,6 +97,7 @@ enum PropsTs {
     Inline(Vec<InlinePropEntry>),
 }
 
+#[derive(Clone)]
 struct InlinePropEntry {
     name: String,
     optional: bool,
@@ -104,24 +106,28 @@ struct InlinePropEntry {
     map_span: Option<Span>,
 }
 
+#[derive(Clone)]
 struct EmitEntry {
     name: String,
     payload: EmitPayload,
     map_span: Option<Span>,
 }
 
+#[derive(Clone)]
 enum EmitPayload {
     Unknown,
     Call { params_text: String },
     Tuple { tuple_text: String },
 }
 
+#[derive(Clone)]
 struct ModelEntry {
     name: String,
     ts_type: String,
     map_span: Option<Span>,
 }
 
+#[derive(Clone)]
 struct TestingPropBinding {
     name: String,
     ts_type: String,
@@ -129,6 +135,7 @@ struct TestingPropBinding {
     map_span: Option<Span>,
 }
 
+#[derive(Clone)]
 struct TestBindingEntry {
     name: String,
     binding_type: BindingType,
@@ -232,7 +239,7 @@ impl TscWriter {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct TscMacroState {
     // defineOptions
     options_name: Option<String>,
@@ -263,6 +270,347 @@ struct TscMacroState {
 
     // Type import statements to emit (e.g. `import type { Props } from './types'`)
     type_import_stmts: Vec<String>,
+}
+
+// ── Extract + Cache API ──────────────────────────────────────────────────────
+
+/// Options for the extract-only path (steps 1–7 without external types).
+#[derive(Debug, Default)]
+pub struct TscExtractOptions {
+    /// Source filename used in source maps.
+    pub filename: Option<String>,
+}
+
+/// Cached intermediate state from SFC macro extraction.
+///
+/// Captures everything that depends on the SFC source text alone (steps 1–7)
+/// so that code generation can be repeated with different external types or
+/// modes without re-parsing.
+pub struct ExtractedTscState {
+    // Note: Debug is manually implemented below (fields contain non-Debug internal types).
+    macro_state: TscMacroState,
+    generic_params: Option<String>,
+    attrs_type: Option<String>,
+    root_element_tag: Option<String>,
+    test_bindings: Vec<TestBindingEntry>,
+    /// Script setup content string (owned).
+    content_str: String,
+    content_offset: u32,
+    /// Filename for source maps.
+    filename: Option<String>,
+    /// Unresolved external props type ref name (e.g. `"ImportedProps"`).
+    pub unresolved_props_ref: Option<String>,
+    /// SFC-absolute span of the defineProps type parameter (for source mapping).
+    unresolved_props_type_span: Option<Span>,
+    /// Unresolved external emits type ref name (e.g. `"ImportedEmits"`).
+    pub unresolved_emits_ref: Option<String>,
+    /// SFC-absolute span of the defineEmits type parameter (for source mapping).
+    unresolved_emits_type_span: Option<Span>,
+}
+
+impl std::fmt::Debug for ExtractedTscState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractedTscState")
+            .field("unresolved_props_ref", &self.unresolved_props_ref)
+            .field("unresolved_emits_ref", &self.unresolved_emits_ref)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Extract intermediate TSC state from an SFC without external types.
+///
+/// Runs steps 1–7 of the TSC pipeline (SFC tokenization, OXC parsing, macro
+/// extraction, type tracking) using only companion `<script>` block types.
+/// Records which type references were unresolved so that external types can
+/// be bound later via [`generate_tsc_from_state`].
+///
+/// Returns `None` if the SFC has no `<script setup>` block.
+pub fn extract_tsc_state(
+    sfc_source: &str,
+    component_name: &str,
+    options: &TscExtractOptions,
+) -> Option<ExtractedTscState> {
+    let _ = component_name; // used by callers to name the component, not needed during extract
+
+    // ── 1. Tokenize SFC to locate <script setup> ──────────────────────
+    let bytes = sfc_source.as_bytes();
+    let ctx = SyntaxPluginContext {
+        input: sfc_source,
+        bytes,
+        options: &SyntaxPluginOptions::default(),
+        diagnostics: Vec::new(),
+    };
+    let mut syntax = Syntax::new(false);
+    tokenize_sfc(bytes, |e| syntax.handle(&e, &ctx));
+
+    let setup = syntax.script_setup()?;
+    let content_span = setup.content?;
+
+    let content_str = &sfc_source[content_span.start as usize..content_span.end as usize];
+
+    // Collect companion <script> types for same-SFC cross-block resolution (no external types).
+    let companion_types = if let Some(script) = syntax.script() {
+        if let Some(script_content) = script.content {
+            let script_source =
+                &sfc_source[script_content.start as usize..script_content.end as usize];
+            let alloc = Allocator::default();
+            let parse_result = Parser::new(&alloc, script_source, SourceType::ts()).parse();
+            Some(extract_companion_types(
+                &parse_result.program,
+                script_source.as_bytes(),
+                script_content.start,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // ── 2. OXC-parse script content ───────────────────────────────────
+    let alloc = Allocator::default();
+    let parse_result = Parser::new(&alloc, content_str, SourceType::ts()).parse();
+    let program = parse_result.program;
+
+    // ── 3. Extract script items (macros + imports) — NO external types ─
+    let parsed =
+        parse_script_with_companion(&program, ScriptMode::Setup, 0, content_str, companion_types);
+    let test_bindings = collect_test_bindings(&parsed.bindings, content_str, content_span.start);
+
+    // ── 3b. Detect unresolved type refs ────────────────────────────────
+    let mut unresolved_props_ref: Option<String> = None;
+    let mut unresolved_props_type_span: Option<Span> = None;
+    let mut unresolved_emits_ref: Option<String> = None;
+    let mut unresolved_emits_type_span: Option<Span> = None;
+    for item in &parsed.items {
+        if let ScriptItem::Macro(m) = item {
+            match m {
+                ScriptMacro::DefineProps {
+                    type_params: Some(tp),
+                    ..
+                }
+                | ScriptMacro::WithDefaults {
+                    define_props_type_params: Some(tp),
+                    ..
+                } if tp.unresolved_type_ref => {
+                    let type_text =
+                        content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
+                    if looks_like_named_type_reference(type_text) {
+                        unresolved_props_ref = Some(type_text.to_string());
+                        unresolved_props_type_span =
+                            Some(local_to_sfc_span(tp.type_span, content_span.start));
+                    }
+                }
+                ScriptMacro::DefineEmits {
+                    type_params: Some(tp),
+                    ..
+                } if tp.unresolved_type_ref => {
+                    let type_text =
+                        content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
+                    if looks_like_named_type_reference(type_text) {
+                        unresolved_emits_ref = Some(type_text.to_string());
+                        unresolved_emits_type_span =
+                            Some(local_to_sfc_span(tp.type_span, content_span.start));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // ── 4. Collect type-only imports ──────────────────────────────────
+    let type_imports = collect_type_imports(&parsed.items);
+    let mut type_usage_tracker = TypeUsageTracker::new(&parsed.items, content_str, &type_imports);
+
+    // ── 5. Build macro state ──────────────────────────────────────────
+    let mut state = build_macro_state(
+        &parsed.items,
+        sfc_source,
+        content_str,
+        content_span.start,
+        &type_imports,
+        &program.comments,
+        &mut type_usage_tracker,
+    );
+
+    // ── 6. Extract generic params ────────────────────────────────────
+    let generic_params = setup.generic.map(|g| {
+        sfc_source[g.start as usize..g.end as usize]
+            .trim()
+            .to_string()
+    });
+
+    // ── 6b. Extract attrs type ──────────────────────────────────────
+    let explicit_attrs = setup
+        .attrs
+        .map(|a| sfc_source[a.start as usize..a.end as usize].trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let use_attrs_fallback;
+    let attrs_type = if explicit_attrs.is_some() {
+        explicit_attrs
+    } else {
+        use_attrs_fallback = detect_use_attrs_type_arg_tsc(&program.body, content_str);
+        use_attrs_fallback
+    };
+
+    // ── 7. Extract root element tag for attrs fallthrough ──────────
+    if let Some(attrs) = attrs_type.as_deref() {
+        type_usage_tracker.mark_type_text(attrs);
+    }
+    type_usage_tracker.finalize(&mut state);
+
+    let root_element_tag = if attrs_type.is_none() && !state.has_inherit_attrs_false {
+        extract_root_element_tag(syntax.template_ast(), sfc_source)
+    } else {
+        None
+    };
+
+    Some(ExtractedTscState {
+        macro_state: state,
+        generic_params,
+        attrs_type,
+        root_element_tag,
+        test_bindings,
+        content_str: content_str.to_string(),
+        content_offset: content_span.start,
+        filename: options.filename.clone(),
+        unresolved_props_ref,
+        unresolved_props_type_span,
+        unresolved_emits_ref,
+        unresolved_emits_type_span,
+    })
+}
+
+/// Generate TSC output from a previously extracted state.
+///
+/// Clones the cached macro state, binds any freshly-resolved external types,
+/// and calls the appropriate code generation function.
+pub fn generate_tsc_from_state(
+    state: &ExtractedTscState,
+    sfc_source: &str,
+    component_name: &str,
+    mode: TscMode,
+    external_types: Option<&FxHashMap<String, ResolvedElements>>,
+) -> TscOutput {
+    let mut macro_state = state.macro_state.clone();
+
+    // Bind external emits if previously unresolved
+    if let (Some(ref emits_ref), Some(ext)) = (&state.unresolved_emits_ref, external_types) {
+        if let Some(resolved) = ext.get(emits_ref.as_str()) {
+            bind_external_emits(&mut macro_state, resolved, state.unresolved_emits_type_span);
+        }
+    }
+
+    // Bind external props for Testing mode if previously unresolved
+    if matches!(mode, TscMode::Testing) {
+        if let (Some(ref props_ref), Some(ext)) = (&state.unresolved_props_ref, external_types) {
+            if let Some(resolved) = ext.get(props_ref.as_str()) {
+                bind_external_testing_props(
+                    &mut macro_state,
+                    resolved,
+                    sfc_source,
+                    &state.content_str,
+                    state.unresolved_props_type_span,
+                );
+            }
+        }
+    }
+
+    let generic_params = state.generic_params.as_deref();
+    let attrs_type = state.attrs_type.as_deref();
+    let root_element_tag = state.root_element_tag.as_deref();
+    let filename = state.filename.as_deref();
+
+    if matches!(mode, TscMode::Testing) {
+        generate_testing_code(
+            component_name,
+            &macro_state,
+            sfc_source,
+            filename,
+            generic_params,
+            attrs_type,
+            root_element_tag,
+            &state.content_str,
+            &state.test_bindings,
+        )
+    } else {
+        generate_code(
+            component_name,
+            &macro_state,
+            sfc_source,
+            filename,
+            generic_params,
+            attrs_type,
+            None, // narrowing not used in cache path
+            root_element_tag,
+        )
+    }
+}
+
+/// Populate emits_names and emits_ts from externally-resolved emit signatures.
+fn bind_external_emits(
+    state: &mut TscMacroState,
+    resolved: &ResolvedElements,
+    type_span: Option<Span>,
+) {
+    for emit in &resolved.emits {
+        state.emits_names.push(emit.name.clone());
+        let payload = resolved_emit_payload(&emit.signature);
+        // External emits map back to the defineEmits<T>() type span, mirroring
+        // the direct path behavior (process_emits line 1088: `!emit.map_local` branch).
+        state.emits_ts.push(EmitEntry {
+            name: emit.name.clone(),
+            payload,
+            map_span: type_span,
+        });
+    }
+}
+
+/// Populate testing_props from externally-resolved prop definitions.
+fn bind_external_testing_props(
+    state: &mut TscMacroState,
+    resolved: &ResolvedElements,
+    sfc_source: &str,
+    content_str: &str,
+    type_span: Option<Span>,
+) {
+    // Only populate if testing_props is currently empty (unresolved)
+    if !state.testing_props.is_empty() {
+        return;
+    }
+
+    // Get the props type name for indexed access types (e.g. `ImportedProps["key"]`)
+    let named_root_type = state.props_ts.as_ref().and_then(|pts| match pts {
+        PropsTs::TypeRef(name) | PropsTs::TypeText(name)
+            if looks_like_named_type_reference(name) =>
+        {
+            Some(name.as_str())
+        }
+        _ => None,
+    });
+
+    state.testing_props = resolved
+        .props
+        .iter()
+        .map(|prop| {
+            let name = prop
+                .key_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let ts_type =
+                render_resolved_prop_ts_type(prop, named_root_type, sfc_source, content_str);
+
+            TestingPropBinding {
+                name,
+                optional: prop.optional,
+                ts_type,
+                // External props map back to the defineProps<T>() type span, mirroring
+                // the direct path (process_props line 881: `!prop.map_local` branch).
+                map_span: type_span,
+            }
+        })
+        .collect();
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

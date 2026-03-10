@@ -13,5 +13,7 @@ pub mod script;
 mod tests;
 
 pub use script::{
-    generate_tsc_output, generate_tsc_output_with_options, TscGenOptions, TscMode, TscOutput,
+    extract_tsc_state, generate_tsc_from_state, generate_tsc_output,
+    generate_tsc_output_with_options, ExtractedTscState, TscExtractOptions, TscGenOptions, TscMode,
+    TscOutput,
 };

@@ -258,6 +258,7 @@ mod tests {
             latest_diagnostics: HashMap::new(),
             generation: 0,
             cached_parse: None,
+            cached_tsc_extract: None,
         };
         for i in 0..n_slots {
             entry.compile_slots.insert(

@@ -2551,3 +2551,221 @@ const title = defineModel<string>('title')
     assert_eq!(token.get_src_line(), expected_line);
     assert_eq!(token.get_src_col(), expected_col);
 }
+
+// ── Extract + Generate cache equivalence tests ───────────────────────────
+
+use super::script::{extract_tsc_state, generate_tsc_from_state, TscExtractOptions};
+
+#[test]
+fn extract_then_generate_matches_direct_for_inline_types() {
+    let sfc = r#"<script setup lang="ts">
+defineProps<{ x: number; y?: string }>()
+defineEmits<{ (e: 'change', val: number): void }>()
+</script>
+<template><div /></template>"#;
+
+    let extracted = extract_tsc_state(
+        sfc,
+        "TestComp",
+        &TscExtractOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+        },
+    )
+    .expect("should extract from SFC with script setup");
+
+    let from_cache = generate_tsc_from_state(&extracted, sfc, "TestComp", TscMode::Public, None);
+    let direct = gen_tsc(sfc);
+
+    assert_eq!(
+        from_cache.code, direct,
+        "cached path must produce identical code to direct path"
+    );
+}
+
+#[test]
+fn extract_then_generate_matches_direct_for_runtime_macros() {
+    let sfc = r#"<script setup lang="ts">
+defineProps({ x: String, count: { type: Number, default: 0 } })
+defineEmits(['click', 'update'])
+</script>
+<template><div /></template>"#;
+
+    let extracted = extract_tsc_state(
+        sfc,
+        "TestComp",
+        &TscExtractOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+        },
+    )
+    .expect("should extract from SFC with runtime macros");
+
+    let from_cache = generate_tsc_from_state(&extracted, sfc, "TestComp", TscMode::Public, None);
+    let direct = gen_tsc(sfc);
+
+    assert_eq!(
+        from_cache.code, direct,
+        "cached path must match direct for runtime macros"
+    );
+}
+
+#[test]
+fn extract_cache_with_external_emits_matches_direct() {
+    let sfc = r#"<script setup lang="ts">
+import type { ImportedEmits } from './types'
+defineEmits<ImportedEmits>()
+</script>
+<template><div /></template>"#;
+
+    let dep_source = r#"
+export interface ImportedEmits {
+    (e: 'save', data: string): void
+    (e: 'cancel'): void
+}
+"#;
+
+    // Extract WITHOUT external types (as cache would)
+    let extracted = extract_tsc_state(
+        sfc,
+        "TestComp",
+        &TscExtractOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+        },
+    )
+    .expect("should extract");
+
+    // Verify unresolved emits ref is recorded
+    assert!(
+        extracted.unresolved_emits_ref.is_some(),
+        "should record unresolved emits type ref"
+    );
+
+    // Resolve external types
+    let alloc = Allocator::default();
+    let resolved = crate::utils::oxc::vue::resolve_type::resolve_external_type(
+        "ImportedEmits",
+        dep_source,
+        &alloc,
+    )
+    .expect("resolve external type");
+    let mut external_types = FxHashMap::default();
+    external_types.insert("ImportedEmits".to_string(), resolved);
+
+    // Generate from cache WITH external types
+    let from_cache = generate_tsc_from_state(
+        &extracted,
+        sfc,
+        "TestComp",
+        TscMode::Public,
+        Some(&external_types),
+    );
+
+    // Generate directly with external types
+    let direct = gen_tsc_with_external_type(sfc, "ImportedEmits", dep_source);
+
+    assert_eq!(
+        from_cache.code, direct,
+        "cached + external emits must match direct path"
+    );
+    assert!(
+        !from_cache.code.contains("emits: []"),
+        "should not have empty emits array"
+    );
+}
+
+#[test]
+fn extract_cache_with_external_props_testing_mode() {
+    let sfc = r#"<script setup lang="ts">
+import type { ImportedProps } from './types'
+defineProps<ImportedProps>()
+</script>
+<template><div /></template>"#;
+
+    let dep_source = r#"
+export interface ImportedProps {
+    title: string
+    count?: number
+}
+"#;
+
+    // Extract WITHOUT external types
+    let extracted = extract_tsc_state(
+        sfc,
+        "TestComp",
+        &TscExtractOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+        },
+    )
+    .expect("should extract");
+
+    assert!(
+        extracted.unresolved_props_ref.is_some(),
+        "should record unresolved props type ref"
+    );
+
+    // Resolve external types
+    let alloc = Allocator::default();
+    let resolved = crate::utils::oxc::vue::resolve_type::resolve_external_type(
+        "ImportedProps",
+        dep_source,
+        &alloc,
+    )
+    .expect("resolve external type");
+    let mut external_types = FxHashMap::default();
+    external_types.insert("ImportedProps".to_string(), resolved);
+
+    // Generate from cache in Testing mode
+    let from_cache = generate_tsc_from_state(
+        &extracted,
+        sfc,
+        "TestComp",
+        TscMode::Testing,
+        Some(&external_types),
+    );
+
+    // Generate directly in Testing mode
+    let direct = gen_tsc_testing_with_external_type(sfc, "ImportedProps", dep_source);
+
+    assert_eq!(
+        from_cache.code, direct,
+        "cached Testing mode with external props must match direct"
+    );
+}
+
+#[test]
+fn extract_returns_none_without_script_setup() {
+    let sfc = r#"<template><div>hello</div></template>"#;
+
+    let result = extract_tsc_state(sfc, "TestComp", &TscExtractOptions::default());
+    assert!(
+        result.is_none(),
+        "should return None for SFC without script setup"
+    );
+}
+
+#[test]
+fn extract_records_unresolved_refs() {
+    let sfc = r#"<script setup lang="ts">
+import type { Ext } from './external'
+defineProps<Ext>()
+</script>
+<template><div /></template>"#;
+
+    let extracted = extract_tsc_state(
+        sfc,
+        "TestComp",
+        &TscExtractOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+        },
+    )
+    .expect("should extract");
+
+    assert_eq!(
+        extracted.unresolved_props_ref.as_deref(),
+        Some("Ext"),
+        "should record the unresolved props type name"
+    );
+    assert!(
+        extracted.unresolved_emits_ref.is_none(),
+        "should not have unresolved emits ref when no defineEmits"
+    );
+}

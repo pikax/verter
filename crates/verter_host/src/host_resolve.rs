@@ -592,7 +592,7 @@ impl VerterHost {
         mode: PublicApiMode,
     ) -> Option<TscResponse> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
-        let (source, file_kind, macro_type_deps, script_imports) = {
+        let (source, file_kind, macro_type_deps, script_imports, cached_extract) = {
             let files = read_lock(&self.files);
             let entry = files.get(&canonical)?;
             (
@@ -600,6 +600,7 @@ impl VerterHost {
                 entry.file_kind,
                 entry.script_analysis.macro_type_deps.clone(),
                 entry.script_analysis.imports.clone(),
+                entry.cached_tsc_extract.clone(),
             )
         };
         if file_kind != FileKind::VueSfc {
@@ -621,15 +622,52 @@ impl VerterHost {
             PublicApiMode::Public => verter_core::tsc::TscMode::Public,
             PublicApiMode::Testing => verter_core::tsc::TscMode::Testing,
         };
-        let tsc_out = verter_core::tsc::generate_tsc_output_with_options(
+
+        // Try cached extract path: avoids re-parsing SFC + OXC on cache hit.
+        let extract = if let Some(cached) = cached_extract {
+            cached
+        } else if let Some(fresh) = verter_core::tsc::extract_tsc_state(
             &source,
             &component_name,
-            &verter_core::tsc::TscGenOptions {
-                conditional_root_narrowing: false,
+            &verter_core::tsc::TscExtractOptions {
                 filename: Some(canonical.clone()),
-                external_types,
-                mode: tsc_mode,
             },
+        ) {
+            let arc = Arc::new(fresh);
+            // Store in cache under write lock
+            let mut files = write_lock(&self.files);
+            if let Some(entry) = files.get_mut(&canonical) {
+                entry.cached_tsc_extract = Some(Arc::clone(&arc));
+            }
+            arc
+        } else {
+            // No <script setup> — fall through to direct path for empty stub
+            let tsc_out = verter_core::tsc::generate_tsc_output_with_options(
+                &source,
+                &component_name,
+                &verter_core::tsc::TscGenOptions {
+                    conditional_root_narrowing: false,
+                    filename: Some(canonical.clone()),
+                    external_types,
+                    mode: tsc_mode,
+                },
+            );
+            return Some(TscResponse {
+                code: Arc::from(tsc_out.code),
+                source_map: if tsc_out.source_map.is_empty() {
+                    None
+                } else {
+                    Some(Arc::from(tsc_out.source_map))
+                },
+            });
+        };
+
+        let tsc_out = verter_core::tsc::generate_tsc_from_state(
+            &extract,
+            &source,
+            &component_name,
+            tsc_mode,
+            external_types.as_ref(),
         );
         Some(TscResponse {
             code: Arc::from(tsc_out.code),

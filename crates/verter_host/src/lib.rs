@@ -347,6 +347,7 @@ mod tests {
             latest_diagnostics: HashMap::new(),
             generation: 1,
             cached_parse: None,
+            cached_tsc_extract: None,
         }
     }
 
@@ -889,6 +890,7 @@ mod tests {
             latest_diagnostics: HashMap::new(),
             generation: 0,
             cached_parse: None,
+            cached_tsc_extract: None,
         };
         let exts = vec![".ts".to_string()];
         assert!(import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -929,6 +931,7 @@ mod tests {
             latest_diagnostics: HashMap::new(),
             generation: 0,
             cached_parse: None,
+            cached_tsc_extract: None,
         };
         let exts = vec![".ts".to_string()];
         assert!(!import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -963,6 +966,7 @@ mod tests {
             latest_diagnostics: HashMap::new(),
             generation: 0,
             cached_parse: None,
+            cached_tsc_extract: None,
         };
         let exts = vec![".ts".to_string(), ".js".to_string()];
         assert!(import_resolves_to_dep(&entry, "./B", "/src/B", &exts));
@@ -1001,6 +1005,7 @@ mod tests {
             latest_diagnostics: HashMap::new(),
             generation: 0,
             cached_parse: None,
+            cached_tsc_extract: None,
         };
         let exts = vec![".ts".to_string(), ".js".to_string()];
         // ./types resolves to /src/types, dep is /src/types.ts

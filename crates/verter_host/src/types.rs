@@ -955,6 +955,10 @@ pub(crate) struct FileEntry {
     pub(crate) generation: u64,
     /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
     pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
+    /// Cached intermediate TSC extract state. Populated on first `get_public_api_with_mode`
+    /// call and reused for subsequent calls with different external types or modes.
+    /// Cleared on source change (semantic_hash mismatch during upsert).
+    pub(crate) cached_tsc_extract: Option<Arc<verter_core::tsc::ExtractedTscState>>,
 }
 
 impl FileMeta {
