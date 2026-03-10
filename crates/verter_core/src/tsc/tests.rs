@@ -2769,3 +2769,68 @@ defineProps<Ext>()
         "should not have unresolved emits ref when no defineEmits"
     );
 }
+
+// ── TSC output with dotted component names ──────────────────────────
+
+fn assert_valid_tsc_output(source: &str, name: &str) {
+    let tsc_out = super::generate_tsc_output(source, name);
+    let code = &tsc_out.code;
+    eprintln!("=== TSC {} ===\n{}\n=== END ===", name, code);
+
+    let alloc = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("[TSC {name}] OXC ERROR: {err}");
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "[TSC {name}] should have no parse errors. Got {} errors. Output:\n{code}",
+        parsed.errors.len()
+    );
+}
+
+#[test]
+fn tsc_dotted_component_name_sanitized() {
+    // Dotted names like "Drawer.draggable" produce invalid identifiers in
+    // `declare const Drawer.draggable:` — dots must be replaced with underscores.
+    let source = r#"<script setup lang="ts">
+defineProps<{ open: boolean }>()
+</script>
+<template><div>hello</div></template>"#;
+    assert_valid_tsc_output(source, "Drawer.draggable");
+}
+
+#[test]
+fn tsc_multi_dotted_component_name_sanitized() {
+    // Multiple dots: "SwiperCardStyle.story.component"
+    let source = r#"<script setup lang="ts">
+defineProps<{ count: number }>()
+</script>
+<template><div>{{ count }}</div></template>"#;
+    assert_valid_tsc_output(source, "SwiperCardStyle.story.component");
+}
+
+#[test]
+fn tsc_dotted_name_produces_valid_identifiers() {
+    let source = r#"<script setup lang="ts">
+defineProps<{ value: string }>()
+</script>
+<template><div>{{ value }}</div></template>"#;
+    let tsc_out = super::generate_tsc_output(source, "My.Component.Name");
+    let code = &tsc_out.code;
+
+    // The output must NOT contain bare `My.Component.Name` as an identifier
+    assert!(
+        !code.contains("const My.Component.Name"),
+        "dotted name must be sanitized in const declaration: {code}"
+    );
+    assert!(
+        !code.contains("default My.Component.Name"),
+        "dotted name must be sanitized in export default: {code}"
+    );
+    // It SHOULD contain the sanitized version
+    assert!(
+        code.contains("My_Component_Name"),
+        "dotted name should be sanitized to underscores: {code}"
+    );
+}

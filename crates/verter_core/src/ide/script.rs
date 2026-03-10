@@ -4591,7 +4591,14 @@ fn resolve_all_prop_refs_in_expr(expr: &str, prop_names: &rustc_hash::FxHashSet<
             let ident = &expr[start..i];
             // Skip if preceded by '.' (property access, not bare identifier)
             let preceded_by_dot = start > 0 && bytes[start - 1] == b'.';
-            if !preceded_by_dot && prop_names.contains(ident) {
+            // Skip if this is an object property key: followed by ':' (not '::')
+            // and preceded (skipping whitespace) by '{' or ','
+            let is_object_key = if !preceded_by_dot && prop_names.contains(ident) {
+                is_object_property_key(bytes, start, i, len)
+            } else {
+                false
+            };
+            if !preceded_by_dot && !is_object_key && prop_names.contains(ident) {
                 result.push_str("__props.");
             }
             result.push_str(ident);
@@ -4601,6 +4608,40 @@ fn resolve_all_prop_refs_in_expr(expr: &str, prop_names: &rustc_hash::FxHashSet<
         }
     }
     result
+}
+
+/// Check whether the identifier at `bytes[start..end]` is an object property key.
+///
+/// Returns true when the identifier is followed by `:` (not `::`) and preceded
+/// (skipping whitespace) by `{` or `,` — the two tokens that start an object
+/// property in JavaScript/TypeScript.
+fn is_object_property_key(bytes: &[u8], start: usize, end: usize, len: usize) -> bool {
+    // Look ahead: skip whitespace, check for ':' (but not '::')
+    let mut j = end;
+    while j < len && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') {
+        j += 1;
+    }
+    let followed_by_colon = j < len && bytes[j] == b':' && (j + 1 >= len || bytes[j + 1] != b':');
+    if !followed_by_colon {
+        return false;
+    }
+    // Look back: skip whitespace, check for '{' or ','
+    if start == 0 {
+        return false;
+    }
+    let mut k = start - 1;
+    loop {
+        match bytes[k] {
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                if k == 0 {
+                    return false;
+                }
+                k -= 1;
+            }
+            b'{' | b',' => return true,
+            _ => return false,
+        }
+    }
 }
 
 // camelize_event removed — use event_to_jsx_name from super instead
@@ -9646,6 +9687,98 @@ const color = ref('red')
             code.contains("void(color)"),
             "should emit void(color) for style v-bind referenced binding: {}",
             code
+        );
+    }
+
+    // ── resolve_all_prop_refs_in_expr: object key context ─────────────
+
+    #[test]
+    fn resolve_prop_refs_skips_object_property_keys() {
+        let mut prop_names = rustc_hash::FxHashSet::default();
+        prop_names.insert("zIndex");
+        prop_names.insert("position");
+
+        // Object literal: key `zIndex` should NOT be prefixed, value `zIndex` SHOULD be
+        let result = resolve_all_prop_refs_in_expr(
+            "{ position: 'absolute', zIndex: zIndex - 2 }",
+            &prop_names,
+        );
+        assert!(
+            result.contains("zIndex: __props.zIndex"),
+            "value `zIndex` should be prefixed with __props.: {result}"
+        );
+        assert!(
+            !result.contains("__props.zIndex:"),
+            "object key `zIndex` must NOT be prefixed: {result}"
+        );
+        assert!(
+            !result.contains("__props.position:"),
+            "object key `position` must NOT be prefixed: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_still_replaces_ternary_before_colon() {
+        let mut prop_names = rustc_hash::FxHashSet::default();
+        prop_names.insert("flag");
+
+        // Ternary: `flag` before `:` is a value, not an object key
+        let result = resolve_all_prop_refs_in_expr("cond ? flag : other", &prop_names);
+        assert!(
+            result.contains("__props.flag"),
+            "ternary value should still be prefixed: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_object_key_with_prop_value() {
+        let mut prop_names = rustc_hash::FxHashSet::default();
+        prop_names.insert("size");
+
+        // Object key is a prop name, value is also a prop name
+        let result = resolve_all_prop_refs_in_expr("{ size: size + 1 }", &prop_names);
+        assert!(
+            result.contains("size: __props.size"),
+            "value `size` should be prefixed: {result}"
+        );
+        assert!(
+            !result.contains("__props.size:"),
+            "key `size` must NOT be prefixed: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_comp_function_object_literal_in_binding() {
+        // End-to-end: compile SFC with object literal binding containing prop name as key
+        let source = r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+const props = defineProps<{ zIndex: number }>()
+</script>
+<template>
+  <MyComp :overlay-style="{ zIndex: zIndex - 2 }" />
+</template>"#;
+        let (code, _) = gen_tsx_script(source);
+        eprintln!("Object key prop test output:\n{code}");
+
+        // The Comp function should exist
+        assert!(code.contains("Comp"), "should have a Comp function: {code}");
+
+        // The Comp function should NOT have `__props.zIndex:` (invalid object key)
+        assert!(
+            !code.contains("__props.zIndex:"),
+            "object key `zIndex` must NOT be prefixed with __props.: {code}"
+        );
+
+        // The generated TSX should parse without errors
+        let alloc = oxc_allocator::Allocator::new();
+        let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::tsx()).parse();
+        for err in &parsed.errors {
+            eprintln!("OXC ERROR: {err}");
+        }
+        assert!(
+            parsed.errors.is_empty(),
+            "generated TSX should have no parse errors, got {}: {code}",
+            parsed.errors.len()
         );
     }
 }

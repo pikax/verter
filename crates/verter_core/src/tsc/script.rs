@@ -493,6 +493,7 @@ pub fn generate_tsc_from_state(
     mode: TscMode,
     external_types: Option<&FxHashMap<String, ResolvedElements>>,
 ) -> TscOutput {
+    let component_name = &sanitize_tsc_component_name(component_name);
     let mut macro_state = state.macro_state.clone();
 
     // Bind external emits if previously unresolved
@@ -627,12 +628,34 @@ pub fn generate_tsc_output(sfc_source: &str, component_name: &str) -> TscOutput 
     generate_tsc_output_with_options(sfc_source, component_name, &TscGenOptions::default())
 }
 
+/// Sanitize a component name to be a valid TypeScript identifier.
+///
+/// Replaces non-alphanumeric, non-underscore, non-`$` characters with `_`.
+/// This handles dotted file stems like `Drawer.draggable` → `Drawer_draggable`.
+fn sanitize_tsc_component_name(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+            result.push(ch);
+        } else if i == 0 {
+            result.push('_');
+        } else {
+            result.push('_');
+        }
+    }
+    if result.is_empty() {
+        result.push_str("_Component");
+    }
+    result
+}
+
 /// Like [`generate_tsc_output`] but with explicit options.
 pub fn generate_tsc_output_with_options(
     sfc_source: &str,
     component_name: &str,
     tsc_options: &TscGenOptions,
 ) -> TscOutput {
+    let component_name = &sanitize_tsc_component_name(component_name);
     // ── 1. Tokenize SFC to locate <script setup> ──────────────────────
     let bytes = sfc_source.as_bytes();
     let ctx = SyntaxPluginContext {
@@ -1691,11 +1714,12 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
 // ── Step 6: generate code ─────────────────────────────────────────────────────
 
 fn generate_empty_stub(component_name: &str) -> TscOutput {
+    let name = sanitize_tsc_component_name(component_name);
     let source_map = minimal_source_map();
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
     let code = format!(
         "import {{ defineComponent }} from \"vue\"\nconst __comp = defineComponent({{}})\ndeclare const {name}: typeof __comp\nexport default {name}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
-        name = component_name,
+        name = name,
         map = encoded,
     );
     TscOutput { code, source_map }

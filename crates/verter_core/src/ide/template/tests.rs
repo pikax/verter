@@ -4500,3 +4500,57 @@ fn v_slot_with_v_for() {
         "v-slot should produce extractArgumentsFromRenderSlot: {result}"
     );
 }
+
+// ── Object literal in binding: prop name as key must not be rewritten ────
+
+fn compile_full_sfc_tsx(source: &str, filename: &str) -> String {
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some(filename.to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        embed_ambient_types: false,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+    tsx.code.clone()
+}
+
+fn assert_valid_tsx(code: &str, label: &str) {
+    let alloc = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("[{label}] OXC ERROR: {err}");
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "[{label}] TSX should have no parse errors. Got {} errors. Output:\n{code}",
+        parsed.errors.len()
+    );
+}
+
+#[test]
+fn object_literal_binding_prop_key_not_rewritten() {
+    // Bug: `:overlay-style="{ zIndex: zIndex - 2 }"` where `zIndex` is a prop
+    // causes `resolve_all_prop_refs_in_expr` to produce `__props.zIndex: __props.zIndex - 2`
+    // which is invalid JS (can't have dots in object keys without quotes).
+    let source = r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+const props = defineProps<{ zIndex: number }>()
+</script>
+<template>
+  <MyComp :overlay-style="{ zIndex: zIndex - 2 }" />
+</template>"#;
+    let code = compile_full_sfc_tsx(source, "Test.vue");
+    eprintln!("Object key test TSX:\n{code}");
+
+    // Should parse without errors (the core assertion)
+    assert_valid_tsx(&code, "object-key-prop");
+
+    // Negative: should NOT have __props.zIndex: (invalid object key)
+    assert!(
+        !code.contains("__props.zIndex:"),
+        "object key must NOT be prefixed with __props.: {code}"
+    );
+}
