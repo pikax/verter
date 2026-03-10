@@ -27,10 +27,11 @@
     }
   },
   "scripts": {
+    "clean:dist": "node ./scripts/clean-dist.mjs",
     "build:types": "pnpm exec tsc --declaration --emitDeclarationOnly --outDir dist index.ts",
-    "build": "napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
-    "build:debug": "napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
-    "prepublishOnly": "napi prepublish -t npm",
+    "build": "pnpm run clean:dist && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
+    "build:debug": "pnpm run clean:dist && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
+    "prepublishOnly": "pnpm run build && napi prepublish -t npm",
     "artifacts": "napi artifacts",
     "test": "vitest run"
   },

@@ -29,7 +29,7 @@ graph LR
 
 ### Platform Binary Resolution
 
-The loader (`index.js`) detects `process.platform` and `process.arch` at startup and loads the matching `.node` binary from the `dist/` directory. On Linux, it further distinguishes between glibc and musl libc.
+The loader (`index.js`) detects `process.platform` and `process.arch` at startup and loads the matching `.node` binary from the `dist/` directory. It prefers the canonical `verter-native.*.node` artifact and only falls back to legacy `verter.*.node` filenames if they are still present. On Linux, it further distinguishes between glibc and musl libc.
 
 ```mermaid
 flowchart TD
@@ -223,13 +223,13 @@ The build command runs:
 napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml
 ```
 
-This compiles the `verter_napi` Rust crate into a `.node` shared library and places it in `dist/`.
+Before each build, `pnpm run clean:dist` removes old `.node` files from `dist/` so stale legacy binaries cannot shadow the freshly built canonical artifact. The build then compiles the `verter_napi` Rust crate into a `.node` shared library and places it in `dist/`.
 
 ### Publishing
 
 ```bash
 # Generate platform-specific npm packages
-pnpm run prepublishOnly   # runs: napi prepublish -t npm
+pnpm run prepublishOnly   # runs: pnpm run build && napi prepublish -t npm
 
 # Collect built artifacts for all platforms
 pnpm run artifacts        # runs: napi artifacts

@@ -2,6 +2,7 @@
  * @ai-generated - Tests for @verter/native exports.
  * Verifies that VerterHost and processStyle work correctly with both string and Buffer inputs.
  */
+import { basename, sep } from "node:path";
 import { describe, it, expect } from "vitest";
 import { VerterHost, processStyle } from "./index.js";
 
@@ -239,6 +240,29 @@ describe("VerterHost type declarations in sync with native binary", () => {
     expect(typeof native.processStyle).toBe("function");
     expect(typeof native.compileBatch).toBe("function");
     expect(typeof native.VerterHost).toBe("function");
+  });
+
+  it("prefers the canonical verter-native binary when loading from dist", () => {
+    const indexPath = require.resolve("./index.js");
+    const nativeNodeModules = Object.keys(require.cache).filter((entry) =>
+      entry.includes(`${sep}packages${sep}native${sep}dist${sep}`) &&
+      entry.endsWith(".node"),
+    );
+
+    delete require.cache[indexPath];
+    for (const entry of nativeNodeModules) {
+      delete require.cache[entry];
+    }
+
+    require("./index.js");
+
+    const loadedNodeModules = Object.keys(require.cache).filter((entry) =>
+      entry.includes(`${sep}packages${sep}native${sep}dist${sep}`) &&
+      entry.endsWith(".node"),
+    );
+
+    expect(loadedNodeModules).toHaveLength(1);
+    expect(basename(loadedNodeModules[0])).toMatch(/^verter-native\./);
   });
 });
 

@@ -51,20 +51,20 @@ switch (platform) {
     switch (arch) {
       case "x64":
         tryLoadAny([
-          "verter.win32-x64-msvc.node",
           "verter-native.win32-x64-msvc.node",
+          "verter.win32-x64-msvc.node",
         ]);
         break;
       case "ia32":
         tryLoadAny([
-          "verter.win32-ia32-msvc.node",
           "verter-native.win32-ia32-msvc.node",
+          "verter.win32-ia32-msvc.node",
         ]);
         break;
       case "arm64":
         tryLoadAny([
-          "verter.win32-arm64-msvc.node",
           "verter-native.win32-arm64-msvc.node",
+          "verter.win32-arm64-msvc.node",
         ]);
         break;
       default:
@@ -73,21 +73,21 @@ switch (platform) {
     break;
   case "darwin":
     tryLoadAny([
-      "verter.darwin-universal.node",
       "verter-native.darwin-universal.node",
+      "verter.darwin-universal.node",
     ]);
     if (!nativeBinding) {
       switch (arch) {
         case "x64":
           tryLoadAny([
-            "verter.darwin-x64.node",
             "verter-native.darwin-x64.node",
+            "verter.darwin-x64.node",
           ]);
           break;
         case "arm64":
           tryLoadAny([
-            "verter.darwin-arm64.node",
             "verter-native.darwin-arm64.node",
+            "verter.darwin-arm64.node",
           ]);
           break;
         default:
@@ -100,26 +100,26 @@ switch (platform) {
       case "x64":
         if (isMusl()) {
           tryLoadAny([
-            "verter.linux-x64-musl.node",
             "verter-native.linux-x64-musl.node",
+            "verter.linux-x64-musl.node",
           ]);
         } else {
           tryLoadAny([
-            "verter.linux-x64-gnu.node",
             "verter-native.linux-x64-gnu.node",
+            "verter.linux-x64-gnu.node",
           ]);
         }
         break;
       case "arm64":
         if (isMusl()) {
           tryLoadAny([
-            "verter.linux-arm64-musl.node",
             "verter-native.linux-arm64-musl.node",
+            "verter.linux-arm64-musl.node",
           ]);
         } else {
           tryLoadAny([
-            "verter.linux-arm64-gnu.node",
             "verter-native.linux-arm64-gnu.node",
+            "verter.linux-arm64-gnu.node",
           ]);
         }
         break;
