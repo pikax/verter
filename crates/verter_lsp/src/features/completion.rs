@@ -1000,7 +1000,7 @@ fn extract_vfor_variable_names(pattern: &str) -> Vec<&str> {
 
 fn binding_completion_kind(kind: &verter_analysis::AnalyzedBindingKind) -> CompletionItemKind {
     match kind {
-        verter_analysis::AnalyzedBindingKind::Const => CompletionItemKind::CONSTANT,
+        verter_analysis::AnalyzedBindingKind::Const => CompletionItemKind::VARIABLE,
         verter_analysis::AnalyzedBindingKind::Let | verter_analysis::AnalyzedBindingKind::Var => {
             CompletionItemKind::VARIABLE
         }

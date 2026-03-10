@@ -440,8 +440,16 @@ pub fn merge_completions(
             item.label.clone()
         };
 
-        // Skip if already seen (from verter or a previous TSGO item)
+        // Skip if already seen (from verter or a previous TSGO item),
+        // but enrich the existing item's kind if the type provider has a richer one
         if !seen_labels.insert(label.clone()) {
+            if let Some(tp_kind) = item.kind {
+                if !matches!(tp_kind, CompletionKind::Text) {
+                    if let Some(existing) = result.iter_mut().find(|i| i.label == label) {
+                        existing.kind = Some(convert_completion_kind(tp_kind));
+                    }
+                }
+            }
             continue;
         }
 
@@ -3157,6 +3165,76 @@ mod tests {
         assert!(
             !labels.contains(&"model-value"),
             "no kebab-case transformation in expression context, got: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn merge_enriches_verter_kind_from_type_provider() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        // Verter item has VARIABLE kind
+        let verter = vec![CompletionItem {
+            label: "inc".to_string(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            ..Default::default()
+        }];
+        // Type provider has FUNCTION kind for the same label
+        let type_result = CompletionResult {
+            items: vec![Completion {
+                label: "inc".to_string(),
+                kind: Some(CompletionKind::Function),
+                detail: None,
+                documentation: None,
+                edit_range_start: None,
+                edit_range_end: None,
+                insert_text: None,
+                sort_text: None,
+                data: None,
+            }],
+            is_incomplete: false,
+        };
+
+        let (result, _) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        assert_eq!(result.len(), 1, "duplicate should be deduped");
+        assert_eq!(
+            result[0].kind,
+            Some(CompletionItemKind::FUNCTION),
+            "verter item should be enriched with type provider's FUNCTION kind"
+        );
+    }
+
+    #[test]
+    fn merge_does_not_enrich_with_text_kind() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        // Verter item has VARIABLE kind
+        let verter = vec![CompletionItem {
+            label: "msg".to_string(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            ..Default::default()
+        }];
+        // Type provider has Text kind (fallback) for the same label
+        let type_result = CompletionResult {
+            items: vec![Completion {
+                label: "msg".to_string(),
+                kind: Some(CompletionKind::Text),
+                detail: None,
+                documentation: None,
+                edit_range_start: None,
+                edit_range_end: None,
+                insert_text: None,
+                sort_text: None,
+                data: None,
+            }],
+            is_incomplete: false,
+        };
+
+        let (result, _) =
+            merge_completions(verter, type_result, &mapper, &tsx_li, &vue_li, None, false);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].kind,
+            Some(CompletionItemKind::VARIABLE),
+            "Text kind from type provider should NOT override verter's VARIABLE kind"
         );
     }
 }

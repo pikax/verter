@@ -2325,3 +2325,44 @@ fn test_component_prop_completions_from_macros() {
     let foo_item = items.iter().find(|i| i.label == "foo").unwrap();
     assert_eq!(foo_item.kind, Some(CompletionItemKind::PROPERTY));
 }
+
+// ── binding_completion_kind unit tests ──────────────────────────────
+
+#[test]
+fn test_binding_completion_kind_const_is_variable() {
+    // JS `const` declarations should map to Variable, not Constant.
+    // Constant is for enum members and compile-time constants.
+    assert_eq!(
+        binding_completion_kind(&AnalyzedBindingKind::Const),
+        CompletionItemKind::VARIABLE,
+        "const bindings should be VARIABLE (6), not CONSTANT (21)"
+    );
+}
+
+#[test]
+fn test_binding_completion_kind_all_variants() {
+    assert_eq!(
+        binding_completion_kind(&AnalyzedBindingKind::Const),
+        CompletionItemKind::VARIABLE
+    );
+    assert_eq!(
+        binding_completion_kind(&AnalyzedBindingKind::Let),
+        CompletionItemKind::VARIABLE
+    );
+    assert_eq!(
+        binding_completion_kind(&AnalyzedBindingKind::Var),
+        CompletionItemKind::VARIABLE
+    );
+    assert_eq!(
+        binding_completion_kind(&AnalyzedBindingKind::Function),
+        CompletionItemKind::FUNCTION
+    );
+    assert_eq!(
+        binding_completion_kind(&AnalyzedBindingKind::AsyncFunction),
+        CompletionItemKind::FUNCTION
+    );
+    assert_eq!(
+        binding_completion_kind(&AnalyzedBindingKind::Class),
+        CompletionItemKind::CLASS
+    );
+}

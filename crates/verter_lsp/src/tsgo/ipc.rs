@@ -588,19 +588,24 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         1 => CompletionKind::Text,
         2 => CompletionKind::Method,
         3 => CompletionKind::Function,
+        4 => CompletionKind::Method, // Constructor — closest match
         5 => CompletionKind::Field,
         6 => CompletionKind::Variable,
         7 => CompletionKind::Class,
         8 => CompletionKind::Interface,
         9 => CompletionKind::Module,
+        10 => CompletionKind::Property,
+        12 => CompletionKind::Variable, // Value
         13 => CompletionKind::Enum,
         14 => CompletionKind::Keyword,
         15 => CompletionKind::Snippet,
-        16 => CompletionKind::Property,
-        20 => CompletionKind::EnumMember,
-        21 => CompletionKind::Constant,
         17 => CompletionKind::File,
         19 => CompletionKind::Folder,
+        20 => CompletionKind::EnumMember,
+        21 => CompletionKind::Constant,
+        22 => CompletionKind::Class,    // Struct
+        23 => CompletionKind::Property, // Event
+        24 => CompletionKind::Keyword,  // Operator
         25 => CompletionKind::TypeParameter,
         _ => CompletionKind::Text,
     });
@@ -3421,6 +3426,30 @@ const props = withDefaults(defineProps({ bar: String }), {})
         assert!(matches!(item.kind, Some(CompletionKind::Variable)));
         assert_eq!(item.detail.as_deref(), Some("const myVar: string"));
         assert_eq!(item.insert_text.as_deref(), Some("myVar"));
+    }
+
+    #[test]
+    fn test_parse_completion_item_lsp_kind_property() {
+        // LSP kind 10 = Property — must map to CompletionKind::Property, not Text
+        let json = serde_json::json!({ "label": "name", "kind": 10 });
+        let item = parse_completion_item(&json, None).unwrap();
+        assert_eq!(
+            item.kind,
+            Some(CompletionKind::Property),
+            "LSP kind 10 (Property) must not fall to Text fallback"
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_item_lsp_kind_16_is_not_property() {
+        // LSP kind 16 = Color, NOT Property. Verify it doesn't map to Property.
+        let json = serde_json::json!({ "label": "red", "kind": 16 });
+        let item = parse_completion_item(&json, None).unwrap();
+        assert_ne!(
+            item.kind,
+            Some(CompletionKind::Property),
+            "LSP kind 16 (Color) must not be mapped to Property"
+        );
     }
 
     /// @ai-generated — parse_lsp_location parses an LSP Location with content
