@@ -597,7 +597,9 @@ import Child from './Child.vue'
       filename,
     );
 
-    expect(setDepsSpy).toHaveBeenCalledWith(filename, [childFile]);
+    expect(setDepsSpy).toHaveBeenCalledWith(filename, [
+      { specifier: "./Child.vue", resolvedCanonicalId: childFile },
+    ]);
     expect(
       upsertSpy.mock.calls.some(
         ([request]) =>

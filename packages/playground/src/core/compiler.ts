@@ -345,7 +345,10 @@ function syncKnownModuleReferenceDependencies(
           [...PLAYGROUND_RESOLVE_EXTENSIONS],
         )
       : resolveKnownModuleReferenceDependencies(ownerFilename, moduleReferences, knownFiles);
-  wasmHost.setImportDependencies(ownerFilename, resolvedDeps);
+  wasmHost.setImportDependencies(
+    ownerFilename,
+    resolvedDeps.map((dep) => ({ specifier: dep, resolvedCanonicalId: dep })),
+  );
 
   const visited = new Set<string>();
   const pending = [...resolvedDeps];
@@ -378,7 +381,10 @@ function syncKnownModuleReferenceDependencies(
             depResult.moduleReferences,
             knownFiles,
           );
-    wasmHost.setImportDependencies(depFile.filename, childDeps);
+    wasmHost.setImportDependencies(
+      depFile.filename,
+      childDeps.map((dep) => ({ specifier: dep, resolvedCanonicalId: dep })),
+    );
     pending.push(...childDeps);
   }
 }

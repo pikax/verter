@@ -268,6 +268,15 @@ impl From<FfiVirtualNodeKind> for NapiVirtualNodeKind {
 }
 
 #[napi(object)]
+pub struct NapiDependencyResolution {
+    pub specifier: String,
+    #[napi(ts_type = "string | undefined")]
+    pub resolved_canonical_id: Option<String>,
+    #[napi(ts_type = "string[] | undefined")]
+    pub possible_canonical_ids: Option<Vec<String>>,
+}
+
+#[napi(object)]
 pub struct NapiUpsertRequest {
     pub canonicalId: Option<String>,
     pub inputId: String,
@@ -1306,16 +1315,25 @@ impl NapiVerterHost {
     /// chains) when recompiling dependent files.
     ///
     /// - `canonical_or_alias` — the file whose dependencies are being set.
-    /// - `resolved_deps` — canonical IDs of the resolved dependency files.
+    /// - `resolutions` — per-specifier resolution records with exact or candidate canonical IDs.
     #[napi(js_name = "setImportDependencies")]
     pub fn set_import_dependencies(
         &self,
         canonical_or_alias: String,
-        resolved_deps: Vec<String>,
+        resolutions: Vec<NapiDependencyResolution>,
     ) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            self.inner
-                .set_import_dependencies(&canonical_or_alias, resolved_deps);
+            self.inner.set_import_dependencies(
+                &canonical_or_alias,
+                resolutions
+                    .into_iter()
+                    .map(|r| host::DependencyResolution {
+                        specifier: r.specifier,
+                        resolved_canonical_id: r.resolved_canonical_id,
+                        possible_canonical_ids: r.possible_canonical_ids.unwrap_or_default(),
+                    })
+                    .collect(),
+            );
         }))
     }
 

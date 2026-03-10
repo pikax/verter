@@ -332,6 +332,7 @@ mod tests {
             meta: snap.meta.clone(),
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
+            dependency_resolutions: HashMap::new(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -875,6 +876,7 @@ mod tests {
             meta: FileMeta::default(),
             aliases: BTreeSet::new(),
             dependencies: deps,
+            dependency_resolutions: HashMap::new(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -916,6 +918,7 @@ mod tests {
             meta: FileMeta::default(),
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
+            dependency_resolutions: HashMap::new(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -951,6 +954,7 @@ mod tests {
             meta: FileMeta::default(),
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
+            dependency_resolutions: HashMap::new(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -990,6 +994,7 @@ mod tests {
             },
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
+            dependency_resolutions: HashMap::new(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -1166,7 +1171,14 @@ mod tests {
         );
 
         // Caller resolves @/utils → /src/utils.ts
-        host.set_import_dependencies("Comp.vue", vec!["/src/utils.ts".to_string()]);
+        host.set_import_dependencies(
+            "Comp.vue",
+            vec![DependencyResolution {
+                specifier: "@/utils".to_string(),
+                resolved_canonical_id: Some("/src/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
 
         // Check that reverse dependency was added
         let rev = read_lock(&host.reverse_dependencies);
@@ -1189,7 +1201,14 @@ mod tests {
         );
 
         // Resolve @/utils → /src/utils.ts
-        host.set_import_dependencies("/src/Comp.vue", vec!["/src/utils.ts".to_string()]);
+        host.set_import_dependencies(
+            "/src/Comp.vue",
+            vec![DependencyResolution {
+                specifier: "@/utils".to_string(),
+                resolved_canonical_id: Some("/src/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
 
         // Upsert the dependency
         let _ = host

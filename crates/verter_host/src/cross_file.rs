@@ -232,6 +232,7 @@ impl VerterHost {
 /// Resolve an import source to a canonical file ID.
 ///
 /// Uses multiple strategies in order of specificity:
+/// 0. Exact structured dependency resolution (from `set_import_dependencies`)
 /// 1. Direct match in file map
 /// 2. Normalized (strip `./`) match
 /// 3. Relative resolution against the parent file's canonical ID
@@ -247,6 +248,21 @@ pub(crate) fn resolve_import_to_canonical(
     parent_entry: &crate::types::FileEntry,
     import_source: &str,
 ) -> Option<String> {
+    // Phase 0: Exact structured dependency resolution.
+    // If the caller provided a resolution for this specifier, prefer it.
+    if let Some(resolution) = parent_entry.dependency_resolutions.get(import_source) {
+        if let Some(ref resolved_id) = resolution.resolved_canonical_id {
+            if files.contains_key(resolved_id.as_str()) {
+                return Some(resolved_id.clone());
+            }
+        }
+        for candidate in &resolution.possible_canonical_ids {
+            if files.contains_key(candidate.as_str()) {
+                return Some(candidate.clone());
+            }
+        }
+    }
+
     // Direct match
     if files.contains_key(import_source) {
         return Some(import_source.to_string());
@@ -668,7 +684,11 @@ import Child from '@/components/Child.vue'
         // Simulate caller-resolved deps (as unplugin/LSP would do after resolving tsconfig paths)
         host.set_import_dependencies(
             "/project/src/App.vue",
-            vec!["/project/src/components/Child.vue".to_string()],
+            vec![crate::DependencyResolution {
+                specifier: "@/components/Child.vue".to_string(),
+                resolved_canonical_id: Some("/project/src/components/Child.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
         );
 
         let result = host.compute_cross_file_optimizations();

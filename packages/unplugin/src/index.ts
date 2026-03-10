@@ -3,7 +3,7 @@ import { createUnplugin } from "unplugin";
 import type { ResolvedConfig } from "vite";
 import type { VerterPluginOptions, HmrStrategy, BlockPreprocessor } from "./core/types";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
-import type { HostCompileProfile, HostUpdateResult, NativeBlockOverrideEntry } from "@verter/native";
+import type { HostCompileProfile, HostUpdateResult, NativeBlockOverrideEntry, HostDependencyResolution } from "@verter/native";
 import type { VerterHost } from "@verter/native";
 import { loadHost, generateComponentId, processStyle, resetHost } from "./core/compiler";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
@@ -64,9 +64,9 @@ async function resolveUpsertDependencies(
     }
   }
 
-  // Resolve exact and finite-set module references, then feed the canonical
-  // results back to the host without speculating on unknown dynamic imports.
-  const resolvedDependencyIds = new Set<string>();
+  // Resolve exact and finite-set module references, then feed per-specifier
+  // resolution records back to the host for exact cross-file resolution.
+  const resolutions: HostDependencyResolution[] = [];
   const dependencySpecifiers = collectResolvableModuleReferenceSpecifiers(
     host,
     upsertResult.moduleReferences ?? [],
@@ -83,7 +83,7 @@ async function resolveUpsertDependencies(
         );
         if (!resolvedId) continue;
         if (resolvedId.endsWith(".vue")) {
-          resolvedDependencyIds.add(resolvedId);
+          resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
           continue;
         }
         try {
@@ -93,7 +93,7 @@ async function resolveUpsertDependencies(
             source: depSource,
             fileKind: "non_sfc",
           });
-          resolvedDependencyIds.add(resolvedId);
+          resolutions.push({ specifier, resolvedCanonicalId: resolvedId });
         } catch {
           continue;
         }
@@ -106,7 +106,7 @@ async function resolveUpsertDependencies(
         for (const ext of exts) {
           const fullPath = absBase + ext;
           if (fullPath.endsWith(".vue") && fs.existsSync(fullPath)) {
-            resolvedDependencyIds.add(fullPath);
+            resolutions.push({ specifier, resolvedCanonicalId: fullPath });
             break;
           }
           if (fullPath.endsWith(".vue")) continue;
@@ -117,7 +117,7 @@ async function resolveUpsertDependencies(
               source: depSource,
               fileKind: "non_sfc",
             });
-            resolvedDependencyIds.add(fullPath);
+            resolutions.push({ specifier, resolvedCanonicalId: fullPath });
             break;
           } catch {
             continue;
@@ -126,7 +126,14 @@ async function resolveUpsertDependencies(
       }
     }
   }
-  host.setImportDependencies(filename, [...resolvedDependencyIds]);
+  // Also include external src="..." blocks that were resolved during upsert
+  for (const req of upsertResult.externalSourceRequests ?? []) {
+    resolutions.push({
+      specifier: req.specifier,
+      resolvedCanonicalId: req.resolvedCanonicalId,
+    });
+  }
+  host.setImportDependencies(filename, resolutions);
 }
 
 /**

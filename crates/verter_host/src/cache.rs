@@ -243,6 +243,7 @@ mod tests {
             meta: FileMeta::default(),
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
+            dependency_resolutions: HashMap::new(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),

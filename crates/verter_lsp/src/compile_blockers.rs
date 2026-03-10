@@ -102,7 +102,7 @@ pub fn hydrate_vue_compile_blockers(
         let Some(analysis) = host.get_analysis(&source_id) else {
             continue;
         };
-        for dep_id in collect_resolved_codegen_dependencies(
+        for (specifier, dep_id) in collect_resolved_codegen_dependencies(
             resolver,
             reader,
             &source_id,
@@ -111,7 +111,7 @@ pub fn hydrate_vue_compile_blockers(
             if dep_id == source_id {
                 continue;
             }
-            if track_loaded_dependency(host, reader, &source_id, &dep_id) {
+            if track_loaded_dependency(host, reader, &source_id, &specifier, &dep_id) {
                 pending.push(dep_id);
             }
         }
@@ -153,6 +153,7 @@ fn track_loaded_dependency(
     host: &VerterHost,
     reader: &dyn crate::project_resolver::ProjectResolverReader,
     owner_id: &str,
+    specifier: &str,
     dep_id: &str,
 ) -> bool {
     if owner_id == dep_id {
@@ -163,7 +164,14 @@ fn track_loaded_dependency(
         return false;
     }
 
-    host.set_import_dependencies(owner_id, vec![dep_id.to_string()]);
+    host.set_import_dependencies(
+        owner_id,
+        vec![verter_host::DependencyResolution {
+            specifier: specifier.to_string(),
+            resolved_canonical_id: Some(dep_id.to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
     true
 }
 
@@ -186,7 +194,7 @@ fn resolve_and_load_blocker(
     )?;
 
     let dep_id = resolved.source_id;
-    track_loaded_dependency(host, reader, owner_id, &dep_id).then_some(dep_id)
+    track_loaded_dependency(host, reader, owner_id, specifier, &dep_id).then_some(dep_id)
 }
 
 fn analyzed_module_reference_request_kind(
@@ -201,12 +209,13 @@ fn analyzed_module_reference_request_kind(
     }
 }
 
+/// Returns `(specifier, resolved_canonical_id)` pairs.
 fn collect_resolved_codegen_dependencies(
     resolver: &crate::project_resolver::NativeProjectResolver,
     reader: &dyn crate::project_resolver::ProjectResolverReader,
     importer_id: &str,
     module_references: &[verter_analysis::AnalyzedModuleReference],
-) -> Vec<String> {
+) -> Vec<(String, String)> {
     let mut seen = HashSet::new();
     let mut resolved = Vec::new();
 
@@ -225,7 +234,7 @@ fn collect_resolved_codegen_dependencies(
                         },
                     ) {
                         if seen.insert(result.source_id.clone()) {
-                            resolved.push(result.source_id);
+                            resolved.push((specifier.clone(), result.source_id));
                         }
                     }
                 }
@@ -242,7 +251,7 @@ fn collect_resolved_codegen_dependencies(
                         },
                     ) {
                         if seen.insert(result.source_id.clone()) {
-                            resolved.push(result.source_id);
+                            resolved.push((specifier.clone(), result.source_id));
                         }
                     }
                 }
@@ -430,8 +439,11 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                "/workspace/src/types.ts".to_string(),
-                "/workspace/src/nested.ts".to_string()
+                ("@/types".to_string(), "/workspace/src/types.ts".to_string()),
+                (
+                    "./nested".to_string(),
+                    "/workspace/src/nested.ts".to_string()
+                )
             ]
         );
     }

@@ -1,4 +1,4 @@
-import type { VerterHost } from "@verter/native";
+import type { VerterHost, HostDependencyResolution } from "@verter/native";
 
 interface MacroTypeDep {
   importSource: string;
@@ -57,21 +57,26 @@ function resolveRelativeImports(
   currentFile: string,
   imports: AnalysisImport[] | undefined,
   access: MacroTypeDependencyAccess,
-): string[] {
+): HostDependencyResolution[] {
   if (!imports?.length) {
     return [];
   }
-  const resolved = new Set<string>();
+  const resolutions: HostDependencyResolution[] = [];
+  const seen = new Set<string>();
   for (const entry of imports) {
-    if (!isRelativeImport(entry.source)) {
+    if (!isRelativeImport(entry.source) || seen.has(entry.source)) {
       continue;
     }
+    seen.add(entry.source);
     const next = access.resolveModule(currentFile, entry.source);
     if (next) {
-      resolved.add(normalizeSourcePath(next));
+      resolutions.push({
+        specifier: entry.source,
+        resolvedCanonicalId: normalizeSourcePath(next),
+      });
     }
   }
-  return [...resolved];
+  return resolutions;
 }
 
 export function hydrateMacroTypeDependencies(

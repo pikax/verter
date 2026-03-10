@@ -56,6 +56,14 @@ fn to_wasm_value<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Host serialization error: {}", e)))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmDependencyResolution {
+    specifier: String,
+    resolved_canonical_id: Option<String>,
+    possible_canonical_ids: Option<Vec<String>>,
+}
+
 /// Run a closure, converting any panic into a `JsValue` error.
 /// Prevents Rust panics from crashing the WASM runtime and poisoning
 /// RefCell borrow state.
@@ -427,16 +435,26 @@ impl WasmVerterHost {
     /// recompiling dependent files.
     ///
     /// - `canonical_or_alias` — the file whose dependencies are being set.
-    /// - `resolved_deps` — a JS array of canonical ID strings for the
-    ///   resolved dependency files.
+    /// - `resolutions` — a JS array of `{ specifier, resolvedCanonicalId?, possibleCanonicalIds? }`.
     #[wasm_bindgen(js_name = setImportDependencies)]
     pub fn set_import_dependencies(
         &self,
         canonical_or_alias: &str,
-        resolved_deps: JsValue,
+        resolutions: JsValue,
     ) -> Result<(), JsValue> {
-        let deps: Vec<String> = parse_wasm_input(resolved_deps)?;
-        catch_panic(|| self.inner.set_import_dependencies(canonical_or_alias, deps))
+        let records: Vec<WasmDependencyResolution> = parse_wasm_input(resolutions)?;
+        let resolutions = records
+            .into_iter()
+            .map(|r| host::DependencyResolution {
+                specifier: r.specifier,
+                resolved_canonical_id: r.resolved_canonical_id,
+                possible_canonical_ids: r.possible_canonical_ids.unwrap_or_default(),
+            })
+            .collect();
+        catch_panic(|| {
+            self.inner
+                .set_import_dependencies(canonical_or_alias, resolutions)
+        })
     }
 
     /// Returns the exact and finite-set module reference candidates in encounter order.

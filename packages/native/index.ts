@@ -160,6 +160,7 @@ export type {
   HostDocumentSymbol,
   HostElementMatch,
   HostSelectorMatchResult,
+  HostDependencyResolution,
 } from "./host-types";
 
 import type { HostCompileProfile } from "./host-types";
@@ -233,7 +234,7 @@ export declare class VerterHost {
    * Sets the resolved import dependencies for a file, enabling Tier 2/3
    * smart invalidation (cross-file change tracking).
    */
-  setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void;
+  setImportDependencies(canonicalOrAlias: string, resolutions: import("./host-types").HostDependencyResolution[]): void;
   collectResolvableModuleReferenceSpecifiers(moduleReferences: import("./host-types").HostModuleReference[]): string[];
   resolveKnownModuleReferenceDependencies(
     ownerCanonicalId: string,

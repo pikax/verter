@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crate::hash::compile_profile_hash;
+use crate::id::canonicalize_id;
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
@@ -372,10 +373,21 @@ impl VerterHost {
             .unwrap_or_default()
     }
 
-    /// Provide caller-resolved import dependency canonical IDs.
-    /// Called after upsert() when the caller resolves non-relative import paths
+    /// Provide caller-resolved import dependency resolution records.
+    ///
+    /// Called after `upsert()` when the caller resolves import specifiers
     /// (tsconfig paths, vite aliases, etc.) using bundler/LSP resolution.
-    pub fn set_import_dependencies(&self, canonical_or_alias: &str, resolved_deps: Vec<String>) {
+    /// Each record maps a raw import specifier to its resolved canonical ID
+    /// (or a list of candidate canonical IDs).
+    ///
+    /// Records are merged into the file's `dependency_resolutions` map (keyed by
+    /// specifier). The flat `dependencies` set is updated in parallel for
+    /// reverse-dependency tracking.
+    pub fn set_import_dependencies(
+        &self,
+        canonical_or_alias: &str,
+        resolutions: Vec<DependencyResolution>,
+    ) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
         // Single write lock to avoid TOCTOU race between read-read-write.
@@ -385,8 +397,33 @@ impl VerterHost {
                 return;
             };
             let old_deps = entry.dependencies.clone();
-            for dep in resolved_deps {
-                entry.dependencies.insert(dep);
+            for mut res in resolutions {
+                // Normalize paths so Windows backslashes / drive-letter case
+                // match the canonical IDs used by `upsert()`.
+                if let Some(ref mut id) = res.resolved_canonical_id {
+                    let norm = canonicalize_id(id);
+                    if norm != id.as_str() {
+                        *id = norm.into_owned();
+                    }
+                }
+                for candidate in &mut res.possible_canonical_ids {
+                    let norm = canonicalize_id(candidate);
+                    if norm != candidate.as_str() {
+                        *candidate = norm.into_owned();
+                    }
+                }
+                // Derive flat dependency set for reverse-dep tracking
+                if let Some(ref canonical_id) = res.resolved_canonical_id {
+                    entry.dependencies.insert(canonical_id.clone());
+                } else {
+                    for candidate in &res.possible_canonical_ids {
+                        entry.dependencies.insert(candidate.clone());
+                    }
+                }
+                // Store structured record for exact resolution lookups
+                entry
+                    .dependency_resolutions
+                    .insert(res.specifier.clone(), res);
             }
             let new_deps = entry.dependencies.clone();
             (old_deps, new_deps)

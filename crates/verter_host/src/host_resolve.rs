@@ -44,6 +44,29 @@ impl VerterHost {
         import_source: &str,
     ) -> Option<String> {
         let owner_entry = files.get(owner_canonical)?;
+
+        // Phase 1: Exact lookup via structured dependency resolution records.
+        // If the caller provided a resolution for this specifier, use it.
+        if let Some(resolution) = owner_entry.dependency_resolutions.get(import_source) {
+            if let Some(ref resolved_id) = resolution.resolved_canonical_id {
+                if files.contains_key(resolved_id.as_str()) {
+                    return Some(resolved_id.clone());
+                }
+                // Exact resolution exists but file not loaded — don't fall through
+                // to heuristics (the caller knows best).
+                return None;
+            }
+
+            // Phase 2: Candidate list — return first loaded candidate.
+            for candidate in &resolution.possible_canonical_ids {
+                if files.contains_key(candidate.as_str()) {
+                    return Some(candidate.clone());
+                }
+            }
+        }
+
+        // Phase 3: Direct path probing for relative specifiers.
+        // Resolves `./types` → `/src/types`, then tries extensions and /index variants.
         let direct = crate::id::resolve_external(owner_canonical, import_source);
         if files.contains_key(direct.as_str()) {
             return Some(direct);
@@ -54,7 +77,16 @@ impl VerterHost {
                 return Some(with_ext);
             }
         }
+        // Try directory index files: ./types → ./types/index.ts, etc.
+        for ext in &self.config.resolve_extensions {
+            let index_path = format!("{}/index{}", direct, ext);
+            if files.contains_key(index_path.as_str()) {
+                return Some(index_path);
+            }
+        }
 
+        // Phase 4: Fall back to dependency set matching for non-relative specifiers
+        // that weren't in `dependency_resolutions` (e.g., auto-discovered deps).
         let normalized = import_source.strip_prefix("./").unwrap_or(import_source);
         for dep in &owner_entry.dependencies {
             if !files.contains_key(dep.as_str()) {
@@ -62,20 +94,6 @@ impl VerterHost {
             }
             if dep.ends_with(import_source) || dep.ends_with(normalized) {
                 return Some(dep.clone());
-            }
-
-            let dep_normalized = dep.replace('\\', "/");
-            if let Some(import_basename) = normalized.rsplit('/').next() {
-                if dep_normalized.rsplit('/').next() == Some(import_basename) {
-                    return Some(dep.clone());
-                }
-                for ext in &self.config.resolve_extensions {
-                    if let Some(dep_stem) = dep_normalized.strip_suffix(ext) {
-                        if dep_stem.rsplit('/').next() == Some(import_basename) {
-                            return Some(dep.clone());
-                        }
-                    }
-                }
             }
         }
 

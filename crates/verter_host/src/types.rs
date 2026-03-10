@@ -920,6 +920,22 @@ impl ScriptAnalysisArcs {
     }
 }
 
+/// Per-specifier resolution record for an import dependency.
+///
+/// Callers (unplugin, LSP, TS plugin) resolve import specifiers to canonical IDs
+/// and pass these records to [`VerterHost::set_import_dependencies`]. The host uses
+/// them for exact resolution instead of lossy basename/suffix heuristics.
+#[derive(Debug, Clone)]
+pub struct DependencyResolution {
+    /// The raw import specifier as written in source (e.g., `@/components/base`).
+    pub specifier: String,
+    /// Exact resolved canonical ID, if the caller resolved it (e.g., `/src/components/base/index.ts`).
+    pub resolved_canonical_id: Option<String>,
+    /// Ordered candidate canonical IDs when exact resolution isn't available.
+    /// First loaded candidate wins.
+    pub possible_canonical_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
     pub(crate) canonical_id: String,
@@ -932,6 +948,10 @@ pub(crate) struct FileEntry {
     pub(crate) meta: FileMeta,
     pub(crate) aliases: BTreeSet<String>,
     pub(crate) dependencies: BTreeSet<String>,
+    /// Per-specifier resolution records from the last `set_import_dependencies` call.
+    /// Keyed by raw import specifier. Used by `resolve_loaded_dependency_canonical`
+    /// for exact lookup before falling back to heuristics.
+    pub(crate) dependency_resolutions: HashMap<String, DependencyResolution>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,

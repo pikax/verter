@@ -95,6 +95,9 @@ declare module "@verter/types" {
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
   export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
+  export declare function extractArgumentsFromRenderSlot<T extends { $slots: { [K in N]: any } }, N extends string>(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
+  export declare function extractLoops<T extends Array<any>>(element: T): T extends Array<infer V> ? { key: number; value: V } : { key: number; value: unknown };
+  export declare function extractLoops<T extends Record<any, any>>(element: T): { [K in keyof T]: { key: K; value: T[K] } }[keyof T];
 }
 `;
 
@@ -275,7 +278,9 @@ describe("resolveKnownModuleReferenceDependencies", () => {
       ["src/App.vue", "src/types.ts"],
       ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".vue"],
     );
-    expect(host.setImportDependencies).toHaveBeenCalledWith("src/App.vue", ["src/types.ts"]);
+    expect(host.setImportDependencies).toHaveBeenCalledWith("src/App.vue", [
+      { specifier: "src/types.ts", resolvedCanonicalId: "src/types.ts" },
+    ]);
   });
 
   it("falls back to the local TS resolver when an older loaded wasm runtime lacks the helper", async () => {
@@ -291,7 +296,9 @@ describe("resolveKnownModuleReferenceDependencies", () => {
       [types.filename]: types,
     });
 
-    expect(host.setImportDependencies).toHaveBeenCalledWith("src/App.vue", ["src/types.ts"]);
+    expect(host.setImportDependencies).toHaveBeenCalledWith("src/App.vue", [
+      { specifier: "src/types.ts", resolvedCanonicalId: "src/types.ts" },
+    ]);
     expect(host.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         inputId: "src/types.ts",

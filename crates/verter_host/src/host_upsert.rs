@@ -156,6 +156,7 @@ impl VerterHost {
                     meta: FileMeta::default(),
                     aliases: BTreeSet::new(),
                     dependencies: BTreeSet::new(),
+                    dependency_resolutions: HashMap::new(),
                     external_requests: Vec::new(),
                     src_blocks: Vec::new(),
                     parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -203,6 +204,9 @@ impl VerterHost {
             entry.generation = entry.generation.saturating_add(1);
             entry.aliases = alias_set.clone();
             entry.dependencies = new_deps.clone();
+            // Clear caller-provided resolution records — they'll be re-set by the
+            // next set_import_dependencies call from the unplugin/LSP after this upsert.
+            entry.dependency_resolutions.clear();
 
             if changes.changed && changes.semantic_changed {
                 entry.latest_diagnostics.clear();

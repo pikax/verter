@@ -176,7 +176,11 @@ fn external_src_can_compile_via_owner_dependency_mapping() {
     upsert_non_sfc(&host, "/src/partials/panel.html", "<div>{{ n }}</div>");
     host.set_import_dependencies(
         "/src/Comp.vue",
-        vec!["/src/partials/panel.html".to_string()],
+        vec![crate::DependencyResolution {
+            specifier: "@/partials/panel.html".to_string(),
+            resolved_canonical_id: Some("/src/partials/panel.html".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
     );
 
     let response = host
@@ -665,4 +669,231 @@ defineProps<{ x: T }>()
             "cached_tsc_extract should be cleared after descriptor change (generic attr)"
         );
     }
+}
+
+// ── DependencyResolution tests ────────────────────────────────────────────
+
+/// Exact alias resolution via structured DependencyResolution record.
+/// This is the core fix: when `@/components/base` resolves to `/src/components/base/index.ts`,
+/// the host should find it via the exact record rather than failing on basename heuristics.
+#[test]
+fn exact_alias_resolves_via_dependency_resolution() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/components/base'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
+    upsert_vue(&host, "/src/App.vue", source);
+    upsert_non_sfc(
+        &host,
+        "/src/components/base/index.ts",
+        "export interface Props { msg: string }",
+    );
+
+    // Provide structured resolution: specifier → exact canonical ID
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::DependencyResolution {
+            specifier: "@/components/base".to_string(),
+            resolved_canonical_id: Some("/src/components/base/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    // Compile should succeed — exact resolution bypasses basename heuristics
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/App.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed with exact dependency resolution");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "no HOST_MISSING_MACRO_TYPE_DEP with exact resolution: {:?}",
+        response.diagnostics
+    );
+    assert!(
+        response.code.contains("export default"),
+        "should produce main module output"
+    );
+    // Negative: should not contain error markers
+    assert!(
+        !response.code.contains("HOST_MISSING"),
+        "output must not contain error markers"
+    );
+}
+
+/// Relative import resolves to directory index via candidate probing.
+#[test]
+fn relative_import_resolves_via_directory_index_file() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Props } from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    // Dep is at /src/types/index.ts (NOT /src/types.ts)
+    upsert_non_sfc(
+        &host,
+        "/src/types/index.ts",
+        "export interface Props { msg: string }",
+    );
+    // No set_import_dependencies — direct path probing should find /src/types/index.ts
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed via directory index probing");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "directory index resolution should work: {:?}",
+        response.diagnostics
+    );
+}
+
+/// Exact resolution to an unloaded file should NOT silently fall back to heuristics.
+#[test]
+fn exact_resolution_to_unloaded_file_reports_error() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/foo'\nconst props = defineProps<Props>()\n</script>\n<template><div/></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    // Provide resolution pointing to a file that is NOT loaded in the host
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "@/foo".to_string(),
+            resolved_canonical_id: Some("/src/foo/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    // Do NOT upsert /src/foo/index.ts
+
+    let diagnostics = compile_main_error(&host, "/src/Comp.vue");
+    assert!(
+        diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
+        "should get HOST_MISSING_MACRO_TYPE_DEP when exact resolution target is not loaded: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
+/// Directory index resolution follows extension priority (.ts before .js).
+#[test]
+fn directory_index_resolution_follows_extension_priority() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Props } from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    // Both .ts and .js index files exist
+    upsert_non_sfc(
+        &host,
+        "/src/types/index.ts",
+        "export interface Props { msg: string }",
+    );
+    upsert_non_sfc(&host, "/src/types/index.js", "// no types here");
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed — .ts has priority over .js");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "should resolve to index.ts (higher priority): {:?}",
+        response.diagnostics
+    );
+}
+
+/// Candidate-list fallback resolves to first loaded candidate.
+#[test]
+fn candidate_list_resolves_to_first_loaded() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    // Only the second candidate is loaded
+    upsert_non_sfc(
+        &host,
+        "/src/types-b/index.ts",
+        "export interface Props { msg: string }",
+    );
+
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "@/types".to_string(),
+            resolved_canonical_id: None,
+            possible_canonical_ids: vec![
+                "/src/types-a/index.ts".to_string(),
+                "/src/types-b/index.ts".to_string(),
+            ],
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed via candidate list fallback");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "should resolve to first loaded candidate: {:?}",
+        response.diagnostics
+    );
+}
+
+/// Exact resolution invalidates on dep change.
+#[test]
+fn exact_resolution_invalidates_on_dep_change() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    upsert_non_sfc(
+        &host,
+        "/src/types/index.ts",
+        "export interface Props { msg: string }",
+    );
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "@/types".to_string(),
+            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    // First compile
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("first compile should succeed");
+
+    // Change the dependency — should trigger invalidation
+    upsert_non_sfc(
+        &host,
+        "/src/types/index.ts",
+        "export interface Props { msg: string; count: number }",
+    );
+
+    // Compile slots should be cleared
+    let files = read_lock(&host.files);
+    let entry = files.get("/src/Comp.vue").expect("entry exists");
+    assert!(
+        entry.compile_slots.is_empty(),
+        "compile slots should be cleared after dep change"
+    );
 }

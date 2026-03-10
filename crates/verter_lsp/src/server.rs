@@ -835,7 +835,11 @@ impl VerterLanguageServer {
                 prepared
                     .resolved_dependencies
                     .iter()
-                    .map(|entry| entry.source_id.clone())
+                    .map(|entry| verter_host::DependencyResolution {
+                        specifier: entry.provider_specifier.clone(),
+                        resolved_canonical_id: Some(entry.source_id.clone()),
+                        possible_canonical_ids: Vec::new(),
+                    })
                     .collect(),
             );
         }
@@ -942,7 +946,11 @@ impl VerterLanguageServer {
                     &canonical_id,
                     resolved_dependencies
                         .iter()
-                        .map(|entry| entry.source_id.clone())
+                        .map(|entry| verter_host::DependencyResolution {
+                            specifier: entry.provider_specifier.clone(),
+                            resolved_canonical_id: Some(entry.source_id.clone()),
+                            possible_canonical_ids: Vec::new(),
+                        })
                         .collect(),
                 );
             }
@@ -3890,7 +3898,11 @@ async fn sync_pending_non_vue_provider_file(
                 prepared
                     .resolved_dependencies
                     .iter()
-                    .map(|entry| entry.source_id.clone())
+                    .map(|entry| verter_host::DependencyResolution {
+                        specifier: entry.provider_specifier.clone(),
+                        resolved_canonical_id: Some(entry.source_id.clone()),
+                        possible_canonical_ids: Vec::new(),
+                    })
                     .collect(),
             );
             true

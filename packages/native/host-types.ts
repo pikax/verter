@@ -200,6 +200,12 @@ export interface HostRemoveResult {
   canonicalId: string;
 }
 
+export interface HostDependencyResolution {
+  specifier: string;
+  resolvedCanonicalId?: string;
+  possibleCanonicalIds?: string[];
+}
+
 // =============================================================================
 // Code Actions
 // =============================================================================

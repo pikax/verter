@@ -116,6 +116,7 @@ import type {
   HostLintDiagnostic,
   HostDocumentSymbol,
   HostSelectorMatchResult,
+  HostDependencyResolution,
 } from "@verter/native/host-types";
 
 // =============================================================================
@@ -136,7 +137,7 @@ type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[]
 type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
 type WasmHostGetIdeFn = (canonicalId: string, profile?: HostCompileProfile) => HostIdeResponse | null;
 type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
-type WasmHostSetImportDependenciesFn = (canonicalOrAlias: string, resolvedDeps: string[]) => void;
+type WasmHostSetImportDependenciesFn = (canonicalOrAlias: string, resolutions: HostDependencyResolution[]) => void;
 type WasmHostCollectResolvableModuleReferenceSpecifiersFn = (
   moduleReferences: HostModuleReference[],
 ) => string[];
@@ -325,8 +326,8 @@ export class Host {
    * Sets the resolved import dependencies for a file, enabling Tier 2/3
    * smart invalidation (cross-file change tracking).
    */
-  setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void {
-    this.inner.setImportDependencies(canonicalOrAlias, resolvedDeps);
+  setImportDependencies(canonicalOrAlias: string, resolutions: HostDependencyResolution[]): void {
+    this.inner.setImportDependencies(canonicalOrAlias, resolutions);
   }
 
   collectResolvableModuleReferenceSpecifiers(moduleReferences: HostModuleReference[]): string[] {

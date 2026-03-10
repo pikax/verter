@@ -47,12 +47,29 @@ pub(crate) fn strip_configured_extension<'a>(
 /// Check if an import source from `file` resolves to `dependency_id`.
 /// Handles both relative paths (resolved via resolve_external) and
 /// non-relative paths (matched via the file's registered dependencies).
+///
+/// Checks structured `dependency_resolutions` first for exact matches,
+/// then falls back to heuristic resolution.
 pub(crate) fn import_resolves_to_dep(
     file: &FileEntry,
     import_source: &str,
     dependency_id: &str,
     resolve_extensions: &[String],
 ) -> bool {
+    // Check structured resolution records first (exact match).
+    if let Some(resolution) = file.dependency_resolutions.get(import_source) {
+        if let Some(ref resolved_id) = resolution.resolved_canonical_id {
+            return resolved_id == dependency_id;
+        }
+        if resolution
+            .possible_canonical_ids
+            .iter()
+            .any(|c| c == dependency_id)
+        {
+            return true;
+        }
+    }
+
     if import_source.starts_with('.') {
         let resolved = id::resolve_external(&file.canonical_id, import_source);
         if resolved == dependency_id {
