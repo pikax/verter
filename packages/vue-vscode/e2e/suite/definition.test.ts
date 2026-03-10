@@ -266,6 +266,58 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     expect(def.uri.fsPath, "should NOT be in generated .tsx").to.not.match(/\.vue\.tsx$/);
   });
 
+  test("B1b: CTRL+click on direct imported WrappedButton tag reaches WrappedButton.vue", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const pos = findPosition(doc, "<WrappedButton", 1);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const locations = await getDefinitions(doc.uri, pos);
+    console.log(`    CTRL+click on <WrappedButton: ${locations.length} location(s)`);
+    for (const loc of locations) {
+      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+    }
+
+    expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
+
+    const def = locations.find((location) => location.uri.fsPath.includes("WrappedButton.vue")) || locations[0];
+    expect(def.uri.fsPath, "definition should reach WrappedButton.vue").to.include("WrappedButton.vue");
+    expect(def.uri.fsPath, "should not stay in App.vue").to.not.equal(doc.uri.fsPath);
+    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(/\.vue\.(?:d\.ts|ts|tsx)$/);
+  });
+
+  test("B1c: CTRL+click on direct imported WrappedButton binding reaches WrappedButton.vue", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const pos = findPosition(doc, "import WrappedButton from './WrappedButton.vue'", 7);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const locations = await getDefinitions(doc.uri, pos);
+    console.log(`    CTRL+click on WrappedButton import: ${locations.length} location(s)`);
+    for (const loc of locations) {
+      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+    }
+
+    expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
+
+    const def = locations.find((location) => location.uri.fsPath.includes("WrappedButton.vue")) || locations[0];
+    expect(def.uri.fsPath, "definition should reach WrappedButton.vue").to.include("WrappedButton.vue");
+    expect(def.uri.fsPath, "should not stay in App.vue").to.not.equal(doc.uri.fsPath);
+    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(/\.vue\.(?:d\.ts|ts|tsx)$/);
+  });
+
   test("B2: go-to-definition on barrel-imported component tag reaches actual .vue", async function () {
     if (FIXTURE_NAME !== "barrel-exports") {
       console.log("    pass (N/A for this fixture)");
@@ -638,6 +690,42 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     }
   });
 
+  test("E2b: CTRL+click on WrappedButton variant prop reaches child defineProps", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const pos = findPosition(doc, 'variant="danger"', 0);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const locations = await getDefinitions(doc.uri, pos);
+    console.log(`    CTRL+click on WrappedButton variant: ${locations.length} location(s)`);
+    for (const loc of locations) {
+      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+    }
+
+    expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
+
+    const def = locations.find((location) => location.uri.fsPath.includes("WrappedButton.vue")) || locations[0];
+    expect(def.uri.fsPath, "definition should be in WrappedButton.vue").to.include("WrappedButton.vue");
+    expect(def.uri.fsPath, "should not stay in App.vue").to.not.equal(doc.uri.fsPath);
+    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(/\.vue\.(?:d\.ts|ts|tsx)$/);
+
+    const childDoc = await vscode.workspace.openTextDocument(def.uri);
+    const childText = childDoc.getText();
+    const variantInDefineProps = childText.indexOf("variant: string");
+    if (variantInDefineProps !== -1) {
+      const expectedLine = childDoc.positionAt(variantInDefineProps).line;
+      expect(def.range.start.line, "definition should point to variant in defineProps").to.equal(
+        expectedLine,
+      );
+    }
+  });
+
   test("E3: go-to-definition on barrel-imported component prop reaches child defineProps", async function () {
     if (FIXTURE_NAME !== "barrel-exports") {
       console.log("    pass (N/A for this fixture)");
@@ -876,5 +964,83 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     }
 
     expect(def.uri.fsPath, "should NOT be in generated .tsx").to.not.match(/\.vue\.tsx$/);
+  });
+
+  test("G3: CTRL+click on component event name reaches child defineEmits", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const pos = findPosition(doc, '@custom="handleCustom($event)"', 1);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const locations = await getDefinitions(doc.uri, pos);
+    console.log(`    CTRL+click on @custom: ${locations.length} location(s)`);
+    for (const loc of locations) {
+      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+    }
+
+    expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
+
+    const def = locations.find((location) => location.uri.fsPath.includes("MyComp.vue")) || locations[0];
+    expect(def.uri.fsPath, "definition should reach MyComp.vue").to.include("MyComp.vue");
+    expect(def.uri.fsPath, "should not stay in App.vue").to.not.equal(doc.uri.fsPath);
+    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(/\.vue\.(?:d\.ts|ts|tsx)$/);
+
+    const childDoc = await vscode.workspace.openTextDocument(def.uri);
+    const childText = childDoc.getText();
+    const emitDecl = childText.indexOf("custom: [payload: string]");
+    if (emitDecl !== -1) {
+      const expectedLine = childDoc.positionAt(emitDecl).line;
+      expect(def.range.start.line, "definition should point to custom in defineEmits").to.equal(
+        expectedLine,
+      );
+    }
+  });
+
+  test("G4: CTRL+click on prop-backed event name reaches onEvent prop", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const pos = findPosition(doc, '@alert="handleCustom"', 1);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const locations = await getDefinitions(doc.uri, pos);
+    console.log(`    CTRL+click on @alert: ${locations.length} location(s)`);
+    for (const loc of locations) {
+      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+    }
+
+    expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
+
+    const def =
+      locations.find((location) => location.uri.fsPath.includes("OnEventPropComp.vue")) ||
+      locations[0];
+    expect(def.uri.fsPath, "definition should reach OnEventPropComp.vue").to.include(
+      "OnEventPropComp.vue",
+    );
+    expect(def.uri.fsPath, "should not stay in App.vue").to.not.equal(doc.uri.fsPath);
+    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(
+      /\.vue\.(?:d\.ts|ts|tsx)$/,
+    );
+
+    const childDoc = await vscode.workspace.openTextDocument(def.uri);
+    const childText = childDoc.getText();
+    const propDecl = childText.indexOf("onAlert?: (payload: string) => void");
+    if (propDecl !== -1) {
+      const expectedLine = childDoc.positionAt(propDecl).line;
+      expect(def.range.start.line, "definition should point to onAlert in defineProps").to.equal(
+        expectedLine,
+      );
+    }
   });
 });

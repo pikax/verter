@@ -5,6 +5,7 @@ import BaseButton from './BaseButton.vue'
 import WrappedButton from './WrappedButton.vue'
 import FragmentComp from './FragmentComp.vue'
 import NoInheritComp from './NoInheritComp.vue'
+import OnEventPropComp from './OnEventPropComp.vue'
 import ConditionalRoot from './ConditionalRoot.vue'
 import FunctionalBtn from './FunctionalBtn'
 import GenericAttrsComp from './GenericAttrsComp.vue'
@@ -66,6 +67,7 @@ function handleCustom(payload: string) { console.log(payload) }
     <WrappedButton variant="danger" class="extra" />
     <FragmentComp msg="hello" data-test="id" />
     <NoInheritComp label="ok" data-custom="val" />
+    <OnEventPropComp label="prop-event" @alert="handleCustom" />
     <ConditionalRoot :show="true" text="hi" class="cond" />
     <FunctionalBtn label="fn" class="fn-class" />
     <GenericAttrsComp :value="'hello'" class="generic-test" />

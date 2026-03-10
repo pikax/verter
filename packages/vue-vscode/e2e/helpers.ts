@@ -103,6 +103,15 @@ export async function openVueFile(relativePath: string): Promise<vscode.TextDocu
   return doc;
 }
 
+export async function openAndReady(
+  relativePath: string,
+  options: Parameters<typeof waitForFileReady>[1] = {},
+): Promise<vscode.TextDocument> {
+  const doc = await openVueFile(relativePath);
+  await waitForFileReady(doc, options);
+  return doc;
+}
+
 /**
  * Wait until the type provider has processed a file by probing completions.
  * When the type provider hasn't synced yet, completions return Text-kind or
@@ -328,6 +337,60 @@ export async function measureHover(
   return { hovers: hovers || [], latencyMs };
 }
 
+function hoverContentText(hover: vscode.Hover): string {
+  return hover.contents
+    .map((content) => (typeof content === "string" ? content : content.value))
+    .join("\n");
+}
+
+export async function getHoverText(
+  uri: vscode.Uri,
+  position: vscode.Position,
+): Promise<string> {
+  const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+    "vscode.executeHoverProvider",
+    uri,
+    position,
+  );
+
+  assert.ok(hovers && hovers.length > 0, `Expected hover results at ${uri.toString()} ${position.line}:${position.character}`);
+  const text = hoverContentText(hovers[0]);
+  assert.ok(text.trim().length > 0, `Expected non-empty hover text at ${uri.toString()} ${position.line}:${position.character}`);
+  return text;
+}
+
+export async function expectHoverContains(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  expected: string | string[],
+): Promise<string> {
+  const text = await getHoverText(uri, position);
+  const needles = Array.isArray(expected) ? expected : [expected];
+  for (const needle of needles) {
+    assert.ok(
+      text.includes(needle),
+      `Expected hover text to contain "${needle}" but got:\n${text}`,
+    );
+  }
+  return text;
+}
+
+export async function expectHoverNotContains(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  unexpected: string | string[],
+): Promise<string> {
+  const text = await getHoverText(uri, position);
+  const needles = Array.isArray(unexpected) ? unexpected : [unexpected];
+  for (const needle of needles) {
+    assert.ok(
+      !text.includes(needle),
+      `Expected hover text to NOT contain "${needle}" but got:\n${text}`,
+    );
+  }
+  return text;
+}
+
 /**
  * Trigger a decoration refresh by making a no-op edit to the active document.
  * The decoration providers listen for `onDidChangeTextDocument` and re-apply
@@ -446,6 +509,58 @@ export async function getCompletions(
     uri,
     position,
   );
+}
+
+export function getCompletionLabel(item: vscode.CompletionItem): string {
+  return typeof item.label === "string" ? item.label : item.label.label;
+}
+
+export function getCompletionItem(
+  completions: vscode.CompletionList,
+  label: string,
+): vscode.CompletionItem | undefined {
+  return completions.items.find((item) => getCompletionLabel(item) === label);
+}
+
+export function expectCompletionHas(
+  completions: vscode.CompletionList,
+  label: string,
+  options: { allowText?: boolean } = {},
+): vscode.CompletionItem {
+  const item = getCompletionItem(completions, label);
+  assert.ok(item, `Expected completion "${label}" to be present`);
+  assert.notStrictEqual(item!.kind, undefined, `Expected completion "${label}" to have a kind`);
+  if (!options.allowText) {
+    assert.notStrictEqual(
+      item!.kind,
+      vscode.CompletionItemKind.Text,
+      `Expected completion "${label}" to not be Text`,
+    );
+  }
+  return item!;
+}
+
+export function expectCompletionMissing(
+  completions: vscode.CompletionList,
+  label: string,
+): void {
+  const item = getCompletionItem(completions, label);
+  assert.ok(!item, `Expected completion "${label}" to be absent`);
+}
+
+export function expectCompletionKind(
+  completions: vscode.CompletionList,
+  label: string,
+  kinds: vscode.CompletionItemKind | vscode.CompletionItemKind[],
+  options: { allowText?: boolean } = {},
+): vscode.CompletionItem {
+  const item = expectCompletionHas(completions, label, options);
+  const allowedKinds = Array.isArray(kinds) ? kinds : [kinds];
+  assert.ok(
+    allowedKinds.includes(item.kind!),
+    `Expected completion "${label}" kind ${item.kind} to be one of [${allowedKinds.join(", ")}]`,
+  );
+  return item;
 }
 
 /**

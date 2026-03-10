@@ -149,6 +149,9 @@ export class PropConstnessDecorationProvider implements Disposable {
     grouped.set("dynamic", []);
 
     for (const comp of analysis.template.components) {
+      if (!Array.isArray(comp.props)) {
+        continue;
+      }
       for (const prop of comp.props) {
         const category = classifyPropConstness(prop.constness);
         if (!category) continue;

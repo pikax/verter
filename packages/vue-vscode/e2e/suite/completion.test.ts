@@ -1,8 +1,10 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
+  assertLogNotContains,
   waitForExtensionReady,
   waitForFileReady,
+  openAndReady,
   openVueFile,
   getAppVuePath,
   getCompletions,
@@ -10,6 +12,56 @@ import {
   findNthPosition,
   FIXTURE_NAME,
 } from "../helpers";
+
+function completionLabel(item: vscode.CompletionItem): string {
+  return typeof item.label === "string" ? item.label : item.label.label;
+}
+
+function completionLabels(list: vscode.CompletionList): string[] {
+  return list.items.map(completionLabel);
+}
+
+function completionItem(
+  list: vscode.CompletionList,
+  label: string,
+): vscode.CompletionItem | undefined {
+  return list.items.find((item) => completionLabel(item) === label);
+}
+
+function expectCompletionKinds(
+  list: vscode.CompletionList,
+  label: string,
+  allowedKinds: vscode.CompletionItemKind[],
+): void {
+  const item = completionItem(list, label);
+  expect(item, `expected completion "${label}"`).to.exist;
+  expect(item!.kind, `"${label}" should have a concrete completion kind`).to.not.equal(undefined);
+  expect(item!.kind, `"${label}" should not degrade to Text`).to.not.equal(
+    vscode.CompletionItemKind.Text,
+  );
+  expect(item!.kind, `"${label}" should have an allowed kind`).to.be.oneOf(allowedKinds);
+}
+
+function expectCompletionsPresent(list: vscode.CompletionList, labels: string[]): void {
+  const actual = completionLabels(list);
+  for (const label of labels) {
+    expect(actual, `expected completion "${label}" in [${actual.join(", ")}]`).to.include(label);
+  }
+}
+
+function expectCompletionsMissing(list: vscode.CompletionList, labels: string[]): void {
+  const actual = completionLabels(list);
+  for (const label of labels) {
+    expect(actual, `unexpected completion "${label}" in [${actual.join(", ")}]`).to.not.include(label);
+  }
+}
+
+function expectNoInternalLeakage(list: vscode.CompletionList): void {
+  const joined = completionLabels(list).join(",");
+  expect(joined, "should not include __props").to.not.include("__props");
+  expect(joined, "should not include ___VERTER___").to.not.include("___VERTER___");
+  expect(joined, "should not include $V_ internals").to.not.include("$V_");
+}
 
 suite(`Completion [${FIXTURE_NAME}]`, function () {
   this.timeout(60_000);
@@ -22,286 +74,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     await waitForFileReady(doc);
   });
 
-  test("C1: mustache expression shows bindings", async function () {
-    const pos = findPosition(doc, "{{ count }}", 3); // on "count"
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
-
-    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    Mustache completions: ${labels.length} items`);
-
-    expect(labels, "should include 'count'").to.include("count");
-    expect(labels, "should include 'doubled'").to.include("doubled");
-
-    // Negative: internal symbols should NOT appear
-    expect(labels.join(","), "should NOT include __props").to.not.include("__props");
-    expect(labels.join(","), "should NOT include ___VERTER___").to.not.include("___VERTER___");
-  });
-
-  test("C2: event handler value shows functions", async function () {
-    const pos = findPosition(doc, '@click="increment"', 8); // on "increment"
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
-
-    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    Event handler completions: ${labels.length} items`);
-
-    expect(labels, "should include 'increment'").to.include("increment");
-  });
-
-  test("C3: component props in opening tag", async function () {
-    if (FIXTURE_NAME !== "single-project") {
-      console.log("    pass (N/A for this fixture)");
-      return;
-    }
-
-    // Position after <MyComp (in attribute position)
-    const pos = findPosition(doc, "<MyComp ", 8); // after the space
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
-
-    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    Component prop completions: ${labels.length} items, labels: ${labels.slice(0, 10).join(", ")}`);
-
-    // Should include component props
-    // Note: exact labels depend on whether child analysis resolves
-    // At minimum, should NOT include parent script bindings as top-level items
-    // when we're in a component's attribute position
-  });
-
-  test("C4: event modifier completions", async function () {
-    const pos = findPosition(doc, "@click.prevent", 7); // after the dot
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    // We need position right after the "." — find @click.prevent and position on "p"
-    const completions = await getCompletions(doc.uri, pos);
-    // Event modifier completions may or may not trigger depending on timing
-    if (completions && completions.items.length > 0) {
-      const labels = completions.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-      console.log(`    Event modifier completions: ${labels.length} items`);
-      // If we got modifier completions, verify they include modifiers
-      if (labels.some((l) => ["prevent", "stop", "once", "capture", "self", "passive"].includes(l))) {
-        expect(labels, "should include 'prevent'").to.include("prevent");
-        expect(labels, "should include 'stop'").to.include("stop");
-        // Negative: should NOT include script bindings
-        expect(labels, "should NOT include 'count'").to.not.include("count");
-      }
-    }
-  });
-
-  test("C5: v-for scoped variable in template", async function () {
-    const pos = findPosition(doc, "{{ item }}", 3); // on "item"
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
-
-    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    v-for scoped completions: ${labels.length} items`);
-
-    // The scoped variable `item` should be available (via TSGO, since it's in the generated TSX)
-    // This test verifies that the v-for codegen creates proper JS scope
-    expect(labels, "should include 'item'").to.include("item");
-
-    // v-for iteration variables compile to arrow function params — tsserver
-    // returns kind "parameter" which must map to Variable, not Text
-    const itemCompletion = completions!.items.find((i) => i.label === "item");
-    if (itemCompletion) {
-      expect(
-        itemCompletion.kind,
-        "'item' should be Variable, not Text",
-      ).to.equal(vscode.CompletionItemKind.Variable);
-    }
-  });
-
-  test("C6: v-for member access shows typed properties", async function () {
-    if (FIXTURE_NAME !== "single-project") {
-      console.log("    N/A");
-      return;
-    }
-
-    // Position after "action." in :disabled="action.disabled"
-    const pos = findPosition(doc, "action.disabled", 7); // on "d" after dot
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
-    const items = completions!.items;
-    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(
-      `    v-for member: ${items.length} items, first: ${labels.slice(0, 10).join(", ")}`,
-    );
-    console.log(
-      `    kinds: ${items.slice(0, 10).map((i) => `${i.label}:${i.kind}`).join(", ")}`,
-    );
-
-    // POSITIVE: Action properties present
-    expect(labels, "should include 'disabled'").to.include("disabled");
-    expect(labels, "should include 'label'").to.include("label");
-    expect(labels, "should include 'handler'").to.include("handler");
-
-    // KIND: must be Property/Field, not Text
-    const disabledItem = items.find((i) => i.label === "disabled");
-    expect(disabledItem!.kind, "'disabled' kind").to.be.oneOf([
-      vscode.CompletionItemKind.Property,
-      vscode.CompletionItemKind.Field,
-    ]);
-
-    // NEGATIVE: not global scope
-    expect(items.length, "member completions, not global").to.be.lessThan(50);
-    expect(labels.join(",")).to.not.include("___VERTER___");
-  });
-
-  test("C7: v-for iteration variable in mustache shows typed properties", async function () {
-    if (FIXTURE_NAME !== "single-project") {
-      console.log("    N/A");
-      return;
-    }
-
-    // Position on "user.name" inside {{ user.name }} in the v-for with index
-    const pos = findPosition(doc, "user.name", 5); // on "n" after "user."
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
-    const items = completions!.items;
-    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    v-for mustache member: ${items.length} items`);
-
-    expect(labels, "should include 'name'").to.include("name");
-    expect(labels, "should include 'email'").to.include("email");
-    expect(labels, "should include 'age'").to.include("age");
-
-    const nameItem = items.find((i) => i.label === "name");
-    expect(nameItem!.kind, "'name' kind").to.be.oneOf([
-      vscode.CompletionItemKind.Property,
-      vscode.CompletionItemKind.Field,
-    ]);
-    expect(items.length, "member completions, not global").to.be.lessThan(50);
-  });
-
-  test("C8: nested v-for inner variable member access", async function () {
-    if (FIXTURE_NAME !== "single-project") {
-      console.log("    N/A");
-      return;
-    }
-
-    // In nested v-for: {{ action.label }} inside the inner loop
-    // Use findNthPosition to get the occurrence inside the nested loop
-    const pos = findNthPosition(doc, "action.label", 1, 7); // 2nd occurrence, on "l"
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions).to.exist;
-    const items = completions!.items;
-    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    nested v-for inner: ${items.length} items`);
-
-    expect(labels).to.include("label");
-    expect(labels).to.include("disabled");
-    expect(items.length, "member completions").to.be.lessThan(50);
-  });
-
-  test("C9: nested v-for outer variable member access", async function () {
-    if (FIXTURE_NAME !== "single-project") {
-      console.log("    N/A");
-      return;
-    }
-
-    // In nested v-for: {{ user.name }} inside the inner loop
-    const pos = findNthPosition(doc, "user.name", 1, 5); // 2nd occurrence
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions).to.exist;
-    const items = completions!.items;
-    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    nested v-for outer: ${items.length} items`);
-
-    expect(labels).to.include("name");
-    expect(labels).to.include("email");
-    expect(items.length, "member completions").to.be.lessThan(50);
-  });
-
-  test("C10: v-if narrowed ref member access", async function () {
-    if (FIXTURE_NAME !== "single-project") {
-      console.log("    N/A");
-      return;
-    }
-
-    // {{ selectedUser.name }} inside v-if="selectedUser"
-    const pos = findPosition(doc, "selectedUser.name", 13); // on "n"
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions).to.exist;
-    const items = completions!.items;
-    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    v-if narrowed: ${items.length} items`);
-
-    expect(labels).to.include("name");
-    expect(labels).to.include("email");
-    expect(items.length, "member completions").to.be.lessThan(50);
-  });
-
-  test("C11: destructured v-for params available", async function () {
-    if (FIXTURE_NAME !== "single-project") {
-      console.log("    N/A");
-      return;
-    }
-
-    // {{ name }} inside <div v-for="{ name, email } in users">
-    const pos = findPosition(doc, "{{ name }}", 3); // on "n"
-    if (!pos) {
-      this.skip();
-      return;
-    }
-
-    const completions = await getCompletions(doc.uri, pos);
-    expect(completions).to.exist;
-    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    destructured v-for: ${labels.length} items`);
-
-    expect(labels).to.include("name");
-  });
-
-  test("C12: script binding completions are typed", async function () {
+  test("mustache expression shows typed local bindings without globals", async function () {
     const pos = findPosition(doc, "{{ count }}", 3);
     if (!pos) {
       this.skip();
@@ -309,32 +82,25 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions).to.exist;
-    const items = completions!.items;
-    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
+    expect(completions, "should return completions").to.exist;
 
-    expect(labels).to.include("count");
-    expect(labels).to.include("doubled");
-    expect(labels).to.include("increment");
+    console.log(`    Mustache completions: ${completionLabels(completions!).join(", ")}`);
 
-    // Script bindings should be Variable/Function kind, not Text
-    const countItem = items.find((i) => i.label === "count");
-    if (countItem) {
-      expect(
-        countItem.kind,
-        "'count' should not be Text",
-      ).to.not.equal(vscode.CompletionItemKind.Text);
-    }
+    expectCompletionsPresent(completions!, ["count", "doubled", "increment"]);
+    expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
+    expectCompletionKinds(completions!, "doubled", [vscode.CompletionItemKind.Variable]);
+    expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function]);
+    expectCompletionsMissing(completions!, [
+      "AbortController",
+      "HTMLDivElement",
+      "document",
+      "window",
+    ]);
+    expectNoInternalLeakage(completions!);
   });
 
-  test("C13: props member access in interpolation", async function () {
-    if (FIXTURE_NAME !== "single-project") {
-      console.log("    N/A");
-      return;
-    }
-
-    // Position after "props." in {{ props.title }}
-    const pos = findPosition(doc, "props.title", 6); // on "t" after "props."
+  test("event handler expression shows typed functions", async function () {
+    const pos = findPosition(doc, '@click="increment"', 8);
     if (!pos) {
       this.skip();
       return;
@@ -342,36 +108,55 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
-    const items = completions!.items;
-    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(
-      `    props member: ${items.length} items, first: ${labels.slice(0, 10).join(", ")}`,
-    );
 
-    // POSITIVE: prop members present
-    expect(labels, "should include 'title'").to.include("title");
-    const titleItem = items.find((i) => i.label === "title");
-    expect(titleItem!.kind, "'title' kind").to.be.oneOf([
+    expectCompletionsPresent(completions!, ["increment"]);
+    expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function]);
+    expectNoInternalLeakage(completions!);
+  });
+
+  test("component opening tag exposes real props and events without parent leakage", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "<MyComp ", 8);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+
+    console.log(`    <MyComp completions: ${completionLabels(completions!).join(", ")}`);
+
+    expectCompletionsPresent(completions!, ["foo", "bar", "@custom"]);
+    expectCompletionKinds(completions!, "foo", [
       vscode.CompletionItemKind.Property,
       vscode.CompletionItemKind.Field,
     ]);
-
-    // NEGATIVE: no Vue-attr transformations in expression context
-    expect(
-      labels.filter((l) => l.startsWith("@")).length,
-      "no @-prefixed items in expression context",
-    ).to.equal(0);
-    expect(items.length, "member completions, not global").to.be.lessThan(50);
+    expectCompletionKinds(completions!, "bar", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionKinds(completions!, "@custom", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionsMissing(completions!, [
+      "count",
+      "doubled",
+      "increment",
+      "window",
+      "document",
+      "AbortController",
+    ]);
+    expectNoInternalLeakage(completions!);
   });
 
-  test("C14: v-for scoped variable member access has no attr transforms", async function () {
-    if (FIXTURE_NAME !== "single-project") {
-      console.log("    N/A");
-      return;
-    }
-
-    // Position after "action." in :disabled="action.disabled"
-    const pos = findPosition(doc, "action.disabled", 7); // on "d" after dot
+  test("v-for local in template resolves as Variable", async function () {
+    const pos = findPosition(doc, "{{ item }}", 3);
     if (!pos) {
       this.skip();
       return;
@@ -379,70 +164,337 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "should return completions").to.exist;
-    const items = completions!.items;
-    const labels = items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(
-      `    v-for member attr: ${items.length} items, first: ${labels.slice(0, 10).join(", ")}`,
-    );
 
-    // POSITIVE: Action properties present
-    expect(labels, "should include 'disabled'").to.include("disabled");
-    expect(labels, "should include 'label'").to.include("label");
-    expect(labels, "should include 'handler'").to.include("handler");
-
-    // NEGATIVE: no Vue-attr transformations (no kebab-case, no @-prefix)
-    expect(
-      labels.filter((l) => l.startsWith("@")).length,
-      "no @-prefixed items in expression context",
-    ).to.equal(0);
-    expect(
-      labels.filter((l) => l.includes("-")).length,
-      "no kebab-case transformations in expression context",
-    ).to.equal(0);
+    expectCompletionsPresent(completions!, ["item"]);
+    expectCompletionKinds(completions!, "item", [vscode.CompletionItemKind.Variable]);
+    expectNoInternalLeakage(completions!);
   });
 
-  test("C16: broken expression excludes globals (Unknown context)", async function () {
-    // {{ count + }} is an incomplete expression — OXC returns Unknown
-    const pos = findPosition(doc, "{{ count + }}", 11); // after "+ "
+  test("v-for member access shows actual properties with typed kinds", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "action.disabled", 7);
     if (!pos) {
       this.skip();
       return;
     }
+
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions).to.exist;
-    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    broken expr completions: ${labels.length} items`);
+    expect(completions, "should return completions").to.exist;
 
-    // POSITIVE: script setup bindings should still be present
-    expect(labels).to.include("count");
+    console.log(`    action. completions: ${completionLabels(completions!).join(", ")}`);
 
-    // NEGATIVE: globals must NOT appear even in Unknown context
-    expect(labels).to.not.include("AbortController");
-    expect(labels).to.not.include("HTMLDivElement");
-    expect(labels).to.not.include("document");
-    expect(labels).to.not.include("window");
-    expect(completions!.items.length).to.be.lessThan(200);
+    expectCompletionsPresent(completions!, ["disabled", "label", "handler"]);
+    expectCompletionKinds(completions!, "disabled", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionKinds(completions!, "label", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionsMissing(completions!, ["@click", "@custom", "foo-bar"]);
+    expectNoInternalLeakage(completions!);
+    expect(completions!.items.length, "member completions should stay scoped").to.be.lessThan(50);
   });
 
-  test("C15: template identifier completions exclude globals", async function () {
-    const pos = findPosition(doc, "{{ count }}", 3);
+  test("v-for item member access in mustache stays typed", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "user.name", 5);
     if (!pos) {
       this.skip();
       return;
     }
+
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions).to.exist;
-    const labels = completions!.items.map((i) => typeof i.label === "string" ? i.label : i.label.label);
-    console.log(`    identifier completions: ${labels.length} items`);
+    expect(completions, "should return completions").to.exist;
 
-    // POSITIVE: script setup bindings are present
-    expect(labels).to.include("count");
+    expectCompletionsPresent(completions!, ["name", "email", "age"]);
+    expectCompletionKinds(completions!, "name", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionKinds(completions!, "email", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectNoInternalLeakage(completions!);
+    expect(completions!.items.length, "member completions should stay scoped").to.be.lessThan(50);
+  });
 
-    // NEGATIVE: global types should NOT appear in template expressions
-    expect(labels).to.not.include("AbortController");
-    expect(labels).to.not.include("HTMLDivElement");
-    expect(labels).to.not.include("document");
-    expect(labels).to.not.include("window");
-    expect(completions!.items.length).to.be.lessThan(200);
+  test("nested v-for inner and outer scopes stay distinct", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const innerPos = findNthPosition(doc, "action.label", 1, 7);
+    const outerPos = findNthPosition(doc, "user.name", 1, 5);
+    expect(innerPos, "should find nested inner member access").to.exist;
+    expect(outerPos, "should find nested outer member access").to.exist;
+
+    const innerCompletions = await getCompletions(doc.uri, innerPos!);
+    const outerCompletions = await getCompletions(doc.uri, outerPos!);
+    expect(innerCompletions, "should return inner completions").to.exist;
+    expect(outerCompletions, "should return outer completions").to.exist;
+
+    expectCompletionsPresent(innerCompletions!, ["label", "disabled"]);
+    expectCompletionsMissing(innerCompletions!, ["email", "age"]);
+
+    expectCompletionsPresent(outerCompletions!, ["name", "email", "age"]);
+    expectCompletionsMissing(outerCompletions!, ["disabled"]);
+  });
+
+  test("v-if narrowed member access stays typed and scoped", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "selectedUser.name", 13);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+
+    expectCompletionsPresent(completions!, ["name", "email", "age"]);
+    expectCompletionKinds(completions!, "name", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionsMissing(completions!, ["null", "@custom", "foo-bar"]);
+    expectNoInternalLeakage(completions!);
+  });
+
+  test("props member access stays typed and free of attr leakage", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "props.title", 6);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+
+    expectCompletionsPresent(completions!, ["title"]);
+    expectCompletionKinds(completions!, "title", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionsMissing(completions!, ["@click", "@custom", "foo-bar"]);
+    expectNoInternalLeakage(completions!);
+    expect(completions!.items.length, "member completions should stay scoped").to.be.lessThan(50);
+  });
+
+  test("broken template expression still returns local bindings and excludes globals", async function () {
+    const pos = findPosition(doc, "{{ count + }}", 11);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+
+    expectCompletionsPresent(completions!, ["count", "doubled", "increment"]);
+    expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
+    expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function]);
+    expectCompletionsMissing(completions!, [
+      "AbortController",
+      "HTMLDivElement",
+      "document",
+      "window",
+    ]);
+    expectNoInternalLeakage(completions!);
+    expect(completions!.items.length, "broken expression completions should stay bounded").to.be.lessThan(200);
+  });
+
+  test("barrel Button opening tag exposes actual props and click event", async function () {
+    if (FIXTURE_NAME !== "barrel-exports") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "<Button ", 8);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+
+    console.log(`    <Button completions: ${completionLabels(completions!).join(", ")}`);
+
+    expectCompletionsPresent(completions!, ["label", "disabled", "size", "@click"]);
+    expectCompletionKinds(completions!, "label", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionKinds(completions!, "disabled", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionKinds(completions!, "@click", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionsMissing(completions!, ["count", "doubled", "increment"]);
+    expectNoInternalLeakage(completions!);
+  });
+
+  test("barrel Overlay opening tag exposes actual props", async function () {
+    if (FIXTURE_NAME !== "barrel-exports") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "<Overlay ", 9);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const completions = await getCompletions(doc.uri, pos);
+    expect(completions, "should return completions").to.exist;
+
+    console.log(`    <Overlay completions: ${completionLabels(completions!).join(", ")}`);
+
+    expectCompletionsPresent(completions!, ["zIndex", "duration", "show", "lockScroll"]);
+    expectCompletionKinds(completions!, "zIndex", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionKinds(completions!, "show", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionsMissing(completions!, ["count", "doubled", "increment", "label"]);
+    expectNoInternalLeakage(completions!);
+  });
+
+  test("v-slot locals and members stay typed and scoped", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const slotDoc = await openAndReady("src/TemplateSlotCases.vue");
+
+    const localPos = findPosition(slotDoc, "{{ slotItem.name }}", 3);
+    const memberPos = findPosition(slotDoc, "slotItem.name", 9);
+    expect(localPos, "should find slot local usage").to.exist;
+    expect(memberPos, "should find slot member usage").to.exist;
+
+    const localCompletions = await getCompletions(slotDoc.uri, localPos!);
+    const memberCompletions = await getCompletions(slotDoc.uri, memberPos!);
+    expect(localCompletions, "should return slot local completions").to.exist;
+    expect(memberCompletions, "should return slot member completions").to.exist;
+
+    expectCompletionsPresent(localCompletions!, ["slotItem", "slotIndex", "slotTotal"]);
+    expectCompletionKinds(localCompletions!, "slotItem", [vscode.CompletionItemKind.Variable]);
+    expectCompletionKinds(localCompletions!, "slotIndex", [vscode.CompletionItemKind.Variable]);
+    expectCompletionsMissing(localCompletions!, ["siblingSlot", "@click", "foo-bar"]);
+
+    expectCompletionsPresent(memberCompletions!, ["name", "id"]);
+    expectCompletionKinds(memberCompletions!, "name", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionsMissing(memberCompletions!, ["@click", "foo-bar"]);
+    expectNoInternalLeakage(memberCompletions!);
+  });
+
+  test("broken script recovery preserves typed completions", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const recoveryDoc = await openAndReady("src/TemplateRecovery.vue");
+
+    const pos = findPosition(recoveryDoc, "{{ count }}", 3);
+    expect(pos, "should find recovered count usage").to.exist;
+
+    const completions = await getCompletions(recoveryDoc.uri, pos!);
+    expect(completions, "should return completions").to.exist;
+
+    expectCompletionsPresent(completions!, ["count", "safeAction"]);
+    expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
+    expectCompletionKinds(completions!, "safeAction", [vscode.CompletionItemKind.Function]);
+    expectCompletionsMissing(completions!, ["window", "document", "AbortController"]);
+    expectNoInternalLeakage(completions!);
+  });
+
+  test("dedicated broken template expression recovery preserves typed completions", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const brokenExprDoc = await openAndReady("src/BrokenTemplateExpr.vue");
+
+    const pos = findPosition(brokenExprDoc, "{{ count + }}", 11);
+    expect(pos, "should find broken expression probe").to.exist;
+
+    const completions = await getCompletions(brokenExprDoc.uri, pos!);
+    expect(completions, "should return completions").to.exist;
+
+    expectCompletionsPresent(completions!, ["count", "formatted"]);
+    expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
+    expectCompletionKinds(completions!, "formatted", [vscode.CompletionItemKind.Variable]);
+    expectCompletionsMissing(completions!, ["window", "document", "AbortController"]);
+    expectNoInternalLeakage(completions!);
+  });
+
+  test("JS SFC template completions stay typed", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const jsDoc = await openAndReady("src/JsTemplateCases.vue");
+
+    const mustachePos = findPosition(jsDoc, "{{ count }}", 3);
+    const memberPos = findPosition(jsDoc, "state.label", 6);
+    expect(mustachePos, "should find JS mustache usage").to.exist;
+    expect(memberPos, "should find JS member usage").to.exist;
+
+    const mustacheCompletions = await getCompletions(jsDoc.uri, mustachePos!);
+    const memberCompletions = await getCompletions(jsDoc.uri, memberPos!);
+    expect(mustacheCompletions, "should return JS mustache completions").to.exist;
+    expect(memberCompletions, "should return JS member completions").to.exist;
+
+    expectCompletionsPresent(mustacheCompletions!, ["count", "increment"]);
+    expectCompletionKinds(mustacheCompletions!, "count", [vscode.CompletionItemKind.Variable]);
+    expectCompletionKinds(mustacheCompletions!, "increment", [vscode.CompletionItemKind.Function]);
+
+    expectCompletionsPresent(memberCompletions!, ["label", "done"]);
+    expectCompletionKinds(memberCompletions!, "label", [
+      vscode.CompletionItemKind.Property,
+      vscode.CompletionItemKind.Field,
+    ]);
+    expectCompletionsMissing(memberCompletions!, ["@click", "foo-bar"]);
+    expectNoInternalLeakage(memberCompletions!);
+  });
+
+  test("completion scenarios do not log panic markers", function () {
+    assertLogNotContains("panicked at", "completion flows should not trigger Rust panics");
+    assertLogNotContains("thread 'main' panicked", "completion flows should not crash the server");
   });
 });
