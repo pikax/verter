@@ -64,6 +64,18 @@ export function isLikelyTestFileName(fileName: string): boolean {
   );
 }
 
+export function resolveVuePublicApiMode(
+  exposeBindingsTesting: boolean,
+  containingFile: string,
+  isTestFile: (fileName: string) => boolean,
+): VuePublicApiMode {
+  if (!exposeBindingsTesting) {
+    return "public";
+  }
+
+  return isTestFile(stripVueVirtualSuffix(containingFile)) ? "testing" : "public";
+}
+
 export const isVue = (fileName: string) => DEFAULT_REGEXP.test(fileName);
 export const isRelativeVue = (fileName: string) => isVue(fileName) && isRelative(fileName);
 

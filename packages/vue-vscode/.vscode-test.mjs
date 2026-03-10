@@ -23,31 +23,37 @@ const testFiles = onlyTest
 function copyLspBinaryToTemp() {
   const ext = process.platform === "win32" ? ".exe" : "";
   const binaryName = `verter-lsp${ext}`;
+  const candidates = [];
 
   // Search upward from extension dir for target/debug or target/release
   let dir = __dirname;
-  let sourcePath;
   for (let i = 0; i < 5; i++) {
     for (const profile of ["debug", "release"]) {
       const candidate = path.join(dir, "target", profile, binaryName);
       if (fs.existsSync(candidate)) {
-        sourcePath = candidate;
-        break;
+        candidates.push(candidate);
       }
     }
-    if (sourcePath) break;
     dir = path.dirname(dir);
   }
 
   // Also check dist/ and bin/
-  if (!sourcePath) {
-    const distPath = path.join(__dirname, "dist", binaryName);
-    if (fs.existsSync(distPath)) sourcePath = distPath;
+  const distPath = path.join(__dirname, "dist", binaryName);
+  if (fs.existsSync(distPath)) {
+    candidates.push(distPath);
   }
-  if (!sourcePath) {
-    const binPath = path.join(__dirname, "bin", binaryName);
-    if (fs.existsSync(binPath)) sourcePath = binPath;
+  const binPath = path.join(__dirname, "bin", binaryName);
+  if (fs.existsSync(binPath)) {
+    candidates.push(binPath);
   }
+
+  const sourcePath = candidates
+    .map((candidate) => ({
+      candidate,
+      mtimeMs: fs.statSync(candidate).mtimeMs,
+    }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .map((entry) => entry.candidate)[0];
 
   if (!sourcePath) return undefined;
 

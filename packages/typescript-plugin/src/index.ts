@@ -7,9 +7,9 @@ import {
   isRelativeVueTs,
   isVue,
   normalizePath,
+  resolveVuePublicApiMode,
   stripVueVirtualSuffix,
   toVueVirtualFileName,
-  type VuePublicApiMode,
 } from "./helpers/utils";
 import {
   parseFile,
@@ -56,18 +56,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const _fileExists = info.serverHost.fileExists.bind(info.serverHost);
     const _readFile = info.serverHost.readFile.bind(info.serverHost);
 
-    const resolvePublicApiMode = (containingFile: string): VuePublicApiMode => {
-      if (!exposeBindingsTesting) {
-        return "public";
-      }
-
-      return isTestFileWithContext(normalizeSourcePath(containingFile), {
-        fileExists: _fileExists,
-        readFile: _readFile,
-      })
-        ? "testing"
-        : "public";
-    };
+    const resolvePublicApiMode = (containingFile: string) =>
+      resolveVuePublicApiMode(
+        exposeBindingsTesting,
+        containingFile,
+        (sourceFileName) =>
+          isTestFileWithContext(normalizeSourcePath(sourceFileName), {
+            fileExists: _fileExists,
+            readFile: _readFile,
+          }),
+      );
 
     const createModuleResolver =
       (containingFile: string) =>

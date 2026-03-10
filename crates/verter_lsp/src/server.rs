@@ -936,7 +936,8 @@ impl VerterLanguageServer {
             }
 
             for dependency in resolved_dependencies {
-                if dependency.provider_target == crate::project_resolver::ProviderTarget::VuePublicApi
+                if dependency.provider_target
+                    == crate::project_resolver::ProviderTarget::VuePublicApi
                 {
                     self.sync_vue_public_api_by_canonical_id(&dependency.source_id)
                         .await;
@@ -6962,8 +6963,11 @@ mod tests {
             "import type { Nested } from '@/nested'\nexport interface Props { msg: Nested }",
         )
         .expect("write types dependency");
-        std::fs::write(workspace.join("src/nested.ts"), "export type Nested = string")
-            .expect("write nested dependency");
+        std::fs::write(
+            workspace.join("src/nested.ts"),
+            "export type Nested = string",
+        )
+        .expect("write nested dependency");
 
         let workspace_id = workspace.to_string_lossy().replace('\\', "/");
         let app_id = workspace
@@ -7032,7 +7036,9 @@ mod tests {
         let external_resolved = external_resolved.expect("external resolve result");
         let type_resolved = type_resolved.expect("type resolve result");
         assert!(
-            external_resolved.source_id.ends_with("/src/partials/panel.html"),
+            external_resolved
+                .source_id
+                .ends_with("/src/partials/panel.html"),
             "external src should resolve to the real template file: {:?}",
             external_resolved
         );
@@ -7065,7 +7071,10 @@ mod tests {
         )
         .await;
 
-        assert!(synced, "pending Vue sync should succeed after blocker hydration");
+        assert!(
+            synced,
+            "pending Vue sync should succeed after blocker hydration"
+        );
         assert!(
             host.get_source(&format!("{workspace_id}/src/partials/panel.html"))
                 .is_some(),
@@ -7073,11 +7082,13 @@ mod tests {
             host.list_files()
         );
         assert!(
-            host.get_source(&format!("{workspace_id}/src/types.ts")).is_some(),
+            host.get_source(&format!("{workspace_id}/src/types.ts"))
+                .is_some(),
             "macro type dependencies should be loaded into the host during hydration"
         );
         assert!(
-            host.get_source(&format!("{workspace_id}/src/nested.ts")).is_some(),
+            host.get_source(&format!("{workspace_id}/src/nested.ts"))
+                .is_some(),
             "transitive codegen dependencies should be loaded into the host during hydration"
         );
 

@@ -6,6 +6,7 @@ import {
   isRelativeVueTs,
   isVue,
   isVueTs,
+  resolveVuePublicApiMode,
 } from "./utils";
 
 describe("isVue", () => {
@@ -99,5 +100,29 @@ describe("isLikelyTestFileName", () => {
   it("does not flag normal source files", () => {
     expect(isLikelyTestFileName("/src/App.ts")).toBe(false);
     expect(isLikelyTestFileName("/src/components/Foo.vue")).toBe(false);
+  });
+});
+
+describe("resolveVuePublicApiMode", () => {
+  it("stays public when testing bindings are disabled", () => {
+    expect(
+      resolveVuePublicApiMode(false, "/src/App.spec.ts", () => true),
+    ).toBe("public");
+  });
+
+  it("stays public for non-test importers when testing bindings are enabled", () => {
+    expect(
+      resolveVuePublicApiMode(true, "/src/components/App.vue", () => false),
+    ).toBe("public");
+  });
+
+  it("switches to testing for test importers when enabled", () => {
+    expect(
+      resolveVuePublicApiMode(
+        true,
+        "/src/__tests__/App.spec.ts",
+        (fileName) => fileName === "/src/__tests__/App.spec.ts",
+      ),
+    ).toBe("testing");
   });
 });

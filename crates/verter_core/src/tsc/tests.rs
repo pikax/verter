@@ -28,6 +28,15 @@ fn gen_tsc_output_with_external_type(
     type_name: &str,
     dep_source: &str,
 ) -> super::script::TscOutput {
+    gen_tsc_output_with_external_type_and_mode(sfc, type_name, dep_source, TscMode::Public)
+}
+
+fn gen_tsc_output_with_external_type_and_mode(
+    sfc: &str,
+    type_name: &str,
+    dep_source: &str,
+    mode: TscMode,
+) -> super::script::TscOutput {
     let alloc = Allocator::default();
     let resolved = resolve_external_type(type_name, dep_source, &alloc)
         .expect("failed to resolve external type");
@@ -39,6 +48,7 @@ fn gen_tsc_output_with_external_type(
         &TscGenOptions {
             filename: Some("/test/TestComp.vue".to_string()),
             external_types: Some(external_types),
+            mode,
             ..Default::default()
         },
     )
@@ -70,6 +80,10 @@ fn gen_tsc_output_testing(sfc: &str) -> super::script::TscOutput {
             ..Default::default()
         },
     )
+}
+
+fn gen_tsc_testing_with_external_type(sfc: &str, type_name: &str, dep_source: &str) -> String {
+    gen_tsc_output_with_external_type_and_mode(sfc, type_name, dep_source, TscMode::Testing).code
 }
 
 fn offset_to_zero_based_line_col(text: &str, offset: usize) -> (u32, u32) {
@@ -547,6 +561,91 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
         "defaulted imported props should be wrapped to make keys optional: {r}"
     );
     assert!(!r.contains("withDefaults"), "macro removed");
+}
+
+// @ai-generated - Imported prop types must not slice foreign spans when defaults are present.
+#[test]
+fn tsc_codegen_public_mode_with_defaults_imported_type_does_not_panic() {
+    let r = gen_tsc_with_external_type(
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+withDefaults(defineProps<Props>(), {
+  title: 'hello',
+})
+</script><template><div>{{ title }} {{ count }}</div></template>"#,
+        "Props",
+        r#"
+export interface Props {
+  title: string
+  count: number
+}
+"#,
+    );
+
+    assert!(
+        r.contains("import type { Props } from './types'"),
+        "import type statement should be preserved: {r}"
+    );
+    assert!(
+        r.contains("Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>"),
+        "defaulted imported props should stay wrapped as a named type: {r}"
+    );
+}
+
+// @ai-generated - Testing mode should expose imported props without indexing into foreign source text.
+#[test]
+fn tsc_testing_mode_with_defaults_imported_type_uses_indexed_access_without_panicking() {
+    let r = gen_tsc_testing_with_external_type(
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+withDefaults(defineProps<Props>(), {
+  title: 'hello',
+})
+</script><template><div>{{ title }} {{ count }}</div></template>"#,
+        "Props",
+        r#"
+export interface Props {
+  title: string
+  count: number
+}
+"#,
+    );
+
+    assert!(
+        r.contains("declare const title: Props['title']"),
+        "defaulted imported props should use indexed access in testing mode: {r}"
+    );
+    assert!(
+        r.contains("declare const count: Props['count']"),
+        "non-defaulted imported props should use indexed access in testing mode: {r}"
+    );
+}
+
+// @ai-generated - Companion-script resolved prop spans should be consumed as absolute SFC spans.
+#[test]
+fn tsc_testing_mode_same_sfc_companion_props_use_absolute_spans() {
+    let r = gen_tsc_testing(
+        r#"<script lang="ts">
+export interface Props {
+  title: string
+  count?: number
+}
+</script>
+<script setup lang="ts">
+withDefaults(defineProps<Props>(), {
+  title: 'hello',
+})
+</script><template><div>{{ title }} {{ count }}</div></template>"#,
+    );
+
+    assert!(
+        r.contains("declare const title: string"),
+        "defaulted companion-script props should keep their concrete type text: {r}"
+    );
+    assert!(
+        r.contains("declare const count: (number) | undefined"),
+        "optional companion-script props should still render optional types: {r}"
+    );
 }
 
 // ── Object prop with default is optional ─────────────────────────────────────

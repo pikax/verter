@@ -351,6 +351,69 @@ export interface EmitShape {
     expect(result).toContain('"onConfirm"?: (...args: [id: number]) => void');
   });
 
+  // @ai-generated - Imported defineProps with defaults must stay on the real public API path.
+  it.skipIf(!hasNativeBinary)("hydrates imported defineProps types in public mode", () => {
+    const entryFile = "/test/src/components/ImportedPropsBox.vue";
+    const source = `
+<script setup lang="ts">
+import type { Props } from './types'
+withDefaults(defineProps<Props>(), {
+  title: 'hello',
+})
+</script>
+
+<template>
+  <div>{{ title }} {{ count }}</div>
+</template>
+`;
+    const access = createInMemoryAccess({
+      [entryFile]: source,
+      "/test/src/components/types.ts": `
+export interface Props {
+  title: string
+  count: number
+}
+`,
+    });
+
+    const result = parseFile(entryFile, source, mockLogger, access);
+
+    expect(result).not.toBe(FALLBACK_STUB);
+    expect(result).toContain("Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>");
+  });
+
+  // @ai-generated - Testing mode must expose imported props without loading fallback stubs.
+  it.skipIf(!hasNativeBinary)("hydrates imported defineProps types in testing mode", () => {
+    const entryFile = "/test/src/components/ImportedPropsBox.vue";
+    const source = `
+<script setup lang="ts">
+import type { Props } from './types'
+withDefaults(defineProps<Props>(), {
+  title: 'hello',
+})
+</script>
+
+<template>
+  <div>{{ title }} {{ count }}</div>
+</template>
+`;
+    const access = createInMemoryAccess({
+      [entryFile]: source,
+      "/test/src/components/types.ts": `
+export interface Props {
+  title: string
+  count: number
+}
+`,
+    });
+
+    const result = parseFile(entryFile, source, mockLogger, access, "testing");
+
+    expect(result).not.toBe(FALLBACK_STUB);
+    expect(result).toContain("declare const title: Props['title']");
+    expect(result).toContain("declare const count: Props['count']");
+  });
+
   // @ai-generated - Refreshes generated public API when an imported emits dependency changes.
   it.skipIf(!hasNativeBinary)("refreshes imported macro types when the dependency source changes", () => {
     const entryFile = "/test/src/components/RefreshDeps.vue";

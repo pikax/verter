@@ -67,11 +67,7 @@ fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
         .to_string()
 }
 
-fn public_api_code_with_mode(
-    host: &VerterHost,
-    canonical_id: &str,
-    mode: PublicApiMode,
-) -> String {
+fn public_api_code_with_mode(host: &VerterHost, canonical_id: &str, mode: PublicApiMode) -> String {
     host.get_public_api_with_mode(canonical_id, mode)
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
         .code
@@ -178,7 +174,10 @@ fn external_src_can_compile_via_owner_dependency_mapping() {
         "<template src=\"@/partials/panel.html\"></template>\n<script setup>const n = 1</script>";
     upsert_vue(&host, "/src/Comp.vue", source);
     upsert_non_sfc(&host, "/src/partials/panel.html", "<div>{{ n }}</div>");
-    host.set_import_dependencies("/src/Comp.vue", vec!["/src/partials/panel.html".to_string()]);
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec!["/src/partials/panel.html".to_string()],
+    );
 
     let response = host
         .get_virtual_file(VirtualQuery {

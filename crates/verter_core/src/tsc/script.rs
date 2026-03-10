@@ -45,6 +45,7 @@ use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use crate::parser::Syntax;
 use crate::template::code_gen::binding::BindingType;
 use crate::tokenizer::byte::tokenize_sfc;
+use crate::utils::oxc::vue::resolve_type::ResolvedProp;
 use crate::utils::oxc::vue::{
     extract_companion_types, parse_script_with_companion, MacroArrayArg, MacroObjectArg,
     MacroTypeParams, ResolvedElements, ResolvedEmitSignature, RuntimeType, ScriptItem, ScriptMacro,
@@ -356,6 +357,7 @@ pub fn generate_tsc_output_with_options(
     // ── 5. Build macro state ──────────────────────────────────────────
     let mut state = build_macro_state(
         &parsed.items,
+        sfc_source,
         content_str,
         content_span.start,
         &type_imports,
@@ -395,13 +397,12 @@ pub fn generate_tsc_output_with_options(
     };
 
     // ── 8. Extract root conditions for narrowing ────────────────────
-    let narrowing = if tsc_options.conditional_root_narrowing
-        && matches!(tsc_options.mode, TscMode::Public)
-    {
-        extract_tsc_narrowing(syntax.template_ast(), &state, sfc_source)
-    } else {
-        None
-    };
+    let narrowing =
+        if tsc_options.conditional_root_narrowing && matches!(tsc_options.mode, TscMode::Public) {
+            extract_tsc_narrowing(syntax.template_ast(), &state, sfc_source)
+        } else {
+            None
+        };
 
     // ── 9. Generate code + source map ────────────────────────────────
     if matches!(tsc_options.mode, TscMode::Testing) {
@@ -613,6 +614,7 @@ fn is_ident_continue(byte: u8) -> bool {
 
 fn build_macro_state<'a>(
     items: &[ScriptItem<'a>],
+    sfc_source: &'a str,
     content_str: &'a str,
     content_offset: u32,
     type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
@@ -643,6 +645,7 @@ fn build_macro_state<'a>(
                     type_params.as_ref(),
                     object_arg.as_ref(),
                     array_arg.as_ref(),
+                    sfc_source,
                     content_str,
                     content_offset,
                     type_imports,
@@ -693,6 +696,7 @@ fn build_macro_state<'a>(
                     define_props_type_params.as_ref(),
                     None,
                     None,
+                    sfc_source,
                     content_str,
                     content_offset,
                     type_imports,
@@ -796,10 +800,55 @@ fn normalize_resolved_span(span: Span, span_is_absolute: bool, content_offset: u
     }
 }
 
+fn slice_checked(source: &str, span: Span) -> Option<&str> {
+    source.get(span.start as usize..span.end as usize)
+}
+
+fn resolved_prop_type_text<'a>(
+    prop: &ResolvedProp,
+    sfc_source: &'a str,
+    content_str: &'a str,
+) -> Option<&'a str> {
+    let type_span = prop.type_span?;
+    if prop.span_is_absolute {
+        slice_checked(sfc_source, type_span).map(str::trim)
+    } else if prop.map_local {
+        slice_checked(content_str, type_span).map(str::trim)
+    } else {
+        None
+    }
+}
+
+fn quote_ts_prop_name(name: &str) -> String {
+    format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+fn render_resolved_prop_ts_type(
+    prop: &ResolvedProp,
+    root_type_text: Option<&str>,
+    sfc_source: &str,
+    content_str: &str,
+) -> String {
+    if let Some(ts_type) = resolved_prop_type_text(prop, sfc_source, content_str) {
+        return ts_type.to_string();
+    }
+
+    if !prop.map_local {
+        if let Some(root_type_text) = root_type_text {
+            if let Some(name) = prop.key_name.as_deref() {
+                return format!("{}[{}]", root_type_text.trim(), quote_ts_prop_name(name));
+            }
+        }
+    }
+
+    runtime_types_to_ts(&prop.types)
+}
+
 fn process_props<'a>(
     type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
     array_arg: Option<&MacroArrayArg>,
+    sfc_source: &'a str,
     content_str: &'a str,
     content_offset: u32,
     type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
@@ -808,6 +857,9 @@ fn process_props<'a>(
     state: &mut TscMacroState,
 ) {
     if let Some(tp) = type_params {
+        let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
+        let named_root_type = looks_like_named_type_reference(type_text).then_some(type_text);
+
         state.testing_props = tp
             .resolved
             .props
@@ -816,13 +868,8 @@ fn process_props<'a>(
                 let name = prop.key_name.clone().unwrap_or_else(|| {
                     content_str[prop.key.start as usize..prop.key.end as usize].to_string()
                 });
-                let ts_type = if let Some(ts) = prop.type_span {
-                    content_str[ts.start as usize..ts.end as usize]
-                        .trim()
-                        .to_string()
-                } else {
-                    runtime_types_to_ts(&prop.types)
-                };
+                let ts_type =
+                    render_resolved_prop_ts_type(prop, named_root_type, sfc_source, content_str);
 
                 TestingPropBinding {
                     name,
@@ -837,9 +884,7 @@ fn process_props<'a>(
             })
             .collect();
 
-        let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-
-        if looks_like_named_type_reference(type_text) {
+        if named_root_type.is_some() {
             if let Some(info) = type_imports.get(type_text) {
                 let _ = info;
                 state.props_ts = Some(PropsTs::TypeRef(type_text.to_string()));
@@ -856,15 +901,12 @@ fn process_props<'a>(
                     let name = prop.key_name.clone().unwrap_or_else(|| {
                         content_str[prop.key.start as usize..prop.key.end as usize].to_string()
                     });
-                    // Prefer the original type annotation span (preserves parenthesized
-                    // function types in unions) over the lossy runtime type mapping.
-                    let ts_type = if let Some(ts) = prop.type_span {
-                        content_str[ts.start as usize..ts.end as usize]
-                            .trim()
-                            .to_string()
-                    } else {
-                        runtime_types_to_ts(&prop.types)
-                    };
+                    let ts_type = render_resolved_prop_ts_type(
+                        prop,
+                        named_root_type,
+                        sfc_source,
+                        content_str,
+                    );
                     let comment = find_leading_jsdoc(comments, prop.key.start, content_str);
                     type_usage_tracker.mark_type_text(&ts_type);
                     InlinePropEntry {
@@ -935,7 +977,9 @@ fn process_props<'a>(
             .map(|elem_span| {
                 let elem = content_str[elem_span.start as usize..elem_span.end as usize].trim();
                 TestingPropBinding {
-                    name: elem.trim_matches(|c: char| c == '\'' || c == '"').to_string(),
+                    name: elem
+                        .trim_matches(|c: char| c == '\'' || c == '"')
+                        .to_string(),
                     ts_type: "unknown".to_string(),
                     optional: true,
                     map_span: Some(local_to_sfc_span(*elem_span, content_offset)),

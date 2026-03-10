@@ -37,31 +37,58 @@ function tryLoad(file) {
   }
 }
 
+function tryLoadAny(files) {
+  for (const file of files) {
+    tryLoad(file);
+    if (nativeBinding) {
+      return;
+    }
+  }
+}
+
 switch (platform) {
   case "win32":
     switch (arch) {
       case "x64":
-        tryLoad("verter-native.win32-x64-msvc.node");
+        tryLoadAny([
+          "verter.win32-x64-msvc.node",
+          "verter-native.win32-x64-msvc.node",
+        ]);
         break;
       case "ia32":
-        tryLoad("verter-native.win32-ia32-msvc.node");
+        tryLoadAny([
+          "verter.win32-ia32-msvc.node",
+          "verter-native.win32-ia32-msvc.node",
+        ]);
         break;
       case "arm64":
-        tryLoad("verter-native.win32-arm64-msvc.node");
+        tryLoadAny([
+          "verter.win32-arm64-msvc.node",
+          "verter-native.win32-arm64-msvc.node",
+        ]);
         break;
       default:
         throw new Error(`Unsupported architecture on Windows: ${arch}`);
     }
     break;
   case "darwin":
-    tryLoad("verter-native.darwin-universal.node");
+    tryLoadAny([
+      "verter.darwin-universal.node",
+      "verter-native.darwin-universal.node",
+    ]);
     if (!nativeBinding) {
       switch (arch) {
         case "x64":
-          tryLoad("verter-native.darwin-x64.node");
+          tryLoadAny([
+            "verter.darwin-x64.node",
+            "verter-native.darwin-x64.node",
+          ]);
           break;
         case "arm64":
-          tryLoad("verter-native.darwin-arm64.node");
+          tryLoadAny([
+            "verter.darwin-arm64.node",
+            "verter-native.darwin-arm64.node",
+          ]);
           break;
         default:
           throw new Error(`Unsupported architecture on macOS: ${arch}`);
@@ -72,16 +99,28 @@ switch (platform) {
     switch (arch) {
       case "x64":
         if (isMusl()) {
-          tryLoad("verter-native.linux-x64-musl.node");
+          tryLoadAny([
+            "verter.linux-x64-musl.node",
+            "verter-native.linux-x64-musl.node",
+          ]);
         } else {
-          tryLoad("verter-native.linux-x64-gnu.node");
+          tryLoadAny([
+            "verter.linux-x64-gnu.node",
+            "verter-native.linux-x64-gnu.node",
+          ]);
         }
         break;
       case "arm64":
         if (isMusl()) {
-          tryLoad("verter-native.linux-arm64-musl.node");
+          tryLoadAny([
+            "verter.linux-arm64-musl.node",
+            "verter-native.linux-arm64-musl.node",
+          ]);
         } else {
-          tryLoad("verter-native.linux-arm64-gnu.node");
+          tryLoadAny([
+            "verter.linux-arm64-gnu.node",
+            "verter-native.linux-arm64-gnu.node",
+          ]);
         }
         break;
       default:

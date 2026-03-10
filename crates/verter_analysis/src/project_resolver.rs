@@ -1155,7 +1155,6 @@ fn match_package_mapping<'a>(
     best.map(|(value, captured, _, _)| (value, captured))
 }
 
-
 #[cfg(test)]
 #[path = "project_resolver_tests.rs"]
 mod project_resolver_tests;

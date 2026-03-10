@@ -273,9 +273,7 @@ mod tests {
             for (path, text) in entries {
                 let normalized = path.replace('\\', "/");
                 reader.files.insert(normalized.clone());
-                reader
-                    .texts
-                    .insert(normalized, Arc::<str>::from(*text));
+                reader.texts.insert(normalized, Arc::<str>::from(*text));
             }
             reader
         }
@@ -343,7 +341,10 @@ mod tests {
         };
         let resolver = crate::project_resolver::NativeProjectResolver::new(vec![project]);
         let reader = TestResolverReader::with_texts(&[
-            ("/workspace/src/partials/panel.html", "<div>{{ props.msg }}</div>"),
+            (
+                "/workspace/src/partials/panel.html",
+                "<div>{{ props.msg }}</div>",
+            ),
             (
                 "/workspace/src/types.ts",
                 "import type { Nested } from '@/nested'\nexport interface Props { msg: Nested }",
@@ -354,7 +355,8 @@ mod tests {
         hydrate_vue_compile_blockers(&host, &resolver, &reader, "/workspace/src/App.vue");
 
         assert!(
-            host.get_source("/workspace/src/partials/panel.html").is_some(),
+            host.get_source("/workspace/src/partials/panel.html")
+                .is_some(),
             "external template source should be loaded into the host"
         );
         assert!(
@@ -369,7 +371,8 @@ mod tests {
         host.ensure_compiled("/workspace/src/App.vue", &ide_profile)
             .expect("compile should succeed once codegen blockers are hydrated");
         assert!(
-            host.get_ide("/workspace/src/App.vue", &ide_profile).is_some(),
+            host.get_ide("/workspace/src/App.vue", &ide_profile)
+                .is_some(),
             "hydrated compile should restore IDE output"
         );
     }

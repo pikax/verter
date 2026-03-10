@@ -55,7 +55,9 @@ impl TestReader {
 
 impl ProjectResolverReader for TestReader {
     fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.texts.get(&normalize_canonical_id(canonical_id)).cloned()
+        self.texts
+            .get(&normalize_canonical_id(canonical_id))
+            .cloned()
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
@@ -86,7 +88,10 @@ fn module_reference(
         expr_span: Span::new(0, 1),
         raw_text: String::new(),
         literal_specifier: literal_specifier.map(str::to_string),
-        finite_specifiers: finite_specifiers.iter().map(|value| (*value).to_string()).collect(),
+        finite_specifiers: finite_specifiers
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
         static_prefix: None,
         analyzability,
     }
@@ -213,7 +218,8 @@ fn provider_paths_keep_vue_ide_files_under_synthetic_project_roots() {
         "IDE provider path should live under the synthetic provider root: {provider_id}"
     );
     assert!(
-        resolver.source_id_from_provider_id(&provider_id).as_deref() == Some("/workspace/src/App.vue"),
+        resolver.source_id_from_provider_id(&provider_id).as_deref()
+            == Some("/workspace/src/App.vue"),
         "Vue IDE provider paths only need to round-trip back to the source ID: {provider_id}"
     );
     assert!(
@@ -495,7 +501,10 @@ fn resolve_project_references_after_local_tsconfig_options() {
         .provider_id_for_source("/workspace/packages/app/src/App.ts")
         .expect("importer should receive a provider path");
 
-    assert_eq!(resolved.source_id, "/workspace/packages/shared/src/index.ts");
+    assert_eq!(
+        resolved.source_id,
+        "/workspace/packages/shared/src/index.ts"
+    );
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
     assert_eq!(resolved.provider_id, expected_provider_id);
     assert_eq!(
@@ -641,7 +650,10 @@ fn resolve_package_exports_distinguishes_import_and_require() {
         )
         .expect("require call should resolve package exports");
 
-    assert_eq!(esm.source_id, "/workspace/node_modules/lib/dist/feature.mjs");
+    assert_eq!(
+        esm.source_id,
+        "/workspace/node_modules/lib/dist/feature.mjs"
+    );
     assert_eq!(
         require.source_id,
         "/workspace/node_modules/lib/dist/feature.cjs"
