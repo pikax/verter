@@ -454,6 +454,30 @@ fn drain_priority_signals(
     }
 }
 
+/// Re-sync a non-Vue source file that changed on disk (outside the editor).
+///
+/// Called from `did_change_watched_files`. Invalidates the host cache, re-reads
+/// from disk, and re-syncs to the type provider.
+pub(crate) async fn resync_non_vue_file(
+    canonical_id: &str,
+    host: &Arc<VerterHost>,
+    sync: &ProjectSync,
+    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    sync_states: &DashMap<String, ProviderSyncState>,
+) {
+    // Invalidate host cache so ensure_source_loaded_into_host re-reads from disk
+    let host_clone = Arc::clone(host);
+    let id_clone = canonical_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        host_clone.remove(&id_clone);
+    })
+    .await
+    .ok();
+
+    let _ = sync_non_vue_file_to_provider(canonical_id, host, sync, resolver_snapshot, sync_states)
+        .await;
+}
+
 /// Sync a non-Vue source file to the type provider.
 ///
 /// Reads from disk, upserts into host, rewrites imports, and loads into provider.
@@ -1234,5 +1258,66 @@ mod tests {
         assert_eq!(classified[1].1, Tier::ProjectSource);
         // scripts/ → Other
         assert_eq!(classified[2].1, Tier::Other);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // is_non_vue_source_file / is_declaration_file
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_is_non_vue_source_file() {
+        // Positive: standard source extensions
+        assert!(is_non_vue_source_file("main.ts"));
+        assert!(is_non_vue_source_file("App.tsx"));
+        assert!(is_non_vue_source_file("utils.js"));
+        assert!(is_non_vue_source_file("render.jsx"));
+        assert!(is_non_vue_source_file("config.mts"));
+        assert!(is_non_vue_source_file("config.mjs"));
+        assert!(is_non_vue_source_file("config.cts"));
+        assert!(is_non_vue_source_file("config.cjs"));
+
+        // Negative: declaration files
+        assert!(!is_non_vue_source_file("env.d.ts"), ".d.ts excluded");
+        assert!(!is_non_vue_source_file("global.d.mts"), ".d.mts excluded");
+        assert!(!is_non_vue_source_file("types.d.cts"), ".d.cts excluded");
+
+        // Negative: non-source extensions
+        assert!(!is_non_vue_source_file("App.vue"), ".vue not source");
+        assert!(!is_non_vue_source_file("style.css"), ".css not source");
+        assert!(!is_non_vue_source_file("readme.md"), ".md not source");
+        assert!(!is_non_vue_source_file("data.json"), ".json not source");
+    }
+
+    #[test]
+    fn test_is_declaration_file() {
+        assert!(is_declaration_file("env.d.ts"));
+        assert!(is_declaration_file("global.d.mts"));
+        assert!(is_declaration_file("types.d.cts"));
+        assert!(is_declaration_file("node_modules/@types/vue/index.d.ts"));
+
+        assert!(
+            !is_declaration_file("main.ts"),
+            ".ts is not a declaration file"
+        );
+        assert!(
+            !is_declaration_file("utils.mts"),
+            ".mts is not a declaration file"
+        );
+    }
+
+    #[test]
+    fn test_is_excluded_dir() {
+        assert!(is_excluded_dir("node_modules"));
+        assert!(is_excluded_dir("dist"));
+        assert!(is_excluded_dir("build"));
+        assert!(is_excluded_dir(".git"));
+        assert!(is_excluded_dir(".vscode"));
+
+        assert!(!is_excluded_dir("src"), "src should not be excluded");
+        assert!(!is_excluded_dir("lib"), "lib should not be excluded");
+        assert!(
+            !is_excluded_dir("packages"),
+            "packages should not be excluded"
+        );
     }
 }

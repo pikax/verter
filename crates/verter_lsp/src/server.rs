@@ -4346,6 +4346,26 @@ impl LanguageServer for VerterLanguageServer {
         let init_lint_opts = self.init_lint_options.lock().await.take();
         self.spawn_background_init(init_lint_opts, "initialization")
             .await;
+
+        // D. Register file system watcher for non-Vue source files.
+        // This enables did_change_watched_files notifications for .ts/.tsx/.js/.jsx
+        // files changed outside the editor (e.g., git checkout, build tools).
+        let _ = self
+            .client
+            .register_capability(vec![Registration {
+                id: "verter-source-file-watcher".to_string(),
+                method: "workspace/didChangeWatchedFiles".to_string(),
+                register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                    watchers: vec![FileSystemWatcher {
+                        glob_pattern: GlobPattern::String(
+                            "**/*.{ts,tsx,js,jsx,mts,mjs,cts,cjs}".to_string(),
+                        ),
+                        kind: Some(WatchKind::Change | WatchKind::Create | WatchKind::Delete),
+                    }],
+                })
+                .ok(),
+            }])
+            .await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -4630,6 +4650,67 @@ impl LanguageServer for VerterLanguageServer {
         // Spawn background task for the blocking work (registry rebuild + scanner)
         self.spawn_background_init(None, "workspace folder rebuild")
             .await;
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let _hg = HandlerGuard::new("did_change_watched_files");
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+
+        let mut resync_ids = Vec::new();
+        let mut delete_ids = Vec::new();
+
+        for event in &params.changes {
+            let canonical_id = uri_to_canonical_id(&event.uri);
+
+            // Skip .vue files — they have their own sync path (did_open/did_change)
+            if canonical_id.ends_with(".vue") {
+                continue;
+            }
+            // Skip files that are currently open in the editor (those get did_change)
+            if self.documents.get(&event.uri).is_some() {
+                continue;
+            }
+
+            if event.typ == FileChangeType::DELETED {
+                delete_ids.push(canonical_id);
+            } else {
+                // Created or Changed — re-sync
+                resync_ids.push(canonical_id);
+            }
+        }
+
+        // Handle deletions: close provider files and remove from host
+        for canonical_id in &delete_ids {
+            if let Some(state) = self.remove_provider_sync_state(canonical_id) {
+                self.close_provider_state(&state).await;
+            }
+            self.documents.host().remove(canonical_id);
+            tracing::debug!("did_change_watched_files: removed {canonical_id}");
+        }
+
+        // Handle creates/changes: re-sync to provider in background
+        if !resync_ids.is_empty() {
+            let host = self.documents.host_arc();
+            let sync = sync.clone();
+            let resolver_snapshot = Arc::clone(&self.resolver_snapshot);
+            let provider_sync_states = Arc::clone(&self.provider_sync_states);
+
+            tokio::spawn(async move {
+                for canonical_id in resync_ids {
+                    crate::workspace_scanner::resync_non_vue_file(
+                        &canonical_id,
+                        &host,
+                        &sync,
+                        &resolver_snapshot,
+                        &provider_sync_states,
+                    )
+                    .await;
+                    tracing::debug!("did_change_watched_files: resynced {canonical_id}");
+                }
+            });
+        }
     }
 
     async fn did_create_files(&self, params: CreateFilesParams) {
