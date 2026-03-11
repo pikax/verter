@@ -863,3 +863,26 @@ fn text_children_empty_for_self_closing() {
         "self-closing has no text children"
     );
 }
+
+// ── :ref on component is NOT a prop ──
+
+#[test]
+fn bound_ref_not_included_in_component_props() {
+    // :ref is a template ref binding, not a prop — should NOT appear in component.props
+    let data = extract_with_script(
+        r#"<template><Child :ref="elRef" :msg="val" /></template>"#,
+        "import { ref } from 'vue'\nimport Child from './Child.vue'\nconst elRef = ref(null)\nconst val = 'hi'",
+    );
+    assert_eq!(data.components.len(), 1);
+    let child = &data.components[0];
+    // Positive: msg should be in props
+    assert!(
+        child.props.iter().any(|p| p.name == "msg"),
+        "msg should be extracted as a prop"
+    );
+    // Negative: ref should NOT be in props
+    assert!(
+        !child.props.iter().any(|p| p.name == "ref"),
+        ":ref should NOT be extracted as a component prop"
+    );
+}

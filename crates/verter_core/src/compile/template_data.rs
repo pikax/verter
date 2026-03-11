@@ -902,8 +902,9 @@ fn extract_component_usage(
                     // Check for key (skip), ref (skip), spread (skip)
                     match arg {
                         Some("key") => continue,
-                        None => continue, // v-bind spread — already captured by has_spread
-                        _ => {}           // Regular bound prop — fall through
+                        Some("ref") => continue, // :ref is not a prop — it's a template ref
+                        None => continue,        // v-bind spread — already captured by has_spread
+                        _ => {}                  // Regular bound prop — fall through
                     }
                 }
                 _ => continue, // Other directives (v-model, v-show, etc.) — skip

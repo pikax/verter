@@ -382,7 +382,7 @@ fn diagnostics_have_correct_code_and_source() {
             span: verter_span::Span::new(15, 30),
         }],
     )]);
-    let child = make_child_with_props(&[]);
+    let child = make_child_with_props(&["msg"]); // needs at least one prop to trigger checking
     let source = "<template><Child :unknown=\"val\" /></template>";
     let line_index = LineIndex::new_utf16(source);
 
@@ -742,5 +742,172 @@ fn aria_attr_not_flagged_on_non_fragment_component() {
     assert!(
         unknowns.is_empty(),
         "aria-label should NOT be flagged on non-fragment component"
+    );
+}
+
+// ── Macro fallback path tests ───────────────────────────────────
+//
+// In production, `template.prop_definitions` is always empty.
+// Props come from `macros[DefineProps].prop_fields` instead.
+
+/// Helper: child with DefineProps macro prop_fields, NO template.prop_definitions.
+fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
+    use verter_analysis::types::AnalyzedPropField;
+
+    FileAnalysisSnapshot {
+        macros: vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: true,
+            type_references: vec![],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: prop_names
+                .iter()
+                .map(|name| AnalyzedPropField {
+                    name: name.to_string(),
+                    span: verter_span::Span::new(0, 0),
+                })
+                .collect(),
+            emit_fields: vec![],
+            span: verter_span::Span::new(0, 30),
+        }]
+        .into(),
+        // template.prop_definitions is empty — matches production
+        ..Default::default()
+    }
+}
+
+#[test]
+fn macro_fallback_known_prop_not_flagged() {
+    // Child has DefineProps macro with "msg" in prop_fields
+    let parent = make_parent_analysis(vec![make_component(
+        "Child",
+        "./Child.vue",
+        vec![make_prop("msg")],
+    )]);
+    let child = make_child_with_macro_props(&["msg"]);
+
+    let unknowns = find_unknown_props(&parent, &|_| Some(child.clone()));
+
+    // Positive: msg is known via macro fallback
+    assert!(
+        unknowns.is_empty(),
+        "macro fallback should recognize 'msg' as defined prop"
+    );
+}
+
+#[test]
+fn macro_fallback_unknown_prop_flagged() {
+    // Child has DefineProps macro with "msg" only
+    let parent = make_parent_analysis(vec![make_component(
+        "Child",
+        "./Child.vue",
+        vec![make_prop("msg"), make_prop("unknown")],
+    )]);
+    let child = make_child_with_macro_props(&["msg"]);
+
+    let unknowns = find_unknown_props(&parent, &|_| Some(child.clone()));
+
+    // Positive: unknown should be flagged
+    assert_eq!(unknowns.len(), 1, "should find 1 unknown prop");
+    assert_eq!(unknowns[0].prop_name, "unknown");
+    // Negative: msg should NOT be flagged
+    assert!(
+        !unknowns.iter().any(|u| u.prop_name == "msg"),
+        "msg should not be flagged via macro fallback"
+    );
+}
+
+#[test]
+fn macro_fallback_with_defaults_pattern() {
+    // withDefaults wraps defineProps — the inner DefineProps macro has the real props
+    use verter_analysis::types::AnalyzedPropField;
+
+    let child = FileAnalysisSnapshot {
+        macros: vec![
+            AnalyzedMacro {
+                kind: AnalyzedMacroKind::WithDefaults,
+                is_type_based: false,
+                type_references: vec![],
+                binding_name: None,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: vec![],
+                emit_fields: vec![],
+                span: verter_span::Span::new(0, 50),
+            },
+            AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec![],
+                binding_name: None,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: vec![
+                    AnalyzedPropField {
+                        name: "msg".to_string(),
+                        span: verter_span::Span::new(0, 0),
+                    },
+                    AnalyzedPropField {
+                        name: "count".to_string(),
+                        span: verter_span::Span::new(0, 0),
+                    },
+                ],
+                emit_fields: vec![],
+                span: verter_span::Span::new(10, 40),
+            },
+        ]
+        .into(),
+        ..Default::default()
+    };
+
+    let parent = make_parent_analysis(vec![make_component(
+        "Child",
+        "./Child.vue",
+        vec![make_prop("msg"), make_prop("count")],
+    )]);
+
+    let unknowns = find_unknown_props(&parent, &|_| Some(child.clone()));
+    assert!(
+        unknowns.is_empty(),
+        "withDefaults + defineProps inner props should be recognized"
+    );
+}
+
+#[test]
+fn macro_fallback_kebab_camel_match() {
+    // Child has camelCase "lazyRender", parent uses kebab-case ":lazy-render"
+    let parent = make_parent_analysis(vec![make_component(
+        "Child",
+        "./Child.vue",
+        vec![make_prop("lazy-render")],
+    )]);
+    let child = make_child_with_macro_props(&["lazyRender"]);
+
+    let unknowns = find_unknown_props(&parent, &|_| Some(child.clone()));
+    assert!(
+        unknowns.is_empty(),
+        "kebab 'lazy-render' should match camel 'lazyRender' via macro fallback"
+    );
+}
+
+#[test]
+fn empty_props_no_false_positives() {
+    // Child resolves but has NO macros and NO prop_definitions → empty defined_props
+    // Should NOT flag any props (can't validate without definitions)
+    let parent = make_parent_analysis(vec![make_component(
+        "Child",
+        "./Child.vue",
+        vec![make_prop("foo"), make_prop("bar")],
+    )]);
+    let child = FileAnalysisSnapshot::default(); // No macros, no template
+
+    let unknowns = find_unknown_props(&parent, &|_| Some(child.clone()));
+
+    // With the guard: empty defined_props → skip checking → no diagnostics
+    assert!(
+        unknowns.is_empty(),
+        "empty prop definitions should NOT produce false positive diagnostics"
     );
 }

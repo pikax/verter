@@ -138,6 +138,14 @@ fn check_component_props(
     }
 
     let defined_props = child_prop_names(&child);
+
+    // If no prop definitions could be resolved (e.g., external type refs like
+    // `defineProps<Props>()` where Props is imported), skip checking entirely
+    // to avoid false positives on every prop.
+    if defined_props.is_empty() {
+        return None;
+    }
+
     let is_fragment = child_is_fragment(&child);
     let mut unknowns = Vec::new();
 

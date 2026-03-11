@@ -245,13 +245,25 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
     };
 
     // Recompute verter diagnostics fresh (lint + host errors) instead of reading stale cache.
-    let verter_diags = compute_verter_diagnostics_for(
+    let mut verter_diags = compute_verter_diagnostics_for(
         &deps.documents,
         &uri,
         &deps.cached_verter_diags,
         &deps.project_registry,
         &deps.fallback_linter,
     );
+
+    // When a TypeProvider is active, suppress component usage diagnostics
+    // (unknown-prop, unknown-model) since the TypeProvider validates props
+    // via the generated TSX and is the source of truth.
+    if deps.type_provider.is_some() {
+        verter_diags.retain(|d| match &d.code {
+            Some(NumberOrString::String(code)) => {
+                code != "verter/unknown-prop" && code != "verter/unknown-model"
+            }
+            _ => true,
+        });
+    }
 
     let diagnostics = if let Some(tp) = &deps.type_provider {
         // Build IDE context from the host

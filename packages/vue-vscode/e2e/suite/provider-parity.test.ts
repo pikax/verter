@@ -10,6 +10,7 @@ import {
   getDefinitions,
   findPosition,
   readTestLog,
+  waitForDiagnostics,
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
@@ -155,6 +156,54 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     expect(content, "should mention bar prop").to.include("bar");
     expect(content, "should NOT be any").to.not.match(/:\s*any\b/);
     expect(content, "should NOT show DefineComponent<{}, {}>").to.not.include("DefineComponent<{}, {}>");
+  });
+
+  // ── Component Prop Validation ────────────────────────────────
+  // When a TypeProvider is active, invalid component props should produce
+  // TypeScript errors (not verter/ diagnostics).
+
+  test("P6: TypeProvider detects invalid component props", async function () {
+    if (!TYPE_PROVIDER) {
+      console.log("    N/A (no TypeProvider)");
+      return;
+    }
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const invalidDoc = await openVueFile("src/InvalidPropCase.vue");
+    await waitForFileReady(invalidDoc);
+
+    // Wait for TS diagnostics referencing the unknown prop
+    const diags = await waitForDiagnostics(invalidDoc.uri, {
+      source: "ts",
+      timeoutMs: 30_000,
+      predicate: (d) => d.message.includes("thisDoesNotExist"),
+    });
+
+    // Positive: TypeScript should flag 'thisDoesNotExist' as invalid
+    const tsError = diags.find((d) => d.message.includes("thisDoesNotExist"));
+    expect(
+      tsError,
+      `Expected TS error for 'thisDoesNotExist'. Got: ${JSON.stringify(diags.map((d) => ({ msg: d.message, code: d.code, src: d.source })))}`,
+    ).to.exist;
+
+    // Negative: foo and bar are valid props — no errors on them
+    const allDiags = vscode.languages.getDiagnostics(invalidDoc.uri);
+    const fooError = allDiags.find((d) => d.message.includes("'foo'") && d.source === "ts");
+    const barError = allDiags.find((d) => d.message.includes("'bar'") && d.source === "ts");
+    expect(fooError, "foo is a valid prop — should have no TS error").to.be.undefined;
+    expect(barError, "bar is a valid prop — should have no TS error").to.be.undefined;
+
+    // Negative: no verter/unknown-prop diagnostics (TypeProvider is source of truth)
+    const verterPropDiag = allDiags.find(
+      (d) => d.source === "verter" && d.message.includes("Unknown prop"),
+    );
+    expect(
+      verterPropDiag,
+      "verter/unknown-prop should be suppressed when TypeProvider is active",
+    ).to.be.undefined;
   });
 
   // ── TSGO Canary Tests ─────────────────────────────────────────
