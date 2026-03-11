@@ -21,6 +21,7 @@ jobs:
       wasm: ${{ steps.filter.outputs.wasm }}
       playground: ${{ steps.filter.outputs.playground }}
       vscode: ${{ steps.filter.outputs.vscode }}
+      native: ${{ steps.filter.outputs.native }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -81,6 +82,22 @@ jobs:
               - 'packages/vue-vscode/**'
               - 'packages/language-shared/**'
               - 'packages/typescript-plugin/**'
+              - '.github/workflows/ci.yml'
+            native:
+              - 'crates/verter_napi/**'
+              - 'crates/verter_core/**'
+              - 'crates/verter_analysis/**'
+              - 'crates/verter_host/**'
+              - 'crates/verter_ffi/**'
+              - 'crates/verter_diagnostics/**'
+              - 'crates/verter_actions/**'
+              - 'crates/verter_span/**'
+              - 'packages/native/**'
+              - 'packages/unplugin/**'
+              - 'packages/typescript-plugin/**'
+              - 'packages/core/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
 
   rust-fmt:
@@ -228,6 +245,10 @@ jobs:
         run: pnpm run build:wasm
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
+      - name: Build TS packages
+        run: pnpm run build:ts
+      - name: Test @verter/wasm
+        run: pnpm --filter @verter/wasm test
 
   vscode-e2e:
     name: VS Code E2E Tests
@@ -269,3 +290,37 @@ jobs:
           name: e2e-timing-report
           path: /tmp/verter-e2e-timing-*.json
           if-no-files-found: ignore
+
+  native-test:
+    name: Native Package Tests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.native == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build native binary
+        run: pnpm run build:native
+      - name: Build TS packages
+        run: pnpm run build:ts
+      - name: Test @verter/native
+        run: pnpm --filter @verter/native test
+      - name: Test @verter/typescript-plugin
+        run: pnpm --filter @verter/typescript-plugin test
+      - name: Test @verter/unplugin
+        run: pnpm --filter @verter/unplugin test
