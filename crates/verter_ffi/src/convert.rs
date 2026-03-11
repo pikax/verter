@@ -1546,6 +1546,83 @@ mod tests {
     }
 
     #[test]
+    fn host_update_to_ffi_export_signatures() {
+        // Use the host to produce real export signatures from a barrel file
+        let h = host::VerterHost::new(host::HostConfig::default());
+        let result = h
+            .upsert(host::UpsertRequest {
+                canonical_id: Some("/src/barrel.ts".to_string()),
+                input_id: "/src/barrel.ts".to_string(),
+                source: std::sync::Arc::from(
+                    "export { default as Button } from './Button.vue';\nexport type { Props } from './types';",
+                ),
+                file_kind: host::FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        // Verify host produced export signatures
+        assert!(
+            !result.export_signatures.is_empty(),
+            "barrel file must produce export signatures"
+        );
+
+        let ffi = host_update_to_ffi(result, None);
+
+        // Positive: re-export signatures are mapped correctly
+        let button_sig = ffi.export_signatures.iter().find(|s| s.name == "Button");
+        assert!(button_sig.is_some(), "Button re-export must be present");
+        let button = button_sig.unwrap();
+        assert!(!button.is_type);
+        assert_eq!(button.reexport_source, Some("./Button.vue".to_string()));
+        assert_eq!(button.reexport_local, Some("default".to_string()));
+
+        let props_sig = ffi.export_signatures.iter().find(|s| s.name == "Props");
+        assert!(props_sig.is_some(), "Props type re-export must be present");
+        let props = props_sig.unwrap();
+        assert!(props.is_type);
+        assert_eq!(props.reexport_source, Some("./types".to_string()));
+    }
+
+    #[test]
+    fn host_update_to_ffi_export_signatures_local_exports() {
+        let h = host::VerterHost::new(host::HostConfig::default());
+        let result = h
+            .upsert(host::UpsertRequest {
+                canonical_id: Some("/src/utils.ts".to_string()),
+                input_id: "/src/utils.ts".to_string(),
+                source: std::sync::Arc::from(
+                    "export function greet() {}\nexport type Color = string;",
+                ),
+                file_kind: host::FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        let ffi = host_update_to_ffi(result, None);
+
+        let greet_sig = ffi.export_signatures.iter().find(|s| s.name == "greet");
+        assert!(greet_sig.is_some(), "local export must be present");
+        // Negative: local exports must not have reexport fields
+        assert_eq!(greet_sig.unwrap().reexport_source, None);
+        assert_eq!(greet_sig.unwrap().reexport_local, None);
+
+        let color_sig = ffi.export_signatures.iter().find(|s| s.name == "Color");
+        assert!(color_sig.is_some(), "type export must be present");
+        assert!(color_sig.unwrap().is_type);
+    }
+
+    #[test]
+    fn host_update_to_ffi_export_signatures_empty() {
+        let result = host::HostUpdateResult::no_change("/src/Empty.vue".to_string());
+        let ffi = host_update_to_ffi(result, None);
+        assert!(
+            ffi.export_signatures.is_empty(),
+            "no-change result must have empty export_signatures"
+        );
+    }
+
+    #[test]
     fn host_update_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
         let source = "a😀b";
         let result = host::HostUpdateResult {

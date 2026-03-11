@@ -1398,3 +1398,138 @@ defineEmits<DrawerEmits>()
     expect(code).not.toContain("XInvalidMacroType");
   });
 });
+
+describe("barrel file export signatures", () => {
+  afterEach(() => {
+    resetHost();
+  });
+
+  it("upsert of barrel file returns export signatures with reexport metadata", () => {
+    const host = loadHost();
+    const result = host.upsert({
+      inputId: "/src/barrel.ts",
+      source:
+        "export { default as Button } from './Button.vue';\nexport type { Props } from './types';",
+      fileKind: "non_sfc",
+    });
+
+    // Positive: export signatures present
+    expect(result.exportSignatures).toBeDefined();
+    expect(result.exportSignatures.length).toBeGreaterThanOrEqual(2);
+
+    const button = result.exportSignatures.find(
+      (s: any) => s.name === "Button",
+    );
+    expect(button).toBeDefined();
+    expect(button!.isType).toBe(false);
+    expect(button!.reexportSource).toBe("./Button.vue");
+    expect(button!.reexportLocal).toBe("default");
+
+    const props = result.exportSignatures.find(
+      (s: any) => s.name === "Props",
+    );
+    expect(props).toBeDefined();
+    expect(props!.isType).toBe(true);
+    expect(props!.reexportSource).toBe("./types");
+  });
+
+  it("upsert of local-only file returns export signatures without reexport fields", () => {
+    const host = loadHost();
+    const result = host.upsert({
+      inputId: "/src/utils.ts",
+      source: "export function greet() {}\nexport type Color = string;",
+      fileKind: "non_sfc",
+    });
+
+    expect(result.exportSignatures).toBeDefined();
+
+    const greet = result.exportSignatures.find(
+      (s: any) => s.name === "greet",
+    );
+    expect(greet).toBeDefined();
+    // Negative: local exports must not have reexport fields
+    expect(greet!.reexportSource).toBeUndefined();
+    expect(greet!.reexportLocal).toBeUndefined();
+
+    const color = result.exportSignatures.find(
+      (s: any) => s.name === "Color",
+    );
+    expect(color).toBeDefined();
+    expect(color!.isType).toBe(true);
+  });
+
+  it("resolveExports follows re-export chains across multiple files", () => {
+    const host = loadHost();
+
+    // Create a chain: deep.ts -> mid.ts -> top.ts
+    host.upsert({
+      inputId: "/src/deep.ts",
+      source: "export const SECRET = 42;\nexport type DeepType = string;",
+      fileKind: "non_sfc",
+    });
+
+    host.upsert({
+      inputId: "/src/mid.ts",
+      source:
+        "export { SECRET } from './deep';\nexport type { DeepType } from './deep';",
+      fileKind: "non_sfc",
+    });
+    host.setImportDependencies("/src/mid.ts", [
+      { specifier: "./deep", resolvedCanonicalId: "/src/deep.ts" },
+    ]);
+
+    host.upsert({
+      inputId: "/src/top.ts",
+      source:
+        "export { SECRET } from './mid';\nexport type { DeepType } from './mid';",
+      fileKind: "non_sfc",
+    });
+    host.setImportDependencies("/src/top.ts", [
+      { specifier: "./mid", resolvedCanonicalId: "/src/mid.ts" },
+    ]);
+
+    const resolved = host.resolveExports("/src/top.ts");
+    expect(resolved).toBeDefined();
+
+    const secret = resolved.find((e: any) => e.name === "SECRET");
+    expect(secret).toBeDefined();
+    // Resolved through chain to ultimate source
+    expect(secret!.sourceCanonicalId).toBe("/src/deep.ts");
+    expect(secret!.sourceName).toBe("SECRET");
+
+    const deepType = resolved.find((e: any) => e.name === "DeepType");
+    expect(deepType).toBeDefined();
+    expect(deepType!.isType).toBe(true);
+    expect(deepType!.sourceCanonicalId).toBe("/src/deep.ts");
+  });
+
+  it("getAnalysis includes exportSignatures in JSON output", () => {
+    const host = loadHost();
+    host.upsert({
+      inputId: "/src/barrel.ts",
+      source:
+        "export { default as Dialog } from './Dialog.vue';\nexport const VERSION = '1.0';",
+      fileKind: "non_sfc",
+    });
+
+    const analysisJson = host.getAnalysis("/src/barrel.ts");
+    expect(analysisJson).toBeTruthy();
+    const analysis = JSON.parse(analysisJson!);
+
+    expect(analysis.exportSignatures).toBeDefined();
+    expect(analysis.exportSignatures.length).toBeGreaterThanOrEqual(2);
+
+    const dialog = analysis.exportSignatures.find(
+      (s: any) => s.name === "Dialog",
+    );
+    expect(dialog).toBeDefined();
+    expect(dialog.reexportSource).toBe("./Dialog.vue");
+
+    const version = analysis.exportSignatures.find(
+      (s: any) => s.name === "VERSION",
+    );
+    expect(version).toBeDefined();
+    // Negative: local export must not have reexportSource
+    expect(version.reexportSource).toBeUndefined();
+  });
+});

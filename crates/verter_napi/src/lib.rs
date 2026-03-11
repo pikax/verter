@@ -2089,6 +2089,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn host_update_to_napi_exposes_export_signatures() {
+        // Use the host to produce real export signatures from a barrel file
+        let h = host::VerterHost::new(host::HostConfig::default());
+        let host_result = h
+            .upsert(host::UpsertRequest {
+                canonical_id: Some("/src/barrel.ts".to_string()),
+                input_id: "/src/barrel.ts".to_string(),
+                source: std::sync::Arc::from(
+                    "export { default as Button } from './Button.vue';\nexport type { Props } from './types';",
+                ),
+                file_kind: host::FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        assert!(
+            !host_result.export_signatures.is_empty(),
+            "barrel file must produce export signatures"
+        );
+
+        let result = host_update_to_napi(host_result, None);
+
+        // Positive: re-export signatures mapped with camelCase fields
+        let button = result.exportSignatures.iter().find(|s| s.name == "Button");
+        assert!(button.is_some(), "Button re-export must be present");
+        let button = button.unwrap();
+        assert!(!button.isType);
+        assert_eq!(button.reexportSource, Some("./Button.vue".to_string()));
+        assert_eq!(button.reexportLocal, Some("default".to_string()));
+
+        let props = result.exportSignatures.iter().find(|s| s.name == "Props");
+        assert!(props.is_some(), "Props type re-export must be present");
+        assert!(props.unwrap().isType);
+    }
+
+    #[test]
+    fn host_update_to_napi_export_signatures_local_exports() {
+        let h = host::VerterHost::new(host::HostConfig::default());
+        let host_result = h
+            .upsert(host::UpsertRequest {
+                canonical_id: Some("/src/utils.ts".to_string()),
+                input_id: "/src/utils.ts".to_string(),
+                source: std::sync::Arc::from(
+                    "export function greet() {}\nexport type Color = string;",
+                ),
+                file_kind: host::FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        let result = host_update_to_napi(host_result, None);
+
+        let greet = result.exportSignatures.iter().find(|s| s.name == "greet");
+        assert!(greet.is_some(), "local export must be present");
+        // Negative: local exports must not have reexport fields
+        assert!(greet.unwrap().reexportSource.is_none());
+        assert!(greet.unwrap().reexportLocal.is_none());
+
+        let color = result.exportSignatures.iter().find(|s| s.name == "Color");
+        assert!(color.is_some(), "type export must be present");
+        assert!(color.unwrap().isType);
+    }
+
+    #[test]
+    fn host_update_to_napi_export_signatures_empty_on_no_change() {
+        let result = host_update_to_napi(
+            host::HostUpdateResult::no_change("/src/Empty.vue".to_string()),
+            None,
+        );
+        assert!(
+            result.exportSignatures.is_empty(),
+            "no-change result must have empty exportSignatures"
+        );
+    }
+
     // @ai-generated — Tests compile_batch_files() helper: multi-file parallel compilation
 
     #[test]
