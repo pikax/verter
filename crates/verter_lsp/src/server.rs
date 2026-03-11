@@ -2646,6 +2646,31 @@ impl VerterLanguageServer {
 /// Handles `./foo.vue`, `../bar/baz.vue`, etc.
 /// Check whether a requested `context.only` filter includes the given code action kind.
 ///
+/// Check whether a canonical ID (or URI string) refers to a config file
+/// that should trigger a project registry rebuild when changed on disk.
+///
+/// Matches: `tsconfig*.json`, `.verterrc.json`, `vite.config.{ts,js,...}`, `package.json`.
+fn is_config_file(path: &str) -> bool {
+    // Extract the filename (last segment after '/')
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    if filename.starts_with("tsconfig") && filename.ends_with(".json") {
+        return true;
+    }
+    if filename == ".verterrc.json" || filename == "package.json" {
+        return true;
+    }
+    // vite.config.{ts,js,mjs,cjs,mts,cts}
+    if let Some(ext) = filename.strip_prefix("vite.config.") {
+        return matches!(ext, "ts" | "js" | "mjs" | "cjs" | "mts" | "cts");
+    }
+    false
+}
+
+/// Check whether a canonical ID (or URI string) refers to a `.vue` file.
+fn is_vue_file(path: &str) -> bool {
+    path.ends_with(".vue")
+}
+
 /// When `only` is `None` (no filter), all kinds are wanted.
 /// Otherwise, checks for hierarchical prefix matching (LSP spec):
 /// `"quickfix"` matches `"quickfix.foo"` and vice-versa.
@@ -4347,21 +4372,48 @@ impl LanguageServer for VerterLanguageServer {
         self.spawn_background_init(init_lint_opts, "initialization")
             .await;
 
-        // D. Register file system watcher for non-Vue source files.
-        // This enables did_change_watched_files notifications for .ts/.tsx/.js/.jsx
-        // files changed outside the editor (e.g., git checkout, build tools).
+        // D. Register file system watchers for external file changes.
+        // This enables did_change_watched_files notifications for source files,
+        // Vue SFCs, and config files changed outside the editor (e.g., git checkout,
+        // build tools, other editors). Enables non-VS Code clients (Neovim, etc.)
+        // to get full external change detection via the standard LSP mechanism.
+        let watch_kind = Some(WatchKind::Change | WatchKind::Create | WatchKind::Delete);
         let _ = self
             .client
             .register_capability(vec![Registration {
-                id: "verter-source-file-watcher".to_string(),
+                id: "verter-file-watcher".to_string(),
                 method: "workspace/didChangeWatchedFiles".to_string(),
                 register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                    watchers: vec![FileSystemWatcher {
-                        glob_pattern: GlobPattern::String(
-                            "**/*.{ts,tsx,js,jsx,mts,mjs,cts,cjs}".to_string(),
-                        ),
-                        kind: Some(WatchKind::Change | WatchKind::Create | WatchKind::Delete),
-                    }],
+                    watchers: vec![
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String("**/*.vue".to_string()),
+                            kind: watch_kind,
+                        },
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String(
+                                "**/*.{ts,tsx,js,jsx,mts,mjs,cts,cjs}".to_string(),
+                            ),
+                            kind: watch_kind,
+                        },
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String("**/tsconfig*.json".to_string()),
+                            kind: watch_kind,
+                        },
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String("**/.verterrc.json".to_string()),
+                            kind: watch_kind,
+                        },
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String(
+                                "**/vite.config.{ts,js,mjs,cjs,mts,cts}".to_string(),
+                            ),
+                            kind: watch_kind,
+                        },
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String("**/package.json".to_string()),
+                            kind: watch_kind,
+                        },
+                    ],
                 })
                 .ok(),
             }])
@@ -4654,35 +4706,70 @@ impl LanguageServer for VerterLanguageServer {
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         let _hg = HandlerGuard::new("did_change_watched_files");
-        let Some(sync) = &self.project_sync else {
-            return;
-        };
 
-        let mut resync_ids = Vec::new();
-        let mut delete_ids = Vec::new();
+        let mut ts_js_resync_ids = Vec::new();
+        let mut ts_js_delete_ids = Vec::new();
+        let mut vue_resync_ids = Vec::new();
+        let mut vue_delete_ids: Vec<(String, String)> = Vec::new(); // (canonical_id, uri_str)
+        let mut config_changed = false;
 
         for event in &params.changes {
             let canonical_id = uri_to_canonical_id(&event.uri);
 
-            // Skip .vue files — they have their own sync path (did_open/did_change)
-            if canonical_id.ends_with(".vue") {
-                continue;
-            }
-            // Skip files that are currently open in the editor (those get did_change)
+            // Skip files that are currently open in the editor — the editor's
+            // didChange notification is authoritative for open files.
             if self.documents.get(&event.uri).is_some() {
                 continue;
             }
 
-            if event.typ == FileChangeType::DELETED {
-                delete_ids.push(canonical_id);
+            if is_config_file(&canonical_id) {
+                config_changed = true;
+                tracing::debug!("did_change_watched_files: config file changed: {canonical_id}");
+                // Config files also trigger vite dep check below, but the
+                // registry rebuild is the primary action.
+            } else if is_vue_file(&canonical_id) {
+                if event.typ == FileChangeType::DELETED {
+                    vue_delete_ids.push((canonical_id, event.uri.as_str().to_string()));
+                } else {
+                    vue_resync_ids.push(canonical_id);
+                }
             } else {
-                // Created or Changed — re-sync
-                resync_ids.push(canonical_id);
+                // TS/JS source file
+                if event.typ == FileChangeType::DELETED {
+                    ts_js_delete_ids.push(canonical_id);
+                } else {
+                    ts_js_resync_ids.push(canonical_id);
+                }
             }
         }
 
-        // Handle deletions: close provider files and remove from host
-        for canonical_id in &delete_ids {
+        // ── Vue file deletions ─────────────────────────────────────
+        for (canonical_id, uri_str) in &vue_delete_ids {
+            if let Some(state) = self.remove_provider_sync_state(canonical_id).or_else(|| {
+                let profile = self.documents.tsx_profile.read().clone();
+                self.documents
+                    .host()
+                    .get_ide(canonical_id, &profile)
+                    .and_then(|ide| {
+                        self.prepare_vue_provider_sync_transition(canonical_id, ide.is_jsx)
+                            .map(|transition| transition.next)
+                    })
+            }) {
+                self.close_provider_state(&state).await;
+            }
+            self.documents.host().remove(canonical_id);
+            self.cached_verter_diags.remove(uri_str.as_str());
+            tracing::debug!("did_change_watched_files: removed vue {canonical_id}");
+        }
+
+        // ── Vue file creates/changes ───────────────────────────────
+        for canonical_id in &vue_resync_ids {
+            self.resync_background_vue_file(canonical_id).await;
+            tracing::debug!("did_change_watched_files: resynced vue {canonical_id}");
+        }
+
+        // ── TS/JS file deletions ───────────────────────────────────
+        for canonical_id in &ts_js_delete_ids {
             if let Some(state) = self.remove_provider_sync_state(canonical_id) {
                 self.close_provider_state(&state).await;
             }
@@ -4690,26 +4777,58 @@ impl LanguageServer for VerterLanguageServer {
             tracing::debug!("did_change_watched_files: removed {canonical_id}");
         }
 
-        // Handle creates/changes: re-sync to provider in background
-        if !resync_ids.is_empty() {
-            let host = self.documents.host_arc();
-            let sync = sync.clone();
-            let resolver_snapshot = Arc::clone(&self.resolver_snapshot);
-            let provider_sync_states = Arc::clone(&self.provider_sync_states);
+        // ── TS/JS file creates/changes ─────────────────────────────
+        if !ts_js_resync_ids.is_empty() {
+            if let Some(sync) = &self.project_sync {
+                let host = self.documents.host_arc();
+                let sync = sync.clone();
+                let resolver_snapshot = Arc::clone(&self.resolver_snapshot);
+                let provider_sync_states = Arc::clone(&self.provider_sync_states);
 
-            tokio::spawn(async move {
-                for canonical_id in resync_ids {
-                    crate::workspace_scanner::resync_non_vue_file(
-                        &canonical_id,
-                        &host,
-                        &sync,
-                        &resolver_snapshot,
-                        &provider_sync_states,
-                    )
-                    .await;
-                    tracing::debug!("did_change_watched_files: resynced {canonical_id}");
+                tokio::spawn(async move {
+                    for canonical_id in ts_js_resync_ids {
+                        crate::workspace_scanner::resync_non_vue_file(
+                            &canonical_id,
+                            &host,
+                            &sync,
+                            &resolver_snapshot,
+                            &provider_sync_states,
+                        )
+                        .await;
+                        tracing::debug!("did_change_watched_files: resynced {canonical_id}");
+                    }
+                });
+            }
+        }
+
+        // ── Config file changes → registry rebuild ─────────────────
+        // Also check whether any changed file is a vite config dependency
+        // (mirrors the logic in on_file_changed).
+        if !config_changed {
+            let all_changed: Vec<String> = params
+                .changes
+                .iter()
+                .map(|e| uri_to_canonical_id(&e.uri))
+                .collect();
+            let registry = self.project_registry.read();
+            if let Some(reg) = registry.as_ref() {
+                for canonical_id in &all_changed {
+                    if reg
+                        .projects()
+                        .iter()
+                        .any(|p| p.vite_config_deps.iter().any(|dep| dep == canonical_id))
+                    {
+                        config_changed = true;
+                        tracing::debug!(
+                            "did_change_watched_files: vite config dep changed: {canonical_id}"
+                        );
+                        break;
+                    }
                 }
-            });
+            }
+        }
+        if config_changed {
+            self.trigger_registry_rebuild().await;
         }
     }
 
@@ -9175,5 +9294,50 @@ function handleCustom(payload: string) {
             "source.organizeImports"
         ));
         assert!(!wants_code_action_kind(Some(&kinds), "refactor"));
+    }
+
+    // ── File watcher helper tests ──────────────────────────────────
+
+    #[test]
+    fn test_is_config_file_positive() {
+        assert!(is_config_file("file:///project/tsconfig.json"));
+        assert!(is_config_file("file:///project/tsconfig.app.json"));
+        assert!(is_config_file("file:///project/tsconfig.node.json"));
+        assert!(is_config_file("file:///project/.verterrc.json"));
+        assert!(is_config_file("file:///project/vite.config.ts"));
+        assert!(is_config_file("file:///project/vite.config.js"));
+        assert!(is_config_file("file:///project/vite.config.mjs"));
+        assert!(is_config_file("file:///project/vite.config.cjs"));
+        assert!(is_config_file("file:///project/vite.config.mts"));
+        assert!(is_config_file("file:///project/vite.config.cts"));
+        assert!(is_config_file("file:///project/package.json"));
+    }
+
+    #[test]
+    fn test_is_config_file_negative() {
+        assert!(!is_config_file("file:///project/src/App.vue"));
+        assert!(!is_config_file("file:///project/src/utils.ts"));
+        assert!(!is_config_file("file:///project/src/config.ts"));
+        assert!(!is_config_file("file:///project/tsconfig-paths.ts"));
+        assert!(!is_config_file("file:///project/my.config.ts"));
+        assert!(!is_config_file("file:///project/verterrc.json"));
+    }
+
+    #[test]
+    fn test_is_config_file_windows_paths() {
+        // Canonical IDs on Windows use forward slashes
+        assert!(is_config_file("C:/project/tsconfig.json"));
+        assert!(is_config_file("C:/project/package.json"));
+        assert!(is_config_file("C:/project/.verterrc.json"));
+        assert!(!is_config_file("C:/project/src/App.vue"));
+    }
+
+    #[test]
+    fn test_is_vue_file() {
+        assert!(is_vue_file("file:///project/src/App.vue"));
+        assert!(is_vue_file("C:/project/src/App.vue"));
+        assert!(!is_vue_file("file:///project/src/utils.ts"));
+        assert!(!is_vue_file("file:///project/tsconfig.json"));
+        assert!(!is_vue_file("file:///project/vue.config.js"));
     }
 }

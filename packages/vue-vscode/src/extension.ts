@@ -462,9 +462,9 @@ export async function activateVueLanguageServer(
       // so it can provide position-mapped features (hover, definition, etc.)
       { scheme: VirtualFileContentProvider.scheme },
     ],
-    synchronize: {
-      fileEvents: workspace.createFileSystemWatcher("**/*.{vue}"),
-    },
+    // File watching is handled server-side via dynamic registration of
+    // workspace/didChangeWatchedFiles (covers .vue, .ts/.js, config files).
+    // No client-side synchronize.fileEvents needed.
     initializationOptions: {
       configuration: {
         vue: workspace.getConfiguration("vue"),
