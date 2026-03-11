@@ -136,13 +136,14 @@ function installFixtureDeps(fixtureDir: string): void {
 async function main() {
   const extensionDevelopmentPath = path.resolve(__dirname, "../../");
   const extensionTestsPath = path.resolve(__dirname, "./suite/index");
+  const vscodeVersion = process.env.VERTER_E2E_VSCODE_VERSION ?? "stable";
 
   const fixtureArg = process.argv.find((a) => a.startsWith("--fixture="));
   const fixturesToRun = fixtureArg
     ? [fixtureArg.replace("--fixture=", "")]
     : FIXTURES;
 
-  const vscodeExecutablePath = await downloadAndUnzipVSCode("stable");
+  const vscodeExecutablePath = await downloadAndUnzipVSCode(vscodeVersion);
 
   // Copy LSP binary to temp to prevent file locking
   const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
@@ -181,7 +182,7 @@ async function main() {
         vscodeExecutablePath,
         extensionDevelopmentPath,
         extensionTestsPath,
-        launchArgs: ["--disable-extensions", fixtureDir],
+        launchArgs: ["--disable-extensions", "--disable-updates", fixtureDir],
         extensionTestsEnv: {
           ...process.env,
           VERTER_E2E_TEST: "1",

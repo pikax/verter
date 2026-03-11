@@ -268,4 +268,74 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
       await sleep(500);
     }
   });
+
+  test("missing sass preprocessor shows an inline diagnostic on lang=\"sass\" and clears after switching to scss", async function () {
+    const doc = await openVueFile(getAppVuePath());
+    await waitForFileReady(doc);
+
+    const insertPos = doc.lineAt(doc.lineCount - 1).range.end;
+    const edit = new vscode.WorkspaceEdit();
+    edit.insert(
+      doc.uri,
+      insertPos,
+      "\n<style lang=\"sass\">\n.missing-preprocessor\n  color: red\n</style>\n",
+    );
+    await vscode.workspace.applyEdit(edit);
+
+    try {
+      const sassDiags = await waitForDiagnostics(doc.uri, {
+        source: "verter",
+        timeoutMs: 20_000,
+        predicate: (d) =>
+          d.message.includes("\"sass\" is not installed") &&
+          d.source === "verter",
+      });
+      const missingSass = sassDiags.find((d) =>
+        d.message.includes("\"sass\" is not installed"),
+      );
+
+      expect(
+        missingSass,
+        `Expected an inline missing-sass diagnostic. Got: ${JSON.stringify(sassDiags.map((d) => ({ message: d.message, source: d.source })))}`,
+      ).to.exist;
+      expect(doc.getText(missingSass!.range)).to.equal("lang=\"sass\"");
+
+      const langPos = findPosition(doc, 'lang="sass"');
+      expect(langPos, "should find lang=\"sass\" after inserting the style block").to.exist;
+
+      const replaceEdit = new vscode.WorkspaceEdit();
+      replaceEdit.replace(
+        doc.uri,
+        new vscode.Range(
+          langPos!,
+          new vscode.Position(langPos!.line, langPos!.character + 'lang="sass"'.length),
+        ),
+        'lang="scss"',
+      );
+      await vscode.workspace.applyEdit(replaceEdit);
+
+      const clearStart = Date.now();
+      let remaining = vscode.languages.getDiagnostics(doc.uri).filter((d) =>
+        d.source === "verter" &&
+        d.message.includes("\"sass\" is not installed"),
+      );
+      while (remaining.length > 0 && Date.now() - clearStart < 20_000) {
+        await sleep(250);
+        remaining = vscode.languages.getDiagnostics(doc.uri).filter((d) =>
+          d.source === "verter" &&
+          d.message.includes("\"sass\" is not installed"),
+        );
+      }
+
+      expect(
+        remaining,
+        `Missing-sass diagnostic should clear after switching to scss. Got: ${JSON.stringify(remaining.map((d) => ({ message: d.message, source: d.source })))}`,
+      ).to.be.empty;
+    } finally {
+      await vscode.commands.executeCommand("undo");
+      await sleep(200);
+      await vscode.commands.executeCommand("undo");
+      await sleep(500);
+    }
+  });
 });

@@ -23,7 +23,22 @@ const nexusUiTimeoutMs = 60_000;
 const runNexusUiCheck = process.env.VERTER_RUN_NEXUS_UI === "1";
 
 const viteBin = path.resolve(unpluginDir, "node_modules", "vite", "bin", "vite.js");
-const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const pnpmInvocation = resolvePnpmInvocation();
+
+function resolvePnpmInvocation() {
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath) {
+    const ext = path.extname(npmExecPath).toLowerCase();
+    if (ext === ".cmd" || ext === ".exe") {
+      return { command: npmExecPath, args: [] };
+    }
+    if (ext === ".js" || ext === ".cjs" || ext === ".mjs") {
+      return { command: process.execPath, args: [npmExecPath] };
+    }
+  }
+
+  return { command: "pnpm", args: [] };
+}
 
 function cleanDir(dir) {
   if (dir && existsSync(dir)) {
@@ -196,8 +211,8 @@ async function buildLinkedUnplugin() {
   return runCommand({
     label: "build linked @verter/unplugin dist",
     cwd: unpluginDir,
-    command: pnpmCommand,
-    args: ["run", "build"],
+    command: pnpmInvocation.command,
+    args: [...pnpmInvocation.args, "run", "build"],
     timeoutMs: 120_000,
   });
 }
@@ -206,8 +221,8 @@ async function runNexusUiFallback() {
   return runCommand({
     label: "nexus-ui @nexus/ui build-lib",
     cwd: nexusUiRoot,
-    command: pnpmCommand,
-    args: ["--filter", "@nexus/ui", "build-lib"],
+    command: pnpmInvocation.command,
+    args: [...pnpmInvocation.args, "--filter", "@nexus/ui", "build-lib"],
     timeoutMs: nexusUiTimeoutMs,
     cleanupDir: nexusUiDistDir,
     expectedOutput: nexusUiDistDir,

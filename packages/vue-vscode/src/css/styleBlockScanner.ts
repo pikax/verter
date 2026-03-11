@@ -123,20 +123,20 @@ export function scanStyleBlocks(source: string): StyleBlockInfo[] {
     // Compute langAttributeRange if the lang attribute was found
     let langAttributeRange: StyleBlockInfo["langAttributeRange"];
     if (parsed.matchStart >= 0) {
-      // The attrs string starts after "<style" in the source.
-      // openMatch[0] is e.g. `<style lang="scss">`. The attrs capture group
-      // starts at openMatch.index + "<style".length (6).
-      const attrsOffset = openMatch.index + 6; // length of "<style"
-      const langAbsStart = attrsOffset + parsed.matchStart;
-      const langAbsEnd = langAbsStart + parsed.matchLength;
-      const start = offsetToLineCol(langAbsStart);
-      const end = offsetToLineCol(langAbsEnd);
-      langAttributeRange = {
-        startLine: start.line,
-        startCol: start.col,
-        endLine: end.line,
-        endCol: end.col,
-      };
+      const attrsStartInOpenTag = openMatch[0].indexOf(attrs);
+      if (attrsStartInOpenTag >= 0) {
+        const attrsOffset = openMatch.index + attrsStartInOpenTag;
+        const langAbsStart = attrsOffset + parsed.matchStart;
+        const langAbsEnd = langAbsStart + parsed.matchLength;
+        const start = offsetToLineCol(langAbsStart);
+        const end = offsetToLineCol(langAbsEnd);
+        langAttributeRange = {
+          startLine: start.line,
+          startCol: start.col,
+          endLine: end.line,
+          endCol: end.col,
+        };
+      }
     }
 
     results.push({

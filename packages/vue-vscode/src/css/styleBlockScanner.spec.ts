@@ -133,6 +133,24 @@ describe("langAttributeRange", () => {
     expect(text).toBe('lang="less"');
   });
 
+  it("tracks langAttributeRange when the opening tag spans multiple lines", () => {
+    const source = `<style
+  scoped
+  lang="sass">
+.foo
+  color: red
+</style>`;
+    const blocks = scanStyleBlocks(source);
+    expect(blocks).toHaveLength(1);
+    const range = blocks[0].langAttributeRange;
+    expect(range).toBeDefined();
+    expect(range!.startLine).toBe(2);
+    expect(range!.endLine).toBe(2);
+    const line = source.split("\n")[2];
+    const text = line.slice(range!.startCol, range!.endCol);
+    expect(text).toBe('lang="sass"');
+  });
+
   it("handles lang attribute after template on next line", () => {
     const source = `<template><div>hello</div></template>
 <style lang="sass">

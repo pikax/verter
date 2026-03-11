@@ -9,6 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixture = process.env.E2E_FIXTURE || "single-project";
 const typeProvider = process.env.E2E_TYPE_PROVIDER || "";
 const onlyTest = process.env.VERTER_E2E_ONLY || "";
+const vscodeVersion = process.env.VERTER_E2E_VSCODE_VERSION || "stable";
 const testFiles = onlyTest
   ? onlyTest.includes("*")
     ? onlyTest
@@ -111,10 +112,10 @@ if (fixture === "monorepo") {
 
 export default defineConfig({
   files: testFiles,
-  version: "stable",
+  version: vscodeVersion,
   extensionDevelopmentPath: __dirname,
   workspaceFolder: path.join(__dirname, "e2e", "fixtures", fixture),
-  launchArgs: ["--disable-extensions"],
+  launchArgs: ["--disable-extensions", "--disable-updates"],
   env: {
     ...process.env,
     VERTER_E2E_TEST: "1",
