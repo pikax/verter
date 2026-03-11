@@ -2834,3 +2834,129 @@ defineProps<{ value: string }>()
         "dotted name should be sanitized to underscores: {code}"
     );
 }
+
+// ── defineExpose ──────────────────────────────────────────────────────────────
+
+#[test]
+fn tsc_codegen_define_expose_object_arg() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const foo = ref(1)
+const bar = ref('hello')
+function baz() {}
+defineExpose({ foo, bar, baz })
+</script><template/>"#,
+    );
+
+    // Positive: exposed names appear as properties in the return type
+    assert!(
+        r.contains("foo: any"),
+        "should have foo: any in return type: {r}"
+    );
+    assert!(
+        r.contains("bar: any"),
+        "should have bar: any in return type: {r}"
+    );
+    assert!(
+        r.contains("baz: any"),
+        "should have baz: any in return type: {r}"
+    );
+    // Negative: defineExpose call should not appear in output
+    assert!(
+        !r.contains("defineExpose("),
+        "defineExpose call should be removed from output: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_define_expose_empty() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineExpose()
+</script><template/>"#,
+    );
+
+    // Should produce valid output with no extra properties
+    assert!(r.contains("new("), "should have constructor in output: {r}");
+    assert!(
+        !r.contains("defineExpose("),
+        "defineExpose call should be removed from output: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_define_expose_type_param() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+const foo = ref(1)
+const bar = ref('hello')
+defineExpose<{ foo: number, bar: string }>({ foo, bar })
+</script><template/>"#,
+    );
+
+    // Type param wins: intersection with the type text
+    assert!(
+        r.contains("{ foo: number, bar: string }"),
+        "should have type text as intersection on return type: {r}"
+    );
+    // Should NOT have individual `foo: any` — type param covers it
+    assert!(
+        !r.contains("foo: any"),
+        "should not have individual foo: any when type param present: {r}"
+    );
+    assert!(
+        !r.contains("defineExpose("),
+        "defineExpose call should be removed from output: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_define_expose_non_object() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+const obj = { foo: 1 }
+defineExpose(obj)
+</script><template/>"#,
+    );
+
+    // Can't extract names from a variable reference — no exposed properties
+    assert!(
+        !r.contains("foo: any"),
+        "should not have foo: any for non-object arg: {r}"
+    );
+    assert!(r.contains("new("), "should have constructor in output: {r}");
+}
+
+#[test]
+fn tsc_codegen_define_expose_method() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+function greet(name: string) { return `Hello, ${name}!` }
+defineExpose({ greet })
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("greet: any"),
+        "should have greet: any in return type: {r}"
+    );
+    assert!(
+        !r.contains("defineExpose("),
+        "defineExpose call should be removed from output: {r}"
+    );
+}
+
+#[test]
+fn tsc_codegen_define_expose_computed_key() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineExpose({ foo, bar: computed(() => 1), baz: 'literal' })
+</script><template/>"#,
+    );
+
+    // All named properties should appear
+    assert!(r.contains("foo: any"), "should have foo: any: {r}");
+    assert!(r.contains("bar: any"), "should have bar: any: {r}");
+    assert!(r.contains("baz: any"), "should have baz: any: {r}");
+}

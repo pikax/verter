@@ -265,6 +265,11 @@ struct TscMacroState {
     // defineSlots — TypeScript type for $slots
     slots_ts: Option<String>,
 
+    // defineExpose — individual property names (from object arg)
+    expose_names: Vec<String>,
+    // defineExpose — TypeScript type text (from type param)
+    expose_type_text: Option<String>,
+
     // Local type declarations (interfaces, type aliases)
     local_types: Vec<String>,
 
@@ -1085,7 +1090,19 @@ fn build_macro_state<'a>(
                     &mut state,
                 );
             }
-            _ => {}
+            ScriptMacro::DefineExpose {
+                type_params,
+                object_arg,
+                ..
+            } => {
+                process_expose(
+                    type_params.as_ref(),
+                    object_arg.as_ref(),
+                    content_str,
+                    type_usage_tracker,
+                    &mut state,
+                );
+            }
         }
     }
 
@@ -1604,6 +1621,28 @@ fn process_slots(
     let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
     state.slots_ts = Some(type_text.to_string());
     type_usage_tracker.mark_type_text(type_text);
+}
+
+fn process_expose(
+    type_params: Option<&MacroTypeParams>,
+    object_arg: Option<&MacroObjectArg<'_>>,
+    content_str: &str,
+    type_usage_tracker: &mut TypeUsageTracker<'_>,
+    state: &mut TscMacroState,
+) {
+    // Type param wins over object arg
+    if let Some(tp) = type_params {
+        let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
+        state.expose_type_text = Some(type_text.to_string());
+        type_usage_tracker.mark_type_text(type_text);
+        return;
+    }
+    // Fall back to extracting property names from object arg
+    if let Some(obj) = object_arg {
+        for prop in &obj.properties {
+            state.expose_names.push(prop.name.to_string());
+        }
+    }
 }
 
 fn collect_test_bindings(
@@ -2234,6 +2273,11 @@ fn generate_code(
     }
     out.push_str("    $refs: {},\n");
 
+    // Exposed bindings from defineExpose
+    for name in &state.expose_names {
+        out.push_str(&format!("    {}: any,\n", name));
+    }
+
     // $root — conditional type for narrowing
     if let Some(nr) = narrowing {
         out.push_str("    $root: ");
@@ -2273,7 +2317,11 @@ fn generate_code(
         out.push_str(",\n");
     }
 
-    out.push_str("  }\n");
+    if let Some(ref expose_type) = state.expose_type_text {
+        out.push_str(&format!("  }} & {}\n", expose_type));
+    } else {
+        out.push_str("  }\n");
+    }
     out.push_str("}\n");
     out.push_str(&format!("export default {}\n", component_name));
 

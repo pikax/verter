@@ -684,6 +684,7 @@ pub fn parse_macro_call<'a>(
             Some(ScriptMacro::DefineExpose {
                 span,
                 declarator,
+                type_params,
                 object_arg,
             })
         }

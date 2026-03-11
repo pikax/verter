@@ -128,6 +128,7 @@ pub enum ScriptMacro<'a> {
     DefineExpose {
         span: Span,
         declarator: Option<MacroDeclarator<'a>>,
+        type_params: Option<MacroTypeParams>,
         object_arg: Option<MacroObjectArg<'a>>,
     },
 

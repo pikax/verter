@@ -2809,7 +2809,7 @@ fn process_single_macro(
         ScriptMacro::DefineExpose {
             span,
             declarator,
-            object_arg: _,
+            ..
         } => {
             let entry = process_standard_macro(
                 "defineExpose",
