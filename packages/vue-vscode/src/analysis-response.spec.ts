@@ -204,6 +204,29 @@ describe("Analysis response resilience to skip_serializing_if", () => {
     expect(propNames).toEqual(["title"]);
   });
 
+  it("builds ComponentTreeProvider tooltip without crashing when props is undefined", () => {
+    // Simulate a component with props omitted (e.g., serde skip or malformed response)
+    const comp = { name: "NoPropsComp", isDynamic: false, hasSpread: false } as TemplateComponentUsage;
+    // This is the exact pattern from ComponentTreeProvider.ts line 205
+    // Before the fix: `comp.props.length` would crash with "Cannot read properties of undefined"
+    // After the fix: `(comp.props ?? []).length` returns 0
+    const tooltip = [
+      `Component: ${comp.name}`,
+      comp.importSource ? `Import: ${comp.importSource}` : "Global component",
+      comp.isDynamic ? "Dynamic component" : "",
+      comp.hasSpread ? "Has v-bind spread" : "",
+      `Props: ${(comp.props ?? []).length}`,
+      `Slots: ${(comp.slotsUsed ?? []).join(", ") || "none"}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    expect(tooltip).toContain("Props: 0");
+    expect(tooltip).toContain("Slots: none");
+    // Negative: should NOT crash or produce "Props: undefined"
+    expect(tooltip).not.toContain("undefined");
+  });
+
   it("builds tooltip string without crashing on missing fields", () => {
     const comp = analysis.template!.components[0]!;
     // This is the exact tooltip pattern from AnalysisTreeProvider

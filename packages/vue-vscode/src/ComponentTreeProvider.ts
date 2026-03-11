@@ -202,7 +202,7 @@ export class ComponentTreeProvider
       comp.importSource ? `Import: ${comp.importSource}` : "Global component",
       comp.isDynamic ? "Dynamic component" : "",
       comp.hasSpread ? "Has v-bind spread" : "",
-      `Props: ${comp.props.length}`,
+      `Props: ${(comp.props ?? []).length}`,
       `Slots: ${(comp.slotsUsed ?? []).join(", ") || "none"}`,
     ]
       .filter(Boolean)
