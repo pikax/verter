@@ -19,6 +19,14 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use crate::tsgo::protocol::*;
 use crate::tsgo::traits::{ProviderFuture, TypeProvider};
 
+/// Environment variables to strip from child processes to prevent VS Code/Electron
+/// debugger inheritance (F5 sessions set these, causing "Debugger listening" noise).
+pub(crate) const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &[
+    "NODE_OPTIONS",
+    "VSCODE_INSPECTOR_OPTIONS",
+    "ELECTRON_RUN_AS_NODE",
+];
+
 /// Message sent to the dedicated stdin writer task.
 enum TsserverStdinMessage {
     /// Write a newline-delimited JSON message to stdin.
@@ -467,6 +475,13 @@ impl TsserverTypeProvider {
         crash_notify: Option<Arc<Notify>>,
     ) -> Result<Self, TypeProviderError> {
         let mut cmd = tokio::process::Command::new(node_path);
+
+        // Remove VS Code/Electron debug env vars to prevent tsserver from
+        // opening a debugger port during F5 sessions.
+        for var in CHILD_PROCESS_ENV_DENYLIST {
+            cmd.env_remove(var);
+        }
+
         cmd.arg(tsserver_path)
             .arg("--useSyntaxServer=false")
             .arg("--disableAutomaticTypingAcquisition");
@@ -559,9 +574,6 @@ impl TsserverTypeProvider {
     /// Find the best project root for a file path (longest prefix match).
     /// Falls back to the global `workspace_root` if no project root matches.
     fn project_root_for(&self, file: &str) -> String {
-        if let Some(provider_root) = synthetic_provider_root(file) {
-            return provider_root;
-        }
         let roots = self.project_roots.read();
         for root in roots.iter() {
             if file.starts_with(root.as_str()) {
@@ -570,15 +582,6 @@ impl TsserverTypeProvider {
         }
         self.workspace_root.clone()
     }
-}
-
-fn synthetic_provider_root(path: &str) -> Option<String> {
-    let normalized = path.replace('\\', "/");
-    let marker = "/.verter/ide/";
-    let marker_idx = normalized.find(marker)?;
-    let after_marker = &normalized[marker_idx + marker.len()..];
-    let hash_end = after_marker.find('/')?;
-    Some(normalized[..marker_idx + marker.len() + hash_end].to_string())
 }
 
 impl TypeProvider for TsserverTypeProvider {
@@ -1686,16 +1689,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn synthetic_provider_root_uses_owner_specific_provider_root() {
-        let path = "/workspace/pkg-a/.verter/ide/abc123/src/App.vue.tsx";
-        assert_eq!(
-            synthetic_provider_root(path).as_deref(),
-            Some("/workspace/pkg-a/.verter/ide/abc123")
-        );
-        assert_eq!(synthetic_provider_root("/workspace/src/App.vue.tsx"), None);
-    }
-
-    #[test]
     fn test_byte_offset_to_tsserver_pos() {
         let content = "line1\nline2\nline3";
         // 'l' at start of line1 → (1, 1)
@@ -2255,5 +2248,38 @@ mod tests {
         assert!(content.is_none(), "cache miss should yield None");
         // The actual fix changes the code to `return Ok(vec![])` here,
         // so no transport request is sent. We verify the None path exists.
+    }
+
+    // ── env denylist test ──────────────────────────────────────────
+
+    #[test]
+    fn test_child_process_env_denylist_strips_debug_vars() {
+        // Verify the constant contains exactly the expected vars
+        assert!(
+            CHILD_PROCESS_ENV_DENYLIST.contains(&"NODE_OPTIONS"),
+            "should deny NODE_OPTIONS"
+        );
+        assert!(
+            CHILD_PROCESS_ENV_DENYLIST.contains(&"VSCODE_INSPECTOR_OPTIONS"),
+            "should deny VSCODE_INSPECTOR_OPTIONS"
+        );
+        assert!(
+            CHILD_PROCESS_ENV_DENYLIST.contains(&"ELECTRON_RUN_AS_NODE"),
+            "should deny ELECTRON_RUN_AS_NODE"
+        );
+
+        // Verify that std::process::Command.env_remove with these vars works
+        // (same API as tokio::process::Command)
+        let mut cmd = std::process::Command::new("echo");
+        for var in CHILD_PROCESS_ENV_DENYLIST {
+            cmd.env_remove(var);
+        }
+        // If we get here without panic, the API accepts all denylist entries.
+        // Also verify the list length is exactly 3 (no accidental additions)
+        assert_eq!(
+            CHILD_PROCESS_ENV_DENYLIST.len(),
+            3,
+            "denylist should have exactly 3 entries"
+        );
     }
 }

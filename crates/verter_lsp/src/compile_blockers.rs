@@ -14,7 +14,7 @@ impl<'a> HostFsProjectResolverReader<'a> {
     }
 }
 
-fn normalize_fs_path(path: &str) -> String {
+pub fn normalize_fs_path(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     if let Some(stripped) = normalized.strip_prefix("//?/UNC/") {
         return format!("//{stripped}");
@@ -27,12 +27,8 @@ fn normalize_fs_path(path: &str) -> String {
 
 impl crate::project_resolver::ProjectResolverReader for HostFsProjectResolverReader<'_> {
     fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.host.get_source(canonical_id).or_else(|| {
-            let normalized = normalize_fs_path(canonical_id);
-            std::fs::read_to_string(&normalized)
-                .ok()
-                .map(Arc::<str>::from)
-        })
+        ensure_source_loaded_into_host(self.host, canonical_id);
+        self.host.get_source(canonical_id)
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
@@ -49,6 +45,32 @@ impl crate::project_resolver::ProjectResolverReader for HostFsProjectResolverRea
             .ok()
             .map(|path| normalize_fs_path(&path.to_string_lossy()))
     }
+}
+
+/// Single filesystem ingress for source content reads.
+///
+/// If the source is already in the host, returns `true` immediately.
+/// Otherwise reads from disk, upserts into the host, and returns `true`
+/// on success. Returns `false` if the file cannot be read.
+///
+/// All source content reads should go through this function to ensure
+/// files are loaded into the host exactly once via a single code path.
+pub fn ensure_source_loaded_into_host(host: &VerterHost, canonical_id: &str) -> bool {
+    if host.get_source(canonical_id).is_some() {
+        return true;
+    }
+    let normalized = normalize_fs_path(canonical_id);
+    let Ok(source) = std::fs::read_to_string(&normalized) else {
+        return false;
+    };
+    host.upsert(UpsertRequest {
+        canonical_id: Some(canonical_id.to_string()),
+        input_id: canonical_id.to_string(),
+        source: Arc::from(source.as_str()),
+        file_kind: file_kind_for_canonical_id(canonical_id),
+        aliases: Vec::new(),
+    })
+    .is_ok()
 }
 
 pub fn hydrate_vue_compile_blockers(
@@ -118,7 +140,7 @@ pub fn hydrate_vue_compile_blockers(
     }
 }
 
-fn file_kind_for_canonical_id(canonical_id: &str) -> FileKind {
+pub fn file_kind_for_canonical_id(canonical_id: &str) -> FileKind {
     if canonical_id.ends_with(".vue") {
         FileKind::VueSfc
     } else {
@@ -131,14 +153,14 @@ fn load_resolved_file_into_host(
     reader: &dyn crate::project_resolver::ProjectResolverReader,
     canonical_id: &str,
 ) -> bool {
-    if host.get_source(canonical_id).is_some() {
+    // Try the ingress (real filesystem) first, then fall back to the reader
+    // (which may provide in-memory content in tests or from other sources).
+    if ensure_source_loaded_into_host(host, canonical_id) {
         return true;
     }
-
     let Some(source) = reader.read_text(canonical_id) else {
         return false;
     };
-
     host.upsert(UpsertRequest {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
@@ -445,6 +467,95 @@ mod tests {
                     "/workspace/src/nested.ts".to_string()
                 )
             ]
+        );
+    }
+
+    #[test]
+    fn ensure_source_loaded_into_host_loads_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("utils.ts");
+        std::fs::write(&file_path, "export const x = 1;").unwrap();
+
+        let canonical_id = normalize_fs_path(&file_path.to_string_lossy());
+        let host = VerterHost::new(HostConfig::default());
+
+        // Not in host yet
+        assert!(
+            host.get_source(&canonical_id).is_none(),
+            "file should not be in host before ingress"
+        );
+
+        // Ingress loads it
+        assert!(
+            ensure_source_loaded_into_host(&host, &canonical_id),
+            "ingress should succeed for file on disk"
+        );
+        assert!(
+            host.get_source(&canonical_id).is_some(),
+            "file should be in host after ingress"
+        );
+        assert_eq!(
+            host.get_source(&canonical_id).unwrap().as_ref(),
+            "export const x = 1;",
+            "ingress should preserve file content"
+        );
+    }
+
+    #[test]
+    fn ensure_source_loaded_into_host_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("App.vue");
+        std::fs::write(&file_path, "<template><div>hi</div></template>").unwrap();
+
+        let canonical_id = normalize_fs_path(&file_path.to_string_lossy());
+        let host = VerterHost::new(HostConfig::default());
+
+        assert!(ensure_source_loaded_into_host(&host, &canonical_id));
+
+        // Mutate file on disk — second call should NOT re-read since host already has it
+        std::fs::write(&file_path, "<template><div>changed</div></template>").unwrap();
+        assert!(ensure_source_loaded_into_host(&host, &canonical_id));
+        assert_eq!(
+            host.get_source(&canonical_id).unwrap().as_ref(),
+            "<template><div>hi</div></template>",
+            "second ingress call must not overwrite existing host content"
+        );
+    }
+
+    #[test]
+    fn ensure_source_loaded_into_host_returns_false_for_missing_file() {
+        let host = VerterHost::new(HostConfig::default());
+        assert!(
+            !ensure_source_loaded_into_host(&host, "/nonexistent/file.ts"),
+            "ingress should return false for missing files"
+        );
+        assert!(
+            host.get_source("/nonexistent/file.ts").is_none(),
+            "missing file should not appear in host"
+        );
+    }
+
+    #[test]
+    fn reader_read_text_routes_through_ingress() {
+        use crate::project_resolver::ProjectResolverReader;
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("types.ts");
+        std::fs::write(&file_path, "export type T = string;").unwrap();
+
+        let canonical_id = normalize_fs_path(&file_path.to_string_lossy());
+        let host = VerterHost::new(HostConfig::default());
+
+        assert!(host.get_source(&canonical_id).is_none());
+
+        let reader = HostFsProjectResolverReader::new(&host);
+        let content = reader.read_text(&canonical_id);
+        assert!(content.is_some(), "reader should return content from disk");
+        assert_eq!(content.unwrap().as_ref(), "export type T = string;");
+
+        // After read_text, file should be in the host (ingress side effect)
+        assert!(
+            host.get_source(&canonical_id).is_some(),
+            "read_text must load file into host via ingress"
         );
     }
 }

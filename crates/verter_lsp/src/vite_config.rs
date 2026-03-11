@@ -941,11 +941,7 @@ const {{ pathToFileURL }} = require('url');
         .stderr(std::process::Stdio::piped());
 
     // Remove VS Code/Electron env vars
-    for var in &[
-        "NODE_OPTIONS",
-        "VSCODE_INSPECTOR_OPTIONS",
-        "ELECTRON_RUN_AS_NODE",
-    ] {
+    for var in crate::tsserver::ipc::CHILD_PROCESS_ENV_DENYLIST {
         cmd.env_remove(var);
     }
 

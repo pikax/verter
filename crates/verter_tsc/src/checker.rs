@@ -968,10 +968,7 @@ fn postprocess_vue_declarations(
                 }
             }
             if let Err(e) = fs::write(&target_path, rewritten) {
-                eprintln!(
-                    "verter-tsc: failed to write {}: {e}",
-                    target_path.display()
-                );
+                eprintln!("verter-tsc: failed to write {}: {e}", target_path.display());
                 continue;
             }
 

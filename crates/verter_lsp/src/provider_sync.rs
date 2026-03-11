@@ -16,9 +16,7 @@ pub enum ProviderPathKind {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderSyncState {
-    pub owner_tsconfig_path: Option<String>,
-    pub provider_root: Option<String>,
-    pub project_config_path: Option<String>,
+    pub owner_key: String,
     pub ide_path: Option<String>,
     pub api_path: Option<String>,
     pub shadow_path: Option<String>,
@@ -91,20 +89,18 @@ pub struct ProviderSyncTransition {
     pub stale_paths: Vec<(ProviderPathKind, String)>,
 }
 
-pub fn project_config_path_for_provider_root(provider_root: &str) -> String {
-    format!("{provider_root}/tsconfig.json")
-}
-
 pub fn vue_sync_state_for_source(
     resolver: &NativeProjectResolver,
     source_id: &str,
     is_jsx: bool,
 ) -> Option<ProviderSyncState> {
     let owner = resolver.owner_for_file(source_id)?;
+    let owner_key = owner
+        .tsconfig_path
+        .clone()
+        .unwrap_or_else(|| owner.root.clone());
     Some(ProviderSyncState {
-        owner_tsconfig_path: owner.tsconfig_path.clone(),
-        provider_root: Some(owner.provider_root.clone()),
-        project_config_path: Some(project_config_path_for_provider_root(&owner.provider_root)),
+        owner_key,
         ide_path: resolver.provider_ide_id_for_source(source_id, is_jsx),
         api_path: resolver.provider_id_for_source(source_id),
         shadow_path: None,
@@ -119,10 +115,12 @@ pub fn non_vue_sync_state_for_source(
     source_id: &str,
 ) -> Option<ProviderSyncState> {
     let owner = resolver.owner_for_file(source_id)?;
+    let owner_key = owner
+        .tsconfig_path
+        .clone()
+        .unwrap_or_else(|| owner.root.clone());
     Some(ProviderSyncState {
-        owner_tsconfig_path: owner.tsconfig_path.clone(),
-        provider_root: Some(owner.provider_root.clone()),
-        project_config_path: Some(project_config_path_for_provider_root(&owner.provider_root)),
+        owner_key,
         ide_path: None,
         api_path: None,
         shadow_path: resolver.provider_id_for_source(source_id),
@@ -136,16 +134,20 @@ pub fn stale_paths_for_transition(
     previous: &ProviderSyncState,
     next: &ProviderSyncState,
 ) -> Vec<(ProviderPathKind, String)> {
+    let owner_changed = previous.owner_key != next.owner_key;
     let mut stale = Vec::new();
     for kind in [
         ProviderPathKind::Ide,
         ProviderPathKind::Api,
         ProviderPathKind::Shadow,
     ] {
-        let previous_path = previous.path_for_kind(kind);
+        let prev_path = previous.path_for_kind(kind);
         let next_path = next.path_for_kind(kind);
-        if let Some(path) = previous_path.filter(|path| Some(*path) != next_path) {
-            stale.push((kind, path.to_string()));
+        if let Some(path) = prev_path {
+            // Stale if: path changed, OR owner changed but path is the same (force rebind)
+            if Some(path) != next_path || (owner_changed && Some(path) == next_path) {
+                stale.push((kind, path.to_string()));
+            }
         }
     }
     stale
@@ -190,7 +192,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vue_sync_state_tracks_owner_specific_provider_root() {
+    fn vue_sync_state_uses_owner_key_from_tsconfig() {
         let resolver = NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 "/workspace/pkg-a".to_string(),
@@ -208,23 +210,17 @@ mod tests {
             .expect("matched Vue source should materialize provider state");
 
         assert_eq!(
-            state.owner_tsconfig_path.as_deref(),
-            Some("/workspace/pkg-a/tsconfig.json")
+            state.owner_key, "/workspace/pkg-a/tsconfig.json",
+            "owner_key should be tsconfig path when available"
         );
-        assert!(
-            state
-                .provider_root
-                .as_deref()
-                .unwrap()
-                .contains("/workspace/pkg-a/.verter/ide/"),
-            "provider root should be owner-specific"
+        assert_eq!(
+            state.ide_path.as_deref(),
+            Some("/workspace/pkg-a/src/App.vue.tsx"),
+            "provider IDE path should be canonical_id.tsx"
         );
-        assert!(
-            state.ide_path.as_deref().unwrap().ends_with(".tsx"),
-            "provider IDE path must remain TSX/JSX-backed"
-        );
-        assert!(
-            state.api_path.as_deref().unwrap().ends_with(".vue.ts"),
+        assert_eq!(
+            state.api_path.as_deref(),
+            Some("/workspace/pkg-a/src/App.vue.ts"),
             "Vue imports must keep resolving through .vue.ts"
         );
     }
@@ -232,23 +228,75 @@ mod tests {
     #[test]
     fn stale_paths_only_include_paths_that_change() {
         let previous = ProviderSyncState {
-            ide_path: Some("/workspace/.verter/ide/a/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/.verter/ide/a/src/App.vue.ts".to_string()),
+            owner_key: "/workspace/tsconfig.json".to_string(),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ..Default::default()
         };
         let next = ProviderSyncState {
-            ide_path: Some("/workspace/.verter/ide/b/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/.verter/ide/a/src/App.vue.ts".to_string()),
+            owner_key: "/workspace/tsconfig.json".to_string(),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ..Default::default()
         };
 
-        assert_eq!(
-            stale_paths_for_transition(&previous, &next),
-            vec![(
-                ProviderPathKind::Ide,
-                "/workspace/.verter/ide/a/src/App.vue.tsx".to_string()
-            )]
+        assert!(
+            stale_paths_for_transition(&previous, &next).is_empty(),
+            "same owner + same paths = no stale"
         );
+    }
+
+    #[test]
+    fn owner_change_forces_stale_even_when_paths_unchanged() {
+        let previous = ProviderSyncState {
+            owner_key: "/workspace/tsconfig.old.json".to_string(),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ..Default::default()
+        };
+        let next = ProviderSyncState {
+            owner_key: "/workspace/tsconfig.new.json".to_string(),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ..Default::default()
+        };
+
+        let stale = stale_paths_for_transition(&previous, &next);
+        assert_eq!(
+            stale.len(),
+            2,
+            "both active paths should be stale on owner change"
+        );
+        assert!(stale.contains(&(
+            ProviderPathKind::Ide,
+            "/workspace/src/App.vue.tsx".to_string()
+        )));
+        assert!(stale.contains(&(
+            ProviderPathKind::Api,
+            "/workspace/src/App.vue.ts".to_string()
+        )));
+    }
+
+    #[test]
+    fn fallback_to_fallback_owner_change_detected() {
+        let previous = ProviderSyncState {
+            owner_key: "/workspace/old-root".to_string(),
+            shadow_path: Some("/workspace/src/utils.ts".to_string()),
+            ..Default::default()
+        };
+        let next = ProviderSyncState {
+            owner_key: "/workspace/new-root".to_string(),
+            shadow_path: Some("/workspace/src/utils.ts".to_string()),
+            ..Default::default()
+        };
+
+        let stale = stale_paths_for_transition(&previous, &next);
+        assert_eq!(
+            stale.len(),
+            1,
+            "fallback→fallback with different root = stale"
+        );
+        assert_eq!(stale[0].1, "/workspace/src/utils.ts");
     }
 
     #[test]
@@ -257,8 +305,9 @@ mod tests {
         states.insert(
             "/workspace/src/App.vue".to_string(),
             ProviderSyncState {
-                ide_path: Some("/workspace/.verter/ide/a/src/App.vue.tsx".to_string()),
-                api_path: Some("/workspace/.verter/ide/a/src/App.vue.ts".to_string()),
+                owner_key: "/workspace/tsconfig.json".to_string(),
+                ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+                api_path: Some("/workspace/src/App.vue.ts".to_string()),
                 ide_background_loaded: true,
                 api_background_loaded: true,
                 ..Default::default()
@@ -269,8 +318,9 @@ mod tests {
             &states,
             "/workspace/src/App.vue",
             ProviderSyncState {
-                ide_path: Some("/workspace/.verter/ide/a/src/App.vue.tsx".to_string()),
-                api_path: Some("/workspace/.verter/ide/a/src/App.vue.ts".to_string()),
+                owner_key: "/workspace/tsconfig.json".to_string(),
+                ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+                api_path: Some("/workspace/src/App.vue.ts".to_string()),
                 ..Default::default()
             },
         );
@@ -286,7 +336,8 @@ mod tests {
         states.insert(
             "/workspace/src/util.ts".to_string(),
             ProviderSyncState {
-                shadow_path: Some("/workspace/.verter/ide/a/src/util.__verter__.ts".to_string()),
+                owner_key: "/workspace".to_string(),
+                shadow_path: Some("/workspace/src/util.ts".to_string()),
                 shadow_background_loaded: true,
                 ..Default::default()
             },
@@ -299,7 +350,7 @@ mod tests {
             removed.active_paths(),
             vec![(
                 ProviderPathKind::Shadow,
-                "/workspace/.verter/ide/a/src/util.__verter__.ts".to_string()
+                "/workspace/src/util.ts".to_string()
             )]
         );
         assert!(states.is_empty());

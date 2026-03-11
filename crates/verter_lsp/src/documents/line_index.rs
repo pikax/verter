@@ -115,6 +115,11 @@ impl LineIndex {
         self.line_starts.get(line).copied()
     }
 
+    /// Return the total byte length of the source text.
+    pub fn source_len(&self) -> u32 {
+        self.source.len() as u32
+    }
+
     /// Return the byte offset of the end of a line (before the newline, or EOF).
     pub fn line_end(&self, line: usize) -> Option<u32> {
         let start = self.line_start(line)? as usize;
@@ -460,6 +465,29 @@ mod tests {
         // \r\n: line 0 ends at offset 3 (before \r)
         assert_eq!(idx.line_end(0), Some(3));
         assert_eq!(idx.line_start(1), Some(5)); // after \r\n
+    }
+
+    // ========================================================================
+    // source_len
+    // ========================================================================
+
+    #[test]
+    fn test_source_len_empty() {
+        let idx = LineIndex::new_utf16("");
+        assert_eq!(idx.source_len(), 0);
+    }
+
+    #[test]
+    fn test_source_len_ascii() {
+        let idx = LineIndex::new_utf16("abc\ndef\nghi");
+        assert_eq!(idx.source_len(), 11);
+    }
+
+    #[test]
+    fn test_source_len_utf8() {
+        // 'é' is 2 bytes in UTF-8
+        let idx = LineIndex::new_utf16("café");
+        assert_eq!(idx.source_len(), 5);
     }
 
     // ========================================================================

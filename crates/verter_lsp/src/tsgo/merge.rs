@@ -638,6 +638,7 @@ fn resolve_vue_tsx_range(
 /// `external_resolver` is used to resolve positions in `.vue.tsx` files that differ
 /// from the current file (cross-file navigation, e.g., CTRL+CLICK on component tag
 /// navigates to the target component's file).
+#[allow(clippy::too_many_arguments)]
 pub fn merge_definitions(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
@@ -646,6 +647,7 @@ pub fn merge_definitions(
     vue_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     document_uri: &Uri,
+    vue_source_exists: &dyn Fn(&str) -> bool,
 ) -> Option<GotoDefinitionResponse> {
     // If verter provides a definition, prefer it when:
     // - TSGO returned nothing, or
@@ -671,15 +673,7 @@ pub fn merge_definitions(
             .filter_map(|loc| {
                 // TypeProvider returns paths; convert to URIs
                 // For .vue files, strip virtual suffixes (.tsx or .d.ts)
-                // Also strip .verter/ide/<hash>/ prefix if present
-                let normalized = normalize_vue_path(&loc.path);
-                let file_path_owned;
-                let file_path = if let Some(stripped) = strip_verter_ide_prefix_owned(normalized) {
-                    file_path_owned = stripped;
-                    &file_path_owned
-                } else {
-                    normalized
-                };
+                let file_path = normalize_vue_path(&loc.path, vue_source_exists);
                 let uri = path_to_uri(file_path)?;
                 // Map TSX byte offsets back to Vue positions for .vue.tsx targets
                 // (.vue.d.ts targets use Range::default — no position mapping available)
@@ -732,47 +726,33 @@ pub fn merge_definitions(
 /// - `.vue.tsx` / `.vue.jsx` → `.vue` (IDE output)
 /// - `.vue.ts` → `.vue` (public API / DTS output)
 /// - `.vue.d.ts` → `.vue` (published type declarations)
-fn normalize_vue_path(path: &str) -> &str {
+///
+/// The `vue_source_exists` predicate guards against collisions with real
+/// `.vue.tsx`/`.vue.ts` files on disk: if the backing `.vue` source does
+/// not exist in the host, the path is left unchanged. The `.vue.d.ts`
+/// case (from node_modules) has no collision risk and skips the check.
+fn normalize_vue_path<'a>(path: &'a str, vue_source_exists: &dyn Fn(&str) -> bool) -> &'a str {
     if path.ends_with(".vue.tsx") || path.ends_with(".vue.jsx") {
-        &path[..path.len() - 4] // strip .tsx/.jsx
+        let candidate = &path[..path.len() - 4]; // strip .tsx/.jsx
+        if vue_source_exists(candidate) {
+            return candidate;
+        }
     } else if path.ends_with(".vue.ts") {
-        &path[..path.len() - 3] // strip .ts
+        let candidate = &path[..path.len() - 3]; // strip .ts
+        if vue_source_exists(candidate) {
+            return candidate;
+        }
     } else if path.ends_with(".vue.d.ts") {
-        path.trim_end_matches(".d.ts")
-    } else {
-        path
+        // .d.ts is from node_modules — no collision risk
+        return path.trim_end_matches(".d.ts");
     }
+    path
 }
 
 /// Like `normalize_vue_path` but returns an owned String.
 /// Used by server.rs for inline path normalization.
-pub fn normalize_vue_path_owned(path: &str) -> String {
-    normalize_vue_path(path).to_string()
-}
-
-/// Strip `.verter/ide/<hash>/` prefix from a provider path.
-///
-/// Resolves paths like `/project/.verter/ide/a1b2c3d4e5f6g7h8/src/App.vue.tsx`
-/// back to `/project/src/App.vue.tsx`.
-fn strip_verter_ide_prefix_owned(path: &str) -> Option<String> {
-    let marker_fwd = "/.verter/ide/";
-    let marker_win = "\\.verter\\ide\\";
-    let (pos, marker_len, sep) = if let Some(p) = path.find(marker_fwd) {
-        (p, marker_fwd.len(), "/")
-    } else if let Some(p) = path.find(marker_win) {
-        (p, marker_win.len(), "\\")
-    } else {
-        return None;
-    };
-
-    let after = &path[pos + marker_len..];
-    // Skip the 16-char hex hash + separator
-    if after.len() > 17 && (after.as_bytes()[16] == b'/' || after.as_bytes()[16] == b'\\') {
-        let relative = &after[17..];
-        let root = &path[..pos];
-        return Some(format!("{root}{sep}{relative}"));
-    }
-    None
+pub fn normalize_vue_path_owned(path: &str, vue_source_exists: &dyn Fn(&str) -> bool) -> String {
+    normalize_vue_path(path, vue_source_exists).to_string()
 }
 
 /// Convert a file path to a `file://` URI.
@@ -803,6 +783,7 @@ pub fn merge_references(
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
+    vue_source_exists: &dyn Fn(&str) -> bool,
 ) -> Option<Vec<Location>> {
     let mut result = verter_refs.unwrap_or_default();
 
@@ -818,7 +799,7 @@ pub fn merge_references(
                 vue_line_index,
                 external_resolver,
             );
-            let vue_path = normalize_vue_path(&loc.path);
+            let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
             if let Some(uri) = path_to_uri(vue_path) {
                 // Deduplicate: skip if we already have a ref at this position
                 let dup = result
@@ -830,7 +811,7 @@ pub fn merge_references(
             }
         } else if loc.path.ends_with(".vue.d.ts") || loc.path.ends_with(".vue.ts") {
             // DTS declarations (.vue.d.ts or .vue.ts): strip suffix, use default range
-            let vue_path = normalize_vue_path(&loc.path);
+            let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
             if let Some(uri) = path_to_uri(vue_path) {
                 result.push(Location {
                     uri,
@@ -863,7 +844,7 @@ pub fn merge_references(
 /// - Start with verter's same-file WorkspaceEdit
 /// - Add TypeProvider's cross-file rename locations as additional TextEdits
 /// - Map TSX ranges back to Vue for .vue targets
-#[allow(clippy::mutable_key_type)] // Uri has interior mutability but is used as key by tower-lsp API
+#[allow(clippy::mutable_key_type, clippy::too_many_arguments)]
 pub fn merge_rename_locations(
     verter_edit: Option<WorkspaceEdit>,
     type_locations: Vec<RenameLocation>,
@@ -872,6 +853,7 @@ pub fn merge_rename_locations(
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
+    vue_source_exists: &dyn Fn(&str) -> bool,
 ) -> Option<WorkspaceEdit> {
     let mut edit = verter_edit.unwrap_or_else(|| WorkspaceEdit {
         changes: Some(std::collections::HashMap::new()),
@@ -893,7 +875,7 @@ pub fn merge_rename_locations(
                 vue_line_index,
                 external_resolver,
             );
-            let vue_path = normalize_vue_path(&loc.path);
+            let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
             if let Some(uri) = path_to_uri(vue_path) {
                 let edits = changes.entry(uri).or_default();
                 let dup = edits.iter().any(|e| e.range.start == range.start);
@@ -905,7 +887,7 @@ pub fn merge_rename_locations(
                 }
             }
         } else if loc.path.ends_with(".vue.d.ts") || loc.path.ends_with(".vue.ts") {
-            let vue_path = normalize_vue_path(&loc.path);
+            let vue_path = normalize_vue_path(&loc.path, vue_source_exists);
             if let Some(uri) = path_to_uri(vue_path) {
                 let edits = changes.entry(uri).or_default();
                 edits.push(TextEdit {
@@ -1027,6 +1009,7 @@ pub fn merge_code_actions(
     tsx_line_index: &LineIndex,
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
+    vue_source_exists: &dyn Fn(&str) -> bool,
 ) -> Vec<CodeActionOrCommand> {
     type_actions
         .into_iter()
@@ -1043,7 +1026,7 @@ pub fn merge_code_actions(
                         mapper,
                         vue_line_index,
                     ) {
-                        let vue_path = normalize_vue_path(&edit.path);
+                        let vue_path = normalize_vue_path(&edit.path, vue_source_exists);
                         if let Some(uri) = path_to_uri(vue_path) {
                             changes.entry(uri).or_default().push(TextEdit {
                                 range,
@@ -1052,7 +1035,7 @@ pub fn merge_code_actions(
                         }
                     }
                 } else if edit.path.ends_with(".vue.d.ts") || edit.path.ends_with(".vue.ts") {
-                    let vue_path = normalize_vue_path(&edit.path);
+                    let vue_path = normalize_vue_path(&edit.path, vue_source_exists);
                     if let Some(uri) = path_to_uri(vue_path) {
                         changes.entry(uri).or_default().push(TextEdit {
                             range: Range::default(),
@@ -1635,6 +1618,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result.is_some());
     }
@@ -1657,6 +1641,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result.is_some());
     }
@@ -1673,6 +1658,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result.is_none());
     }
@@ -1709,7 +1695,15 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_references(verter, type_refs, &tsx_li, &mapper, &vue_li, None);
+        let result = merge_references(
+            verter,
+            type_refs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &vue_exists,
+        );
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 2);
     }
@@ -1718,7 +1712,7 @@ mod tests {
     #[test]
     fn merge_references_neither() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_references(None, vec![], &tsx_li, &mapper, &vue_li, None);
+        let result = merge_references(None, vec![], &tsx_li, &mapper, &vue_li, None, &vue_exists);
         assert!(result.is_none());
     }
 
@@ -1731,7 +1725,7 @@ mod tests {
             range: Range::default(),
         }]);
 
-        let result = merge_references(verter, vec![], &tsx_li, &mapper, &vue_li, None);
+        let result = merge_references(verter, vec![], &tsx_li, &mapper, &vue_li, None, &vue_exists);
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 1);
     }
@@ -1825,7 +1819,7 @@ mod tests {
             }],
         }];
 
-        let result = merge_code_actions(actions, &tsx_li, &mapper, &vue_li);
+        let result = merge_code_actions(actions, &tsx_li, &mapper, &vue_li, &vue_exists);
         assert_eq!(result.len(), 1);
     }
 
@@ -1833,7 +1827,7 @@ mod tests {
     #[test]
     fn merge_code_actions_empty() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result = merge_code_actions(vec![], &tsx_li, &mapper, &vue_li);
+        let result = merge_code_actions(vec![], &tsx_li, &mapper, &vue_li, &vue_exists);
         assert!(result.is_empty());
     }
 
@@ -1940,8 +1934,16 @@ mod tests {
             ..Default::default()
         });
 
-        let result =
-            merge_rename_locations(verter, vec![], "newName", &tsx_li, &mapper, &vue_li, None);
+        let result = merge_rename_locations(
+            verter,
+            vec![],
+            "newName",
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &vue_exists,
+        );
         assert!(result.is_some());
     }
 
@@ -1949,8 +1951,16 @@ mod tests {
     #[test]
     fn merge_rename_neither() {
         let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
-        let result =
-            merge_rename_locations(None, vec![], "newName", &tsx_li, &mapper, &vue_li, None);
+        let result = merge_rename_locations(
+            None,
+            vec![],
+            "newName",
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &vue_exists,
+        );
         assert!(result.is_none());
     }
 
@@ -1981,6 +1991,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result.is_some(), "Expected definition response");
 
@@ -2037,6 +2048,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result.is_some());
     }
@@ -2078,6 +2090,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result.is_some(), "should return TSGO's external definition");
 
@@ -2127,6 +2140,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result.is_some());
         match result.unwrap() {
@@ -2177,6 +2191,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(
             result.is_some(),
@@ -2203,34 +2218,56 @@ mod tests {
 
     // ── normalize_vue_path tests ────────────────────────────────────
 
+    /// Predicate that always returns true — for tests where the .vue source is known to exist.
+    fn vue_exists(_: &str) -> bool {
+        true
+    }
+
+    /// Predicate that always returns false — simulates a real .vue.tsx file with no backing .vue.
+    fn vue_missing(_: &str) -> bool {
+        false
+    }
+
     #[test]
     fn normalize_vue_path_strips_tsx() {
-        assert_eq!(normalize_vue_path("/src/App.vue.tsx"), "/src/App.vue");
+        assert_eq!(
+            normalize_vue_path("/src/App.vue.tsx", &vue_exists),
+            "/src/App.vue"
+        );
     }
 
     #[test]
     fn normalize_vue_path_strips_dts() {
         assert_eq!(
-            normalize_vue_path("/node_modules/lib/Comp.vue.d.ts"),
+            normalize_vue_path("/node_modules/lib/Comp.vue.d.ts", &vue_exists),
             "/node_modules/lib/Comp.vue"
         );
     }
 
     #[test]
     fn normalize_vue_path_strips_vue_ts() {
-        assert_eq!(normalize_vue_path("/src/App.vue.ts"), "/src/App.vue");
+        assert_eq!(
+            normalize_vue_path("/src/App.vue.ts", &vue_exists),
+            "/src/App.vue"
+        );
     }
 
     #[test]
     fn normalize_vue_path_strips_vue_jsx() {
-        assert_eq!(normalize_vue_path("/src/App.vue.jsx"), "/src/App.vue");
+        assert_eq!(
+            normalize_vue_path("/src/App.vue.jsx", &vue_exists),
+            "/src/App.vue"
+        );
     }
 
     #[test]
     fn normalize_vue_path_passthrough_plain_dts() {
         // Non-.vue .d.ts files should NOT be stripped
         assert_eq!(
-            normalize_vue_path("/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts"),
+            normalize_vue_path(
+                "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts",
+                &vue_exists
+            ),
             "/node_modules/@vue/runtime-dom/dist/runtime-dom.d.ts"
         );
     }
@@ -2238,46 +2275,50 @@ mod tests {
     #[test]
     fn normalize_vue_path_passthrough_plain_ts() {
         // Non-.vue .ts files should NOT be stripped
-        assert_eq!(normalize_vue_path("/src/utils.ts"), "/src/utils.ts");
-    }
-
-    // ── strip_verter_ide_prefix tests ────────────────────────────────
-
-    /// @ai-generated - Strips .verter/ide/<hash>/ prefix from provider paths
-    #[test]
-    fn strip_verter_ide_prefix_valid_unix() {
-        let path = "/project/.verter/ide/a1b2c3d4e5f6g7h8/src/App.vue";
-        let result = strip_verter_ide_prefix_owned(path);
-        assert_eq!(result, Some("/project/src/App.vue".to_string()));
+        assert_eq!(
+            normalize_vue_path("/src/utils.ts", &vue_exists),
+            "/src/utils.ts"
+        );
     }
 
     #[test]
-    fn strip_verter_ide_prefix_valid_windows() {
-        let path = "D:\\project\\.verter\\ide\\a1b2c3d4e5f6g7h8\\src\\App.vue";
-        let result = strip_verter_ide_prefix_owned(path);
-        assert_eq!(result, Some("D:\\project\\src\\App.vue".to_string()));
+    fn normalize_vue_path_skips_real_vue_tsx() {
+        // A real .vue.tsx file on disk (no backing .vue source) must NOT be stripped
+        assert_eq!(
+            normalize_vue_path("/src/App.vue.tsx", &vue_missing),
+            "/src/App.vue.tsx",
+            "real .vue.tsx should be left unchanged when no .vue source exists"
+        );
     }
 
     #[test]
-    fn strip_verter_ide_prefix_no_marker() {
-        let path = "/project/src/App.vue";
-        let result = strip_verter_ide_prefix_owned(path);
-        assert_eq!(result, None);
+    fn normalize_vue_path_skips_real_vue_ts() {
+        assert_eq!(
+            normalize_vue_path("/src/App.vue.ts", &vue_missing),
+            "/src/App.vue.ts",
+            "real .vue.ts should be left unchanged when no .vue source exists"
+        );
     }
 
     #[test]
-    fn strip_verter_ide_prefix_short_hash() {
-        // Hash too short (< 16 chars) — should return None
-        let path = "/project/.verter/ide/abc123/src/App.vue";
-        let result = strip_verter_ide_prefix_owned(path);
-        assert_eq!(result, None);
+    fn normalize_vue_path_strips_virtual_vue_tsx() {
+        // Virtual .vue.tsx with a backing .vue source SHOULD be stripped
+        let exists_for_app = |path: &str| path == "/src/App.vue";
+        assert_eq!(
+            normalize_vue_path("/src/App.vue.tsx", &exists_for_app),
+            "/src/App.vue",
+            "virtual .vue.tsx should strip to .vue when source exists"
+        );
     }
 
     #[test]
-    fn strip_verter_ide_prefix_with_vue_tsx_suffix() {
-        let path = "/project/.verter/ide/a1b2c3d4e5f6g7h8/src/App.vue.tsx";
-        let result = strip_verter_ide_prefix_owned(path);
-        assert_eq!(result, Some("/project/src/App.vue.tsx".to_string()));
+    fn normalize_vue_path_dts_always_strips_regardless_of_predicate() {
+        // .vue.d.ts from node_modules has no collision risk — always strip
+        assert_eq!(
+            normalize_vue_path("/node_modules/lib/Comp.vue.d.ts", &vue_missing),
+            "/node_modules/lib/Comp.vue",
+            ".vue.d.ts should always strip regardless of predicate"
+        );
     }
 
     // ── .vue.d.ts definition tests ──────────────────────────────────
@@ -2301,6 +2342,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result.is_some());
         match result.unwrap() {
@@ -2331,7 +2373,15 @@ mod tests {
             end: 10,
         }];
 
-        let result = merge_references(None, type_refs, &tsx_li, &mapper, &vue_li, None);
+        let result = merge_references(
+            None,
+            type_refs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &vue_exists,
+        );
         assert!(result.is_some());
         let locs = result.unwrap();
         assert_eq!(locs.len(), 1);
@@ -2365,6 +2415,7 @@ mod tests {
             &mapper,
             &vue_li,
             None,
+            &vue_exists,
         );
         assert!(result.is_some());
         let edit = result.unwrap();
@@ -2811,6 +2862,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result_no_resolver.is_some());
         match result_no_resolver.unwrap() {
@@ -2845,6 +2897,7 @@ mod tests {
             &vue_li,
             Some(&resolver),
             &test_doc_uri(),
+            &vue_exists,
         );
         assert!(result_with_resolver.is_some());
         match result_with_resolver.unwrap() {
@@ -2898,6 +2951,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         match result {
             Some(GotoDefinitionResponse::Scalar(_)) => {
@@ -2945,6 +2999,7 @@ mod tests {
             &vue_li,
             None,
             &test_doc_uri(),
+            &vue_exists,
         );
         match result {
             Some(GotoDefinitionResponse::Scalar(loc)) => {

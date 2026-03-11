@@ -393,8 +393,9 @@ mod tests {
         states.insert(
             "/workspace/src/App.vue".to_string(),
             ProviderSyncState {
-                ide_path: Some("/workspace/.verter/ide/old/src/App.vue.tsx".to_string()),
-                api_path: Some("/workspace/.verter/ide/old/src/App.vue.ts".to_string()),
+                owner_key: "/workspace/tsconfig.old.json".to_string(),
+                ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+                api_path: Some("/workspace/src/App.vue.ts".to_string()),
                 ..Default::default()
             },
         );
@@ -403,8 +404,9 @@ mod tests {
             &states,
             "/workspace/src/App.vue",
             ProviderSyncState {
-                ide_path: Some("/workspace/.verter/ide/new/src/App.vue.tsx".to_string()),
-                api_path: Some("/workspace/.verter/ide/new/src/App.vue.ts".to_string()),
+                owner_key: "/workspace/tsconfig.new.json".to_string(),
+                ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+                api_path: Some("/workspace/src/App.vue.ts".to_string()),
                 ..Default::default()
             },
         );
@@ -416,34 +418,33 @@ mod tests {
         assert_eq!(
             calls.len(),
             2,
-            "owner change should close both stale provider ids"
+            "owner change should close both stale provider ids (for rebind)"
         );
         assert!(
             matches!(
                 &calls[0],
                 MockCall::CloseFile { path }
-                    if path == "/workspace/.verter/ide/old/src/App.vue.tsx"
+                    if path == "/workspace/src/App.vue.tsx"
             ),
-            "first stale close should target the old IDE id: {:?}",
+            "first stale close should target the IDE id: {:?}",
             calls[0]
         );
         assert!(
             matches!(
                 &calls[1],
                 MockCall::CloseFile { path }
-                    if path == "/workspace/.verter/ide/old/src/App.vue.ts"
+                    if path == "/workspace/src/App.vue.ts"
             ),
-            "second stale close should target the old API id: {:?}",
+            "second stale close should target the API id: {:?}",
             calls[1]
         );
         assert_eq!(
             states
                 .get("/workspace/src/App.vue")
                 .expect("new owner state should be committed")
-                .provider_root
-                .as_deref(),
-            None,
-            "test transition only cares about stale close behavior"
+                .owner_key,
+            "/workspace/tsconfig.new.json",
+            "committed state should have the new owner key"
         );
     }
 }

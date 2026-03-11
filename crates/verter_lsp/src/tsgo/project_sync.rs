@@ -1,8 +1,5 @@
 use std::sync::Arc;
 
-use serde_json::json;
-
-use crate::config::ProviderProjectPlan;
 use crate::tsgo::protocol::TypeProviderError;
 use crate::tsgo::traits::TypeProvider;
 use crate::ProjectSyncMode;
@@ -97,112 +94,8 @@ impl ProjectSync {
         self.provider.close_file(path).await
     }
 
-    pub fn ensure_provider_project(&self, plan: &ProviderProjectPlan) -> std::io::Result<()> {
-        std::fs::create_dir_all(&plan.provider_root)?;
-        let config = render_provider_project_config(plan);
-        let write = match std::fs::read_to_string(&plan.config_path) {
-            Ok(existing) => existing != config,
-            Err(_) => true,
-        };
-        if write {
-            std::fs::write(&plan.config_path, config)?;
-        }
-        Ok(())
-    }
-
-    pub fn ensure_provider_projects(&self, plans: &[ProviderProjectPlan]) -> std::io::Result<()> {
-        for plan in plans {
-            self.ensure_provider_project(plan)?;
-        }
-        Ok(())
-    }
-
     pub fn mode(&self) -> ProjectSyncMode {
         self.mode
-    }
-}
-
-fn render_provider_project_config(plan: &ProviderProjectPlan) -> String {
-    let config_dir = std::path::Path::new(&plan.config_path)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new(&plan.provider_root));
-
-    let extends = plan
-        .tsconfig_path
-        .as_ref()
-        .map(|path| relative_config_path(config_dir, std::path::Path::new(path)));
-    let references = plan
-        .reference_config_paths
-        .iter()
-        .map(|path| json!({ "path": relative_config_path(config_dir, std::path::Path::new(path)) }))
-        .collect::<Vec<_>>();
-
-    let compiler_options = if plan.tsconfig_path.is_some() {
-        json!({ "rootDir": "." })
-    } else {
-        json!({
-            "module": "esnext",
-            "target": "esnext",
-            "moduleResolution": "bundler",
-            "jsx": "preserve",
-            "jsxImportSource": "vue",
-            "allowJs": true,
-            "checkJs": true,
-            "strict": true,
-            "allowArbitraryExtensions": true,
-            "allowSyntheticDefaultImports": true,
-            "esModuleInterop": true,
-            "skipLibCheck": true,
-            "rootDir": "."
-        })
-    };
-
-    let mut obj = serde_json::Map::new();
-    if let Some(extends) = extends {
-        obj.insert("extends".to_string(), serde_json::Value::String(extends));
-    }
-    obj.insert("compilerOptions".to_string(), compiler_options);
-    if !references.is_empty() {
-        obj.insert(
-            "references".to_string(),
-            serde_json::Value::Array(references),
-        );
-    }
-    obj.insert("include".to_string(), json!(["./**/*"]));
-
-    serde_json::to_string_pretty(&serde_json::Value::Object(obj)).unwrap() + "\n"
-}
-
-fn relative_config_path(from_dir: &std::path::Path, to_path: &std::path::Path) -> String {
-    let from = from_dir
-        .components()
-        .collect::<Vec<std::path::Component<'_>>>();
-    let to = to_path
-        .components()
-        .collect::<Vec<std::path::Component<'_>>>();
-
-    if from.first() != to.first() {
-        return to_path.to_string_lossy().replace('\\', "/");
-    }
-
-    let common = from
-        .iter()
-        .zip(to.iter())
-        .take_while(|(left, right)| left == right)
-        .count();
-
-    let mut relative = Vec::new();
-    for _ in common..from.len() {
-        relative.push("..".to_string());
-    }
-    for component in &to[common..] {
-        relative.push(component.as_os_str().to_string_lossy().to_string());
-    }
-
-    if relative.is_empty() {
-        ".".to_string()
-    } else {
-        relative.join("/").replace('\\', "/")
     }
 }
 
@@ -407,52 +300,16 @@ mod tests {
         let mock = MockTypeProvider::new();
         let sync = make_sync(&mock, ProjectSyncMode::FullProject);
 
-        sync.close_file("utils.__verter__.ts").await.unwrap();
+        sync.close_file("utils.ts").await.unwrap();
 
         let calls = mock.file_sync_calls();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
             MockCall::CloseFile { path } => {
-                assert_eq!(path, "utils.__verter__.ts");
+                assert_eq!(path, "utils.ts");
             }
             _ => panic!("expected CloseFile"),
         }
-    }
-
-    #[test]
-    fn project_sync_loads_provider_project_config_before_owner_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plan = ProviderProjectPlan {
-            root: "/workspace/pkg-a".to_string(),
-            workspace_root: "/workspace".to_string(),
-            tsconfig_path: Some("/workspace/pkg-a/tsconfig.json".to_string()),
-            provider_root: tmp
-                .path()
-                .join(".verter/ide/pkg-a")
-                .to_string_lossy()
-                .replace('\\', "/"),
-            config_path: tmp
-                .path()
-                .join(".verter/ide/pkg-a/tsconfig.json")
-                .to_string_lossy()
-                .replace('\\', "/"),
-            reference_config_paths: vec![tmp
-                .path()
-                .join(".verter/ide/shared/tsconfig.json")
-                .to_string_lossy()
-                .replace('\\', "/")],
-        };
-        let mock = MockTypeProvider::new();
-        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
-
-        sync.ensure_provider_project(&plan)
-            .expect("provider project config should materialize");
-
-        let written = std::fs::read_to_string(&plan.config_path)
-            .expect("provider project config should be readable from disk");
-        assert!(written.contains("\"extends\":"));
-        assert!(written.contains("\"references\":"));
-        assert!(written.contains("\"./**/*\""));
     }
 
     /// @ai-generated — Vue TSX is sent in resolver-managed mode

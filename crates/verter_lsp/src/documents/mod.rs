@@ -355,6 +355,26 @@ impl DocumentRegistry {
 
         // Fast path: cache hit
         if let Some(resp) = self.host.get_ide(&canonical_id, &profile) {
+            // Lazily rebuild position mapper if it was None (startup race:
+            // did_open runs before background_init completes, so the mapper
+            // may not have been built, but the workspace scanner later compiles
+            // the file and caches TSX in the host).
+            if let Some(entry) = self.documents.get(uri.as_str()) {
+                if entry.position_mapper.is_none() {
+                    drop(entry);
+                    if let Some(mut entry) = self.documents.get_mut(uri.as_str()) {
+                        if entry.position_mapper.is_none() {
+                            if let Some(mapper) = resp
+                                .source_map
+                                .as_ref()
+                                .and_then(|sm| PositionMapper::from_json(sm).ok())
+                            {
+                                entry.position_mapper = Some(mapper);
+                            }
+                        }
+                    }
+                }
+            }
             return Some(resp);
         }
 
@@ -752,5 +772,78 @@ mod tests {
             "verter-virtual:///tsx.tsx?sourceUri=file%3A%2F%2F%2FC%3A%2FUsers%2Fdev%2FApp.vue";
         let source = parse_virtual_uri(uri);
         assert_eq!(source, Some("file:///C:/Users/dev/App.vue".to_string()));
+    }
+
+    /// Bug 1 regression: `get_ide()` fast path should lazily rebuild a missing
+    /// position mapper when the host already has cached TSX output.
+    #[test]
+    fn position_mapper_lazily_rebuilt_on_fast_path() {
+        let host = Arc::new(verter_host::VerterHost::new(
+            verter_host::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
+
+        // Open a Vue file — this compiles and builds the mapper
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<template><div>hello</div></template><script setup lang=\"ts\">\nconst x = 1;\n</script>".to_string(),
+        });
+
+        // Verify mapper was built during did_open
+        assert!(
+            registry.get_position_mapper(&uri).is_some(),
+            "mapper should be built during did_open"
+        );
+
+        // Simulate the startup race: clear the mapper to None
+        if let Some(mut entry) = registry.documents.get_mut(uri.as_str()) {
+            entry.position_mapper = None;
+        }
+        assert!(
+            registry.get_position_mapper(&uri).is_none(),
+            "mapper should be None after clearing"
+        );
+
+        // Call get_ide() — fast path should lazily rebuild the mapper
+        let ide = registry.get_ide(&uri);
+        assert!(ide.is_some(), "get_ide should return cached TSX");
+
+        // The mapper should now be rebuilt
+        assert!(
+            registry.get_position_mapper(&uri).is_some(),
+            "mapper should be lazily rebuilt on fast path cache hit"
+        );
+    }
+
+    /// get_ide() fast path should not overwrite an existing position mapper.
+    #[test]
+    fn position_mapper_not_overwritten_when_present() {
+        let host = Arc::new(verter_host::VerterHost::new(
+            verter_host::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
+
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<template><div>hello</div></template><script setup lang=\"ts\">\nconst x = 1;\n</script>".to_string(),
+        });
+
+        // Grab the original mapper
+        let original = registry.get_position_mapper(&uri);
+        assert!(original.is_some(), "mapper should exist after did_open");
+
+        // Call get_ide() — should not replace the mapper
+        let ide = registry.get_ide(&uri);
+        assert!(ide.is_some());
+
+        // Mapper should still be the same instance
+        let after = registry.get_position_mapper(&uri);
+        assert!(after.is_some(), "mapper should still exist after get_ide");
     }
 }

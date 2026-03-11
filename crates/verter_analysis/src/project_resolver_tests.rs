@@ -139,7 +139,7 @@ fn owner_selection_ignores_solution_style_root_membership() {
 }
 
 #[test]
-fn provider_paths_use_synthetic_workspace_project_for_unmatched_files() {
+fn provider_id_uses_original_path_for_non_vue() {
     let resolver = NativeProjectResolver::new(vec![
         project(
             "/workspace",
@@ -161,19 +161,11 @@ fn provider_paths_use_synthetic_workspace_project_for_unmatched_files() {
 
     let provider_id = resolver
         .provider_id_for_source("/workspace/scripts/tool.ts")
-        .expect("unmatched file should still receive a provider shadow path");
+        .expect("unmatched file should still receive a provider path");
 
-    assert!(
-        provider_id.contains("/.verter/ide/"),
-        "provider path should use a synthetic workspace root: {provider_id}"
-    );
-    assert!(
-        provider_id.ends_with("/scripts/tool.__verter__.ts"),
-        "non-Vue workspace files should be materialized as shadow source files: {provider_id}"
-    );
-    assert!(
-        !provider_id.ends_with("/scripts/tool.ts"),
-        "provider path must not use the raw workspace source path: {provider_id}"
+    assert_eq!(
+        provider_id, "/workspace/scripts/tool.ts",
+        "non-Vue provider ID should be the canonical ID itself"
     );
 }
 
@@ -201,7 +193,7 @@ fn provider_paths_keep_vue_as_public_api_targets() {
 }
 
 #[test]
-fn provider_paths_keep_vue_ide_files_under_synthetic_project_roots() {
+fn provider_ide_id_appends_tsx_to_vue() {
     let resolver = NativeProjectResolver::new(vec![project(
         "/workspace",
         "/workspace",
@@ -211,20 +203,16 @@ fn provider_paths_keep_vue_ide_files_under_synthetic_project_roots() {
 
     let provider_id = resolver
         .provider_ide_id_for_source("/workspace/src/App.vue", false)
-        .expect("vue IDE files should receive synthetic provider IDs");
+        .expect("vue IDE files should receive provider IDs");
 
-    assert!(
-        provider_id.contains("/.verter/ide/"),
-        "IDE provider path should live under the synthetic provider root: {provider_id}"
+    assert_eq!(
+        provider_id, "/workspace/src/App.vue.tsx",
+        "Vue IDE path should be canonical_id.tsx"
     );
-    assert!(
-        resolver.source_id_from_provider_id(&provider_id).as_deref()
-            == Some("/workspace/src/App.vue"),
-        "Vue IDE provider paths only need to round-trip back to the source ID: {provider_id}"
-    );
-    assert!(
-        !provider_id.starts_with("/workspace/src/App.vue"),
-        "provider IDE path must not expose the raw workspace source path"
+    assert_eq!(
+        resolver.source_id_from_provider_id(&provider_id).as_deref(),
+        Some("/workspace/src/App.vue"),
+        "Vue IDE provider paths must round-trip back to the source ID"
     );
     assert_ne!(
         Some(provider_id.clone()),
@@ -329,10 +317,10 @@ fn resolve_workspace_alias_rewrites_to_shadow_provider_file() {
     assert_eq!(resolved.source_id, "/workspace/src/utils.ts");
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
     assert_eq!(resolved.resolution_kind, ResolutionKind::WorkspaceAlias);
-    assert_eq!(resolved.provider_specifier, "./utils.__verter__.ts");
-    assert!(
-        resolved.provider_id.ends_with("/src/utils.__verter__.ts"),
-        "non-Vue workspace files should resolve to provider shadow files: {}",
+    assert_eq!(resolved.provider_specifier, "./utils.ts");
+    assert_eq!(
+        resolved.provider_id, "/workspace/src/utils.ts",
+        "non-Vue workspace files should resolve to their canonical path: {}",
         resolved.provider_id
     );
 }
@@ -371,14 +359,10 @@ fn resolve_tsconfig_paths_before_base_url() {
     assert_eq!(resolved.source_id, "/workspace/generated/shared.ts");
     assert_eq!(resolved.resolution_kind, ResolutionKind::TsConfigPath);
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
+    assert_eq!(resolved.provider_specifier, "../generated/shared.ts");
     assert_eq!(
-        resolved.provider_specifier,
-        "../generated/shared.__verter__.ts"
-    );
-    assert!(
-        !resolved.provider_id.ends_with("/src/shared.__verter__.ts"),
-        "baseUrl fallback must not win when tsconfig paths has a match: {}",
-        resolved.provider_id
+        resolved.provider_id, "/workspace/generated/shared.ts",
+        "tsconfig paths match must not fall through to baseUrl"
     );
 }
 
@@ -412,7 +396,7 @@ fn resolve_base_url_when_no_paths_match() {
     assert_eq!(resolved.source_id, "/workspace/src/shared.ts");
     assert_eq!(resolved.resolution_kind, ResolutionKind::TsConfigPath);
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
-    assert_eq!(resolved.provider_specifier, "./shared.__verter__.ts");
+    assert_eq!(resolved.provider_specifier, "./shared.ts");
 }
 
 #[test]
@@ -444,11 +428,9 @@ fn resolve_relative_paths_use_realpath_normalization() {
     assert_eq!(resolved.source_id, "/workspace/src/shared/util.ts");
     assert_eq!(resolved.resolution_kind, ResolutionKind::Relative);
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
-    assert_eq!(resolved.provider_specifier, "./shared/util.__verter__.ts");
-    assert!(
-        resolved
-            .provider_id
-            .ends_with("/src/shared/util.__verter__.ts"),
+    assert_eq!(resolved.provider_specifier, "./shared/util.ts");
+    assert_eq!(
+        resolved.provider_id, "/workspace/src/shared/util.ts",
         "provider path should be derived from the canonical realpath target: {}",
         resolved.provider_id
     );
@@ -550,7 +532,7 @@ fn resolve_package_imports_from_nearest_package_json() {
     assert_eq!(resolved.source_id, "/workspace/src/utils.ts");
     assert_eq!(resolved.resolution_kind, ResolutionKind::PackageImports);
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
-    assert_eq!(resolved.provider_specifier, "./utils.__verter__.ts");
+    assert_eq!(resolved.provider_specifier, "./utils.ts");
 }
 
 #[test]

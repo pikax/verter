@@ -680,6 +680,38 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Get code actions for a range, optionally filtered by kind.
+ */
+export async function getCodeActions(
+  uri: vscode.Uri,
+  range: vscode.Range,
+  kind?: vscode.CodeActionKind,
+): Promise<(vscode.CodeAction | vscode.Command)[]> {
+  const result = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
+    "vscode.executeCodeActionProvider",
+    uri,
+    range,
+    kind?.value,
+  );
+  return result || [];
+}
+
+/**
+ * Get inlay hints for a range.
+ */
+export async function getInlayHints(
+  uri: vscode.Uri,
+  range: vscode.Range,
+): Promise<vscode.InlayHint[]> {
+  const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>(
+    "vscode.executeInlayHintProvider",
+    uri,
+    range,
+  );
+  return hints || [];
+}
+
 function matchesExpectedCompletionKind(
   actualKind: vscode.CompletionItemKind,
   expectedKinds?: readonly vscode.CompletionItemKind[],

@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
-use verter_host::{CompileProfile, FileKind, UpsertRequest, VerterHost};
+use verter_host::{CompileProfile, VerterHost};
+#[cfg(test)]
+use verter_host::{FileKind, UpsertRequest};
 
 use crate::provider_sync::{
     commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
@@ -304,17 +306,9 @@ async fn scanner_loop(
         let profile = config.tsx_profile.clone();
 
         let compile_ok = tokio::task::spawn_blocking(move || {
-            let source = match std::fs::read_to_string(&path_clone) {
-                Ok(s) => s,
-                Err(_) => return false,
-            };
-            let _ = host.upsert(UpsertRequest {
-                canonical_id: None,
-                input_id: path_clone.clone(),
-                source: source.into(),
-                file_kind: FileKind::VueSfc,
-                aliases: Vec::new(),
-            });
+            if !crate::compile_blockers::ensure_source_loaded_into_host(&host, &path_clone) {
+                return false;
+            }
             host.ensure_compiled(&path_clone, &profile).is_ok()
         })
         .await
@@ -773,16 +767,8 @@ mod tests {
             .get(canonical_id)
             .expect("scanner should commit a source-keyed provider state");
         assert_eq!(
-            state.owner_tsconfig_path.as_deref(),
-            Some("/workspace/pkg-a/tsconfig.json")
-        );
-        assert!(
-            state
-                .provider_root
-                .as_deref()
-                .unwrap_or_default()
-                .contains("/workspace/pkg-a/.verter/ide/"),
-            "matched Vue files should sync into their owner project root"
+            state.owner_key, "/workspace/pkg-a/tsconfig.json",
+            "matched Vue files should have owner_key set to the tsconfig path"
         );
     }
 
@@ -836,14 +822,10 @@ mod tests {
         let state = sync_states
             .get(canonical_id)
             .expect("unmatched Vue files should still sync to the workspace project");
-        assert_eq!(state.owner_tsconfig_path, None);
-        assert!(
-            state
-                .provider_root
-                .as_deref()
-                .unwrap_or_default()
-                .contains("/workspace/.verter/ide/"),
-            "unmatched Vue files should only materialize under the synthetic workspace project"
+        assert_eq!(
+            state.owner_key,
+            "/workspace",
+            "unmatched Vue files should have owner_key set to the workspace root (fallback project)"
         );
     }
 }

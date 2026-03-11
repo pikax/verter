@@ -104,6 +104,20 @@ suite(`Activation & LSP Health [${FIXTURE_NAME}]`, function () {
     );
   });
 
+  test("tsserver does not inherit debugger env vars", function () {
+    // Under F5 sessions, VS Code sets NODE_OPTIONS/VSCODE_INSPECTOR_OPTIONS
+    // which cause tsserver to open a debug port. The env sanitization fix
+    // strips these vars. This test validates no debugger noise in the log.
+    assertLogNotContains(
+      "Debugger listening",
+      "tsserver should not open a debug port (env sanitization)",
+    );
+    assertLogNotContains(
+      "Debugger attached",
+      "tsserver should not have debugger attached (env sanitization)",
+    );
+  });
+
   test("log file is non-empty", function () {
     const log = readTestLog();
     expect(log.length, "Log file should have content").to.be.greaterThan(0);

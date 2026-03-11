@@ -181,6 +181,21 @@ pub struct ViteConfigTrustRequiredParams {
     pub reason: String,
 }
 
+/// Server → client notification: TSGO is active but no project has a tsconfig.
+/// Without a `tsconfig.json`, TSGO cannot discover project configuration.
+/// The extension should warn the user to add a tsconfig or switch to tsserver.
+pub enum TsgoNoTsconfig {}
+
+impl tower_lsp_server::ls_types::notification::Notification for TsgoNoTsconfig {
+    type Params = TsgoNoTsconfigParams;
+    const METHOD: &'static str = "$/verter/tsgoLimitation";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TsgoNoTsconfigParams {
+    pub message: String,
+}
+
 /// Params for `$/onDidChangeTsOrJsFile` notification.
 #[derive(Debug, Deserialize)]
 pub struct OnDidChangeTsOrJsFileParams {
@@ -755,7 +770,7 @@ impl VerterLanguageServer {
                     tracing::info!("sync_ide: ok for {}", ide_path);
                 }
             } else {
-                tracing::info!("sync_ide: no IDE output available for {}", uri.as_str());
+                tracing::debug!("sync_ide: no IDE output available for {}", uri.as_str());
             }
         }
     }
@@ -1686,14 +1701,12 @@ impl VerterLanguageServer {
                 .get_analysis(&child_canonical_id)
                 .is_none()
         {
-            let child_source = std::fs::read_to_string(&child_canonical_id).ok()?;
-            let _ = self.documents.host().upsert(verter_host::UpsertRequest {
-                canonical_id: Some(child_canonical_id.clone()),
-                input_id: child_canonical_id.clone(),
-                source: Arc::from(child_source.as_str()),
-                file_kind: verter_host::FileKind::VueSfc,
-                aliases: vec![],
-            });
+            if !crate::compile_blockers::ensure_source_loaded_into_host(
+                self.documents.host(),
+                &child_canonical_id,
+            ) {
+                return None;
+            }
             self.hydrate_vue_compile_blockers_for_canonical_id(&child_canonical_id);
             let profile = self.documents.tsx_profile.read().clone();
             let _ = self
@@ -2017,25 +2030,16 @@ impl VerterLanguageServer {
             "resync_background: START {canonical_id} thread={:?}",
             std::thread::current().id()
         );
-        // Read file from disk + upsert + compile (all blocking) — wrapped in block_in_place
+        // Load from disk + upsert + compile (all blocking) — wrapped in block_in_place
         // to prevent tokio worker thread exhaustion during background sync.
         let compile_result = tokio::task::block_in_place(|| {
-            let source = match std::fs::read_to_string(canonical_id) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::debug!("resync_background: can't read {canonical_id}: {e}");
-                    return None;
-                }
-            };
-
-            // Upsert into host
-            let _ = self.documents.host.upsert(verter_host::UpsertRequest {
-                canonical_id: Some(canonical_id.to_string()),
-                input_id: canonical_id.to_string(),
-                source: Arc::from(source.as_str()),
-                file_kind: verter_host::FileKind::VueSfc,
-                aliases: Vec::new(),
-            });
+            if !crate::compile_blockers::ensure_source_loaded_into_host(
+                &self.documents.host,
+                canonical_id,
+            ) {
+                tracing::debug!("resync_background: can't read {canonical_id}");
+                return None;
+            }
 
             self.hydrate_vue_compile_blockers_for_canonical_id(canonical_id);
 
@@ -2612,6 +2616,23 @@ impl VerterLanguageServer {
 /// Resolve a relative import path against an importer's directory.
 ///
 /// Handles `./foo.vue`, `../bar/baz.vue`, etc.
+/// Check whether a requested `context.only` filter includes the given code action kind.
+///
+/// When `only` is `None` (no filter), all kinds are wanted.
+/// Otherwise, checks for hierarchical prefix matching (LSP spec):
+/// `"quickfix"` matches `"quickfix.foo"` and vice-versa.
+fn wants_code_action_kind(only: Option<&[CodeActionKind]>, kind: &str) -> bool {
+    match only {
+        None => true,
+        Some(kinds) => kinds.iter().any(|k| {
+            let k = k.as_str();
+            k == kind
+                || kind.starts_with(k) && kind.as_bytes().get(k.len()) == Some(&b'.')
+                || k.starts_with(kind) && k.as_bytes().get(kind.len()) == Some(&b'.')
+        }),
+    }
+}
+
 /// Does NOT handle alias imports (e.g., `@/components/Foo.vue`).
 /// Build the list of workspace components available for auto-import.
 ///
@@ -2748,40 +2769,29 @@ impl<'a> LspProjectResolverReader<'a> {
     }
 }
 
-fn normalize_reader_fs_path(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if let Some(stripped) = normalized.strip_prefix("//?/UNC/") {
-        return format!("//{stripped}");
-    }
-    normalized
-        .strip_prefix("//?/")
-        .unwrap_or(normalized.as_str())
-        .to_string()
-}
-
 impl crate::project_resolver::ProjectResolverReader for LspProjectResolverReader<'_> {
     fn read_text(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.documents.host().get_source(canonical_id).or_else(|| {
-            let normalized = normalize_reader_fs_path(canonical_id);
-            std::fs::read_to_string(&normalized)
-                .ok()
-                .map(Arc::<str>::from)
-        })
+        crate::compile_blockers::ensure_source_loaded_into_host(
+            self.documents.host(),
+            canonical_id,
+        );
+        self.documents.host().get_source(canonical_id)
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
         self.documents.host().get_source(canonical_id).is_some()
-            || std::path::Path::new(&normalize_reader_fs_path(canonical_id)).is_file()
+            || std::path::Path::new(&crate::compile_blockers::normalize_fs_path(canonical_id))
+                .is_file()
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         if self.documents.host().get_source(canonical_id).is_some() {
-            return Some(normalize_reader_fs_path(canonical_id));
+            return Some(crate::compile_blockers::normalize_fs_path(canonical_id));
         }
 
-        std::fs::canonicalize(normalize_reader_fs_path(canonical_id))
+        std::fs::canonicalize(crate::compile_blockers::normalize_fs_path(canonical_id))
             .ok()
-            .map(|path| normalize_reader_fs_path(&path.to_string_lossy()))
+            .map(|path| crate::compile_blockers::normalize_fs_path(&path.to_string_lossy()))
     }
 }
 
@@ -3611,19 +3621,32 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         tracing::info!("init gen={my_gen} superseded, discarding registry");
         return Ok(());
     }
+    // 4a. TSGO limitation warning: no tsconfig found
+    if is_tsgo
+        && registry
+            .projects()
+            .iter()
+            .all(|p| p.tsconfig_path.is_none())
+    {
+        tracing::warn!(
+            "TSGO active but no project has a tsconfig.json — type checking will be limited"
+        );
+        client
+            .send_notification::<TsgoNoTsconfig>(TsgoNoTsconfigParams {
+                message: "No tsconfig.json found. TSGO requires a tsconfig.json for project \
+                          configuration discovery. Consider adding one or switching to tsserver \
+                          (verter.typeProvider: \"tsserver\")."
+                    .to_string(),
+            })
+            .await;
+    }
+
     let resolver = registry.to_native_project_resolver();
-    let provider_project_plans = registry.provider_project_plans();
     *resolver_snapshot.write() = Some(ResolverSnapshot {
         generation: my_gen,
         resolver,
     });
     *project_registry.write() = Some(registry);
-
-    if let Some(sync) = &project_sync {
-        if let Err(error) = sync.ensure_provider_projects(&provider_project_plans) {
-            tracing::warn!("failed to materialize synthetic provider projects: {error}");
-        }
-    }
 
     drain_pending_snapshot_provider_sync(
         project_sync.as_ref(),
@@ -4653,18 +4676,11 @@ impl LanguageServer for VerterLanguageServer {
                 Err(_) => continue,
             };
             let canonical_id = uri_to_canonical_id(&uri);
-            // Read and upsert the file so it's indexed without needing to open in editor
-            if let Ok(content) =
-                std::fs::read_to_string(uri.path().as_str().trim_start_matches('/'))
-            {
-                let _ = self.documents.host().upsert(verter_host::UpsertRequest {
-                    canonical_id: Some(canonical_id.clone()),
-                    input_id: file.uri.clone(),
-                    source: Arc::from(content.as_str()),
-                    file_kind: verter_host::FileKind::VueSfc,
-                    aliases: vec![],
-                });
-            }
+            // Load the file through ingress so it's indexed without needing to open in editor
+            crate::compile_blockers::ensure_source_loaded_into_host(
+                self.documents.host(),
+                &canonical_id,
+            );
             // Compile and sync to type provider for cross-file type resolution
             self.resync_background_vue_file(&canonical_id).await;
             tracing::debug!("did_create_files: indexed {}", file.uri);
@@ -5399,7 +5415,10 @@ impl LanguageServer for VerterLanguageServer {
                             .into_iter()
                             .filter_map(|d| {
                                 // Strip virtual suffixes so user navigates to .vue
-                                let target_path = merge::normalize_vue_path_owned(&d.path);
+                                let vue_source_exists =
+                                    |p: &str| self.documents.host().get_source(p).is_some();
+                                let target_path =
+                                    merge::normalize_vue_path_owned(&d.path, &vue_source_exists);
                                 let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
                                 // Convert byte offsets to positions using vf LineIndex for
                                 // same-file refs; for external files, fall back to 0:0
@@ -5584,6 +5603,8 @@ impl LanguageServer for VerterLanguageServer {
                                 "definition: type provider returned {} locations",
                                 type_defs.len()
                             );
+                            let vue_source_exists =
+                                |p: &str| self.documents.host().get_source(p).is_some();
                             return Ok(merge::merge_definitions(
                                 verter_result,
                                 type_defs,
@@ -5592,6 +5613,7 @@ impl LanguageServer for VerterLanguageServer {
                                 &ctx.vue_line_index,
                                 Some(&|ide_path: &str| self.external_ide_context(ide_path)),
                                 uri,
+                                &vue_source_exists,
                             ));
                         }
                         Err(e) => {
@@ -5636,7 +5658,10 @@ impl LanguageServer for VerterLanguageServer {
                         let locations: Vec<Location> = type_refs
                             .into_iter()
                             .filter_map(|r| {
-                                let target_path = merge::normalize_vue_path_owned(&r.path);
+                                let vue_source_exists =
+                                    |p: &str| self.documents.host().get_source(p).is_some();
+                                let target_path =
+                                    merge::normalize_vue_path_owned(&r.path, &vue_source_exists);
                                 let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
                                 let range = if r.path == tsx_path {
                                     Range {
@@ -5713,6 +5738,8 @@ impl LanguageServer for VerterLanguageServer {
                                 "references: type provider returned {} locations",
                                 type_refs.len()
                             );
+                            let vue_source_exists =
+                                |p: &str| self.documents.host().get_source(p).is_some();
                             return Ok(merge::merge_references(
                                 verter_result,
                                 type_refs,
@@ -5720,6 +5747,7 @@ impl LanguageServer for VerterLanguageServer {
                                 &ctx.mapper,
                                 &ctx.vue_line_index,
                                 Some(&|ide_path: &str| self.external_ide_context(ide_path)),
+                                &vue_source_exists,
                             ));
                         }
                         Err(e) => {
@@ -5817,6 +5845,8 @@ impl LanguageServer for VerterLanguageServer {
                 ) {
                     if let Ok(type_locs) = tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await
                     {
+                        let vue_source_exists =
+                            |p: &str| self.documents.host().get_source(p).is_some();
                         return Ok(merge::merge_rename_locations(
                             verter_result,
                             type_locs,
@@ -5825,6 +5855,7 @@ impl LanguageServer for VerterLanguageServer {
                             &ctx.mapper,
                             &ctx.vue_line_index,
                             Some(&|ide_path: &str| self.external_ide_context(ide_path)),
+                            &vue_source_exists,
                         ));
                     }
                 }
@@ -6076,72 +6107,90 @@ impl LanguageServer for VerterLanguageServer {
         let uri = &params.text_document.uri;
         let range = &params.range;
 
+        let only = params.context.only.as_deref();
+
         let mut all_actions: Vec<CodeActionOrCommand> = Vec::new();
 
         // Verter's own code actions (organize imports)
         if let Some(doc) = self.documents.get(uri) {
             let analysis = self.documents.get_analysis(uri);
-            let mut verter_actions =
-                organize_imports_actions(&doc.source, analysis.as_ref(), &doc.line_index);
-            fix_placeholder_uris(&mut verter_actions, uri);
-            all_actions.extend(verter_actions);
 
-            // Extract component refactoring
-            let blocks = scan_sfc_blocks(&doc.source);
-            if let Some(extract_action) =
-                crate::features::extract_component::extract_component_action(
-                    &doc.source,
-                    range,
-                    &blocks,
-                    &doc.line_index,
-                    uri,
-                )
-            {
-                all_actions.push(extract_action);
+            if wants_code_action_kind(only, "source.organizeImports") {
+                let mut verter_actions =
+                    organize_imports_actions(&doc.source, analysis.as_ref(), &doc.line_index);
+                fix_placeholder_uris(&mut verter_actions, uri);
+                all_actions.extend(verter_actions);
             }
 
-            // Macro code actions (defineSlots, defineEmits generation/augmentation)
-            let cursor_offset = doc.line_index.position_to_offset(&range.start);
-            let mut macro_actions = crate::features::macro_actions::macro_code_actions(
-                &doc.source,
-                analysis.as_ref(),
-                &blocks,
-                &doc.line_index,
-                cursor_offset,
-            );
-            fix_placeholder_uris(&mut macro_actions, uri);
-            all_actions.extend(macro_actions);
-
-            // Component code actions (add unknown props/v-models to child)
-            if let Some(ref analysis) = analysis {
-                let comp_actions = crate::features::component_actions::component_code_actions(
-                    analysis,
-                    &|import_source| self.resolve_component_context(uri, import_source),
-                );
-                all_actions.extend(comp_actions);
-
-                // Suggest matching props from parent bindings to child component tags
-                let suggest_actions = crate::features::component_actions::suggest_matching_props(
-                    analysis,
-                    &doc.source,
-                    &doc.line_index,
-                    uri,
-                    &|import_source| self.resolve_component_context(uri, import_source),
-                );
-                all_actions.extend(suggest_actions);
-
-                // Event handler type hint actions
-                let mut event_actions = crate::features::event_type_hints::event_type_hint_actions(
-                    analysis,
-                    &doc.source,
-                    &doc.line_index,
-                );
-                fix_placeholder_uris(&mut event_actions, uri);
-                all_actions.extend(event_actions);
-
-                // Action engine quick fixes (e.g., remove unused CSS selector).
-                // Lock ordering: project_registry → release → fallback_linter (never nested).
+            // Extract component refactoring
+            if wants_code_action_kind(only, "refactor.extract") {
+                let blocks = scan_sfc_blocks(&doc.source);
+                if let Some(extract_action) =
+                    crate::features::extract_component::extract_component_action(
+                        &doc.source,
+                        range,
+                        &blocks,
+                        &doc.line_index,
+                        uri,
+                    )
                 {
+                    all_actions.push(extract_action);
+                }
+            }
+
+            if wants_code_action_kind(only, "quickfix") {
+                let blocks = scan_sfc_blocks(&doc.source);
+
+                // Macro code actions (defineSlots, defineEmits generation/augmentation)
+                let cursor_offset = doc.line_index.position_to_offset(&range.start);
+                let mut macro_actions = crate::features::macro_actions::macro_code_actions(
+                    &doc.source,
+                    analysis.as_ref(),
+                    &blocks,
+                    &doc.line_index,
+                    cursor_offset,
+                );
+                fix_placeholder_uris(&mut macro_actions, uri);
+                all_actions.extend(macro_actions);
+
+                // Component code actions (add unknown props/v-models to child)
+                if let Some(ref analysis) = analysis {
+                    let comp_actions = crate::features::component_actions::component_code_actions(
+                        analysis,
+                        &|import_source| self.resolve_component_context(uri, import_source),
+                    );
+                    all_actions.extend(comp_actions);
+
+                    // Suggest matching props from parent bindings to child component tags
+                    let suggest_actions =
+                        crate::features::component_actions::suggest_matching_props(
+                            analysis,
+                            &doc.source,
+                            &doc.line_index,
+                            uri,
+                            &|import_source| self.resolve_component_context(uri, import_source),
+                        );
+                    all_actions.extend(suggest_actions);
+
+                    // Event handler type hint actions
+                    let mut event_actions =
+                        crate::features::event_type_hints::event_type_hint_actions(
+                            analysis,
+                            &doc.source,
+                            &doc.line_index,
+                        );
+                    fix_placeholder_uris(&mut event_actions, uri);
+                    all_actions.extend(event_actions);
+                }
+            }
+
+            let wants_quickfix = wants_code_action_kind(only, "quickfix");
+            let wants_refactor = wants_code_action_kind(only, "refactor");
+
+            // Action engine quick fixes and refactorings.
+            // Lock ordering: project_registry → release → fallback_linter (never nested).
+            if wants_quickfix || wants_refactor {
+                if let Some(ref analysis) = analysis {
                     let canonical_id = uri_to_canonical_id(uri);
                     let used_project = {
                         let registry_guard = self.project_registry.read();
@@ -6149,29 +6198,35 @@ impl LanguageServer for VerterLanguageServer {
                             .as_ref()
                             .and_then(|r| r.linter_for(&canonical_id))
                         {
-                            all_actions.extend(
-                                crate::features::diagnostics_bridge::action_engine_fixes(
-                                    &self.action_engine,
-                                    analysis,
-                                    &doc.source,
-                                    &doc.line_index,
-                                    &project.linter,
-                                    &params.context.diagnostics,
-                                    uri,
-                                ),
-                            );
-                            if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
+                            if wants_quickfix {
                                 all_actions.extend(
-                                    crate::features::diagnostics_bridge::action_engine_refactorings(
+                                    crate::features::diagnostics_bridge::action_engine_fixes(
                                         &self.action_engine,
                                         analysis,
                                         &doc.source,
                                         &doc.line_index,
                                         &project.linter,
-                                        offset,
+                                        &params.context.diagnostics,
                                         uri,
                                     ),
                                 );
+                            }
+                            if wants_refactor {
+                                if let Some(offset) =
+                                    doc.line_index.position_to_offset(&range.start)
+                                {
+                                    all_actions.extend(
+                                        crate::features::diagnostics_bridge::action_engine_refactorings(
+                                            &self.action_engine,
+                                            analysis,
+                                            &doc.source,
+                                            &doc.line_index,
+                                            &project.linter,
+                                            offset,
+                                            uri,
+                                        ),
+                                    );
+                                }
                             }
                             true
                         } else {
@@ -6181,29 +6236,33 @@ impl LanguageServer for VerterLanguageServer {
 
                     if !used_project {
                         let fl = self.fallback_linter.read();
-                        all_actions.extend(
-                            crate::features::diagnostics_bridge::action_engine_fixes(
-                                &self.action_engine,
-                                analysis,
-                                &doc.source,
-                                &doc.line_index,
-                                &fl,
-                                &params.context.diagnostics,
-                                uri,
-                            ),
-                        );
-                        if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
+                        if wants_quickfix {
                             all_actions.extend(
-                                crate::features::diagnostics_bridge::action_engine_refactorings(
+                                crate::features::diagnostics_bridge::action_engine_fixes(
                                     &self.action_engine,
                                     analysis,
                                     &doc.source,
                                     &doc.line_index,
                                     &fl,
-                                    offset,
+                                    &params.context.diagnostics,
                                     uri,
                                 ),
                             );
+                        }
+                        if wants_refactor {
+                            if let Some(offset) = doc.line_index.position_to_offset(&range.start) {
+                                all_actions.extend(
+                                    crate::features::diagnostics_bridge::action_engine_refactorings(
+                                        &self.action_engine,
+                                        analysis,
+                                        &doc.source,
+                                        &doc.line_index,
+                                        &fl,
+                                        offset,
+                                        uri,
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
@@ -6211,30 +6270,39 @@ impl LanguageServer for VerterLanguageServer {
         }
 
         // TypeProvider code actions (TSGO quick fixes, refactorings).
+        // Skip during typing cooldown to keep TSGO pipeline clear for interactive requests.
         // Extract all context synchronously — no DashMap guard held across await.
-        if let Some(tp) = &self.type_provider {
-            if let Some(ctx) = self.type_provider_context(uri) {
-                let start_offset = merge::vue_position_to_tsx_offset_validated(
-                    &range.start,
-                    &ctx.vue_line_index,
-                    &ctx.mapper,
-                    &ctx.tsx_line_index,
-                );
-                let end_offset = merge::vue_position_to_tsx_offset_validated(
-                    &range.end,
-                    &ctx.vue_line_index,
-                    &ctx.mapper,
-                    &ctx.tsx_line_index,
-                );
-                if let (Some(so), Some(eo)) = (start_offset, end_offset) {
-                    if let Ok(type_actions) = tp.get_code_actions(&ctx.tsx_path, so, eo).await {
-                        let actions = merge::merge_code_actions(
-                            type_actions,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.vue_line_index,
-                        );
-                        all_actions.extend(actions);
+        if !self.is_typing_cooldown()
+            && (wants_code_action_kind(only, "quickfix")
+                || wants_code_action_kind(only, "refactor"))
+        {
+            if let Some(tp) = &self.type_provider {
+                if let Some(ctx) = self.type_provider_context(uri) {
+                    let start_offset = merge::vue_position_to_tsx_offset_validated(
+                        &range.start,
+                        &ctx.vue_line_index,
+                        &ctx.mapper,
+                        &ctx.tsx_line_index,
+                    );
+                    let end_offset = merge::vue_position_to_tsx_offset_validated(
+                        &range.end,
+                        &ctx.vue_line_index,
+                        &ctx.mapper,
+                        &ctx.tsx_line_index,
+                    );
+                    if let (Some(so), Some(eo)) = (start_offset, end_offset) {
+                        if let Ok(type_actions) = tp.get_code_actions(&ctx.tsx_path, so, eo).await {
+                            let vue_source_exists =
+                                |p: &str| self.documents.host().get_source(p).is_some();
+                            let actions = merge::merge_code_actions(
+                                type_actions,
+                                &ctx.tsx_line_index,
+                                &ctx.mapper,
+                                &ctx.vue_line_index,
+                                &vue_source_exists,
+                            );
+                            all_actions.extend(actions);
+                        }
                     }
                 }
             }
@@ -6376,12 +6444,25 @@ impl LanguageServer for VerterLanguageServer {
                         &ctx.mapper,
                         &ctx.tsx_line_index,
                     );
+                    // Tolerant end mapping: fall back to unvalidated, then TSX EOF.
+                    // The visible range end often lands in synthetic JSX (generated for
+                    // HTML elements), which fails validation. Inlay hints tolerate an
+                    // approximate end bound — only the start must be precise.
                     let end_offset = merge::vue_position_to_tsx_offset_validated(
                         &range.end,
                         &ctx.vue_line_index,
                         &ctx.mapper,
                         &ctx.tsx_line_index,
-                    );
+                    )
+                    .or_else(|| {
+                        merge::vue_position_to_tsx_offset(
+                            &range.end,
+                            &ctx.vue_line_index,
+                            &ctx.mapper,
+                            &ctx.tsx_line_index,
+                        )
+                    })
+                    .or_else(|| Some(ctx.tsx_line_index.source_len()));
                     if let (Some(so), Some(eo)) = (start_offset, end_offset) {
                         match tp.get_inlay_hints(&ctx.tsx_path, so, eo).await {
                             Ok(type_hints) => {
@@ -6412,9 +6493,8 @@ impl LanguageServer for VerterLanguageServer {
                         }
                     } else {
                         tracing::debug!(
-                            "inlay_hint: position mapping failed — start={:?}, end={:?}",
-                            start_offset,
-                            end_offset
+                            "inlay_hint: start position mapping failed for {}",
+                            uri.as_str()
                         );
                     }
                 } else {
@@ -7384,16 +7464,16 @@ mod tests {
             prepared
                 .resolved_dependencies
                 .iter()
-                .any(|entry| entry.provider_specifier == "./util.__verter__.ts"),
-            "non-Vue workspace dependencies should target provider shadow files"
+                .any(|entry| entry.provider_specifier == "./util.ts"),
+            "non-Vue workspace dependencies should target provider paths with explicit extension"
         );
         assert!(
             prepared.rewritten.contains("'./Foo.vue.ts'"),
             "exact Vue imports should rewrite through the resolved provider specifier"
         );
         assert!(
-            prepared.rewritten.contains("'./util.__verter__.ts'"),
-            "non-Vue workspace imports should rewrite through the resolved shadow provider specifier"
+            prepared.rewritten.contains("'./util.ts'"),
+            "non-Vue workspace imports should rewrite through the resolved provider specifier"
         );
         assert!(
             prepared.rewritten.contains("import(`./${name}.vue`)"),
@@ -7402,7 +7482,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_vue_path_helpers_use_synthetic_project_roots() {
+    fn provider_vue_path_helpers_use_original_paths() {
         let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 "/workspace".to_string(),
@@ -7415,26 +7495,18 @@ mod tests {
             provider_ide_path_for_source(&resolver, "/workspace/src/App.vue", false).unwrap();
         let api_path = provider_api_path_for_source(&resolver, "/workspace/src/App.vue").unwrap();
 
-        assert!(
-            ide_path.contains("/.verter/ide/"),
-            "Vue IDE files should use the synthetic provider root: {ide_path}"
+        assert_eq!(
+            ide_path, "/workspace/src/App.vue.tsx",
+            "Vue IDE path should be canonical_id.tsx"
         );
-        assert!(
-            ide_path.ends_with(".tsx"),
-            "Vue IDE provider files must still have a TSX extension for the provider: {ide_path}"
-        );
-        assert!(
-            api_path.ends_with("/src/App.vue.ts"),
-            "Vue imports should resolve through the provider-side .vue.ts API file: {api_path}"
-        );
-        assert!(
-            !ide_path.starts_with("/workspace/src/App.vue"),
-            "Vue IDE provider IDs must not use the raw workspace path"
+        assert_eq!(
+            api_path, "/workspace/src/App.vue.ts",
+            "Vue API path should be canonical_id.ts"
         );
     }
 
     #[test]
-    fn provider_path_helpers_round_trip_only_through_resolver() {
+    fn provider_path_helpers_round_trip_through_resolver() {
         let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 "/workspace".to_string(),
@@ -7455,9 +7527,44 @@ mod tests {
             source_id_from_provider_vue_path(&resolver, &api_path).as_deref(),
             Some("/workspace/src/App.vue")
         );
-        assert!(
-            source_id_from_provider_vue_path(&resolver, "/workspace/src/App.vue.tsx").is_none(),
-            "raw workspace-path suffix stripping must no longer be used"
+    }
+
+    #[test]
+    fn vue_tsx_collision_with_real_file() {
+        // A real .vue.tsx file exists but there's no matching .vue source in any project.
+        // source_id_from_provider_vue_path should return None (collision guard).
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace/src".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+
+        // "/workspace/src/weird.vue.tsx" has no backing "/workspace/src/weird.vue"
+        // registered in any project, so the resolver should not strip the suffix
+        assert_eq!(
+            source_id_from_provider_vue_path(&resolver, "/other/weird.vue.tsx"),
+            None,
+            ".vue.tsx with no backing .vue in any project should return None"
+        );
+    }
+
+    #[test]
+    fn vue_tsx_virtual_file_resolves() {
+        // A virtual .vue.tsx with a backing .vue source registered in a project.
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+
+        assert_eq!(
+            source_id_from_provider_vue_path(&resolver, "/workspace/src/App.vue.tsx").as_deref(),
+            Some("/workspace/src/App.vue"),
+            "virtual .vue.tsx with backing .vue source should resolve to .vue"
         );
     }
 
@@ -8485,12 +8592,8 @@ function handleCustom(payload: string) {
             .map(|entry| entry.clone())
             .expect("drained sync should commit owner-aware provider state");
         assert!(
-            state
-                .provider_root
-                .as_deref()
-                .unwrap_or_default()
-                .contains("/workspace/.verter/ide/"),
-            "drain must use synthetic owner-aware provider roots"
+            !state.owner_key.is_empty(),
+            "drain must set an owner key on provider state"
         );
 
         let calls = provider.file_sync_calls();
@@ -8676,5 +8779,66 @@ function handleCustom(payload: string) {
             )),
             "pending sync should push the hydrated TSX output"
         );
+    }
+
+    // ── wants_code_action_kind tests ────────────────────────────────
+
+    #[test]
+    fn test_wants_code_action_kind_no_filter() {
+        // No `only` → all kinds wanted
+        assert!(wants_code_action_kind(None, "quickfix"));
+        assert!(wants_code_action_kind(None, "source.organizeImports"));
+        assert!(wants_code_action_kind(None, "refactor.extract"));
+    }
+
+    #[test]
+    fn test_wants_code_action_kind_exact_match() {
+        let kinds = vec![CodeActionKind::new("quickfix")];
+        assert!(wants_code_action_kind(Some(&kinds), "quickfix"));
+        assert!(!wants_code_action_kind(Some(&kinds), "refactor"));
+        assert!(!wants_code_action_kind(
+            Some(&kinds),
+            "source.organizeImports"
+        ));
+    }
+
+    #[test]
+    fn test_wants_code_action_kind_prefix_hierarchy() {
+        // `only: [refactor]` should match `refactor.extract`
+        let kinds = vec![CodeActionKind::new("refactor")];
+        assert!(wants_code_action_kind(Some(&kinds), "refactor.extract"));
+        assert!(wants_code_action_kind(Some(&kinds), "refactor"));
+        assert!(!wants_code_action_kind(Some(&kinds), "quickfix"));
+
+        // `only: [refactor.extract]` should match `refactor` (parent)
+        let kinds = vec![CodeActionKind::new("refactor.extract")];
+        assert!(wants_code_action_kind(Some(&kinds), "refactor"));
+        assert!(wants_code_action_kind(Some(&kinds), "refactor.extract"));
+        assert!(!wants_code_action_kind(Some(&kinds), "quickfix"));
+    }
+
+    #[test]
+    fn test_wants_code_action_kind_no_false_prefix() {
+        // "quickfixExtra" should NOT match "quickfix"
+        let kinds = vec![CodeActionKind::new("quickfix")];
+        assert!(!wants_code_action_kind(Some(&kinds), "quickfixExtra"));
+
+        // "refactoring" should NOT match "refactor"
+        let kinds = vec![CodeActionKind::new("refactor")];
+        assert!(!wants_code_action_kind(Some(&kinds), "refactoring"));
+    }
+
+    #[test]
+    fn test_wants_code_action_kind_multiple_kinds() {
+        let kinds = vec![
+            CodeActionKind::new("quickfix"),
+            CodeActionKind::new("source.organizeImports"),
+        ];
+        assert!(wants_code_action_kind(Some(&kinds), "quickfix"));
+        assert!(wants_code_action_kind(
+            Some(&kinds),
+            "source.organizeImports"
+        ));
+        assert!(!wants_code_action_kind(Some(&kinds), "refactor"));
     }
 }

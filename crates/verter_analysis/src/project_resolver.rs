@@ -161,7 +161,7 @@ pub struct IdeProjectConfig {
 
 impl IdeProjectConfig {
     pub fn new(root: String, workspace_root: String, tsconfig_path: Option<String>) -> Self {
-        let provider_root = build_provider_root(&root, tsconfig_path.as_deref());
+        let provider_root = root.clone();
         Self {
             root,
             workspace_root,
@@ -233,65 +233,47 @@ impl NativeProjectResolver {
     }
 
     pub fn provider_id_for_source(&self, source_id: &str) -> Option<String> {
-        let project = self.owner_for_file(source_id)?;
+        let _project = self.owner_for_file(source_id)?;
         let normalized_source = normalize_canonical_id(source_id);
-        let normalized_root = normalize_canonical_id(&project.root);
-        let relative = normalized_source
-            .strip_prefix(&normalized_root)
-            .unwrap_or(normalized_source.as_str());
-        let relative = relative.trim_start_matches('/');
         if normalized_source.ends_with(".vue") {
-            return Some(format!("{}/{relative}.ts", project.provider_root));
+            Some(format!("{}.ts", normalized_source))
+        } else {
+            Some(normalized_source)
         }
-
-        let shadow_name = shadow_file_name(relative);
-        Some(format!("{}/{}", project.provider_root, shadow_name))
     }
 
     pub fn provider_ide_id_for_source(&self, source_id: &str, is_jsx: bool) -> Option<String> {
-        let project = self.owner_for_file(source_id)?;
+        let _project = self.owner_for_file(source_id)?;
         let normalized_source = normalize_canonical_id(source_id);
         if !normalized_source.ends_with(".vue") {
             return None;
         }
 
-        let normalized_root = normalize_canonical_id(&project.root);
-        let relative = normalized_source
-            .strip_prefix(&normalized_root)
-            .unwrap_or(normalized_source.as_str())
-            .trim_start_matches('/');
         let ext = if is_jsx { ".jsx" } else { ".tsx" };
-        Some(format!("{}/{}{}", project.provider_root, relative, ext))
+        Some(format!("{}{}", normalized_source, ext))
     }
 
     pub fn source_id_from_provider_id(&self, provider_id: &str) -> Option<String> {
         let normalized = normalize_canonical_id(provider_id);
-        for project in &self.projects {
-            let provider_root = normalize_canonical_id(&project.provider_root);
-            if !normalized_starts_with(&normalized, &provider_root) {
-                continue;
-            }
 
-            let relative = normalized
-                .strip_prefix(&provider_root)
-                .unwrap_or(normalized.as_str())
-                .trim_start_matches('/');
+        // Vue virtual paths: strip .tsx/.jsx/.ts suffix to get the .vue source
+        if normalized.ends_with(".vue.tsx") || normalized.ends_with(".vue.jsx") {
+            let candidate = &normalized[..normalized.len() - 4]; // strip .tsx/.jsx
+                                                                 // Verify the candidate is owned by a project
+            if self.owner_for_file(candidate).is_some() {
+                return Some(candidate.to_string());
+            }
+        }
+        if normalized.ends_with(".vue.ts") {
+            let candidate = &normalized[..normalized.len() - 3]; // strip .ts
+            if self.owner_for_file(candidate).is_some() {
+                return Some(candidate.to_string());
+            }
+        }
 
-            if relative.ends_with(".vue.ts") {
-                let source_relative = relative.strip_suffix(".ts").unwrap_or(relative);
-                return Some(join_paths(&project.root, source_relative));
-            }
-            if relative.ends_with(".vue.tsx") {
-                let source_relative = relative.strip_suffix(".tsx").unwrap_or(relative);
-                return Some(join_paths(&project.root, source_relative));
-            }
-            if relative.ends_with(".vue.jsx") {
-                let source_relative = relative.strip_suffix(".jsx").unwrap_or(relative);
-                return Some(join_paths(&project.root, source_relative));
-            }
-            if let Some(source_relative) = restore_shadow_file_name(relative) {
-                return Some(join_paths(&project.root, &source_relative));
-            }
+        // Non-Vue: provider path == source path (if owned by a project)
+        if self.owner_for_file(&normalized).is_some() {
+            return Some(normalized);
         }
 
         None
@@ -454,48 +436,6 @@ fn normalized_starts_with(path: &str, prefix: &str) -> bool {
         && (normalized.len() == prefix.len()
             || prefix.ends_with('/')
             || normalized.as_bytes().get(prefix.len()) == Some(&b'/'))
-}
-
-fn build_provider_root(root: &str, tsconfig_path: Option<&str>) -> String {
-    let key = tsconfig_path.unwrap_or(root);
-    let stable = stable_hash_hex(key);
-    format!("{}/.verter/ide/{}", normalize_canonical_id(root), stable)
-}
-
-fn shadow_file_name(relative: &str) -> String {
-    let path = Path::new(relative);
-    let parent = path
-        .parent()
-        .map(|p| p.to_string_lossy().replace('\\', "/"));
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| relative.to_string());
-    let ext = path
-        .extension()
-        .map(|ext| format!(".{}", ext.to_string_lossy()))
-        .unwrap_or_else(|| ".ts".to_string());
-    let file_name = format!("{stem}.__verter__{ext}");
-    match parent {
-        Some(parent) if !parent.is_empty() => format!("{parent}/{file_name}"),
-        _ => file_name,
-    }
-}
-
-fn restore_shadow_file_name(relative: &str) -> Option<String> {
-    let (parent, file_name) = relative
-        .rsplit_once('/')
-        .map(|(parent, file_name)| (Some(parent), file_name))
-        .unwrap_or((None, relative));
-    let restored = file_name.replacen(".__verter__.", ".", 1);
-    if restored == file_name {
-        return None;
-    }
-
-    Some(match parent {
-        Some(parent) => format!("{parent}/{restored}"),
-        None => restored,
-    })
 }
 
 fn matches_any_pattern_for_root(path: &str, root: &str, patterns: &[String]) -> bool {
@@ -884,15 +824,6 @@ fn normalize_canonical_id(value: &str) -> String {
         }
     }
     normalized
-}
-
-fn stable_hash_hex(input: &str) -> String {
-    let mut hash = 14695981039346656037u64;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    format!("{hash:016x}")
 }
 
 fn resolve_package_imports(
