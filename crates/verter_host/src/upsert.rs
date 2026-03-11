@@ -83,6 +83,7 @@ pub(crate) struct UpsertResultData {
     pub(crate) module_references: Vec<verter_analysis::AnalyzedModuleReference>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
+    pub(crate) export_signatures: Vec<verter_analysis::ExportSignature>,
 }
 
 /// Render bundler and LSP IDs for a list of virtual nodes.
@@ -174,6 +175,7 @@ pub(crate) fn build_upsert_result(
         import_specifiers,
         module_references,
         preprocessor_requests: data.preprocessor_requests,
+        export_signatures: data.export_signatures,
         parse_duration_ms,
     })
 }

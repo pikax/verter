@@ -126,6 +126,20 @@ export interface HostBlockOverrideRequest {
   overrides: HostBlockOverrideEntry[];
 }
 
+export interface HostExportSignature {
+  name: string;
+  isType: boolean;
+  reexportSource?: string;
+  reexportLocal?: string;
+}
+
+export interface HostResolvedExport {
+  name: string;
+  isType: boolean;
+  sourceCanonicalId?: string;
+  sourceName: string;
+}
+
 export interface HostUpdateResult {
   canonicalId: string;
   changed: boolean;
@@ -141,6 +155,7 @@ export interface HostUpdateResult {
   importSpecifiers: HostScriptImportInfo[];
   moduleReferences: HostModuleReference[];
   preprocessorRequests: HostPreprocessorRequest[];
+  exportSignatures: HostExportSignature[];
   parseDurationMs: number;
 }
 

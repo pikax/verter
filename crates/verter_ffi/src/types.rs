@@ -205,6 +205,33 @@ pub struct FfiPreprocessorRequest {
     pub content: String,
 }
 
+/// A single export signature extracted from a file's script block.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiExportSignature {
+    pub name: String,
+    pub is_type: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reexport_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reexport_local: Option<String>,
+}
+
+/// A fully resolved export after following re-export chains.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolvedExport {
+    /// Exported name as seen by importers.
+    pub name: String,
+    /// Whether this is a type-only export.
+    pub is_type: bool,
+    /// Ultimate source file canonical ID (None = local to the queried file).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_canonical_id: Option<String>,
+    /// Name in the ultimate source file (may differ, e.g. "default" → "Button").
+    pub source_name: String,
+}
+
 /// Result of an upsert or style override operation.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -223,6 +250,7 @@ pub struct FfiUpdateResult {
     pub import_specifiers: Vec<FfiScriptImportInfo>,
     pub module_references: Vec<FfiModuleReference>,
     pub preprocessor_requests: Vec<FfiPreprocessorRequest>,
+    pub export_signatures: Vec<FfiExportSignature>,
     pub parse_duration_ms: f64,
 }
 

@@ -370,6 +370,9 @@ pub struct HostUpdateResult {
     /// The caller should invoke the appropriate preprocessor and feed results back
     /// via [`VerterHost::apply_block_overrides`](crate::VerterHost::apply_block_overrides).
     pub preprocessor_requests: Vec<PreprocessorRequest>,
+    /// Export signatures extracted from the file's script block.
+    /// For `.ts`/`.js` files these include re-export metadata for barrel file resolution.
+    pub export_signatures: Vec<verter_analysis::ExportSignature>,
     /// Time spent in the parse phase (ms).
     pub parse_duration_ms: f64,
 }
@@ -392,6 +395,7 @@ impl HostUpdateResult {
             import_specifiers: Vec::new(),
             module_references: Vec::new(),
             preprocessor_requests: Vec::new(),
+            export_signatures: Vec::new(),
             parse_duration_ms: 0.0,
         }
     }
@@ -443,6 +447,10 @@ pub struct FileAnalysisSnapshot {
     /// Script-side binding usage occurrences with exact spans.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub script_binding_occurrences: Arc<Vec<verter_analysis::types::ScriptBindingOccurrence>>,
+
+    /// Export signatures extracted from the file's script block.
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub export_signatures: Arc<Vec<verter_analysis::ExportSignature>>,
 }
 
 /// Compile-time dependencies that must be available before a Vue SFC can codegen.
@@ -452,6 +460,21 @@ pub struct CompileBlockersSnapshot {
     pub external_source_requests: Vec<ExternalSourceRequest>,
     /// Macro type dependencies referenced from the SFC script.
     pub macro_type_deps: Arc<Vec<verter_analysis::MacroTypeDep>>,
+}
+
+/// A fully resolved export after following re-export chains.
+///
+/// Returned by [`VerterHost::resolve_exports`](crate::VerterHost::resolve_exports).
+#[derive(Debug, Clone)]
+pub struct ResolvedExport {
+    /// Exported name as seen by importers.
+    pub name: String,
+    /// Whether this is a type-only export.
+    pub is_type: bool,
+    /// Ultimate source file canonical ID. `None` for local exports.
+    pub source_canonical_id: Option<String>,
+    /// Name in the ultimate source file (may differ, e.g. `"default"` → `"Button"`).
+    pub source_name: String,
 }
 
 /// Helper for `skip_serializing_if` on `Arc<Vec<T>>`.

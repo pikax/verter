@@ -147,6 +147,8 @@ export type {
   HostPreprocessorRequest,
   HostBlockOverrideEntry,
   HostBlockOverrideRequest,
+  HostExportSignature,
+  HostResolvedExport,
   HostUpdateResult,
   HostResolvedId,
   HostVirtualMeta,
@@ -230,6 +232,11 @@ export declare class VerterHost {
    * doesn't exist. When `analysisLevel` is not "full", computes analysis on demand.
    */
   getAnalysis(canonicalOrAlias: string): string | null;
+  /**
+   * Returns all exports of a file, following re-export chains to their ultimate source.
+   * For barrel files, resolves through chains to return the ultimate source file and name.
+   */
+  resolveExports(canonicalOrAlias: string): import("./host-types").HostResolvedExport[];
   /**
    * Sets the resolved import dependencies for a file, enabling Tier 2/3
    * smart invalidation (cross-file change tracking).

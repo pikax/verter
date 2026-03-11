@@ -422,6 +422,7 @@ mod tests {
             module_references: snapshot.script_analysis.module_references,
             external_requests: snapshot.external_requests,
             preprocessor_requests: snapshot.preprocessor_requests,
+            export_signatures: snapshot.export_signatures,
         };
         let changes = UpsertChangeResult {
             slice_changes: SliceChanges::default(),
@@ -470,6 +471,7 @@ mod tests {
             module_references: snapshot.script_analysis.module_references,
             external_requests: snapshot.external_requests,
             preprocessor_requests: snapshot.preprocessor_requests,
+            export_signatures: snapshot.export_signatures,
         };
         let prev = vec![
             VirtualNodeKind::Main,

@@ -35,10 +35,18 @@ interface AnalysisModuleReference {
   literalSpecifier?: string;
 }
 
+interface AnalysisExportSignature {
+  name: string;
+  isType: boolean;
+  reexportSource?: string;
+  reexportLocal?: string;
+}
+
 interface FileAnalysisSnapshot {
   imports?: AnalysisImport[];
   moduleReferences?: AnalysisModuleReference[];
   macroTypeDeps?: MacroTypeDep[];
+  exportSignatures?: AnalysisExportSignature[];
 }
 
 function normalizePath(p: string): string {
@@ -280,11 +288,13 @@ export async function hydrateMacroTypeDeps(
 
       const depResolutions: HostDependencyResolution[] = [];
 
-      // Collect sources from imports and export-from re-exports (export * from, export {} from)
+      // Collect sources from imports and re-export signatures.
+      // Export signatures are more precise than moduleReferences: they know exactly
+      // which names are re-exported and from where.
       const importSources = (depAnalysis.imports ?? []).map(imp => imp.source);
-      const reexportSources = (depAnalysis.moduleReferences ?? [])
-        .filter(ref => ref.syntax === "ExportFrom" && ref.literalSpecifier)
-        .map(ref => ref.literalSpecifier!);
+      const reexportSources = (depAnalysis.exportSignatures ?? [])
+        .filter(sig => sig.reexportSource)
+        .map(sig => sig.reexportSource!);
       const allSources = [...new Set([...importSources, ...reexportSources])];
 
       for (const source of allSources) {

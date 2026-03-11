@@ -535,6 +535,16 @@ pub fn host_update_to_ffi(input: host::HostUpdateResult, source: Option<&str>) -
             .iter()
             .map(host_preprocessor_request_to_ffi)
             .collect(),
+        export_signatures: input
+            .export_signatures
+            .into_iter()
+            .map(|sig| FfiExportSignature {
+                name: sig.name,
+                is_type: sig.is_type,
+                reexport_source: sig.reexport_source,
+                reexport_local: sig.reexport_local,
+            })
+            .collect(),
         parse_duration_ms: input.parse_duration_ms,
     }
 }
@@ -1470,6 +1480,7 @@ mod tests {
                 .expect("upsert should extract module references")
                 .module_references,
             preprocessor_requests: Vec::new(),
+            export_signatures: Vec::new(),
             parse_duration_ms: 1.5,
         };
 

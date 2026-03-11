@@ -115,6 +115,7 @@ impl VerterHost {
                     import_specifiers: Vec::new(),
                     module_references: Vec::new(),
                     preprocessor_requests: Vec::new(),
+                    export_signatures: Vec::new(),
                     parse_duration_ms,
                 });
             }
@@ -129,6 +130,11 @@ impl VerterHost {
                 .map(|e| e.export_signatures.clone())
                 .unwrap_or_default();
 
+            // Clone export_signatures for smart_invalidate_dependents (needs both old & new).
+            // Must happen before std::mem::take below which moves them out of the snapshot.
+            let export_sigs_for_result = snapshot.export_signatures.clone();
+            let new_export_signatures = std::mem::take(&mut snapshot.export_signatures);
+
             // Extract data needed for build_upsert_result before moving snapshot fields.
             let result_data = UpsertResultData {
                 new_meta: snapshot.meta.clone(),
@@ -137,10 +143,8 @@ impl VerterHost {
                 module_references: snapshot.script_analysis.module_references.clone(),
                 external_requests: snapshot.external_requests.clone(),
                 preprocessor_requests: snapshot.preprocessor_requests.clone(),
+                export_signatures: export_sigs_for_result,
             };
-
-            // Clone export_signatures for smart_invalidate_dependents (needs both old & new).
-            let new_export_signatures = std::mem::take(&mut snapshot.export_signatures);
 
             // Apply entry update — move snapshot fields instead of cloning.
             let entry = files
@@ -405,6 +409,7 @@ impl VerterHost {
             import_specifiers: Vec::new(),
             module_references: Vec::new(),
             preprocessor_requests: Vec::new(),
+            export_signatures: Vec::new(),
             parse_duration_ms: 0.0,
         })
     }
@@ -576,6 +581,7 @@ impl VerterHost {
             import_specifiers: Vec::new(),
             module_references: Vec::new(),
             preprocessor_requests: Vec::new(),
+            export_signatures: Vec::new(),
             parse_duration_ms: 0.0,
         })
     }

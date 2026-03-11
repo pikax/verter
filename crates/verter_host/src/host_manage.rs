@@ -44,6 +44,7 @@ impl VerterHost {
             let stored_styles = Arc::clone(&entry.style_analyses);
             let template = entry.template_analysis.clone();
             let cached_parse = entry.cached_parse.clone();
+            let export_sigs = entry.export_signatures.clone();
             drop(files);
 
             let script_analysis = if !scope.needs_script_analysis() {
@@ -83,6 +84,7 @@ impl VerterHost {
                 dom_query_calls: Arc::new(script_analysis.dom_query_calls),
                 css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
                 script_binding_occurrences: Arc::new(script_analysis.script_binding_occurrences),
+                export_signatures: Arc::new(export_sigs),
             };
             self.resolve_snapshot_imports(&canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
@@ -190,6 +192,7 @@ impl VerterHost {
             script_binding_occurrences: Arc::clone(
                 &entry.arc_script_cache.script_binding_occurrences,
             ),
+            export_signatures: Arc::new(entry.export_signatures.clone()),
         }
     }
 
@@ -677,6 +680,160 @@ impl VerterHost {
         let alias_map = read_lock(&self.alias_to_canonical);
         let entry = files.get(parent_canonical_id)?;
         crate::cross_file::resolve_import_to_canonical(&files, &alias_map, entry, import_source)
+    }
+
+    /// Returns all exports of a file, following re-export chains to their ultimate source.
+    ///
+    /// For barrel files like `export { default as Button } from './Button.vue'`, this
+    /// resolves through the chain to return the ultimate source file and name. For
+    /// `export * from './module'`, it recursively resolves the target file's exports.
+    ///
+    /// Uses cycle detection to prevent infinite loops in circular re-exports.
+    pub fn resolve_exports(&self, canonical_or_alias: &str) -> Vec<ResolvedExport> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let files = read_lock(&self.files);
+        let alias_map = read_lock(&self.alias_to_canonical);
+        let mut visiting = rustc_hash::FxHashSet::default();
+        self.collect_resolved_exports(&files, &alias_map, &canonical, &mut visiting)
+    }
+
+    /// Recursively collect resolved exports from a file, following re-export chains.
+    fn collect_resolved_exports(
+        &self,
+        files: &std::collections::HashMap<String, crate::FileEntry>,
+        alias_map: &std::collections::HashMap<String, String>,
+        canonical_id: &str,
+        visiting: &mut rustc_hash::FxHashSet<String>,
+    ) -> Vec<ResolvedExport> {
+        // Cycle detection
+        if !visiting.insert(canonical_id.to_string()) {
+            return Vec::new();
+        }
+
+        let Some(entry) = files.get(canonical_id) else {
+            visiting.remove(canonical_id);
+            return Vec::new();
+        };
+
+        let mut results = Vec::new();
+
+        // For Vue SFCs, export "default" pointing to the first binding
+        if entry.file_kind == crate::FileKind::VueSfc {
+            results.push(ResolvedExport {
+                name: "default".to_string(),
+                is_type: false,
+                source_canonical_id: None,
+                source_name: "default".to_string(),
+            });
+            visiting.remove(canonical_id);
+            return results;
+        }
+
+        // For .ts/.js files, iterate export_signatures
+        for sig in &entry.export_signatures {
+            if sig.name == "*" {
+                // Wildcard re-export: export * from './module'
+                if let Some(ref source) = sig.reexport_source {
+                    if let Some(target) = crate::cross_file::resolve_import_to_canonical(
+                        files, alias_map, entry, source,
+                    ) {
+                        let nested =
+                            self.collect_resolved_exports(files, alias_map, &target, visiting);
+                        for mut export in nested {
+                            // Trace the source through to the ultimate origin
+                            if export.source_canonical_id.is_none() {
+                                export.source_canonical_id = Some(target.clone());
+                            }
+                            results.push(export);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if let (Some(ref source), Some(ref local_name)) =
+                (&sig.reexport_source, &sig.reexport_local)
+            {
+                // Named re-export: follow chain to find ultimate source
+                if let Some(target) =
+                    crate::cross_file::resolve_import_to_canonical(files, alias_map, entry, source)
+                {
+                    let resolved =
+                        self.resolve_single_export(files, alias_map, &target, local_name, visiting);
+                    let (src_id, src_name) = match resolved {
+                        Some((cid, n)) => (Some(cid), n),
+                        None => (Some(target.clone()), local_name.clone()),
+                    };
+                    results.push(ResolvedExport {
+                        name: sig.name.clone(),
+                        is_type: sig.is_type,
+                        source_canonical_id: src_id,
+                        source_name: src_name,
+                    });
+                } else {
+                    // Can't resolve target — include as unresolved re-export
+                    results.push(ResolvedExport {
+                        name: sig.name.clone(),
+                        is_type: sig.is_type,
+                        source_canonical_id: None,
+                        source_name: local_name.clone(),
+                    });
+                }
+            } else {
+                // Local export
+                results.push(ResolvedExport {
+                    name: sig.name.clone(),
+                    is_type: sig.is_type,
+                    source_canonical_id: None,
+                    source_name: sig.name.clone(),
+                });
+            }
+        }
+
+        visiting.remove(canonical_id);
+        results
+    }
+
+    /// Follow a re-export chain for a single named export.
+    /// Returns (ultimate_canonical_id, ultimate_name) or None if unresolvable.
+    fn resolve_single_export(
+        &self,
+        files: &std::collections::HashMap<String, crate::FileEntry>,
+        alias_map: &std::collections::HashMap<String, String>,
+        canonical_id: &str,
+        name: &str,
+        visiting: &mut rustc_hash::FxHashSet<String>,
+    ) -> Option<(String, String)> {
+        let entry = files.get(canonical_id)?;
+
+        // Vue SFCs — always resolve here
+        if entry.file_kind == crate::FileKind::VueSfc {
+            return Some((canonical_id.to_string(), name.to_string()));
+        }
+
+        // Look up in export_signatures
+        let sig = entry.export_signatures.iter().find(|s| s.name == name)?;
+
+        if let (Some(ref source), Some(ref local)) = (&sig.reexport_source, &sig.reexport_local) {
+            // Another re-export — follow if no cycle
+            if visiting.contains(canonical_id) {
+                return Some((canonical_id.to_string(), name.to_string()));
+            }
+            visiting.insert(canonical_id.to_string());
+            let target =
+                crate::cross_file::resolve_import_to_canonical(files, alias_map, entry, source);
+            visiting.remove(canonical_id);
+
+            if let Some(target_id) = target {
+                self.resolve_single_export(files, alias_map, &target_id, local, visiting)
+                    .or(Some((target_id, local.clone())))
+            } else {
+                Some((canonical_id.to_string(), name.to_string()))
+            }
+        } else {
+            // Local — found the ultimate source
+            Some((canonical_id.to_string(), name.to_string()))
+        }
     }
 }
 
@@ -1398,5 +1555,286 @@ const { x, y, reset } = useMouse()
         let host = make_host();
         let results = host.get_analysis_batch(&[]);
         assert!(results.is_empty(), "empty batch should return empty vec");
+    }
+
+    // ── Export signature tests ──────────────────────────────────────
+
+    fn upsert_ts_result(host: &VerterHost, id: &str, src: &str) -> crate::HostUpdateResult {
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    /// @ai-generated - upsert of .ts file returns export signatures
+    #[test]
+    fn upsert_returns_export_signatures_for_ts() {
+        let host = make_host();
+        let result = upsert_ts_result(
+            &host,
+            "index.ts",
+            r#"export const foo = 1;
+export type Bar = string;
+export { default as Button } from './Button.vue';
+"#,
+        );
+
+        assert!(
+            !result.export_signatures.is_empty(),
+            "upsert should return export signatures for .ts files"
+        );
+
+        let foo_sig = result
+            .export_signatures
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("should have 'foo' export");
+        assert!(!foo_sig.is_type, "foo is a value export");
+        assert!(
+            foo_sig.reexport_source.is_none(),
+            "foo is local, not a re-export"
+        );
+
+        let bar_sig = result
+            .export_signatures
+            .iter()
+            .find(|s| s.name == "Bar")
+            .expect("should have 'Bar' export");
+        assert!(bar_sig.is_type, "Bar is a type export");
+
+        let button_sig = result
+            .export_signatures
+            .iter()
+            .find(|s| s.name == "Button")
+            .expect("should have 'Button' re-export");
+        assert_eq!(
+            button_sig.reexport_source.as_deref(),
+            Some("./Button.vue"),
+            "Button re-export source should be './Button.vue'"
+        );
+        assert_eq!(
+            button_sig.reexport_local.as_deref(),
+            Some("default"),
+            "Button re-export local name should be 'default'"
+        );
+    }
+
+    /// @ai-generated - get_analysis includes export signatures
+    #[test]
+    fn get_analysis_includes_export_signatures() {
+        let host = make_host();
+        upsert_ts(
+            &host,
+            "utils.ts",
+            "export function helper() { return 1; }\nexport type Util = number;",
+        );
+
+        let analysis = host.get_analysis("utils.ts").unwrap();
+        assert!(
+            !analysis.export_signatures.is_empty(),
+            "analysis should include export signatures"
+        );
+
+        let helper_sig = analysis
+            .export_signatures
+            .iter()
+            .find(|s| s.name == "helper")
+            .expect("should have 'helper' export");
+        assert!(!helper_sig.is_type);
+
+        let util_sig = analysis
+            .export_signatures
+            .iter()
+            .find(|s| s.name == "Util")
+            .expect("should have 'Util' export");
+        assert!(util_sig.is_type);
+    }
+
+    /// @ai-generated - resolve_exports follows re-export chains
+    #[test]
+    fn resolve_exports_follows_reexport_chains() {
+        let host = make_host();
+
+        upsert_vue(
+            &host,
+            "Button.vue",
+            "<script setup>\ndefineProps({ label: String })\n</script>\n<template><button>{{ label }}</button></template>",
+        );
+
+        upsert_ts(
+            &host,
+            "components/index.ts",
+            "export { default as Button } from './Button.vue';",
+        );
+
+        // Set up dependency so ./Button.vue resolves from components/index.ts
+        host.set_import_dependencies(
+            "components/index.ts",
+            vec![crate::DependencyResolution {
+                specifier: "./Button.vue".to_string(),
+                resolved_canonical_id: Some("Button.vue".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+
+        let exports = host.resolve_exports("components/index.ts");
+        assert!(
+            !exports.is_empty(),
+            "barrel file should have resolved exports"
+        );
+
+        let button = exports
+            .iter()
+            .find(|e| e.name == "Button")
+            .expect("should have 'Button' resolved export");
+        assert_eq!(
+            button.source_canonical_id.as_deref(),
+            Some("Button.vue"),
+            "Button should resolve to Button.vue"
+        );
+        assert_eq!(
+            button.source_name, "default",
+            "Button maps to 'default' in the source file"
+        );
+    }
+
+    /// @ai-generated - resolve_exports handles direct local exports
+    #[test]
+    fn resolve_exports_local_exports() {
+        let host = make_host();
+        upsert_ts(
+            &host,
+            "utils.ts",
+            "export const FOO = 1;\nexport type Bar = string;",
+        );
+
+        let exports = host.resolve_exports("utils.ts");
+        assert_eq!(exports.len(), 2, "should have 2 exports");
+
+        let foo = exports.iter().find(|e| e.name == "FOO").unwrap();
+        assert!(
+            foo.source_canonical_id.is_none(),
+            "local export has no source file"
+        );
+        assert_eq!(foo.source_name, "FOO");
+        assert!(!foo.is_type);
+
+        let bar = exports.iter().find(|e| e.name == "Bar").unwrap();
+        assert!(bar.is_type);
+    }
+
+    /// @ai-generated - resolve_exports handles wildcard re-exports
+    #[test]
+    fn resolve_exports_wildcard_reexports() {
+        let host = make_host();
+
+        upsert_ts(
+            &host,
+            "types.ts",
+            "export type Foo = string;\nexport type Bar = number;",
+        );
+        upsert_ts(&host, "index.ts", "export * from './types';");
+
+        host.set_import_dependencies(
+            "index.ts",
+            vec![crate::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("types.ts".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+
+        let exports = host.resolve_exports("index.ts");
+        assert!(
+            exports.iter().any(|e| e.name == "Foo"),
+            "wildcard re-export should include Foo"
+        );
+        assert!(
+            exports.iter().any(|e| e.name == "Bar"),
+            "wildcard re-export should include Bar"
+        );
+
+        let foo = exports.iter().find(|e| e.name == "Foo").unwrap();
+        assert_eq!(
+            foo.source_canonical_id.as_deref(),
+            Some("types.ts"),
+            "Foo should trace back to types.ts"
+        );
+    }
+
+    /// @ai-generated - resolve_exports detects circular re-exports
+    #[test]
+    fn resolve_exports_circular_protection() {
+        let host = make_host();
+
+        upsert_ts(&host, "a.ts", "export * from './b';");
+        upsert_ts(&host, "b.ts", "export * from './a';");
+
+        host.set_import_dependencies(
+            "a.ts",
+            vec![crate::DependencyResolution {
+                specifier: "./b".to_string(),
+                resolved_canonical_id: Some("b.ts".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+        host.set_import_dependencies(
+            "b.ts",
+            vec![crate::DependencyResolution {
+                specifier: "./a".to_string(),
+                resolved_canonical_id: Some("a.ts".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+
+        // Should not infinite loop
+        let exports = host.resolve_exports("a.ts");
+        // The result is empty because both files only re-export each other with no local exports
+        assert!(
+            exports.is_empty(),
+            "circular re-exports with no local exports should return empty"
+        );
+    }
+
+    /// @ai-generated - resolve_exports multi-level barrel chain
+    #[test]
+    fn resolve_exports_multi_level_barrel() {
+        let host = make_host();
+
+        upsert_ts(&host, "deep.ts", "export const DEEP = 42;");
+        upsert_ts(&host, "mid.ts", "export { DEEP } from './deep';");
+        upsert_ts(&host, "top.ts", "export { DEEP } from './mid';");
+
+        host.set_import_dependencies(
+            "mid.ts",
+            vec![crate::DependencyResolution {
+                specifier: "./deep".to_string(),
+                resolved_canonical_id: Some("deep.ts".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+        host.set_import_dependencies(
+            "top.ts",
+            vec![crate::DependencyResolution {
+                specifier: "./mid".to_string(),
+                resolved_canonical_id: Some("mid.ts".to_string()),
+                possible_canonical_ids: vec![],
+            }],
+        );
+
+        let exports = host.resolve_exports("top.ts");
+        let deep = exports
+            .iter()
+            .find(|e| e.name == "DEEP")
+            .expect("should have DEEP");
+        assert_eq!(
+            deep.source_canonical_id.as_deref(),
+            Some("deep.ts"),
+            "should trace through two levels to deep.ts"
+        );
     }
 }

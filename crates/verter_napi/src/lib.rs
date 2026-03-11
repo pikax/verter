@@ -395,6 +395,22 @@ pub struct NapiBlockOverrideRequest {
 }
 
 #[napi(object)]
+pub struct NapiExportSignature {
+    pub name: String,
+    pub isType: bool,
+    pub reexportSource: Option<String>,
+    pub reexportLocal: Option<String>,
+}
+
+#[napi(object)]
+pub struct NapiResolvedExport {
+    pub name: String,
+    pub isType: bool,
+    pub sourceCanonicalId: Option<String>,
+    pub sourceName: String,
+}
+
+#[napi(object)]
 pub struct NapiUpdateResult {
     pub canonicalId: String,
     pub changed: bool,
@@ -410,6 +426,7 @@ pub struct NapiUpdateResult {
     pub importSpecifiers: Vec<NapiScriptImportInfo>,
     pub moduleReferences: Vec<NapiModuleReference>,
     pub preprocessorRequests: Vec<NapiPreprocessorRequest>,
+    pub exportSignatures: Vec<NapiExportSignature>,
     pub parseDurationMs: f64,
 }
 
@@ -914,6 +931,16 @@ fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> N
                 content: req.content.clone(),
             })
             .collect(),
+        exportSignatures: input
+            .export_signatures
+            .into_iter()
+            .map(|sig| NapiExportSignature {
+                name: sig.name,
+                isType: sig.is_type,
+                reexportSource: sig.reexport_source,
+                reexportLocal: sig.reexport_local,
+            })
+            .collect(),
         parseDurationMs: input.parse_duration_ms,
     }
 }
@@ -1211,6 +1238,28 @@ impl NapiVerterHost {
             })
             .transpose()
         })?
+    }
+
+    /// Returns all exports of a file, following re-export chains to their ultimate source.
+    ///
+    /// For barrel files like `export { default as Button } from './Button.vue'`, this
+    /// resolves through the chain to return the ultimate source file and name.
+    #[napi(js_name = "resolveExports")]
+    pub fn resolve_exports(&self, canonical_or_alias: String) -> Result<Vec<NapiResolvedExport>> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.resolve_exports(&canonical_or_alias)
+        }))
+        .map(|exports| {
+            exports
+                .into_iter()
+                .map(|e| NapiResolvedExport {
+                    name: e.name,
+                    isType: e.is_type,
+                    sourceCanonicalId: e.source_canonical_id,
+                    sourceName: e.source_name,
+                })
+                .collect()
+        })
     }
 
     /// Retrieves the combined TSX output for LSP type checking.
