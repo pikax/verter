@@ -29,6 +29,7 @@ export function loadHost(config?: { devMode?: boolean }): VerterHost {
 }
 
 export function resetHost(): void {
+  host?.close();
   host = null;
 }
 

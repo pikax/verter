@@ -4559,87 +4559,309 @@ fn serialize_element_props(
     }
 }
 
-/// Resolve prop references in a template expression for use in Comp functions.
-///
-/// Props are available as `__props.name` at script scope (not destructured),
-/// so bare identifiers matching prop names need `__props.` prefix.
-///
-/// For simple identifiers (e.g., `tag` → `__props.tag`) this is straightforward.
-/// For member expressions (e.g., `tag.value` where `tag` is a prop), prefix the
 /// Resolve ALL prop name identifiers in an expression, replacing each bare prop
 /// name with `__props.propName`. Used for Comp function condition guards where the
 /// raw template expression may contain multiple prop references (e.g., `showBoard || isEditing`).
+///
+/// Uses OXC expression parser for correct handling of:
+/// - Object shorthand `{ flag }` — NOT prefixed (it's both key and value)
+/// - Computed property keys `{ [flag]: 1 }` — prefixed
+/// - Non-computed property keys `{ flag: val }` — NOT prefixed
+/// - Arrow function params `(flag) => flag` — shadows prop, NOT prefixed
+/// - Member expressions `flag.value` — only root is prefixed
 fn resolve_all_prop_refs_in_expr(expr: &str, prop_names: &rustc_hash::FxHashSet<&str>) -> String {
-    if prop_names.is_empty() {
+    if prop_names.is_empty() || expr.is_empty() {
         return expr.to_string();
     }
-    let bytes = expr.as_bytes();
-    let len = bytes.len();
-    let mut result = String::with_capacity(expr.len());
-    let mut i = 0;
-    while i < len {
-        let b = bytes[i];
-        if b.is_ascii_alphabetic() || b == b'_' || b == b'$' {
-            // Start of an identifier
-            let start = i;
-            i += 1;
-            while i < len
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
-            {
-                i += 1;
-            }
-            let ident = &expr[start..i];
-            // Skip if preceded by '.' (property access, not bare identifier)
-            let preceded_by_dot = start > 0 && bytes[start - 1] == b'.';
-            // Skip if this is an object property key: followed by ':' (not '::')
-            // and preceded (skipping whitespace) by '{' or ','
-            let is_object_key = if !preceded_by_dot && prop_names.contains(ident) {
-                is_object_property_key(bytes, start, i, len)
-            } else {
-                false
-            };
-            if !preceded_by_dot && !is_object_key && prop_names.contains(ident) {
-                result.push_str("__props.");
-            }
-            result.push_str(ident);
-        } else {
-            result.push(b as char);
-            i += 1;
-        }
+
+    let alloc = oxc_allocator::Allocator::new();
+    let parser = oxc_parser::Parser::new(&alloc, expr, oxc_span::SourceType::tsx());
+    let parsed = match parser.parse_expression() {
+        Ok(parsed) => parsed,
+        Err(_) => return expr.to_string(), // fallback: return unchanged on parse error
+    };
+
+    // Collect byte offsets where "__props." should be inserted
+    let mut insertions: Vec<u32> = Vec::new();
+    collect_prop_refs(
+        &parsed,
+        prop_names,
+        &mut insertions,
+        &rustc_hash::FxHashSet::default(),
+    );
+
+    if insertions.is_empty() {
+        return expr.to_string();
     }
+
+    insertions.sort_unstable();
+    insertions.dedup();
+
+    let mut result = String::with_capacity(expr.len() + insertions.len() * 8);
+    let mut last = 0usize;
+    for offset in &insertions {
+        let off = *offset as usize;
+        result.push_str(&expr[last..off]);
+        result.push_str("__props.");
+        last = off;
+    }
+    result.push_str(&expr[last..]);
     result
 }
 
-/// Check whether the identifier at `bytes[start..end]` is an object property key.
-///
-/// Returns true when the identifier is followed by `:` (not `::`) and preceded
-/// (skipping whitespace) by `{` or `,` — the two tokens that start an object
-/// property in JavaScript/TypeScript.
-fn is_object_property_key(bytes: &[u8], start: usize, end: usize, len: usize) -> bool {
-    // Look ahead: skip whitespace, check for ':' (but not '::')
-    let mut j = end;
-    while j < len && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') {
-        j += 1;
-    }
-    let followed_by_colon = j < len && bytes[j] == b':' && (j + 1 >= len || bytes[j + 1] != b':');
-    if !followed_by_colon {
-        return false;
-    }
-    // Look back: skip whitespace, check for '{' or ','
-    if start == 0 {
-        return false;
-    }
-    let mut k = start - 1;
-    loop {
-        match bytes[k] {
-            b' ' | b'\t' | b'\n' | b'\r' => {
-                if k == 0 {
-                    return false;
-                }
-                k -= 1;
+/// Recursively walk an OXC expression, collecting byte offsets of identifiers
+/// that match `prop_names` and should be prefixed with `__props.`.
+fn collect_prop_refs(
+    expr: &oxc_ast::ast::Expression,
+    prop_names: &rustc_hash::FxHashSet<&str>,
+    out: &mut Vec<u32>,
+    shadowed: &rustc_hash::FxHashSet<&str>,
+) {
+    use oxc_ast::ast::*;
+
+    match expr {
+        Expression::Identifier(ident) => {
+            if prop_names.contains(ident.name.as_str()) && !shadowed.contains(ident.name.as_str()) {
+                out.push(ident.span.start);
             }
-            b'{' | b',' => return true,
-            _ => return false,
+        }
+
+        Expression::ObjectExpression(obj) => {
+            for prop in &obj.properties {
+                match prop {
+                    ObjectPropertyKind::ObjectProperty(p) => {
+                        if p.computed {
+                            // Computed key: `{ [flag]: 1 }` — prefix identifiers in key
+                            collect_prop_refs_in_property_key(&p.key, prop_names, out, shadowed);
+                        }
+                        if p.shorthand {
+                            // Shorthand `{ flag }` — skip entirely (it's both key and value)
+                        } else {
+                            collect_prop_refs(&p.value, prop_names, out, shadowed);
+                        }
+                    }
+                    ObjectPropertyKind::SpreadProperty(s) => {
+                        collect_prop_refs(&s.argument, prop_names, out, shadowed);
+                    }
+                }
+            }
+        }
+
+        Expression::ArrayExpression(array) => {
+            for elem in &array.elements {
+                match elem {
+                    ArrayExpressionElement::SpreadElement(s) => {
+                        collect_prop_refs(&s.argument, prop_names, out, shadowed);
+                    }
+                    ArrayExpressionElement::Elision(_) => {}
+                    _ => {
+                        if let Some(e) = elem.as_expression() {
+                            collect_prop_refs(e, prop_names, out, shadowed);
+                        }
+                    }
+                }
+            }
+        }
+
+        Expression::BinaryExpression(binary) => {
+            collect_prop_refs(&binary.left, prop_names, out, shadowed);
+            collect_prop_refs(&binary.right, prop_names, out, shadowed);
+        }
+
+        Expression::LogicalExpression(logical) => {
+            collect_prop_refs(&logical.left, prop_names, out, shadowed);
+            collect_prop_refs(&logical.right, prop_names, out, shadowed);
+        }
+
+        Expression::UnaryExpression(unary) => {
+            collect_prop_refs(&unary.argument, prop_names, out, shadowed);
+        }
+
+        Expression::ConditionalExpression(cond) => {
+            collect_prop_refs(&cond.test, prop_names, out, shadowed);
+            collect_prop_refs(&cond.consequent, prop_names, out, shadowed);
+            collect_prop_refs(&cond.alternate, prop_names, out, shadowed);
+        }
+
+        Expression::CallExpression(call) => {
+            collect_prop_refs(&call.callee, prop_names, out, shadowed);
+            for arg in &call.arguments {
+                match arg {
+                    Argument::SpreadElement(s) => {
+                        collect_prop_refs(&s.argument, prop_names, out, shadowed);
+                    }
+                    _ => {
+                        if let Some(e) = arg.as_expression() {
+                            collect_prop_refs(e, prop_names, out, shadowed);
+                        }
+                    }
+                }
+            }
+        }
+
+        Expression::NewExpression(new_expr) => {
+            collect_prop_refs(&new_expr.callee, prop_names, out, shadowed);
+            for arg in &new_expr.arguments {
+                match arg {
+                    Argument::SpreadElement(s) => {
+                        collect_prop_refs(&s.argument, prop_names, out, shadowed);
+                    }
+                    _ => {
+                        if let Some(e) = arg.as_expression() {
+                            collect_prop_refs(e, prop_names, out, shadowed);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Member expressions — only visit the object (root), not the property
+        Expression::StaticMemberExpression(m) => {
+            collect_prop_refs(&m.object, prop_names, out, shadowed);
+        }
+        Expression::ComputedMemberExpression(m) => {
+            collect_prop_refs(&m.object, prop_names, out, shadowed);
+            collect_prop_refs(&m.expression, prop_names, out, shadowed);
+        }
+        Expression::PrivateFieldExpression(m) => {
+            collect_prop_refs(&m.object, prop_names, out, shadowed);
+        }
+
+        Expression::TemplateLiteral(template) => {
+            for expr in &template.expressions {
+                collect_prop_refs(expr, prop_names, out, shadowed);
+            }
+        }
+
+        Expression::TaggedTemplateExpression(tagged) => {
+            collect_prop_refs(&tagged.tag, prop_names, out, shadowed);
+            for expr in &tagged.quasi.expressions {
+                collect_prop_refs(expr, prop_names, out, shadowed);
+            }
+        }
+
+        Expression::ArrowFunctionExpression(arrow) => {
+            // Collect parameter names that shadow props
+            let mut inner_shadowed = shadowed.clone();
+            for param in &arrow.params.items {
+                collect_binding_pattern_names(&param.pattern, &mut inner_shadowed);
+            }
+            if arrow.expression {
+                // Expression body: `(x) => x + 1`
+                if let Some(oxc_ast::ast::Statement::ExpressionStatement(es)) =
+                    arrow.body.statements.first()
+                {
+                    collect_prop_refs(&es.expression, prop_names, out, &inner_shadowed);
+                }
+            } else {
+                // Block body — not typical for template expressions, but handle it
+                for stmt in &arrow.body.statements {
+                    if let oxc_ast::ast::Statement::ExpressionStatement(es) = stmt {
+                        collect_prop_refs(&es.expression, prop_names, out, &inner_shadowed);
+                    } else if let oxc_ast::ast::Statement::ReturnStatement(rs) = stmt {
+                        if let Some(arg) = &rs.argument {
+                            collect_prop_refs(arg, prop_names, out, &inner_shadowed);
+                        }
+                    }
+                }
+            }
+        }
+
+        Expression::SequenceExpression(seq) => {
+            for expr in &seq.expressions {
+                collect_prop_refs(expr, prop_names, out, shadowed);
+            }
+        }
+
+        Expression::AssignmentExpression(assign) => {
+            collect_prop_refs(&assign.right, prop_names, out, shadowed);
+        }
+
+        Expression::AwaitExpression(a) => {
+            collect_prop_refs(&a.argument, prop_names, out, shadowed);
+        }
+
+        Expression::YieldExpression(y) => {
+            if let Some(arg) = &y.argument {
+                collect_prop_refs(arg, prop_names, out, shadowed);
+            }
+        }
+
+        Expression::ParenthesizedExpression(p) => {
+            collect_prop_refs(&p.expression, prop_names, out, shadowed);
+        }
+
+        Expression::TSNonNullExpression(ts) => {
+            collect_prop_refs(&ts.expression, prop_names, out, shadowed);
+        }
+
+        Expression::TSAsExpression(ts) => {
+            collect_prop_refs(&ts.expression, prop_names, out, shadowed);
+        }
+
+        Expression::TSSatisfiesExpression(ts) => {
+            collect_prop_refs(&ts.expression, prop_names, out, shadowed);
+        }
+
+        Expression::TSTypeAssertion(ts) => {
+            collect_prop_refs(&ts.expression, prop_names, out, shadowed);
+        }
+
+        // Literals, this, super, etc. — no prop refs
+        _ => {}
+    }
+}
+
+/// Collect prop refs from a property key (only for computed keys).
+fn collect_prop_refs_in_property_key(
+    key: &oxc_ast::ast::PropertyKey,
+    prop_names: &rustc_hash::FxHashSet<&str>,
+    out: &mut Vec<u32>,
+    shadowed: &rustc_hash::FxHashSet<&str>,
+) {
+    match key {
+        oxc_ast::ast::PropertyKey::StaticIdentifier(ident) => {
+            // In a computed key context, the identifier IS an expression
+            if prop_names.contains(ident.name.as_str()) && !shadowed.contains(ident.name.as_str()) {
+                out.push(ident.span.start);
+            }
+        }
+        _ => {
+            if let Some(expr) = key.as_expression() {
+                collect_prop_refs(expr, prop_names, out, shadowed);
+            }
+        }
+    }
+}
+
+/// Collect binding names from a destructuring/binding pattern into a set.
+fn collect_binding_pattern_names<'a>(
+    pattern: &'a oxc_ast::ast::BindingPattern<'a>,
+    names: &mut rustc_hash::FxHashSet<&'a str>,
+) {
+    use oxc_ast::ast::BindingPattern;
+    match pattern {
+        BindingPattern::BindingIdentifier(ident) => {
+            names.insert(ident.name.as_str());
+        }
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_binding_pattern_names(&prop.value, names);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_binding_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                collect_binding_pattern_names(elem, names);
+            }
+            if let Some(rest) = &arr.rest {
+                collect_binding_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPattern::AssignmentPattern(assign) => {
+            collect_binding_pattern_names(&assign.left, names);
         }
     }
 }
@@ -9744,6 +9966,104 @@ const color = ref('red')
         assert!(
             !result.contains("__props.size:"),
             "key `size` must NOT be prefixed: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_shorthand_property_not_prefixed() {
+        let mut props = rustc_hash::FxHashSet::default();
+        props.insert("flag");
+        // Shorthand property — should NOT prefix (it's both key and value in shorthand form)
+        let result = resolve_all_prop_refs_in_expr("{ flag }", &props);
+        assert!(
+            !result.contains("__props."),
+            "shorthand property `flag` should NOT be prefixed: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_computed_property_key() {
+        let mut props = rustc_hash::FxHashSet::default();
+        props.insert("flag");
+        // Computed property key — should prefix inside brackets
+        let result = resolve_all_prop_refs_in_expr("{ [flag]: 1 }", &props);
+        assert!(
+            result.contains("__props.flag"),
+            "computed property key `flag` should be prefixed: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_nested_ternary_with_object() {
+        let mut props = rustc_hash::FxHashSet::default();
+        props.insert("flag");
+        props.insert("size");
+        // Nested ternary with object
+        let result = resolve_all_prop_refs_in_expr("flag ? { size: size } : null", &props);
+        assert!(
+            result.contains("__props.flag"),
+            "ternary test `flag` should be prefixed: {result}"
+        );
+        assert!(
+            result.contains("__props.size"),
+            "object value `size` should be prefixed: {result}"
+        );
+        assert!(
+            !result.contains("__props.size:"),
+            "object key `size` must NOT be prefixed: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_member_expression_only_prefixes_root() {
+        let mut props = rustc_hash::FxHashSet::default();
+        props.insert("flag");
+        // Member expression — only prefix the root
+        let result = resolve_all_prop_refs_in_expr("flag.value", &props);
+        assert!(
+            result.contains("__props.flag.value"),
+            "member expression root should be prefixed: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_arrow_function_shadows_prop() {
+        let mut props = rustc_hash::FxHashSet::default();
+        props.insert("flag");
+        // Arrow function param shadows prop
+        let result = resolve_all_prop_refs_in_expr("(flag) => flag", &props);
+        assert!(
+            !result.contains("__props.flag"),
+            "arrow function param should shadow prop: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_template_literal() {
+        let mut props = rustc_hash::FxHashSet::default();
+        props.insert("name");
+        // Template literal with expression
+        let result = resolve_all_prop_refs_in_expr("`hello ${name}`", &props);
+        assert!(
+            result.contains("__props.name"),
+            "template literal expression should be prefixed: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_refs_logical_expression() {
+        let mut props = rustc_hash::FxHashSet::default();
+        props.insert("showBoard");
+        props.insert("isEditing");
+        // Logical OR — both props should be prefixed
+        let result = resolve_all_prop_refs_in_expr("showBoard || isEditing", &props);
+        assert!(
+            result.contains("__props.showBoard"),
+            "left operand should be prefixed: {result}"
+        );
+        assert!(
+            result.contains("__props.isEditing"),
+            "right operand should be prefixed: {result}"
         );
     }
 

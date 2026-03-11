@@ -171,21 +171,6 @@ struct AnalysisContext {
 /// Package imports allowed in statically-analyzed expressions.
 const ALLOWED_PACKAGES: &[&str] = &["vite", "path", "node:path", "url", "node:url"];
 
-/// Extension probing order for relative import resolution.
-#[allow(dead_code)]
-const EXTENSION_PROBE_ORDER: &[&str] = &[".ts", ".js", ".mts", ".cts", ".mjs", ".cjs"];
-
-/// Index file probing order.
-#[allow(dead_code)]
-const INDEX_PROBE_ORDER: &[&str] = &[
-    "index.ts",
-    "index.js",
-    "index.mts",
-    "index.cts",
-    "index.mjs",
-    "index.cjs",
-];
-
 fn analyze_source(
     source: &str,
     file_path: &str,
@@ -778,48 +763,6 @@ fn property_key_name(key: &oxc_ast::ast::PropertyKey) -> Option<String> {
 /// Check if an expression contains `await`.
 fn contains_await(expr: &oxc_ast::ast::Expression, _source: &str) -> bool {
     matches!(expr, oxc_ast::ast::Expression::AwaitExpression(_))
-}
-
-/// Check if an expression contains dynamic `import()`.
-#[allow(dead_code)]
-fn contains_dynamic_import(expr: &oxc_ast::ast::Expression) -> bool {
-    matches!(expr, oxc_ast::ast::Expression::ImportExpression(_))
-}
-
-/// Resolve a relative import path with extension probing.
-#[allow(dead_code)]
-fn resolve_relative_import(importer_dir: &Path, specifier: &str) -> Option<PathBuf> {
-    let base = importer_dir.join(specifier);
-
-    // Try as-is
-    if base.is_file() {
-        return Some(base);
-    }
-
-    // Try with extensions
-    for ext in EXTENSION_PROBE_ORDER {
-        let with_ext = base.with_extension(ext.trim_start_matches('.'));
-        if with_ext.is_file() {
-            return Some(with_ext);
-        }
-        // Also try appending (for paths without extension)
-        let appended = PathBuf::from(format!("{}{}", base.display(), ext));
-        if appended.is_file() {
-            return Some(appended);
-        }
-    }
-
-    // Try as directory with index files
-    if base.is_dir() {
-        for idx in INDEX_PROBE_ORDER {
-            let with_index = base.join(idx);
-            if with_index.is_file() {
-                return Some(with_index);
-            }
-        }
-    }
-
-    None
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

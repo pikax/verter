@@ -263,6 +263,11 @@ export declare class VerterHost {
    * Matches CSS selectors against template elements, returning a match matrix.
    */
   matchCssSelectors(canonicalOrAlias: string): import("./host-types").HostSelectorMatchResult[];
+  /**
+   * Release all cached data (files, aliases, dependency graph).
+   * Call before dropping the host to prevent process exit hangs.
+   */
+  close(): void;
 }
 
 export {};

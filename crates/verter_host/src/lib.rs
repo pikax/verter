@@ -113,6 +113,19 @@ impl VerterHost {
         }
     }
 
+    /// Release all cached data (files, aliases, dependency graph).
+    ///
+    /// After calling `close()` the host is empty but still usable (you could
+    /// upsert files again). The primary purpose is to allow the Rust allocator
+    /// to free the backing memory so that NAPI-RS-backed hosts don't keep the
+    /// Node.js process alive waiting for GC finalisation.
+    pub fn close(&self) {
+        write_lock(&self.files).clear();
+        write_lock(&self.alias_to_canonical).clear();
+        write_lock(&self.reverse_dependencies).clear();
+        write_lock(&self.last_const_prop_overrides).clear();
+    }
+
     #[cfg(feature = "host_metrics")]
     pub fn metrics_snapshot(&self) -> HostMetricsSnapshot {
         use std::collections::BTreeMap;
@@ -2218,6 +2231,62 @@ mod tests {
             write_latency < Duration::from_millis(500),
             "writer should acquire lock quickly with writer-preferring semantics — \
              took {write_latency:?}"
+        );
+    }
+
+    #[test]
+    fn close_clears_all_caches() {
+        let host = VerterHost::new(HostConfig::default());
+
+        // Upsert a file to populate caches
+        upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
+
+        // Verify the host has data
+        assert!(
+            !read_lock(&host.files).is_empty(),
+            "host should have files before close"
+        );
+
+        // Close and verify everything is cleared
+        host.close();
+
+        assert!(
+            read_lock(&host.files).is_empty(),
+            "files should be empty after close"
+        );
+        assert!(
+            read_lock(&host.alias_to_canonical).is_empty(),
+            "alias_to_canonical should be empty after close"
+        );
+        assert!(
+            read_lock(&host.reverse_dependencies).is_empty(),
+            "reverse_dependencies should be empty after close"
+        );
+        assert!(
+            read_lock(&host.last_const_prop_overrides).is_empty(),
+            "last_const_prop_overrides should be empty after close"
+        );
+    }
+
+    #[test]
+    fn close_allows_reuse() {
+        let host = VerterHost::new(HostConfig::default());
+        upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
+        host.close();
+
+        // Host should still be usable after close
+        upsert_vue(
+            &host,
+            "test2.vue",
+            "<template><span>world</span></template>",
+        );
+        assert!(
+            read_lock(&host.files).contains_key("test2.vue"),
+            "host should accept new files after close"
+        );
+        assert!(
+            !read_lock(&host.files).contains_key("test.vue"),
+            "previously closed files should not reappear"
         );
     }
 }

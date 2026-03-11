@@ -208,6 +208,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
     const declaredMethods = [
       "applyBlockOverrides",
       "applyStyleOverrides",
+      "close",
       "collectResolvableModuleReferenceSpecifiers",
       "getAnalysis",
       "getCodeActions",

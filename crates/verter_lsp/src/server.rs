@@ -1940,9 +1940,17 @@ impl VerterLanguageServer {
         }
     }
 
-    /// Trigger a full registry rebuild (same as did_change_workspace_folders).
-    /// Used when vite config files change on disk.
-    async fn trigger_registry_rebuild(&self) {
+    /// Build `BackgroundInitArgs` from the current server state and spawn
+    /// `background_init` as a fire-and-forget tokio task.
+    ///
+    /// Used by `initialized()`, `trigger_registry_rebuild()`, and
+    /// `did_change_workspace_folders()` — the three sites that need a full
+    /// project-registry rebuild.
+    async fn spawn_background_init(
+        &self,
+        init_lint_opts: Option<serde_json::Value>,
+        context: &str,
+    ) {
         let roots = self.workspace_roots.lock().await.clone();
         if roots.is_empty() {
             return;
@@ -1957,7 +1965,7 @@ impl VerterLanguageServer {
         let args = BackgroundInitArgs {
             roots,
             vite_opts,
-            init_lint_opts: None,
+            init_lint_opts,
             my_gen,
             client: self.client.clone(),
             type_provider: self.type_provider.clone(),
@@ -1975,11 +1983,19 @@ impl VerterLanguageServer {
             position_encoding: Arc::clone(&self.position_encoding),
         };
 
+        let ctx = context.to_owned();
         tokio::spawn(async move {
             if let Err(e) = background_init(args).await {
-                tracing::error!("background vite config rebuild failed: {e}");
+                tracing::error!("background {ctx} failed: {e}");
             }
         });
+    }
+
+    /// Trigger a full registry rebuild (same as did_change_workspace_folders).
+    /// Used when vite config files change on disk.
+    async fn trigger_registry_rebuild(&self) {
+        self.spawn_background_init(None, "vite config rebuild")
+            .await;
     }
 
     /// Re-read a non-open .vue file from disk, upsert, compile, and sync to TSGO.
@@ -4317,53 +4333,10 @@ impl LanguageServer for VerterLanguageServer {
             tracing::info!("Sent $/verter/mcpReady with port {port}");
         }
 
-        // C. Read inputs, release locks
-        let roots = self.workspace_roots.lock().await.clone();
-        if roots.is_empty() {
-            return;
-        }
+        // C. Spawn background init (fire-and-forget)
         let init_lint_opts = self.init_lint_options.lock().await.take();
-        let my_gen = self
-            .init_generation
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
-
-        // C2. Early path configuration — discover tsconfig paths and configure
-        // the type provider BEFORE any did_open() can fire. This is fast (reads
-        // JSON files only, no Node.js eval). Vite aliases are merged later in
-        // background_init. Without this, there's a race: did_open() syncs files
-        // to tsserver before configure_paths() runs, creating inferred projects
-        // without path aliases (causing "Cannot find module '@/...'" errors).
-        // D. Clone Arcs for background task
-        let mut vite_opts = self.vite_config_options.lock().await.clone();
-        vite_opts.node_path = crate::tsserver::find_node();
-        let args = BackgroundInitArgs {
-            roots,
-            vite_opts,
-            init_lint_opts,
-            my_gen,
-            client: self.client.clone(),
-            type_provider: self.type_provider.clone(),
-            project_registry: Arc::clone(&self.project_registry),
-            resolver_snapshot: Arc::clone(&self.resolver_snapshot),
-            fallback_linter: Arc::clone(&self.fallback_linter),
-            workspace_scanner: Arc::clone(&self.workspace_scanner),
-            init_generation: Arc::clone(&self.init_generation),
-            project_sync: self.project_sync.clone(),
-            documents: Arc::clone(&self.documents),
-            provider_sync_states: Arc::clone(&self.provider_sync_states),
-            pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
-            is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-            cached_verter_diags: Arc::clone(&self.cached_verter_diags),
-            position_encoding: Arc::clone(&self.position_encoding),
-        };
-
-        // E. Spawn background init (fire-and-forget)
-        tokio::spawn(async move {
-            if let Err(e) = background_init(args).await {
-                tracing::error!("background initialization failed: {e}");
-            }
-        });
+        self.spawn_background_init(init_lint_opts, "initialization")
+            .await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -4645,45 +4618,9 @@ impl LanguageServer for VerterLanguageServer {
             let _ = tp.update_workspace_folders(added, removed).await;
         }
 
-        // Clone roots snapshot and increment generation for background rebuild
-        let roots = self.workspace_roots.lock().await.clone();
-        if roots.is_empty() {
-            return;
-        }
-        let my_gen = self
-            .init_generation
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
-
-        // Spawn background task for the blocking work (same as background_init)
-        let mut vite_opts = self.vite_config_options.lock().await.clone();
-        vite_opts.node_path = crate::tsserver::find_node();
-        let args = BackgroundInitArgs {
-            roots,
-            vite_opts,
-            init_lint_opts: None,
-            my_gen,
-            client: self.client.clone(),
-            type_provider: self.type_provider.clone(),
-            project_registry: Arc::clone(&self.project_registry),
-            resolver_snapshot: Arc::clone(&self.resolver_snapshot),
-            fallback_linter: Arc::clone(&self.fallback_linter),
-            workspace_scanner: Arc::clone(&self.workspace_scanner),
-            init_generation: Arc::clone(&self.init_generation),
-            project_sync: self.project_sync.clone(),
-            documents: Arc::clone(&self.documents),
-            provider_sync_states: Arc::clone(&self.provider_sync_states),
-            pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
-            is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-            cached_verter_diags: Arc::clone(&self.cached_verter_diags),
-            position_encoding: Arc::clone(&self.position_encoding),
-        };
-
-        tokio::spawn(async move {
-            if let Err(e) = background_init(args).await {
-                tracing::error!("background workspace folder rebuild failed: {e}");
-            }
-        });
+        // Spawn background task for the blocking work (registry rebuild + scanner)
+        self.spawn_background_init(None, "workspace folder rebuild")
+            .await;
     }
 
     async fn did_create_files(&self, params: CreateFilesParams) {

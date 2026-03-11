@@ -1406,6 +1406,18 @@ impl NapiVerterHost {
         })
     }
 
+    /// Release all cached data (files, aliases, dependency graph).
+    ///
+    /// Call this before dropping the host to allow the Rust allocator to free
+    /// backing memory immediately, rather than waiting for GC finalisation.
+    /// This prevents the Node.js process from hanging on exit.
+    #[napi]
+    pub fn close(&self) -> Result<()> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.close();
+        }))
+    }
+
     /// Returns a snapshot of host performance metrics.
     ///
     /// Only available when built with the `host_metrics` feature.

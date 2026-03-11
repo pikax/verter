@@ -57,6 +57,14 @@ function expectCompletionsMissing(list: vscode.CompletionList, labels: string[])
   }
 }
 
+function expectCompletionsNonEmpty(
+  completions: vscode.CompletionList | undefined,
+  msg: string,
+): asserts completions is vscode.CompletionList {
+  expect(completions, `${msg}: should return completions`).to.exist;
+  expect(completions!.items.length, `${msg}: completions should not be empty`).to.be.greaterThan(0);
+}
+
 function expectNoInternalLeakage(list: vscode.CompletionList): void {
   const joined = completionLabels(list).join(",");
   expect(joined, "should not include __props").to.not.include("__props");
@@ -83,7 +91,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     console.log(`    Mustache completions: ${completionLabels(completions!).join(", ")}`);
 
@@ -108,7 +116,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["increment"]);
     expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function, vscode.CompletionItemKind.Method, vscode.CompletionItemKind.Variable]);
@@ -129,7 +137,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     console.log(`    <MyComp completions: ${completionLabels(completions!).join(", ")}`);
 
@@ -165,7 +173,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["item"]);
     expectCompletionKinds(completions!, "item", [vscode.CompletionItemKind.Variable]);
@@ -185,7 +193,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     console.log(`    action. completions: ${completionLabels(completions!).join(", ")}`);
 
@@ -200,7 +208,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     ]);
     expectCompletionsMissing(completions!, ["@click", "@custom", "foo-bar"]);
     expectNoInternalLeakage(completions!);
-    expect(completions!.items.length, "member completions should stay scoped").to.be.lessThan(50);
+    expect(completions!.items.length, "member completions should stay scoped").to.be.greaterThan(2).and.lessThan(50);
   });
 
   test("v-for item member access in mustache stays typed", async function () {
@@ -216,7 +224,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["name", "email", "age"]);
     expectCompletionKinds(completions!, "name", [
@@ -228,7 +236,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       vscode.CompletionItemKind.Field,
     ]);
     expectNoInternalLeakage(completions!);
-    expect(completions!.items.length, "member completions should stay scoped").to.be.lessThan(50);
+    expect(completions!.items.length, "member completions should stay scoped").to.be.greaterThan(2).and.lessThan(50);
   });
 
   test("nested v-for inner and outer scopes stay distinct", async function () {
@@ -244,8 +252,8 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     const innerCompletions = await getCompletions(doc.uri, innerPos!);
     const outerCompletions = await getCompletions(doc.uri, outerPos!);
-    expect(innerCompletions, "should return inner completions").to.exist;
-    expect(outerCompletions, "should return outer completions").to.exist;
+    expectCompletionsNonEmpty(innerCompletions, "inner completions");
+    expectCompletionsNonEmpty(outerCompletions, "outer completions");
 
     expectCompletionsPresent(innerCompletions!, ["label", "disabled"]);
     expectCompletionsMissing(innerCompletions!, ["email", "age"]);
@@ -267,7 +275,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["name", "email", "age"]);
     expectCompletionKinds(completions!, "name", [
@@ -291,7 +299,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["title"]);
     expectCompletionKinds(completions!, "title", [
@@ -300,7 +308,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     ]);
     expectCompletionsMissing(completions!, ["@click", "@custom", "foo-bar"]);
     expectNoInternalLeakage(completions!);
-    expect(completions!.items.length, "member completions should stay scoped").to.be.lessThan(50);
+    expect(completions!.items.length, "member completions should stay scoped").to.be.greaterThan(2).and.lessThan(50);
   });
 
   test("broken template expression still returns local bindings and excludes globals", async function () {
@@ -311,7 +319,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["count", "doubled", "increment"]);
     expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
@@ -339,7 +347,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     console.log(`    <Button completions: ${completionLabels(completions!).join(", ")}`);
 
@@ -373,7 +381,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     }
 
     const completions = await getCompletions(doc.uri, pos);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     console.log(`    <Overlay completions: ${completionLabels(completions!).join(", ")}`);
 
@@ -406,8 +414,8 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     const localCompletions = await getCompletions(slotDoc.uri, localPos!);
     const memberCompletions = await getCompletions(slotDoc.uri, memberPos!);
-    expect(localCompletions, "should return slot local completions").to.exist;
-    expect(memberCompletions, "should return slot member completions").to.exist;
+    expectCompletionsNonEmpty(localCompletions, "slot local completions");
+    expectCompletionsNonEmpty(memberCompletions, "slot member completions");
 
     expectCompletionsPresent(localCompletions!, ["slotItem", "slotIndex", "slotTotal"]);
     expectCompletionKinds(localCompletions!, "slotItem", [vscode.CompletionItemKind.Variable]);
@@ -436,7 +444,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     expect(pos, "should find recovered count usage").to.exist;
 
     const completions = await getCompletions(recoveryDoc.uri, pos!);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["count", "safeAction"]);
     expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
@@ -457,7 +465,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     expect(pos, "should find broken expression probe").to.exist;
 
     const completions = await getCompletions(brokenExprDoc.uri, pos!);
-    expect(completions, "should return completions").to.exist;
+    expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["count", "formatted"]);
     expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
@@ -482,8 +490,8 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     const mustacheCompletions = await getCompletions(jsDoc.uri, mustachePos!);
     const memberCompletions = await getCompletions(jsDoc.uri, memberPos!);
-    expect(mustacheCompletions, "should return JS mustache completions").to.exist;
-    expect(memberCompletions, "should return JS member completions").to.exist;
+    expectCompletionsNonEmpty(mustacheCompletions, "JS mustache completions");
+    expectCompletionsNonEmpty(memberCompletions, "JS member completions");
 
     expectCompletionsPresent(mustacheCompletions!, ["count", "increment"]);
     expectCompletionKinds(mustacheCompletions!, "count", [vscode.CompletionItemKind.Variable]);

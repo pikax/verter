@@ -292,7 +292,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     expect(hovers[0].contents.length, "slot outlet hover should have content").to.be.greaterThan(0);
 
     const content = hoverText(hovers[0]);
-    expect(content.toLowerCase(), "slot outlet hover should mention slot").to.include("slot");
+    expect(content, "slot outlet hover should mention slot").to.match(/\bslot\b/i);
     expect(content, "slot outlet hover should not show generic () any").to.not.include("() any");
     expect(content, "slot outlet hover should not degrade to any").to.not.match(/:\s*any\b/);
 
@@ -320,7 +320,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     expect(hovers[0].contents.length, "slot consumer hover should have content").to.be.greaterThan(0);
 
     const content = hoverText(hovers[0]);
-    expect(content.toLowerCase(), "slot consumer hover should mention slot").to.include("slot");
+    expect(content, "slot consumer hover should mention slot").to.match(/\bslot\b/i);
     expect(content, "slot consumer hover should not degrade to any").to.not.match(/:\s*any\b/);
   });
 
@@ -375,6 +375,11 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     const content = hoverText(hovers[0]);
     const hasNamedType = content.includes("Action");
     const hasExpandedType = content.includes("label") && content.includes("disabled") && content.includes("handler");
+    if (hasNamedType && !hasExpandedType) {
+      console.log("    Note: v-for hover shows named type only (Action), not expanded properties");
+    } else if (!hasNamedType && hasExpandedType) {
+      console.log("    Note: v-for hover shows expanded type only, not named type (Action)");
+    }
     expect(hasNamedType || hasExpandedType, `unexpected v-for local hover:\n${content}`).to.equal(true);
     expect(content, "v-for local hover should not degrade to any").to.not.match(/:\s*any\b/);
   });
@@ -426,6 +431,11 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     const content = hoverText(hovers[0]);
     const hasNamedType = content.includes("User");
     const hasExpandedType = content.includes("name") && content.includes("email") && content.includes("age");
+    if (hasNamedType && !hasExpandedType) {
+      console.log("    Note: nested v-for hover shows named type only (User), not expanded properties");
+    } else if (!hasNamedType && hasExpandedType) {
+      console.log("    Note: nested v-for hover shows expanded type only, not named type (User)");
+    }
     expect(hasNamedType || hasExpandedType, `unexpected nested v-for hover:\n${content}`).to.equal(true);
     expect(content, "nested v-for hover should not degrade to any").to.not.match(/:\s*any\b/);
   });
