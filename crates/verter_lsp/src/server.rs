@@ -1165,7 +1165,8 @@ impl VerterLanguageServer {
     /// Get IDE content and mapper by IDE path (reverse lookup).
     fn ide_context_by_path(&self, ide_path: &str) -> Option<(String, Arc<str>, PositionMapper)> {
         let snapshot = self.resolver_snapshot()?;
-        let canonical_id = source_id_from_provider_vue_path(&snapshot.resolver, ide_path)?;
+        let canonical_id =
+            source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
         let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
         self.ide_context(&uri)
     }
@@ -1526,7 +1527,8 @@ impl VerterLanguageServer {
         let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
         // Get the Vue file's line index
         let snapshot = self.resolver_snapshot()?;
-        let canonical_id = source_id_from_provider_vue_path(&snapshot.resolver, ide_path)?;
+        let canonical_id =
+            source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
         let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
         let doc = self.documents.get(&uri)?;
         Some(merge::ExternalIdeContext {
@@ -1556,7 +1558,8 @@ impl VerterLanguageServer {
     /// Find the Vue URI corresponding to an IDE path.
     fn vue_uri_from_ide_path(&self, ide_path: &str) -> Option<Uri> {
         let snapshot = self.resolver_snapshot()?;
-        let canonical_id = source_id_from_provider_vue_path(&snapshot.resolver, ide_path)?;
+        let canonical_id =
+            source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
         self.documents.canonical_id_to_uri(&canonical_id)
     }
 
@@ -2754,9 +2757,17 @@ fn provider_api_path_for_source(
 
 fn source_id_from_provider_vue_path(
     resolver: &crate::project_resolver::NativeProjectResolver,
+    host: &verter_host::VerterHost,
     provider_path: &str,
 ) -> Option<String> {
-    resolver.source_id_from_provider_id(provider_path)
+    let candidate = resolver.source_id_from_provider_id(provider_path)?;
+    // Collision guard: verify backing .vue source exists in host.
+    // A real .vue.tsx on disk under a project root would incorrectly match
+    // project ownership for .vue even though no .vue file was compiled.
+    if candidate.ends_with(".vue") && host.get_source(&candidate).is_none() {
+        return None;
+    }
+    Some(candidate)
 }
 
 struct LspProjectResolverReader<'a> {
@@ -4385,21 +4396,34 @@ impl LanguageServer for VerterLanguageServer {
         let startup_policy = did_open_startup_policy(self.type_provider_kind);
         let imported_vue_priority_ids = self
             .documents
-            .get_canonical_id(uri)
-            .map(|canonical_id| {
-                let snapshot = self.resolver_snapshot();
-                let reader = LspProjectResolverReader::new(&self.documents);
-                self.documents
-                    .get_analysis(uri)
-                    .map(|analysis| {
-                        collect_priority_vue_targets_from_module_references(
-                            snapshot.as_ref(),
-                            &reader,
-                            &canonical_id,
-                            &analysis.module_references,
-                        )
-                    })
-                    .unwrap_or_default()
+            .get_analysis(uri)
+            .map(|analysis| {
+                // Primary: analysis.imports already has resolved_canonical_id from host
+                // (works even before background_init builds the resolver snapshot)
+                let mut ids =
+                    collect_imported_vue_priority_ids_from_imports(&analysis.imports);
+
+                // Supplement: module_references for dynamic import()/require() cases
+                // that aren't in analysis.imports (needs resolver, may return empty pre-init)
+                if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+                    let snapshot = self.resolver_snapshot();
+                    let reader = LspProjectResolverReader::new(&self.documents);
+                    let dynamic_ids = collect_priority_vue_targets_from_module_references(
+                        snapshot.as_ref(),
+                        &reader,
+                        &canonical_id,
+                        &analysis.module_references,
+                    );
+                    // Dedup: add only IDs not already in the primary set
+                    let seen: HashSet<String> =
+                        ids.iter().cloned().collect();
+                    for id in dynamic_ids {
+                        if !seen.contains(&id) {
+                            ids.push(id);
+                        }
+                    }
+                }
+                ids
             })
             .unwrap_or_default();
         // Signal the background scanner to prioritize this file's directory
@@ -7514,17 +7538,27 @@ mod tests {
                 Some("/workspace/tsconfig.app.json".to_string()),
             ),
         ]);
+        // Host must have the backing .vue source for the collision guard to pass
+        let host = VerterHost::new(HostConfig::default());
+        host.upsert(verter_host::UpsertRequest {
+            canonical_id: Some("/workspace/src/App.vue".to_string()),
+            input_id: "/workspace/src/App.vue".to_string(),
+            source: "<template><div/></template>".into(),
+            file_kind: verter_host::FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 
         let ide_path =
             provider_ide_path_for_source(&resolver, "/workspace/src/App.vue", true).unwrap();
         let api_path = provider_api_path_for_source(&resolver, "/workspace/src/App.vue").unwrap();
 
         assert_eq!(
-            source_id_from_provider_vue_path(&resolver, &ide_path).as_deref(),
+            source_id_from_provider_vue_path(&resolver, &host, &ide_path).as_deref(),
             Some("/workspace/src/App.vue")
         );
         assert_eq!(
-            source_id_from_provider_vue_path(&resolver, &api_path).as_deref(),
+            source_id_from_provider_vue_path(&resolver, &host, &api_path).as_deref(),
             Some("/workspace/src/App.vue")
         );
     }
@@ -7540,11 +7574,12 @@ mod tests {
                 Some("/workspace/tsconfig.app.json".to_string()),
             ),
         ]);
+        let host = VerterHost::new(HostConfig::default());
 
         // "/workspace/src/weird.vue.tsx" has no backing "/workspace/src/weird.vue"
         // registered in any project, so the resolver should not strip the suffix
         assert_eq!(
-            source_id_from_provider_vue_path(&resolver, "/other/weird.vue.tsx"),
+            source_id_from_provider_vue_path(&resolver, &host, "/other/weird.vue.tsx"),
             None,
             ".vue.tsx with no backing .vue in any project should return None"
         );
@@ -7560,11 +7595,48 @@ mod tests {
                 Some("/workspace/tsconfig.app.json".to_string()),
             ),
         ]);
+        // Host must have the backing .vue source for the collision guard to pass
+        let host = VerterHost::new(HostConfig::default());
+        host.upsert(verter_host::UpsertRequest {
+            canonical_id: Some("/workspace/src/App.vue".to_string()),
+            input_id: "/workspace/src/App.vue".to_string(),
+            source: "<template><div/></template>".into(),
+            file_kind: verter_host::FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 
         assert_eq!(
-            source_id_from_provider_vue_path(&resolver, "/workspace/src/App.vue.tsx").as_deref(),
+            source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/App.vue.tsx")
+                .as_deref(),
             Some("/workspace/src/App.vue"),
             "virtual .vue.tsx with backing .vue source should resolve to .vue"
+        );
+    }
+
+    #[test]
+    fn vue_tsx_collision_guard_rejects_when_host_missing_source() {
+        // The resolver thinks /workspace/src/Real.vue.tsx belongs to the project
+        // and strips the suffix to get /workspace/src/Real.vue, but the host
+        // has never compiled Real.vue → collision guard must reject.
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+        let host = VerterHost::new(HostConfig::default());
+        // Do NOT upsert /workspace/src/Real.vue into host
+
+        assert_eq!(
+            source_id_from_provider_vue_path(
+                &resolver,
+                &host,
+                "/workspace/src/Real.vue.tsx"
+            ),
+            None,
+            ".vue.tsx in project but no backing .vue in host should return None"
         );
     }
 
