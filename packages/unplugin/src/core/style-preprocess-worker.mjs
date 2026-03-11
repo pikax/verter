@@ -1,58 +1,20 @@
-/**
- * Child process entry point for style preprocessing via Vite's `preprocessCSS()`.
- *
- * Spawned by `PreprocessorSession` via `child_process.fork()`. Runs Vite's CSS
- * preprocessor in an isolated process so that leaked Sass/Stylus worker threads
- * are killed on `process.exit(0)` rather than holding the parent alive.
- *
- * IPC messages:
- *   parent → child:  init, preprocess, close
- *   child → parent:  ready, result, error
- */
-
+// Keep this source-side worker in sync with style-preprocess-worker.ts.
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import type { ResolvedConfig } from "vite";
 
-interface InitMessage {
-  type: "init";
-  configFile?: string;
-  root?: string;
-  cssOptions?: Record<string, unknown>;
-}
+let resolvedConfig = null;
+let initState = null;
 
-interface PreprocessMessage {
-  type: "preprocess";
-  id: number;
-  content: string;
-  filename: string;
-  lang: string;
-}
-
-interface CloseMessage {
-  type: "close";
-}
-
-type ParentMessage = InitMessage | PreprocessMessage | CloseMessage;
-
-type WorkerPreprocessResult = {
-  code: string;
-  sourceMap?: string;
-};
-
-let resolvedConfig: ResolvedConfig | null = null;
-let initState: InitMessage | null = null;
-
-async function handleInit(msg: InitMessage): Promise<void> {
+async function handleInit(msg) {
   if (msg.configFile && !existsSync(msg.configFile)) {
     throw new Error(`Could not resolve "${msg.configFile}"`);
   }
   initState = msg;
   resolvedConfig = null;
-  process.send!({ type: "ready" });
+  process.send({ type: "ready" });
 }
 
-async function getResolvedConfig(): Promise<ResolvedConfig> {
+async function getResolvedConfig() {
   if (resolvedConfig) {
     return resolvedConfig;
   }
@@ -71,14 +33,14 @@ async function getResolvedConfig(): Promise<ResolvedConfig> {
       resolvedConfig = await resolveConfig(loaded.config, "build", "production");
     } else {
       resolvedConfig = await resolveConfig(
-        { root: initState.root, css: initState.cssOptions as any },
+        { root: initState.root, css: initState.cssOptions },
         "build",
         "production",
       );
     }
   } else {
     resolvedConfig = await resolveConfig(
-      { root: initState.root, css: initState.cssOptions as any },
+      { root: initState.root, css: initState.cssOptions },
       "build",
       "production",
     );
@@ -87,8 +49,8 @@ async function getResolvedConfig(): Promise<ResolvedConfig> {
   return resolvedConfig;
 }
 
-function getStyleOptions(lang: string): Record<string, unknown> {
-  const cssOptions = (initState?.cssOptions as Record<string, any> | undefined) ?? {};
+function getStyleOptions(lang) {
+  const cssOptions = initState?.cssOptions ?? {};
   const preprocessorOptions = cssOptions.preprocessorOptions ?? {};
   if (lang === "sass") {
     return preprocessorOptions.sass ?? preprocessorOptions.scss ?? {};
@@ -96,10 +58,10 @@ function getStyleOptions(lang: string): Record<string, unknown> {
   return preprocessorOptions.scss ?? preprocessorOptions.sass ?? {};
 }
 
-function normalizeLoadPaths(value: unknown): string[] | undefined {
+function normalizeLoadPaths(value) {
   if (!value) return undefined;
   if (Array.isArray(value)) {
-    return value.filter((entry): entry is string => typeof entry === "string");
+    return value.filter((entry) => typeof entry === "string");
   }
   if (typeof value === "string") {
     return [value];
@@ -107,11 +69,7 @@ function normalizeLoadPaths(value: unknown): string[] | undefined {
   return undefined;
 }
 
-async function applyAdditionalData(
-  content: string,
-  additionalData: unknown,
-  filename: string,
-): Promise<string> {
+async function applyAdditionalData(content, additionalData, filename) {
   if (typeof additionalData === "string") {
     return `${additionalData}\n${content}`;
   }
@@ -121,7 +79,7 @@ async function applyAdditionalData(
       return result;
     }
     if (result && typeof result === "object" && "content" in result) {
-      const nextContent = (result as { content?: unknown }).content;
+      const nextContent = result.content;
       if (typeof nextContent === "string") {
         return nextContent;
       }
@@ -130,15 +88,13 @@ async function applyAdditionalData(
   return content;
 }
 
-async function tryCompileSass(
-  msg: PreprocessMessage,
-): Promise<WorkerPreprocessResult | null> {
+async function tryCompileSass(msg) {
   const lang = msg.lang.toLowerCase();
   if (lang !== "scss" && lang !== "sass") {
     return null;
   }
 
-  let sass: typeof import("sass");
+  let sass;
   try {
     sass = await import("sass");
   } catch {
@@ -170,9 +126,7 @@ async function tryCompileSass(
   }
 }
 
-async function preprocessWithVite(
-  msg: PreprocessMessage,
-): Promise<WorkerPreprocessResult> {
+async function preprocessWithVite(msg) {
   const { preprocessCSS } = await import("vite");
   const result = await preprocessCSS(
     msg.content,
@@ -186,34 +140,34 @@ async function preprocessWithVite(
   };
 }
 
-async function handlePreprocess(msg: PreprocessMessage): Promise<void> {
+async function handlePreprocess(msg) {
   try {
     const result = await tryCompileSass(msg) ?? await preprocessWithVite(msg);
-    process.send!({
+    process.send({
       type: "result",
       id: msg.id,
       code: result.code,
       sourceMap: result.sourceMap,
     });
-  } catch (e: unknown) {
-    process.send!({
+  } catch (error) {
+    process.send({
       type: "error",
       id: msg.id,
-      message: e instanceof Error ? e.message : String(e),
+      message: error instanceof Error ? error.message : String(error),
     });
   }
 }
 
-process.on("message", async (msg: ParentMessage) => {
+process.on("message", async (msg) => {
   switch (msg.type) {
     case "init":
       try {
         await handleInit(msg);
-      } catch (e: unknown) {
-        process.send!({
+      } catch (error) {
+        process.send({
           type: "error",
           id: -1,
-          message: `Init failed: ${e instanceof Error ? e.message : String(e)}`,
+          message: `Init failed: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
       break;

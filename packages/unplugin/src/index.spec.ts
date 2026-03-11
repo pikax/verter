@@ -199,14 +199,18 @@ $border: #555;
 }
 </style>`;
 
-    await plugin.transform(sfc, file);
-    const style = await plugin.load(`${file}?vue&type=style&index=0&lang.scss`);
+    try {
+      await plugin.transform(sfc, file);
+      const style = await plugin.load(`${file}?vue&type=style&index=0&lang.scss`);
 
-    expect(style).toBeDefined();
-    expect(style.code).toContain(".scoped-style:hover");
-    expect(style.code).toContain("#555");
-    expect(style.code).not.toContain("$border");
-    expect(style.code).not.toContain("[data-v-");
+      expect(style).toBeDefined();
+      expect(style.code).toContain(".scoped-style:hover");
+      expect(style.code).toContain("#555");
+      expect(style.code).not.toContain("$border");
+      expect(style.code).not.toContain("[data-v-");
+    } finally {
+      await plugin.closeBundle();
+    }
   });
 
   it("scopes compiled CSS for non-css style virtual modules without re-preprocessing", async () => {
@@ -222,16 +226,65 @@ $border: #555;
 }
 </style>`;
 
-    await plugin.transform(sfc, file);
-    const styleId = `${file}?vue&type=style&index=0&lang.scss`;
-    const style = await plugin.load(styleId);
-    const transformed = await plugin.transform(style.code, styleId);
+    try {
+      await plugin.transform(sfc, file);
+      const styleId = `${file}?vue&type=style&index=0&lang.scss`;
+      const style = await plugin.load(styleId);
+      const transformed = await plugin.transform(style.code, styleId);
 
-    expect(transformed).toBeDefined();
-    expect(transformed.code).toContain("[data-v-");
-    expect(transformed.code).toContain("#555");
-    expect(transformed.code).not.toContain("$border");
+      expect(transformed).toBeDefined();
+      expect(transformed.code).toContain("[data-v-");
+      expect(transformed.code).toContain("#555");
+      expect(transformed.code).not.toContain("$border");
+    } finally {
+      await plugin.closeBundle();
+    }
   });
+
+  it("buildEnd closes the style preprocessor session and later transforms respawn it", async () => {
+    const plugin = await createVitePlugin();
+    const firstFile = join(tempDir, "BuildEndOne.vue").replace(/\\/g, "/");
+    const secondFile = join(tempDir, "BuildEndTwo.vue").replace(/\\/g, "/");
+    const firstSfc = `<template><button class="first-build-end">x</button></template>
+<style scoped lang="scss">
+$border: #555;
+.first-build-end {
+  &:hover {
+    border-color: $border;
+  }
+}
+</style>`;
+    const secondSfc = `<template><button class="second-build-end">x</button></template>
+<style scoped lang="scss">
+$border: #0a84ff;
+.second-build-end {
+  &:hover {
+    border-color: $border;
+  }
+}
+</style>`;
+
+    try {
+      await plugin.transform(firstSfc, firstFile);
+      await expect(
+        Promise.race([
+          plugin.buildEnd(),
+          new Promise((_, reject) => {
+            setTimeout(() => reject(new Error("buildEnd timed out")), 4_000);
+          }),
+        ]),
+      ).resolves.toBeUndefined();
+
+      await plugin.transform(secondSfc, secondFile);
+      const style = await plugin.load(`${secondFile}?vue&type=style&index=0&lang.scss`);
+
+      expect(style).toBeDefined();
+      expect(style.code).toContain("#0a84ff");
+      expect(style.code).not.toContain("$border");
+    } finally {
+      await plugin.closeBundle();
+    }
+  }, 45_000);
 });
 
 describe("vite compat shim", () => {

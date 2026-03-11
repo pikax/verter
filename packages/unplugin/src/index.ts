@@ -10,7 +10,10 @@ import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-re
 import { hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
 import { preprocessBlock } from "./core/preprocessor";
-import { PreprocessorSession } from "./core/preprocessor-session";
+import {
+  isStylePreprocessorRequest,
+  PreprocessorSession,
+} from "./core/preprocessor-session";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
 
@@ -184,6 +187,15 @@ async function applyPreprocessorRequests(
   }
 }
 
+function prewarmStylePreprocessorSession(
+  upsertResult: HostUpdateResult,
+  preprocessorSession?: PreprocessorSession | null,
+): void {
+  if (!preprocessorSession) return;
+  if (!upsertResult.preprocessorRequests?.some(isStylePreprocessorRequest)) return;
+  void preprocessorSession.prewarm().catch(() => {});
+}
+
 function getHmrStrategy(framework: string): HmrStrategy {
   switch (framework) {
     case "vite":
@@ -351,6 +363,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           inputId: filename,
           source,
         });
+        prewarmStylePreprocessorSession(upsertResult, session);
 
         await resolveUpsertDependencies(
           host,
@@ -461,6 +474,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         source: code,
       });
       const t1 = timing ? performance.now() : 0;
+      prewarmStylePreprocessorSession(upsertResult, session);
 
       await resolveUpsertDependencies(
         host,
@@ -604,4 +618,3 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 const unplugin = createUnplugin(unpluginFactory);
 
 export default unplugin;
-

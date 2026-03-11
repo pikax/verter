@@ -1,6 +1,5 @@
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadConfigFromFile, resolveConfig } from "vite";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const e2eDir = path.resolve(__dirname, "..");
@@ -10,23 +9,28 @@ const fixtureConfigFile = path.resolve(fixtureDir, "vite.config.ts");
 const distEntryUrl = pathToFileURL(path.resolve(unpluginDir, "dist", "index.mjs")).href;
 
 async function main() {
-  const loaded = await loadConfigFromFile(
-    { command: "build", mode: "production" },
-    fixtureConfigFile,
-  );
-
-  if (!loaded?.config) {
-    throw new Error(`Could not load fixture config: ${fixtureConfigFile}`);
-  }
-
-  const resolved = await resolveConfig(loaded.config, "build", "production");
   const { unpluginFactory } = await import(distEntryUrl);
   const plugin = unpluginFactory(undefined, {
     framework: "vite",
     versions: { unplugin: "0.0.0", vite: "7.0.0" },
   });
 
-  plugin.vite?.configResolved?.(resolved);
+  plugin.vite?.configResolved?.({
+    configFile: fixtureConfigFile,
+    root: fixtureDir,
+    css: {
+      preprocessorOptions: {
+        scss: {
+          api: "modern-compiler",
+        },
+      },
+    },
+    command: "build",
+    build: {
+      cssCodeSplit: false,
+      ssr: false,
+    },
+  });
 
   const file = path.resolve(fixtureDir, "src", "DirectStyleExitRegression.vue").replace(/\\/g, "/");
   const sfc = [

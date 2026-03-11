@@ -1,5 +1,5 @@
 /**
- * `PreprocessorSession` — plugin-scoped lifecycle owner for style preprocessing.
+ * `PreprocessorSession` - plugin-scoped lifecycle owner for style preprocessing.
  *
  * Delegates style preprocessor languages (scss, sass, less, styl, stylus) to an
  * isolated child process that runs Vite's `preprocessCSS()`. This ensures leaked
@@ -11,11 +11,17 @@
  */
 
 import { fork, type ChildProcess } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { HostPreprocessorRequest } from "@verter/native";
 import type { BlockPreprocessor } from "./types";
-import { preprocessTemplate, preprocessScript, preprocessCustom } from "./preprocessor";
+import {
+  preprocessCustom,
+  preprocessScript,
+  preprocessTemplate,
+} from "./preprocessor";
 
 interface PreprocessResult {
   code: string;
@@ -28,8 +34,26 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface CleanupHandler {
+  event: "exit" | NodeJS.Signals;
+  handler: () => void;
+}
+
+interface WorkerLaunchConfig {
+  modulePath?: string;
+  execArgv?: string[];
+}
+
 const STYLE_LANGS = new Set(["scss", "sass", "less", "styl", "stylus"]);
 const REQUEST_TIMEOUT_MS = 30_000;
+const CLOSE_TIMEOUT_MS = 2_000;
+const require = createRequire(import.meta.url);
+
+export function isStylePreprocessorRequest(
+  req: Pick<HostPreprocessorRequest, "blockType" | "lang">,
+): boolean {
+  return req.blockType === "style" && STYLE_LANGS.has(req.lang.toLowerCase());
+}
 
 export class PreprocessorSession {
   private child: ChildProcess | null = null;
@@ -38,7 +62,9 @@ export class PreprocessorSession {
   private pending = new Map<number, PendingRequest>();
   private nextId = 1;
   private dead = false;
-  private cleanupHandlers: (() => void)[] = [];
+  private closing = false;
+  private expectedExit = false;
+  private cleanupHandlers: CleanupHandler[] = [];
 
   constructor(
     private viteConfig: {
@@ -57,7 +83,6 @@ export class PreprocessorSession {
     filename: string,
     customBlockHandlers?: Record<string, BlockPreprocessor>,
   ): Promise<PreprocessResult | null> {
-    // Route non-style blocks to in-process handlers
     if (req.blockType === "template") {
       return preprocessTemplate(req.lang, req.content, filename);
     }
@@ -68,22 +93,20 @@ export class PreprocessorSession {
       return preprocessCustom(req.lang, req.content, filename, customBlockHandlers);
     }
 
-    // Style blocks: check if this lang needs preprocessing
-    if (req.blockType !== "style" || !STYLE_LANGS.has(req.lang.toLowerCase())) {
+    if (!isStylePreprocessorRequest(req)) {
       return null;
     }
 
-    // No viteConfig means non-Vite bundlers — warn and return null (same as before)
     if (!this.viteConfig) {
       console.warn(
         `[verter] Style preprocessing for lang="${req.lang}" requires Vite. ` +
-        `Other bundlers are not yet supported for style preprocessing.`,
+          `Other bundlers are not yet supported for style preprocessing.`,
       );
       return null;
     }
 
     if (this.dead) {
-      throw new Error("[verter] PreprocessorSession is dead — child process crashed.");
+      throw new Error("[verter] PreprocessorSession is dead - child process crashed.");
     }
 
     await this.ensureChild();
@@ -91,65 +114,80 @@ export class PreprocessorSession {
   }
 
   /**
+   * Starts the worker before the first style request needs it.
+   * Callers should fire-and-forget this and handle failures at process time.
+   */
+  prewarm(): Promise<void> {
+    if (!this.viteConfig || this.dead) {
+      return Promise.resolve();
+    }
+    return this.ensureChild();
+  }
+
+  /**
    * Kill the child process, reject all pending requests, and clean up.
-   * Idempotent — safe to call multiple times.
+   * Idempotent - safe to call multiple times.
    */
   async close(): Promise<void> {
-    if (!this.child) return;
+    const child = this.child;
+    this.removeCleanupGuards();
 
-    // Remove cleanup guards
-    for (const handler of this.cleanupHandlers) {
-      process.removeListener("beforeExit", handler);
-      process.removeListener("SIGINT", handler);
-      process.removeListener("SIGTERM", handler);
-    }
-    this.cleanupHandlers = [];
-
-    // Reject all pending requests
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(new Error("[verter] PreprocessorSession closed."));
     }
     this.pending.clear();
 
-    // Try graceful close, then force kill
-    const child = this.child;
     this.child = null;
     this.childReady = false;
     this.readyPromise = null;
+    this.closing = true;
+    this.expectedExit = true;
+
+    if (!child) {
+      this.closing = false;
+      this.expectedExit = false;
+      return;
+    }
 
     if (child.connected) {
       try {
         child.send({ type: "close" });
       } catch {
-        // Already disconnected
+        // Already disconnected.
       }
     }
 
-    // Wait briefly for graceful exit, then force kill
     await new Promise<void>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resolve();
+        return;
+      }
+
       const timer = setTimeout(() => {
         try {
-          child.kill("SIGKILL");
+          child.kill();
         } catch {
-          // Already dead
+          // Already dead.
         }
         resolve();
-      }, 2_000);
+      }, CLOSE_TIMEOUT_MS);
 
       child.once("exit", () => {
         clearTimeout(timer);
         resolve();
       });
     });
+
+    this.closing = false;
+    this.expectedExit = false;
+    this.dead = false;
   }
 
   /** Whether the child process is still running. */
   isAlive(): boolean {
     return !this.dead && this.child !== null;
   }
-
-  // ── Internal ──────────────────────────────────────────────────────
 
   private async ensureChild(): Promise<void> {
     if (this.childReady) return;
@@ -158,23 +196,30 @@ export class PreprocessorSession {
       return;
     }
 
-    this.readyPromise = this.spawnChild();
+    this.readyPromise = this.spawnChild().finally(() => {
+      this.readyPromise = null;
+    });
     await this.readyPromise;
   }
 
   private async spawnChild(): Promise<void> {
-    // Resolve worker path relative to this module
-    const workerPath = resolveWorkerPath();
+    const worker = resolveWorkerLaunchConfig();
 
     return new Promise<void>((resolve, reject) => {
-      const child = fork(workerPath, [], {
+      const child = fork(worker.modulePath!, [], {
         stdio: ["ignore", "pipe", "pipe", "ipc"],
         serialization: "advanced",
+        execArgv: worker.execArgv,
       });
+      let settled = false;
 
       this.child = child;
+      this.childReady = false;
+      this.dead = false;
+      this.closing = false;
+      this.expectedExit = false;
+      this.installCleanupGuards();
 
-      // Pipe child stdout/stderr to parent (for debugging)
       child.stdout?.on("data", (chunk: Buffer) => {
         process.stdout.write(chunk);
       });
@@ -184,69 +229,86 @@ export class PreprocessorSession {
 
       child.on("message", (msg: any) => {
         if (msg.type === "ready") {
+          settled = true;
           this.childReady = true;
           resolve();
           return;
         }
-        if (msg.type === "result" || msg.type === "error") {
-          const pending = this.pending.get(msg.id);
-          if (!pending) return;
-          this.pending.delete(msg.id);
-          clearTimeout(pending.timer);
 
-          if (msg.type === "error") {
-            if (msg.id === -1) {
-              // Init failure
-              reject(new Error(msg.message));
-              return;
-            }
-            pending.reject(new Error(msg.message));
-          } else {
-            pending.resolve({
-              code: msg.code,
-              sourceMap: msg.sourceMap,
-            });
-          }
+        if (msg.type !== "result" && msg.type !== "error") {
+          return;
         }
+
+        if (msg.type === "error" && msg.id === -1) {
+          settled = true;
+          this.cleanupFailedChild(child);
+          reject(new Error(msg.message));
+          return;
+        }
+
+        const pending = this.pending.get(msg.id);
+        if (!pending) return;
+
+        this.pending.delete(msg.id);
+        clearTimeout(pending.timer);
+
+        if (msg.type === "error") {
+          pending.reject(new Error(msg.message));
+          return;
+        }
+
+        pending.resolve({
+          code: msg.code,
+          sourceMap: msg.sourceMap,
+        });
       });
 
       child.on("exit", (code, signal) => {
-        this.dead = true;
+        const wasExpected = this.expectedExit || this.child !== child;
+        if (this.child === child) {
+          this.child = null;
+        }
         this.childReady = false;
-        this.child = null;
 
-        // Reject all pending requests
-        for (const [, p] of this.pending) {
-          clearTimeout(p.timer);
-          p.reject(
-            new Error(
-              `[verter] Style preprocessor child exited unexpectedly (code=${code}, signal=${signal}).`,
-            ),
-          );
+        if (wasExpected) {
+          if (!this.closing) {
+            this.dead = false;
+          }
+          return;
+        }
+
+        this.dead = true;
+        this.removeCleanupGuards();
+
+        const error = new Error(
+          `[verter] Style preprocessor child exited unexpectedly (code=${code}, signal=${signal}).`,
+        );
+        for (const [, pending] of this.pending) {
+          clearTimeout(pending.timer);
+          pending.reject(error);
         }
         this.pending.clear();
+
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
       });
 
       child.on("error", (err) => {
-        reject(err);
+        this.cleanupFailedChild(child);
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
       });
 
-      // Send init message
       child.send({
         type: "init",
         configFile: this.viteConfig?.configFile,
         root: this.viteConfig?.root,
         cssOptions: this.viteConfig?.cssOptions,
       });
-
-      // Register cleanup guards
-      const cleanup = () => {
-        this.close().catch(() => {});
-      };
-      process.on("beforeExit", cleanup);
-      process.on("SIGINT", cleanup);
-      process.on("SIGTERM", cleanup);
-      this.cleanupHandlers.push(cleanup);
     });
   }
 
@@ -264,7 +326,11 @@ export class PreprocessorSession {
       const id = this.nextId++;
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`[verter] Style preprocess timed out after ${REQUEST_TIMEOUT_MS}ms for ${filename}`));
+        reject(
+          new Error(
+            `[verter] Style preprocess timed out after ${REQUEST_TIMEOUT_MS}ms for ${filename}`,
+          ),
+        );
       }, REQUEST_TIMEOUT_MS);
 
       this.pending.set(id, { resolve, reject, timer });
@@ -278,31 +344,90 @@ export class PreprocessorSession {
       });
     });
   }
+
+  private installCleanupGuards(): void {
+    this.removeCleanupGuards();
+
+    const cleanup = () => {
+      if (!this.child) return;
+      try {
+        this.child.kill();
+      } catch {
+        // Already dead.
+      }
+    };
+
+    for (const event of ["exit", "SIGINT", "SIGTERM"] as const) {
+      process.on(event, cleanup);
+      this.cleanupHandlers.push({ event, handler: cleanup });
+    }
+  }
+
+  private removeCleanupGuards(): void {
+    for (const { event, handler } of this.cleanupHandlers) {
+      process.removeListener(event, handler);
+    }
+    this.cleanupHandlers = [];
+  }
+
+  private cleanupFailedChild(child: ChildProcess): void {
+    if (this.child === child) {
+      this.child = null;
+    }
+    this.childReady = false;
+    this.readyPromise = null;
+    this.closing = false;
+    this.expectedExit = false;
+    this.dead = false;
+    this.removeCleanupGuards();
+    try {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill();
+      }
+    } catch {
+      // Already dead.
+    }
+  }
 }
 
-function resolveWorkerPath(): string {
-  // In ESM context, resolve relative to this file
-  try {
-    const thisDir = path.dirname(fileURLToPath(import.meta.url));
-    // In development (ts-node, vitest), use the TS source directly via tsx
-    const tsPath = path.resolve(thisDir, "style-preprocess-worker.ts");
-    // In production (built dist), use the compiled JS
-    const mjsPath = path.resolve(thisDir, "style-preprocess-worker.mjs");
-    const cjsPath = path.resolve(thisDir, "style-preprocess-worker.js");
+function resolveWorkerLaunchConfig(): WorkerLaunchConfig {
+  const thisDir = resolveThisDir();
+  const mjsPath = path.resolve(thisDir, "style-preprocess-worker.mjs");
+  const cjsPath = path.resolve(thisDir, "style-preprocess-worker.cjs");
+  const tsPath = path.resolve(thisDir, "style-preprocess-worker.ts");
 
-    const fs = require("fs");
-    if (fs.existsSync(mjsPath)) return mjsPath;
-    if (fs.existsSync(cjsPath)) return cjsPath;
-    if (fs.existsSync(tsPath)) return tsPath;
-    return mjsPath; // Fallback — will error at fork time
-  } catch {
-    // Fallback for CJS context
-    const thisDir = __dirname;
-    const mjsPath = path.resolve(thisDir, "style-preprocess-worker.mjs");
-    const cjsPath = path.resolve(thisDir, "style-preprocess-worker.js");
-    const fs = require("fs");
-    if (fs.existsSync(mjsPath)) return mjsPath;
-    if (fs.existsSync(cjsPath)) return cjsPath;
-    return mjsPath;
+  if (existsSync(mjsPath)) {
+    return { modulePath: mjsPath };
   }
+  if (existsSync(cjsPath)) {
+    return { modulePath: cjsPath };
+  }
+  if (existsSync(tsPath)) {
+    return {
+      modulePath: tsPath,
+      execArgv: resolveTsWorkerExecArgv(),
+    };
+  }
+
+  return { modulePath: mjsPath };
+}
+
+function resolveThisDir(): string {
+  try {
+    return path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return __dirname;
+  }
+}
+
+function resolveTsxImportSpecifier(): string {
+  return pathToFileURL(require.resolve("tsx")).href;
+}
+
+function resolveTsWorkerExecArgv(): string[] {
+  const major = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
+  if (major >= 22) {
+    return ["--experimental-strip-types"];
+  }
+  return ["--import", resolveTsxImportSpecifier()];
 }
