@@ -9,6 +9,7 @@ import {
   sleep,
   triggerDecorationRefresh,
   FIXTURE_NAME,
+  TYPE_PROVIDER,
   type DecorationState,
 } from "../helpers";
 
@@ -164,6 +165,8 @@ suite(`Prop Constness Decorations [${FIXTURE_NAME}]`, function () {
   let state: DecorationState | undefined;
 
   suiteSetup(async function () {
+    // Prop constness requires cross-file analysis via the type provider
+    if (!TYPE_PROVIDER) return this.skip();
     await waitForExtensionReady();
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 

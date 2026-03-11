@@ -6,6 +6,7 @@ import {
   getAppVuePath,
   getCodeActions,
   FIXTURE_NAME,
+  TYPE_PROVIDER,
 } from "../helpers";
 
 function isCodeAction(item: vscode.CodeAction | vscode.Command): item is vscode.CodeAction {
@@ -23,6 +24,7 @@ suite(`Code Actions [${FIXTURE_NAME}]`, function () {
   });
 
   test("organize imports action available with source.organizeImports filter", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     // Request code actions for the import region (lines 1-12, 0-indexed: 0-11)
     const importRange = new vscode.Range(
       new vscode.Position(1, 0),
@@ -54,6 +56,7 @@ suite(`Code Actions [${FIXTURE_NAME}]`, function () {
   });
 
   test("unfiltered request returns multiple action kinds", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     // Request code actions for the full script range without kind filter
     const scriptRange = new vscode.Range(
       new vscode.Position(0, 0),

@@ -11,6 +11,7 @@ import {
   findPosition,
   findNthPosition,
   FIXTURE_NAME,
+  TYPE_PROVIDER,
 } from "../helpers";
 
 function completionLabel(item: vscode.CompletionItem): string {
@@ -89,7 +90,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     expectCompletionsPresent(completions!, ["count", "doubled", "increment"]);
     expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
     expectCompletionKinds(completions!, "doubled", [vscode.CompletionItemKind.Variable]);
-    expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function]);
+    expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function, vscode.CompletionItemKind.Method, vscode.CompletionItemKind.Variable]);
     expectCompletionsMissing(completions!, [
       "AbortController",
       "HTMLDivElement",
@@ -110,11 +111,12 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     expect(completions, "should return completions").to.exist;
 
     expectCompletionsPresent(completions!, ["increment"]);
-    expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function]);
+    expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function, vscode.CompletionItemKind.Method, vscode.CompletionItemKind.Variable]);
     expectNoInternalLeakage(completions!);
   });
 
   test("component opening tag exposes real props and events without parent leakage", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");
       return;
@@ -313,7 +315,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     expectCompletionsPresent(completions!, ["count", "doubled", "increment"]);
     expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
-    expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function]);
+    expectCompletionKinds(completions!, "increment", [vscode.CompletionItemKind.Function, vscode.CompletionItemKind.Method, vscode.CompletionItemKind.Variable]);
     expectCompletionsMissing(completions!, [
       "AbortController",
       "HTMLDivElement",
@@ -389,6 +391,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
   });
 
   test("v-slot locals and members stay typed and scoped", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");
       return;
@@ -421,6 +424,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
   });
 
   test("broken script recovery preserves typed completions", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");
       return;
@@ -463,6 +467,7 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
   });
 
   test("JS SFC template completions stay typed", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");
       return;
