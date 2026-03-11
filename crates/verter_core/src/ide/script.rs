@@ -919,6 +919,9 @@ fn process_tsx_script_setup<'alloc>(
             options.is_jsx,
             has_template,
         ));
+        if has_template {
+            wrapper_end.push_str(&directive_accessor_declaration(options.is_jsx));
+        }
 
         // Build block scope with shallowUnwrapRef destructuring.
         // Includes ALL setup bindings except Props/PropsAliased (accessed via __props).
@@ -1262,6 +1265,7 @@ fn process_tsx_script_setup_error_mode(
                 options.is_jsx,
                 false,
             ));
+            wrapper_open.push_str(&directive_accessor_declaration(options.is_jsx));
             out.overwrite(tag_close.start, tag_close.end, &wrapper_open);
             let mut close = String::from("\n");
             close.push_str(&instance_probe_line());
@@ -2686,6 +2690,7 @@ fn process_tsx_script_only<'alloc>(
             options.filename,
             options.is_jsx,
         ));
+        close.push_str(&directive_accessor_declaration(options.is_jsx));
         out.overwrite(tag_close.start, tag_close.end, &close);
     }
 
@@ -3413,6 +3418,7 @@ fn emit_minimal_wrapper(
             options.is_jsx,
             false,
         ));
+        start.push_str(&directive_accessor_declaration(options.is_jsx));
         out.prepend_alloc(pos, &start);
         let mut close = String::from("\n");
         close.push_str(&instance_probe_line());
@@ -3474,6 +3480,25 @@ fn instance_declaration_ambient(filename: &str, is_jsx: bool) -> String {
             "\n// @ts-ignore\ndeclare let {P}instance: InstanceType<import('./{filename}.ts')['default']>;\n",
             P = PREFIX,
             filename = filename,
+        )
+    }
+}
+
+/// Emit the `___VERTER___directiveAccessor` declaration.
+///
+/// Extracts both local setup directives and global Vue directives from the
+/// component instance, providing type-safe access for custom directive
+/// type checking in template JSX output.
+fn directive_accessor_declaration(is_jsx: bool) -> String {
+    if is_jsx {
+        format!(
+            "var {P}directiveAccessor = {P}retrieveSetupDirectives({P}instance);\nvoid {P}directiveAccessor;\n",
+            P = PREFIX,
+        )
+    } else {
+        format!(
+            "const {P}directiveAccessor = {P}retrieveSetupDirectives({P}instance);\nvoid {P}directiveAccessor;\n",
+            P = PREFIX,
         )
     }
 }
@@ -3594,6 +3619,10 @@ declare module "@verter/types" {
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
   export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
   export declare function extractArgumentsFromRenderSlot<T extends { $slots: { [K in N]: any } }, N extends string>(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
+  export type ExtractLeafElement<T> = T extends HTMLElement ? T : T extends { $el: infer E } ? ExtractLeafElement<E> : T extends { new (): infer I } ? ExtractLeafElement<I> : never;
+  export type ExtractDirectives<T> = { [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any> ? K extends `v${Capitalize<string>}` ? K : never : never]: T[K]; };
+  export declare function runCustomDirective<TInstance, TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>>(instance: TInstance, directive: TDirective): ExtractLeafElement<TInstance> extends infer El extends HTMLElement ? TDirective extends import("vue").Directive<infer TElement, infer TValue, infer M extends string> ? El extends TElement ? (instance: TInstance, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : (instance: TElement, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : false : false;
+  export declare function retrieveSetupDirectives<T>(o: T): ExtractDirectives<T> extends infer D ? ExtractDirectives<Omit<import("vue").GlobalDirectives, keyof D>> & D : ExtractDirectives<import("vue").GlobalDirectives>;
 }
 "#;
 
@@ -3619,6 +3648,10 @@ export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<
 export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
 export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
 export declare function extractArgumentsFromRenderSlot<T extends { $slots: { [K in N]: any } }, N extends string>(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
+export type ExtractLeafElement<T> = T extends HTMLElement ? T : T extends { $el: infer E } ? ExtractLeafElement<E> : T extends { new (): infer I } ? ExtractLeafElement<I> : never;
+export type ExtractDirectives<T> = { [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any> ? K extends `v${Capitalize<string>}` ? K : never : never]: T[K]; };
+export declare function runCustomDirective<TInstance, TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>>(instance: TInstance, directive: TDirective): ExtractLeafElement<TInstance> extends infer El extends HTMLElement ? TDirective extends import("vue").Directive<infer TElement, infer TValue, infer M extends string> ? El extends TElement ? (instance: TInstance, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : (instance: TElement, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : false : false;
+export declare function retrieveSetupDirectives<T>(o: T): ExtractDirectives<T> extends infer D ? ExtractDirectives<Omit<import("vue").GlobalDirectives, keyof D>> & D : ExtractDirectives<import("vue").GlobalDirectives>;
 "#;
 
 /// Collect Vue built-in component names used in the template AST.
@@ -3684,7 +3717,7 @@ fn emit_helper_imports(
         if template_ast.is_some() {
             writeln!(
                 imports,
-                "import type {{ Prettify as {P}Prettify, ExtractComponentProps as {P}ExtractComponentProps }} from \"{}\";",
+                "import type {{ Prettify as {P}Prettify, ExtractComponentProps as {P}ExtractComponentProps, ExtractLeafElement as {P}ExtractLeafElement }} from \"{}\";",
                 options.types_module_name,
                 P = PREFIX,
             )
@@ -3703,7 +3736,7 @@ fn emit_helper_imports(
     // Runtime imports from @verter/types
     writeln!(
         imports,
-        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent, extractArgumentsFromRenderSlot as {P}extractArgumentsFromRenderSlot }} from \"{}\";",
+        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent, extractArgumentsFromRenderSlot as {P}extractArgumentsFromRenderSlot, runCustomDirective as {P}runCustomDirective, retrieveSetupDirectives as {P}retrieveSetupDirectives }} from \"{}\";",
         options.types_module_name,
         P = PREFIX,
     )

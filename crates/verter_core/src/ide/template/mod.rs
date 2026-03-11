@@ -432,7 +432,7 @@ fn walk_element<'a, 'alloc>(
     }
 
     // Process props/attributes → JSX (pass guard for type narrowing in arrow functions)
-    props::process_element_props(
+    let collected_directives = props::process_element_props(
         el,
         oxc_el,
         ctx.source,
@@ -442,6 +442,36 @@ fn walk_element<'a, 'alloc>(
         guard_text.as_deref(),
         ctx.options.is_jsx,
     );
+
+    // Emit v-directive callback prop for collected custom directives (TS mode only)
+    if !collected_directives.is_empty() {
+        use std::fmt::Write;
+        let mut directive_prop = String::from(
+            " v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;",
+        );
+        for d in &collected_directives {
+            write!(
+                directive_prop,
+                "___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor[\"{name}\"])(___VERTER___directiveElement,{value},{arg},{mods});",
+                name = d.camel_name,
+                value = d.value,
+                arg = d.arg,
+                mods = d.modifiers,
+            )
+            .expect("write to String is infallible");
+        }
+        directive_prop.push_str("}}");
+
+        // Insert just before the tag close: before `/>` for self-closing, before `>` otherwise
+        let is_self_closing =
+            ctx.source.as_bytes().get(el.tag_open.end as usize - 2) == Some(&b'/');
+        let insert_pos = if is_self_closing {
+            el.tag_open.end - 2
+        } else {
+            el.tag_open.end - 1
+        };
+        ctx.out.prepend_alloc(insert_pos, &directive_prop);
+    }
 
     // Process v-show
     directives::emit_v_show(el, oxc_el, ctx.source, ctx.out, ctx.alloc, ctx.resolver);

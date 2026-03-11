@@ -20,6 +20,41 @@ use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedProp};
 use crate::types::NodeProp;
 
+/// A custom directive collected for `v-directive` emission in TSX output.
+pub struct CollectedDirective {
+    /// CamelCase directive name: `"vFocus"`, `"vClickOutside"`
+    pub camel_name: String,
+    /// Resolved value expression, or `"true"` for no-value directives
+    pub value: String,
+    /// Argument: `"\"foo\""` (quoted static), resolved expression (dynamic), or `"undefined"`
+    pub arg: String,
+    /// Modifiers object: `{"bar":true}` or `{}`
+    pub modifiers: String,
+}
+
+/// Convert a directive name (without `v-` prefix) to camelCase with `v` prefix.
+///
+/// - `"focus"` → `"vFocus"`
+/// - `"click-outside"` → `"vClickOutside"`
+pub fn directive_name_to_camel(name: &str) -> String {
+    let mut result = String::with_capacity(name.len() + 1);
+    result.push('v');
+    let mut capitalize_next = true;
+    for ch in name.chars() {
+        if ch == '-' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            for upper in ch.to_uppercase() {
+                result.push(upper);
+            }
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 /// Process all props on an element, converting to JSX syntax.
 ///
 /// `condition_guard` is the accumulated condition text from v-if scopes
@@ -34,7 +69,8 @@ pub fn process_element_props<'alloc>(
     resolver: &BindingResolver<'alloc>,
     condition_guard: Option<&str>,
     is_jsx: bool,
-) {
+) -> Vec<CollectedDirective> {
+    let mut collected_directives: Vec<CollectedDirective> = Vec::new();
     let v_if_guard = condition_guard;
 
     // Pre-scan: does this element have v-show? If so, :style will be handled
@@ -225,11 +261,74 @@ pub fn process_element_props<'alloc>(
             "html" => process_v_html(prop, oxc_prop, source, out, resolver),
             "text" => process_v_text(prop, oxc_prop, source, out, resolver),
             _ => {
-                // Unknown directive — remove it (TSX can't represent custom directives)
-                remove_prop(prop, source, out);
+                // Custom directive — collect for v-directive emission (TS mode only).
+                // Skip built-ins that are handled elsewhere.
+                if matches!(dir_name, "show" | "model" | "cloak" | "memo" | "pre" | "is") {
+                    remove_prop(prop, source, out);
+                } else if is_jsx {
+                    // JSX mode: strip custom directives (no TS-only v-directive support)
+                    remove_prop(prop, source, out);
+                } else {
+                    // Build CollectedDirective
+                    let camel_name = directive_name_to_camel(dir_name);
+
+                    // Value
+                    let value = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                        let raw = &source[vs as usize..ve as usize];
+                        resolve_prefixed_expr(raw, vs, oxc_prop, resolver)
+                    } else {
+                        "true".to_string()
+                    };
+
+                    // Arg
+                    let arg = if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+                        let raw_arg = &source[as_ as usize..ae as usize];
+                        if prop.is_dynamic == Some(true) {
+                            // Dynamic arg: resolve as expression, strip brackets if present
+                            let inner = raw_arg
+                                .strip_prefix('[')
+                                .and_then(|s| s.strip_suffix(']'))
+                                .unwrap_or(raw_arg);
+                            resolver.resolve_simple_expr(inner)
+                        } else {
+                            // Static arg: quote it
+                            format!("\"{}\"", raw_arg)
+                        }
+                    } else {
+                        "undefined".to_string()
+                    };
+
+                    // Modifiers
+                    let modifiers = if prop.modifiers.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        let mut m = String::from("{");
+                        for (i, modifier) in prop.modifiers.iter().enumerate() {
+                            if i > 0 {
+                                m.push(',');
+                            }
+                            let mod_name = &source[modifier.start as usize..modifier.end as usize];
+                            m.push_str(&format!("\"{}\":true", mod_name));
+                        }
+                        m.push('}');
+                        m
+                    };
+
+                    collected_directives.push(CollectedDirective {
+                        camel_name,
+                        value,
+                        arg,
+                        modifiers,
+                    });
+
+                    // Remove the directive from raw output
+                    remove_prop(prop, source, out);
+                }
             }
         }
     }
+
+    collected_directives
 }
 
 /// Merge a static class/style value with a dynamic binding into a single
@@ -1284,5 +1383,25 @@ mod tests {
             is_dynamic: None,
         };
         assert_eq!(get_prop_end(&prop), 5); // name_end
+    }
+
+    #[test]
+    fn directive_name_to_camel_simple() {
+        assert_eq!(directive_name_to_camel("focus"), "vFocus");
+    }
+
+    #[test]
+    fn directive_name_to_camel_hyphenated() {
+        assert_eq!(directive_name_to_camel("click-outside"), "vClickOutside");
+    }
+
+    #[test]
+    fn directive_name_to_camel_multi_hyphen() {
+        assert_eq!(directive_name_to_camel("my-long-dir"), "vMyLongDir");
+    }
+
+    #[test]
+    fn directive_name_to_camel_single_char() {
+        assert_eq!(directive_name_to_camel("a"), "vA");
     }
 }

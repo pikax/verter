@@ -4554,3 +4554,307 @@ const props = defineProps<{ zIndex: number }>()
         "object key must NOT be prefixed with __props.: {code}"
     );
 }
+
+// ── JSX helper ─────────────────────────────────────────────
+
+fn gen_jsx_template(source: &str) -> String {
+    let alloc = Allocator::new();
+    let bytes = source.as_bytes();
+
+    let mut syntax = crate::parser::Syntax::new(false);
+    crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+        syntax.handle(
+            &e,
+            &crate::diagnostics::SyntaxPluginContext {
+                input: source,
+                bytes,
+                options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                diagnostics: Vec::new(),
+            },
+        )
+    });
+
+    let template_ast = match syntax.take_template_ast() {
+        Some(ast) => ast,
+        None => return String::new(),
+    };
+
+    let source_type = oxc_span::SourceType::tsx();
+    let oxc_ast = crate::template::oxc::parse_template_expressions(
+        &template_ast,
+        source,
+        &alloc,
+        source_type,
+    );
+
+    let mut tpl_ct = CodeTransform::new(source, &alloc);
+    let mut out = CodeGenOutput::new(&alloc);
+    let bindings = FxHashMap::default();
+    let options = IdeTemplateOptions {
+        self_name: "App",
+        comments: true,
+        is_jsx: true,
+    };
+
+    generate_ide_template(
+        &template_ast,
+        &oxc_ast,
+        source,
+        &mut out,
+        &alloc,
+        &bindings,
+        &options,
+    );
+    out.apply_to(&mut tpl_ct);
+
+    let full = tpl_ct.build_string();
+    let tpl_start = template_ast.root.tag_open.start as usize;
+    let tpl_end = template_ast
+        .root
+        .tag_close
+        .as_ref()
+        .map(|tc| tc.end as usize)
+        .unwrap_or(full.len());
+    let suffix_len = source.len() - tpl_end;
+    full[tpl_start..full.len() - suffix_len].to_string()
+}
+
+// ── Custom directive type checking ─────────────────────────
+
+#[test]
+fn custom_directive_basic_no_args() {
+    let result = gen_tsx_template(r#"<template><div v-focus /></template>"#);
+    eprintln!("custom_directive_basic_no_args:\n{result}");
+
+    // Positive: should emit v-directive callback with vFocus
+    assert!(
+        result.contains("v-directive="),
+        "should emit v-directive prop: {result}"
+    );
+    assert!(
+        result.contains(r#"directiveAccessor["vFocus"]"#),
+        "should reference vFocus from accessor: {result}"
+    );
+    assert!(
+        result.contains("true,undefined,{}"),
+        "no-value directive should use true,undefined,{{}}: {result}"
+    );
+
+    // Negative: v-focus should NOT appear as raw attribute
+    assert!(
+        !result.contains("v-focus"),
+        "v-focus raw attribute must be removed: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_with_value() {
+    let result = gen_tsx_template(r#"<template><div v-test="val" /></template>"#);
+    eprintln!("custom_directive_with_value:\n{result}");
+
+    assert!(
+        result.contains(r#"directiveAccessor["vTest"]"#),
+        "should reference vTest: {result}"
+    );
+    // Value should be the expression "val"
+    assert!(
+        result.contains("val,undefined,{}"),
+        "should have val as value expression: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_static_arg() {
+    let result = gen_tsx_template(r#"<template><div v-test:foo="val" /></template>"#);
+    eprintln!("custom_directive_static_arg:\n{result}");
+
+    assert!(
+        result.contains(r#"directiveAccessor["vTest"]"#),
+        "should reference vTest: {result}"
+    );
+    assert!(
+        result.contains(r#"val,"foo","#),
+        "should have static arg 'foo' (quoted): {result}"
+    );
+}
+
+#[test]
+fn custom_directive_dynamic_arg() {
+    let result = gen_tsx_template(r#"<template><div v-test:[dyn]="val" /></template>"#);
+    eprintln!("custom_directive_dynamic_arg:\n{result}");
+
+    assert!(
+        result.contains(r#"directiveAccessor["vTest"]"#),
+        "should reference vTest: {result}"
+    );
+    // Dynamic arg: dyn resolved as expression (no quotes)
+    assert!(
+        result.contains("instance.dyn,"),
+        "dynamic arg should be resolved unquoted expression: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_modifiers() {
+    let result = gen_tsx_template(r#"<template><div v-test.bar.baz="val" /></template>"#);
+    eprintln!("custom_directive_modifiers:\n{result}");
+
+    assert!(
+        result.contains(r#"directiveAccessor["vTest"]"#),
+        "should reference vTest: {result}"
+    );
+    assert!(
+        result.contains(r#""bar":true"#),
+        "should have bar modifier: {result}"
+    );
+    assert!(
+        result.contains(r#""baz":true"#),
+        "should have baz modifier: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_multiple() {
+    let result = gen_tsx_template(r#"<template><div v-a v-b="x" /></template>"#);
+    eprintln!("custom_directive_multiple:\n{result}");
+
+    // Should have single v-directive= with both calls
+    assert!(
+        result.contains(r#"directiveAccessor["vA"]"#),
+        "should reference vA: {result}"
+    );
+    assert!(
+        result.contains(r#"directiveAccessor["vB"]"#),
+        "should reference vB: {result}"
+    );
+    // Only one v-directive= prop
+    assert_eq!(
+        result.matches("v-directive=").count(),
+        1,
+        "should have exactly one v-directive prop: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_hyphenated_name() {
+    let result = gen_tsx_template(r#"<template><div v-click-outside="fn" /></template>"#);
+    eprintln!("custom_directive_hyphenated_name:\n{result}");
+
+    assert!(
+        result.contains(r#"directiveAccessor["vClickOutside"]"#),
+        "should camelCase hyphenated name: {result}"
+    );
+
+    // Negative: raw attribute must not appear
+    assert!(
+        !result.contains("v-click-outside"),
+        "raw v-click-outside must be removed: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_builtins_not_captured() {
+    let result = gen_tsx_template(r#"<template><div v-show="x" /></template>"#);
+    eprintln!("custom_directive_builtins_not_captured:\n{result}");
+
+    // v-show is a built-in — should NOT produce v-directive
+    assert!(
+        !result.contains("v-directive="),
+        "built-in v-show should NOT produce v-directive: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_jsx_mode_skips() {
+    let result = gen_jsx_template(r#"<template><div v-focus /></template>"#);
+    eprintln!("custom_directive_jsx_mode_skips:\n{result}");
+
+    // JSX mode should NOT emit v-directive (TS-only feature)
+    assert!(
+        !result.contains("v-directive="),
+        "JSX mode should not emit v-directive: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_full_combo() {
+    // v-test:foo.bar="baz" — value + static arg + modifier
+    let result = gen_tsx_template(r#"<template><div v-test:foo.bar="baz" /></template>"#);
+    eprintln!("custom_directive_full_combo:\n{result}");
+
+    assert!(
+        result.contains(r#"directiveAccessor["vTest"]"#),
+        "should reference vTest: {result}"
+    );
+    assert!(
+        result.contains(r#"baz,"foo",{"bar":true}"#),
+        "should have value, static arg, and modifier object: {result}"
+    );
+
+    // Negative: raw directive must not appear
+    assert!(
+        !result.contains("v-test:foo"),
+        "raw v-test:foo must be removed: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_on_component() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><MyComp v-focus /></template>"#,
+        &[("MyComp", BindingType::SetupConst)],
+    );
+    eprintln!("custom_directive_on_component:\n{result}");
+
+    // Should work the same on components
+    assert!(
+        result.contains("v-directive="),
+        "should emit v-directive on component: {result}"
+    );
+    assert!(
+        result.contains(r#"directiveAccessor["vFocus"]"#),
+        "should reference vFocus: {result}"
+    );
+}
+
+// ── Script preamble: directive accessor ────────────────────
+
+#[test]
+fn script_preamble_directive_accessor() {
+    let source = r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><div v-focus /></template>"#;
+    let code = compile_full_sfc_tsx(source, "Test.vue");
+    eprintln!("script_preamble_directive_accessor:\n{code}");
+
+    assert!(
+        code.contains("___VERTER___directiveAccessor"),
+        "should emit directiveAccessor declaration: {code}"
+    );
+    assert!(
+        code.contains("retrieveSetupDirectives"),
+        "should import retrieveSetupDirectives: {code}"
+    );
+    assert!(
+        code.contains("runCustomDirective"),
+        "should import runCustomDirective: {code}"
+    );
+    assert!(
+        code.contains("ExtractLeafElement"),
+        "should import ExtractLeafElement type: {code}"
+    );
+}
+
+#[test]
+fn script_preamble_directive_accessor_valid_tsx() {
+    let source = r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><div v-focus v-test:foo.bar="baz" /></template>"#;
+    let code = compile_full_sfc_tsx(source, "Test.vue");
+    eprintln!("script_preamble_directive_accessor_valid_tsx:\n{code}");
+
+    // The output should be valid TSX
+    assert_valid_tsx(&code, "directive-accessor-preamble");
+}
