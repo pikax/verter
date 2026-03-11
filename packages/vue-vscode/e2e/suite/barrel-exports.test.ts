@@ -62,17 +62,16 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
       return code === 2307 || code === "2307" || String(code) === "2307";
     });
 
-    // TSGO CANARY: barrel re-exports of .vue components lose typing on TSGO.
-    // If this starts passing, TSGO has fixed barrel re-export resolution —
-    // update CLAUDE.md known limitations.
+    // After full VFS sync (all workspace + node_modules files synced to provider),
+    // TSGO should resolve barrel re-exports correctly. If this fails, the VFS
+    // sync is incomplete or TSGO has a regression.
     if (TYPE_PROVIDER === "tsgo") {
       console.log(
-        `    TSGO: ${moduleErrors.length} module error(s) (barrel re-export limitation)`,
+        `    TSGO: ${moduleErrors.length} module error(s)`,
       );
-      // Don't assert — TSGO barrel re-exports may or may not produce TS2307
-      // depending on whether the .vue file is synced. The type degradation
-      // (DefineComponent<{}, {}>) is the real issue, not a module error.
-      return;
+      // TSGO with full VFS should not have module errors on barrel imports.
+      // If this fails, check that workspace scanner syncs all .vue files
+      // before non-Vue files (two-phase scan).
     }
 
     expect(
@@ -118,28 +117,12 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
     // If barrel re-exports work correctly, the type includes $props with
     // zIndex, show, lockScroll, etc.
 
-    // TSGO CANARY: barrel re-exports lose typing on TSGO.
+    // With full VFS sync, both TSGO and tsserver should resolve barrel-imported
+    // component types correctly, showing typed props in hover.
     if (TYPE_PROVIDER === "tsgo") {
-      // On TSGO, the type may degrade to DefineComponent<{}, {}> or similar.
-      // If this assertion starts passing, TSGO has fixed barrel re-exports.
-      const hasProps =
-        content.includes("zIndex") ||
-        content.includes("show") ||
-        content.includes("lockScroll");
-      if (!hasProps) {
-        console.log(
-          "    TSGO CANARY: Barrel-imported component hover lacks props (expected — known limitation)",
-        );
-      } else {
-        console.log(
-          "    TSGO: Barrel-imported component hover DOES show props — limitation may be fixed!",
-        );
-      }
-      return;
+      console.log("    TSGO: checking barrel-imported component hover for typed props");
     }
 
-    // For tsserver: props MUST be visible in the hover
-    // If this fails, the barrel re-export type degradation bug is confirmed in the real LSP.
     const hasTypedProps =
       content.includes("zIndex") ||
       content.includes("show") ||
@@ -194,12 +177,11 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
+    // With full VFS sync, both providers should resolve barrel-imported component types.
     if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: skipping assertion (barrel re-export limitation)");
-      return;
+      console.log("    TSGO: checking barrel-imported Button hover for typed props");
     }
 
-    // For tsserver: Button's label prop should be visible
     const hasProps = content.includes("label") || content.includes("disabled");
 
     expect(
@@ -226,11 +208,9 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
       return numCode === 2322 || numCode === 2769;
     });
 
+    // With full VFS sync, both providers should type-check barrel-imported component props.
     if (TYPE_PROVIDER === "tsgo") {
-      console.log(
-        `    TSGO: ${propErrors.length} prop error(s) (barrel re-export limitation)`,
-      );
-      return;
+      console.log(`    TSGO: ${propErrors.length} prop error(s)`);
     }
 
     expect(
@@ -280,9 +260,9 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
+    // With full VFS sync, both providers should show typed props in barrel file hover.
     if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: skipping assertion (barrel re-export limitation)");
-      return;
+      console.log("    TSGO: checking TS plugin hover for typed component");
     }
 
     // NEGATIVE: should NOT show plain DefineComponent<{}, {}>
@@ -371,9 +351,9 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
+    // With full VFS sync, both providers should show typed import bindings.
     if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: skipping assertion (barrel re-export limitation)");
-      return;
+      console.log("    TSGO: checking import binding hover for typed component");
     }
 
     // NEGATIVE: should NOT be plain DefineComponent<{}, {}>

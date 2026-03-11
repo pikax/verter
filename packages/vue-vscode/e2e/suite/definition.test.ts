@@ -337,14 +337,13 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
 
     const def = locations[0];
 
-    if (TYPE_PROVIDER === "tsgo" && def.uri.fsPath.includes("index.ts")) {
-      console.log("    TSGO CANARY: barrel component resolved to index.ts (known limitation)");
-      return;
-    }
-
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Overlay.vue")) {
       console.log("    Verter-only: barrel re-export definition stops at index.ts (needs type provider)");
       return;
+    }
+
+    if (TYPE_PROVIDER === "tsgo") {
+      console.log(`    TSGO: barrel definition resolved to ${def.uri.fsPath}`);
     }
 
     // Positive: navigates to Overlay.vue
@@ -379,14 +378,13 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
 
     const def = locations[0];
 
-    if (TYPE_PROVIDER === "tsgo" && def.uri.fsPath.includes("index.ts")) {
-      console.log("    TSGO CANARY: barrel component resolved to index.ts (known limitation)");
-      return;
-    }
-
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Button.vue")) {
       console.log("    Verter-only: barrel re-export definition stops at index.ts (needs type provider)");
       return;
+    }
+
+    if (TYPE_PROVIDER === "tsgo") {
+      console.log(`    TSGO: barrel definition resolved to ${def.uri.fsPath}`);
     }
 
     expect(def.uri.fsPath, "definition should reach Button.vue").to.include("Button.vue");
@@ -486,14 +484,13 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
 
     const def = locations[0];
 
-    if (TYPE_PROVIDER === "tsgo" && def.uri.fsPath.includes("index.ts")) {
-      console.log("    TSGO CANARY: barrel import resolved to index.ts (known limitation)");
-      return;
-    }
-
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Overlay.vue")) {
       console.log("    Verter-only: barrel import binding resolves to index.ts (needs type provider)");
       return;
+    }
+
+    if (TYPE_PROVIDER === "tsgo") {
+      console.log(`    TSGO: barrel import definition resolved to ${def.uri.fsPath}`);
     }
 
     // Positive: reaches Overlay.vue
@@ -526,14 +523,13 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
 
     const def = locations[0];
 
-    if (TYPE_PROVIDER === "tsgo" && def.uri.fsPath.includes("index.ts")) {
-      console.log("    TSGO CANARY: barrel import resolved to index.ts (known limitation)");
-      return;
-    }
-
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Button.vue")) {
       console.log("    Verter-only: barrel import binding resolves to index.ts (needs type provider)");
       return;
+    }
+
+    if (TYPE_PROVIDER === "tsgo") {
+      console.log(`    TSGO: barrel import definition resolved to ${def.uri.fsPath}`);
     }
 
     expect(def.uri.fsPath, "definition should reach Button.vue").to.include("Button.vue");
@@ -594,14 +590,13 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
 
     const def = locations[0];
 
-    if (TYPE_PROVIDER === "tsgo" && def.uri.fsPath.includes("index.ts")) {
-      console.log("    TSGO CANARY: barrel component resolved to index.ts (known limitation)");
-      return;
-    }
-
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Overlay.vue")) {
       console.log("    Verter-only: barrel component TAG resolves to index.ts (needs type provider)");
       return;
+    }
+
+    if (TYPE_PROVIDER === "tsgo") {
+      console.log(`    TSGO: barrel component TAG definition resolved to ${def.uri.fsPath}`);
     }
 
     // Positive: reaches the actual .vue source
@@ -772,18 +767,13 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
 
     const def = locations[0];
 
-    if (TYPE_PROVIDER === "tsgo") {
-      // TSGO may not resolve barrel-imported component props
-      if (def.uri.fsPath === doc.uri.fsPath || def.uri.fsPath.includes("index.ts")) {
-        console.log("    TSGO CANARY: barrel component prop not resolved (known limitation)");
-        return;
-      }
-      console.log("    TSGO: barrel component prop resolved correctly — limitation may be fixed!");
-    }
-
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Button.vue")) {
       console.log("    Verter-only: barrel component prop resolves to index.ts (needs type provider)");
       return;
+    }
+
+    if (TYPE_PROVIDER === "tsgo") {
+      console.log(`    TSGO: barrel component prop definition resolved to ${def.uri.fsPath}`);
     }
 
     // Positive: navigates to Button.vue
@@ -834,17 +824,13 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
 
     const def = locations[0];
 
-    if (TYPE_PROVIDER === "tsgo") {
-      if (def.uri.fsPath === doc.uri.fsPath || def.uri.fsPath.includes("index.ts")) {
-        console.log("    TSGO CANARY: barrel component prop not resolved (known limitation)");
-        return;
-      }
-      console.log("    TSGO: barrel component prop resolved correctly — limitation may be fixed!");
-    }
-
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Overlay.vue")) {
       console.log("    Verter-only: barrel component prop resolves to index.ts (needs type provider)");
       return;
+    }
+
+    if (TYPE_PROVIDER === "tsgo") {
+      console.log(`    TSGO: barrel component prop definition resolved to ${def.uri.fsPath}`);
     }
 
     // Positive: navigates to Overlay.vue

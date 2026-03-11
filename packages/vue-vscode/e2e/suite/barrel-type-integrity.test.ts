@@ -60,12 +60,7 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     console.log(`    <Button> hover: ${content.slice(0, 300)}`);
 
     if (TYPE_PROVIDER === "tsgo") {
-      const hasProps = content.includes("label") || content.includes("disabled");
-      if (!hasProps) {
-        console.log("    TSGO CANARY: barrel Button hover lacks props (known limitation)");
-        return;
-      }
-      console.log("    TSGO: barrel Button hover shows props — limitation may be fixed!");
+      console.log("    TSGO: checking barrel Button hover for typed props");
     }
 
     if (!TYPE_PROVIDER) {
@@ -106,12 +101,7 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     console.log(`    <Overlay> hover: ${content.slice(0, 300)}`);
 
     if (TYPE_PROVIDER === "tsgo") {
-      const hasProps = content.includes("zIndex") || content.includes("show");
-      if (!hasProps) {
-        console.log("    TSGO CANARY: barrel Overlay hover lacks props (known limitation)");
-        return;
-      }
-      console.log("    TSGO: barrel Overlay hover shows props — limitation may be fixed!");
+      console.log("    TSGO: checking barrel Overlay hover for typed props");
     }
 
     // Positive: must include actual prop names
@@ -147,11 +137,7 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     console.log(`    <Button > completions: ${labels.slice(0, 20).join(", ")}`);
 
     if (TYPE_PROVIDER === "tsgo") {
-      const hasProps = labels.includes("label") || labels.includes("disabled");
-      if (!hasProps) {
-        console.log("    TSGO CANARY: barrel Button completions lack props (known limitation)");
-        return;
-      }
+      console.log("    TSGO: checking barrel Button completions for typed props");
     }
 
     if (!TYPE_PROVIDER && !labels.includes("label")) {
@@ -190,11 +176,7 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     console.log(`    <Overlay > completions: ${labels.slice(0, 20).join(", ")}`);
 
     if (TYPE_PROVIDER === "tsgo") {
-      const hasProps = labels.includes("zIndex") || labels.includes("show");
-      if (!hasProps) {
-        console.log("    TSGO CANARY: barrel Overlay completions lack props (known limitation)");
-        return;
-      }
+      console.log("    TSGO: checking barrel Overlay completions for typed props");
     }
 
     if (!TYPE_PROVIDER && !labels.includes("zIndex")) {
@@ -229,8 +211,7 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     console.log(`    Button import hover: ${content.slice(0, 200)}`);
 
     if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: skipping assertion (barrel re-export limitation)");
-      return;
+      console.log("    TSGO: checking Button import binding for typed component");
     }
 
     // Negative: must NOT be plain any or degraded shell
@@ -257,8 +238,7 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     console.log(`    Overlay import hover: ${content.slice(0, 200)}`);
 
     if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: skipping assertion (barrel re-export limitation)");
-      return;
+      console.log("    TSGO: checking Overlay import binding for typed component");
     }
 
     expect(content, "Overlay import should NOT be DefineComponent<{}, {}>").to.not.include("DefineComponent<{}, {}>");
@@ -341,8 +321,7 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     console.log(`    label attr hover: ${content.slice(0, 200)}`);
 
     if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: skipping assertion (barrel re-export limitation)");
-      return;
+      console.log("    TSGO: checking label attr hover for typed prop");
     }
 
     expect(content, "label attr should mention label").to.include("label");

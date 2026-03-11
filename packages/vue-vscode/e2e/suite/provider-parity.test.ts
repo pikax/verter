@@ -206,12 +206,11 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     ).to.be.undefined;
   });
 
-  // ── TSGO Canary Tests ─────────────────────────────────────────
-  // These tests document known TSGO limitations. They don't fail —
-  // they log whether the limitation still exists. When TSGO fixes
-  // the issue, the canary message will indicate it's resolved.
+  // ── Barrel Re-Export Parity Tests ────────────────────────────
+  // With full VFS sync, both TSGO and tsserver should resolve
+  // barrel-imported .vue component types correctly.
 
-  test("CANARY: barrel re-exported .vue component type resolution", async function () {
+  test("barrel re-exported .vue component type resolution", async function () {
     if (FIXTURE_NAME !== "barrel-exports") {
       console.log("    N/A");
       return;
@@ -229,27 +228,22 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
       return;
     }
 
+    if (!TYPE_PROVIDER) {
+      console.log("    Verter-only: barrel re-export type resolution requires type provider");
+      return;
+    }
+
     const content = hoverText(hovers[0]);
+    console.log(`    [${TYPE_PROVIDER}] barrel Button hover: ${content.slice(0, 200)}`);
+
     const hasRealProps = content.includes("label") && content.includes("disabled");
     const isDegraded = content.includes("DefineComponent<{}, {}>");
 
-    if (TYPE_PROVIDER === "tsgo") {
-      if (hasRealProps && !isDegraded) {
-        console.log("    TSGO CANARY: barrel re-export RESOLVED — Button shows real props!");
-      } else {
-        console.log("    TSGO CANARY: barrel re-export still limited — Button shows degraded type");
-      }
-    } else if (!TYPE_PROVIDER) {
-      // Verter-only: barrel re-exports cannot resolve component types without a type provider
-      console.log("    Verter-only: barrel re-export type resolution requires type provider");
-    } else {
-      // tsserver should always work
-      expect(hasRealProps, `tsserver barrel Button should show props, got: ${content.slice(0, 200)}`).to.be.true;
-      expect(isDegraded, "tsserver barrel Button should NOT be degraded").to.be.false;
-    }
+    expect(hasRealProps, `barrel Button should show props, got: ${content.slice(0, 200)}`).to.be.true;
+    expect(isDegraded, "barrel Button should NOT be degraded").to.be.false;
   });
 
-  test("CANARY: barrel component go-to-definition target", async function () {
+  test("barrel component go-to-definition target", async function () {
     if (FIXTURE_NAME !== "barrel-exports") {
       console.log("    N/A");
       return;
@@ -267,22 +261,16 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const def = locations[0];
-
-    if (TYPE_PROVIDER === "tsgo") {
-      if (def.uri.fsPath.includes("Button.vue")) {
-        console.log("    TSGO CANARY: barrel definition RESOLVED — reaches Button.vue!");
-      } else if (def.uri.fsPath.includes("index.ts")) {
-        console.log("    TSGO CANARY: barrel definition still limited — stops at index.ts");
-      } else {
-        console.log(`    TSGO CANARY: barrel definition goes to unexpected: ${def.uri.fsPath}`);
-      }
-    } else if (!TYPE_PROVIDER) {
+    if (!TYPE_PROVIDER) {
       console.log("    Verter-only: barrel go-to-definition requires type provider");
-    } else {
-      expect(def.uri.fsPath, "tsserver should reach Button.vue").to.include("Button.vue");
-      expect(def.uri.fsPath, "tsserver should NOT stop at index.ts").to.not.include("index.ts");
+      return;
     }
+
+    const def = locations[0];
+    console.log(`    [${TYPE_PROVIDER}] barrel Button definition: ${def.uri.fsPath}`);
+
+    expect(def.uri.fsPath, "should reach Button.vue").to.include("Button.vue");
+    expect(def.uri.fsPath, "should NOT stop at index.ts").to.not.include("index.ts");
   });
 
   test("CANARY: provider kind is logged correctly", function () {
