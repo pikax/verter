@@ -275,6 +275,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build LSP binary
         run: cargo build -p verter_lsp
+      - name: Build extension dependencies
+        run: pnpm --filter @verter/language-shared build
       - name: Build extension
         run: pnpm --filter verter-vscode build:dev
       - name: Compile E2E tests

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -12,6 +13,7 @@ const fixtureNodeModules = resolve(
   "ant-design-vue",
   "node_modules",
 );
+const fixtureAvailable = existsSync(join(fixtureNodeModules, "vue"));
 
 class FakeNode {
   nodeType: number;
@@ -132,30 +134,30 @@ Object.defineProperty(globalThis, "navigator", {
 (globalThis as any).HTMLElement = FakeNode;
 (globalThis as any).SVGElement = FakeNode;
 
-const vue: typeof import("vue") = require(join(fixtureNodeModules, "vue"));
-const { mount }: typeof import("@vue/test-utils") = require(
-  join(fixtureNodeModules, "@vue/test-utils"),
-);
-const {
-  parse,
-  compileScript,
-}: typeof import("@vue/compiler-sfc") = require(
-  join(fixtureNodeModules, "@vue/compiler-sfc"),
-);
+describe.skipIf(!fixtureAvailable)("VTU wrapper.vm contract", () => {
+  // Lazy-load from integration test fixture — only runs when fixtureAvailable is true
+  const vue: typeof import("vue") = fixtureAvailable
+    ? require(join(fixtureNodeModules, "vue"))
+    : (undefined as any);
+  const { mount } = fixtureAvailable
+    ? (require(join(fixtureNodeModules, "@vue/test-utils")) as typeof import("@vue/test-utils"))
+    : ({ mount: undefined as any } as any);
+  const { parse, compileScript } = fixtureAvailable
+    ? (require(join(fixtureNodeModules, "@vue/compiler-sfc")) as typeof import("@vue/compiler-sfc"))
+    : ({ parse: undefined as any, compileScript: undefined as any } as any);
 
-function compileScriptSetupComponent(scriptSetup: string) {
-  const source = `<script setup>${scriptSetup}</script>`;
-  const { descriptor } = parse(source, { filename: "VmContract.vue" });
-  const compiled = compileScript(descriptor, { id: "vtu-contract" }).content;
-  const commonJs = compiled.replace("export default", "module.exports.default =");
-  const module = { exports: {} as { default?: any } };
-  new Function("module", "exports", commonJs)(module, module.exports);
-  const component = module.exports.default;
-  component.render = () => vue.h("div");
-  return component;
-}
+  function compileScriptSetupComponent(scriptSetup: string) {
+    const source = `<script setup>${scriptSetup}</script>`;
+    const { descriptor } = parse(source, { filename: "VmContract.vue" });
+    const compiled = compileScript(descriptor, { id: "vtu-contract" }).content;
+    const commonJs = compiled.replace("export default", "module.exports.default =");
+    const module = { exports: {} as { default?: any } };
+    new Function("module", "exports", commonJs)(module, module.exports);
+    const component = module.exports.default;
+    component.render = () => vue.h("div");
+    return component;
+  }
 
-describe("VTU wrapper.vm contract", () => {
   it("exposes internal script setup bindings with and without defineExpose", () => {
     const closedComponent = compileScriptSetupComponent(`
 const count = 1

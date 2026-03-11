@@ -4400,8 +4400,7 @@ impl LanguageServer for VerterLanguageServer {
             .map(|analysis| {
                 // Primary: analysis.imports already has resolved_canonical_id from host
                 // (works even before background_init builds the resolver snapshot)
-                let mut ids =
-                    collect_imported_vue_priority_ids_from_imports(&analysis.imports);
+                let mut ids = collect_imported_vue_priority_ids_from_imports(&analysis.imports);
 
                 // Supplement: module_references for dynamic import()/require() cases
                 // that aren't in analysis.imports (needs resolver, may return empty pre-init)
@@ -4415,8 +4414,7 @@ impl LanguageServer for VerterLanguageServer {
                         &analysis.module_references,
                     );
                     // Dedup: add only IDs not already in the primary set
-                    let seen: HashSet<String> =
-                        ids.iter().cloned().collect();
+                    let seen: HashSet<String> = ids.iter().cloned().collect();
                     for id in dynamic_ids {
                         if !seen.contains(&id) {
                             ids.push(id);
@@ -7630,11 +7628,7 @@ mod tests {
         // Do NOT upsert /workspace/src/Real.vue into host
 
         assert_eq!(
-            source_id_from_provider_vue_path(
-                &resolver,
-                &host,
-                "/workspace/src/Real.vue.tsx"
-            ),
+            source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/Real.vue.tsx"),
             None,
             ".vue.tsx in project but no backing .vue in host should return None"
         );

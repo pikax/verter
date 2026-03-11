@@ -549,7 +549,10 @@ defineProps<Props>()
       aliases: [],
       compileProfile: profile,
     });
-    host.setImportDependencies(app.filename, deps);
+    host.setImportDependencies(
+      app.filename,
+      deps.map((dep) => ({ specifier: dep, resolvedCanonicalId: dep })),
+    );
 
     const main = host.getVirtualFile({
       rawId: app.filename,
