@@ -213,6 +213,27 @@ $border: #555;
     }
   });
 
+  it("does NOT scope CSS for non-scoped scss style virtual modules", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "NonScoped.vue").replace(/\\/g, "/");
+    const sfc = `<template><button class="non-scoped">x</button></template>
+<style lang="scss">
+$color: #333;
+.non-scoped {
+  color: $color;
+}
+</style>`;
+
+    await plugin.transform(sfc, file);
+    const styleId = `${file}?vue&type=style&index=0&lang.scss`;
+    const style = await plugin.load(styleId);
+    const transformed = await plugin.transform(style.code, styleId);
+
+    expect(transformed).toBeDefined();
+    expect(transformed.code).not.toContain("[data-v-");
+    expect(transformed.code).toContain("#333");
+  });
+
   it("scopes compiled CSS for non-css style virtual modules without re-preprocessing", async () => {
     const plugin = await createVitePlugin();
     const file = join(tempDir, "ScopedTransform.vue").replace(/\\/g, "/");

@@ -397,20 +397,26 @@ pub fn run(
                         let raw_diags = reporter::parse_tsc_output(&invocation.output);
                         diagnostics.extend(remap_diagnostics(raw_diags, &tsx_to_vue));
 
-                        // Post-process: rename .tsc.tsx.d.ts → .vue.d.ts
-                        if invocation.success {
-                            if let (Some(decl_dir), Some(ref decl_gen)) =
-                                (&opts.declaration_dir, &declaration_generated)
-                            {
-                                postprocess_vue_declarations(decl_dir, decl_gen, &config.root_dir);
-                            }
-                            opts.declaration_dir
-                                .as_ref()
-                                .map(|d| collect_dts_files(d))
-                                .unwrap_or_default()
-                        } else {
-                            Vec::new()
+                        if !invocation.success {
+                            eprintln!(
+                                "verter-tsc: Phase B had errors; post-processing emitted declarations anyway"
+                            );
                         }
+
+                        // Post-process: rename .tsc.tsx.d.ts → .vue.d.ts.
+                        // Always run, even when tsc exits with errors. tsc emits
+                        // .d.ts for non-erroring files (with noEmitOnError: false),
+                        // so skipping post-processing would leave 0 .vue.d.ts files
+                        // when only some components have type errors.
+                        if let (Some(decl_dir), Some(ref decl_gen)) =
+                            (&opts.declaration_dir, &declaration_generated)
+                        {
+                            postprocess_vue_declarations(decl_dir, decl_gen, &config.root_dir);
+                        }
+                        opts.declaration_dir
+                            .as_ref()
+                            .map(|d| collect_dts_files(d))
+                            .unwrap_or_default()
                     }
                     Err(e) => {
                         eprintln!("verter-tsc: Phase B (declarations) failed: {e}");
@@ -575,6 +581,10 @@ fn write_temp_tsconfig(
     if opts.declaration {
         compiler_options["declaration"] = serde_json::json!(true);
         compiler_options["emitDeclarationOnly"] = serde_json::json!(true);
+        // Override the parent tsconfig's potential `noEmitOnError: true`.
+        // Without this, tsc refuses to emit ANY .d.ts files when the project
+        // has type errors, even for non-erroring Vue components.
+        compiler_options["noEmitOnError"] = serde_json::json!(false);
         if let Some(dir) = &opts.declaration_dir {
             compiler_options["declarationDir"] =
                 serde_json::json!(dir.to_string_lossy().replace('\\', "/"));
@@ -949,12 +959,29 @@ fn postprocess_vue_declarations(
 
             // Create parent directories and write.
             if let Some(parent) = target_path.parent() {
-                let _ = fs::create_dir_all(parent);
+                if let Err(e) = fs::create_dir_all(parent) {
+                    eprintln!(
+                        "verter-tsc: failed to create directory {}: {e}",
+                        parent.display()
+                    );
+                    continue;
+                }
             }
-            let _ = fs::write(&target_path, rewritten);
+            if let Err(e) = fs::write(&target_path, rewritten) {
+                eprintln!(
+                    "verter-tsc: failed to write {}: {e}",
+                    target_path.display()
+                );
+                continue;
+            }
 
             // Delete original temp-named file.
-            let _ = fs::remove_file(entry);
+            if let Err(e) = fs::remove_file(entry) {
+                eprintln!(
+                    "verter-tsc: failed to remove temp file {}: {e}",
+                    entry.display()
+                );
+            }
         }
     }
 
@@ -1240,6 +1267,124 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
 
             use std::os::unix::fs::PermissionsExt;
 
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+    }
+
+    /// Write a mock tsc that reports an error (exit 1) but STILL emits a .d.ts file.
+    /// This simulates real tsc behavior where errors in some files don't prevent
+    /// emission of declarations for other (non-erroring) files.
+    fn write_mock_tsc_error_with_emit(project_root: &Path, decl_dir: &Path) {
+        let bin_dir = project_root.join("node_modules").join(".bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        #[cfg(target_os = "windows")]
+        {
+            let ps1 = bin_dir.join("mock-tsc.ps1");
+            fs::write(
+                &ps1,
+                r#"
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+
+$project = ''
+$declaration = $false
+$declarationDir = ''
+
+for ($i = 0; $i -lt $Args.Length; $i++) {
+    switch ($Args[$i]) {
+        '--project' {
+            $project = $Args[$i + 1]
+            $i++
+            continue
+        }
+        '--declaration' {
+            $declaration = $true
+            continue
+        }
+        '--declarationDir' {
+            $declarationDir = $Args[$i + 1]
+            $i++
+            continue
+        }
+    }
+}
+
+if (-not $declaration) {
+    exit 0
+}
+
+$tsconfigDir = Split-Path -Parent $project
+$tscTsx = Get-ChildItem -Path $tsconfigDir -Recurse -Filter *.tsc.tsx | Select-Object -First 1
+
+# Emit the .d.ts file despite errors
+New-Item -ItemType Directory -Force -Path $declarationDir | Out-Null
+$emitted = Join-Path $declarationDir ($tscTsx.Name + '.d.ts')
+Set-Content -Path $emitted -Value 'export declare const ok: number;'
+
+# Also report an error from a different file
+Write-Output "src/other.ts(5,10): error TS2304: Cannot find name 'SomeMissingType'."
+exit 1
+"#,
+            )
+            .unwrap();
+            fs::write(
+                bin_dir.join("tsc.cmd"),
+                "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0mock-tsc.ps1\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            )
+            .unwrap();
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let script = bin_dir.join("tsc");
+            fs::write(
+                &script,
+                r#"#!/bin/sh
+project=""
+declaration=0
+declaration_dir=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --project)
+      project="$2"
+      shift 2
+      ;;
+    --declaration)
+      declaration=1
+      shift
+      ;;
+    --declarationDir)
+      declaration_dir="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [ "$declaration" -ne 1 ]; then
+  exit 0
+fi
+
+tsconfig_dir=$(dirname "$project")
+tsc_tsx=$(find "$tsconfig_dir" -name '*.tsc.tsx' | head -n 1)
+
+# Emit the .d.ts file despite errors
+mkdir -p "$declaration_dir"
+printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc_tsx").d.ts"
+
+# Report an error from a different file
+printf "src/other.ts(5,10): error TS2304: Cannot find name 'SomeMissingType'.\n"
+exit 1
+"#,
+            )
+            .unwrap();
+
+            use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&script).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&script, perms).unwrap();
@@ -1639,6 +1784,33 @@ const props = defineProps<{ msg: string }>()
     }
 
     #[test]
+    fn rewrite_dts_imports_handles_windows_backslash_paths() {
+        // On Windows, tsc may emit absolute paths with backslashes.
+        let content = r#"import("D:\project\src\types").Props"#;
+        let target_dir = Path::new("D:/project/src/components");
+        let root_dir = Path::new("D:/project");
+        let import_map = HashMap::new();
+
+        let result = rewrite_dts_imports(content, target_dir, root_dir, &import_map);
+
+        // Positive: should be rewritten to relative
+        assert!(
+            result.contains("../types"),
+            "Windows backslash paths should be normalized and rewritten: {result}"
+        );
+        // Negative: no absolute paths
+        assert!(
+            !result.contains("D:"),
+            "absolute path should be removed: {result}"
+        );
+        // Negative: no backslashes in output
+        assert!(
+            !result.contains('\\'),
+            "output should use forward slashes: {result}"
+        );
+    }
+
+    #[test]
     fn postprocess_creates_correct_structure() {
         let temp = tempfile::TempDir::new().unwrap();
         let decl_dir = temp.path().join("dist/types");
@@ -1994,6 +2166,99 @@ const props = defineProps<{ msg: string }>()
     /// output dir should be resolved from tsconfig.json compilerOptions.
     /// This mirrors the main.rs fallback chain:
     ///   cli.declaration_dir → cli.out_dir → config.declaration_dir → config.out_dir
+    /// The generated tsconfig must explicitly set `noEmitOnError: false` to override
+    /// the parent tsconfig's potential `noEmitOnError: true`. Otherwise, tsc won't emit
+    /// any `.d.ts` files when the project has type errors, even for non-erroring files.
+    #[test]
+    fn write_temp_tsconfig_declaration_sets_no_emit_on_error_false() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let base_tsconfig = temp.path().join("base-tsconfig.json");
+        fs::write(&base_tsconfig, r#"{ "compilerOptions": {} }"#).unwrap();
+
+        let opts = EmitOptions {
+            no_emit: false,
+            declaration: true,
+            declaration_dir: Some(temp.path().join("dist")),
+        };
+
+        let result =
+            write_temp_tsconfig(temp.path(), &base_tsconfig, &[], &opts, temp.path()).unwrap();
+        let content = fs::read_to_string(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        let co = &json["compilerOptions"];
+        // Positive: noEmitOnError must be explicitly false
+        assert_eq!(
+            co["noEmitOnError"], false,
+            "declaration tsconfig should set noEmitOnError: false to ensure emission despite errors"
+        );
+    }
+
+    /// When Phase B (declaration generation) has errors but tsc still emits some .d.ts
+    /// files, post-processing must still run to rename the emitted files to .vue.d.ts.
+    /// Previously, post-processing was skipped entirely on error, leaving 0 .vue.d.ts files.
+    #[test]
+    fn run_declaration_phase_with_errors_still_postprocesses_emitted_files() {
+        // Create fixture with mock tsc that reports an error AND emits a .d.ts file
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        let src_dir = root.join("src");
+        let vue_path = src_dir.join("Test.vue");
+        let tsconfig_path = root.join("tsconfig.json");
+        let decl_dir = root.join("dist").join("types");
+
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(
+            &vue_path,
+            r#"<script setup lang="ts">
+const props = defineProps<{ msg: string }>()
+</script>
+<template><div>{{ props.msg }}</div></template>
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &tsconfig_path,
+            r#"{
+  "compilerOptions": {
+    "strict": true
+  },
+  "files": ["src/Test.vue"]
+}"#,
+        )
+        .unwrap();
+
+        // Write a mock tsc that both emits a .d.ts AND reports an error (exit 1).
+        // This mimics real tsc behavior: errors in some files don't prevent emission of others.
+        write_mock_tsc_error_with_emit(&root, &decl_dir);
+
+        let config = load_tsconfig(&tsconfig_path).expect("test tsconfig should load");
+        let result = run(
+            &config,
+            &tsconfig_path,
+            &EmitOptions {
+                no_emit: false,
+                declaration: true,
+                declaration_dir: Some(decl_dir.clone()),
+            },
+            TypeCheckerBinary::ForceTsc,
+        );
+
+        // Positive: diagnostics should be reported
+        assert!(
+            !result.diagnostics.is_empty(),
+            "should report diagnostics from the error"
+        );
+
+        // Positive: .vue.d.ts file should still be created despite errors
+        let target = decl_dir.join("src/Test.vue.d.ts");
+        assert!(
+            target.exists(),
+            "should postprocess .vue.d.ts even when tsc reports errors, found: {:?}",
+            collect_dts_files(&decl_dir)
+        );
+    }
+
     #[test]
     fn run_declaration_with_tsconfig_sourced_output_dir() {
         let temp = tempfile::TempDir::new().unwrap();

@@ -232,6 +232,10 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
   // and other profile fields as the initial compilation.
   const profileCache = new Map<string, HostCompileProfile>();
 
+  // Cache per-style-block scoped flags from the SFC source.
+  // Key: filename, Value: array of booleans (one per style block, in order).
+  const styleScopedCache = new Map<string, boolean[]>();
+
   // Cache compiled scripts for script sub-requests.
   // In Vite mode, the main .vue transform returns a thin module that imports from
   // a script sub-request (?vue&type=script&lang.ts). This lets vite:esbuild and
@@ -433,9 +437,14 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         let css = code;
         const profile = profileCache.get(filename);
         if (profile) {
+          // Determine if this specific style block is scoped.
+          // Check URL query first, then fall back to cached SFC-level flags.
+          const styleIndex = query.index ?? 0;
+          const scopedFlags = styleScopedCache.get(filename);
+          const isScoped = query.scoped || (scopedFlags?.[styleIndex] ?? false);
           const processed = processStyle(css, {
             scopeId: profile.componentId ?? "",
-            scoped: true, // TODO: detect from block attributes
+            scoped: isScoped,
           });
           css = processed.code;
         }
@@ -466,6 +475,16 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 
       // Cache the profile so load() can reuse it for virtual file requests
       profileCache.set(filename, profile);
+
+      // Extract per-style-block scoped flags from the SFC source.
+      // Match <style ... scoped ...> tags in order.
+      const scopedFlags: boolean[] = [];
+      const styleRe = /<style\b([^>]*)>/gi;
+      let styleMatch;
+      while ((styleMatch = styleRe.exec(code)) !== null) {
+        scopedFlags.push(/\bscoped\b/.test(styleMatch[1]));
+      }
+      styleScopedCache.set(filename, scopedFlags);
 
       // Register file in host (handles parsing, caching, change detection)
       const t0 = timing ? performance.now() : 0;
@@ -579,6 +598,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         host.remove(id);
         profileCache.delete(id);
         scriptCache.delete(id);
+        styleScopedCache.delete(id);
       }
     },
 
@@ -602,6 +622,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         host.remove(file);
         profileCache.delete(file);
         scriptCache.delete(file);
+        styleScopedCache.delete(file);
 
         const affectedModules = modules.filter((m) => m.file === file);
         if (affectedModules.length > 0) {

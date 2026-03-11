@@ -780,6 +780,9 @@ pub(crate) fn build_props_object_into(
             let mut prop_is_class = false;
             let mut prop_is_style = false;
             let mut is_static_style = false;
+            // Vue 3.4+ same-name shorthand: `:prop` with no value.
+            // When true, the value should be the resolved binding for the arg name.
+            let mut bind_shorthand_arg: Option<&str> = None;
             // Event modifier categories (populated when prop_is_event is true)
             let mut event_runtime_modifiers: Vec<&str> = Vec::new();
             let mut event_key_modifiers: Vec<&str> = Vec::new();
@@ -1033,6 +1036,12 @@ pub(crate) fn build_props_object_into(
                             buf.push('"');
                         } else {
                             buf.push_str(&key);
+                        }
+                        // Vue 3.4+ same-name shorthand: `:disabled` (no value)
+                        // Save the camelized arg name so the value branch can
+                        // emit the resolved binding instead of `""`.
+                        if is_bind && prop.value_start.is_none() {
+                            bind_shorthand_arg = Some(arg_name);
                         }
                     }
                 } else {
@@ -1343,6 +1352,40 @@ pub(crate) fn build_props_object_into(
             } else if prop_is_event {
                 // Event handler with no value (e.g., @contextmenu.prevent)
                 buf.push_str("() => {}");
+            } else if let Some(arg_name) = bind_shorthand_arg {
+                // Vue 3.4+ same-name shorthand: `:disabled` → `disabled: resolvedBinding`
+                // The arg name is used as the expression — resolve it through bindings.
+                let camelized = props::camelize(arg_name);
+                let resolved = resolver.resolve_simple_expr(&camelized);
+                if prop_is_class {
+                    buf.push_str("_normalizeClass(");
+                    uses_normalize_class = true;
+                    if let Some(static_cls) = merge_class {
+                        buf.push_str("[\"");
+                        helpers::escape_js_string_into(buf, static_cls);
+                        buf.push_str("\", ");
+                        buf.push_str(&resolved);
+                        buf.push(']');
+                    } else {
+                        buf.push_str(&resolved);
+                    }
+                    buf.push(')');
+                } else if prop_is_style {
+                    buf.push_str("_normalizeStyle(");
+                    uses_normalize_style = true;
+                    if let Some(static_sty) = merge_style {
+                        buf.push('[');
+                        props::emit_static_style_object(buf, static_sty);
+                        buf.push_str(", ");
+                        buf.push_str(&resolved);
+                        buf.push(']');
+                    } else {
+                        buf.push_str(&resolved);
+                    }
+                    buf.push(')');
+                } else {
+                    buf.push_str(&resolved);
+                }
             } else {
                 // Boolean attribute (no value)
                 buf.push_str("\"\"");

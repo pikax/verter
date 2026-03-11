@@ -13463,3 +13463,216 @@ import MyComp from './MyComp.vue'
         code
     );
 }
+
+// ==================== Vue 3.4+ same-name shorthand bindings ====================
+
+// @ai-generated - TDD test: Issue 1 — `:disabled` with no value resolves to the binding
+#[test]
+fn bind_shorthand_resolves_to_binding() {
+    // Vue 3.4+ shorthand: `:disabled` is equivalent to `:disabled="disabled"`
+    let code = compile_and_validate_template(
+        r#"<template><button :disabled>click</button></template>
+<script setup>const disabled = true;</script>"#,
+    );
+    // Should resolve to the setup binding, not emit ""
+    assert!(
+        code.contains("disabled: $setup.disabled"),
+        ":disabled shorthand should resolve to $setup.disabled, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("disabled: \"\""),
+        ":disabled shorthand should NOT emit empty string, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn bind_shorthand_id_resolves_to_binding() {
+    let code = compile_and_validate_template(
+        r#"<template><div :id>content</div></template>
+<script setup>const id = 'my-div';</script>"#,
+    );
+    assert!(
+        code.contains("id: $setup.id"),
+        ":id shorthand should resolve to $setup.id, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn bind_shorthand_class_uses_normalize_class() {
+    // `:class="myClass"` (explicit value) uses _normalizeClass — verify
+    // shorthand doesn't break existing class normalization behavior.
+    let code = compile_and_validate_template(
+        r#"<template><div :class="myClass">content</div></template>
+<script setup>const myClass = 'active';</script>"#,
+    );
+    assert!(
+        code.contains("_normalizeClass("),
+        ":class should use _normalizeClass, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn bind_shorthand_style_uses_normalize_style() {
+    let code = compile_and_validate_template(
+        r#"<template><div :style>content</div></template>
+<script setup>const style = { color: 'red' };</script>"#,
+    );
+    assert!(
+        code.contains("_normalizeStyle("),
+        ":style shorthand should use _normalizeStyle, got:\n{}",
+        code
+    );
+}
+
+// ==================== Dynamic slot outlet name ====================
+
+// @ai-generated - TDD test: Issue 2 — `:name="expr"` on slot outlet
+#[test]
+fn slot_outlet_dynamic_name() {
+    let code = compile_and_validate_template(
+        r#"<template><div><slot :name="slotName"></slot></div></template>
+<script setup>const slotName = 'header';</script>"#,
+    );
+    // Dynamic name should NOT be quoted — it's an expression
+    assert!(
+        code.contains("_renderSlot(_ctx.$slots, $setup.slotName"),
+        "dynamic :name should use resolved expression, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("\"slotName\""),
+        "dynamic :name should NOT be a string literal, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn slot_outlet_dynamic_name_with_fallback() {
+    let code = compile_and_validate_template(
+        r#"<template><div><slot :name="slotName"><span>fallback</span></slot></div></template>
+<script setup>const slotName = 'header';</script>"#,
+    );
+    assert!(
+        code.contains("_renderSlot(_ctx.$slots, $setup.slotName"),
+        "dynamic slot with fallback should use resolved name, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("() => ["),
+        "slot with fallback should have callback, got:\n{}",
+        code
+    );
+}
+
+// ==================== Slot outlet props ====================
+
+// @ai-generated - TDD test: Issue 3 — slot outlet `:prop="expr"` props
+#[test]
+fn slot_outlet_with_bound_props() {
+    let code = compile_and_validate_template(
+        r#"<template><div><slot :item="item" :index="idx"></slot></div></template>
+<script setup>const item = {}; const idx = 0;</script>"#,
+    );
+    // Props should be passed as 3rd argument object
+    assert!(
+        code.contains("{ item: $setup.item, index: $setup.idx }"),
+        "slot outlet bound props should be in props object, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn slot_outlet_with_shorthand_props() {
+    // Vue 3.4+ shorthand on slot: `:item` → `item: resolvedBinding`
+    let code = compile_and_validate_template(
+        r#"<template><div><slot :item></slot></div></template>
+<script setup>const item = {};</script>"#,
+    );
+    assert!(
+        code.contains("{ item: $setup.item }"),
+        "slot outlet shorthand :item should resolve to binding, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn slot_outlet_props_with_fallback() {
+    let code = compile_and_validate_template(
+        r#"<template><div><slot :item="item"><span>default</span></slot></div></template>
+<script setup>const item = {};</script>"#,
+    );
+    // Props + fallback: _renderSlot($slots, "default", { item: ... }, () => [...])
+    assert!(
+        code.contains("{ item: $setup.item }"),
+        "slot outlet props with fallback should have props object, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("() => ["),
+        "slot outlet with props and fallback should have callback, got:\n{}",
+        code
+    );
+}
+
+// ==================== Forwarded slot flag ====================
+
+// @ai-generated - TDD test: Issue 10 — `_: 3 /* FORWARDED */` when slot contains <slot>
+#[test]
+fn component_slot_forwarded_flag_when_contains_slot_outlet() {
+    // When a component's slot body contains a <slot> outlet, the stability
+    // flag should be 3 (FORWARDED) instead of 1 (STABLE).
+    let result = compile_sfc(
+        r#"<template><Comp><slot></slot></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("_: 3"),
+        "component containing <slot> outlet should have FORWARDED flag (_: 3), got:\n{}",
+        tpl.code
+    );
+    assert!(
+        !tpl.code.contains("_: 1"),
+        "component containing <slot> outlet should NOT have STABLE flag (_: 1), got:\n{}",
+        tpl.code
+    );
+}
+
+#[test]
+fn component_slot_stable_flag_without_slot_outlet() {
+    // Without any nested <slot>, the flag should be 1 (STABLE).
+    let result = compile_sfc(
+        r#"<template><Comp><div>static content</div></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("_: 1"),
+        "component without <slot> outlet should have STABLE flag (_: 1), got:\n{}",
+        tpl.code
+    );
+    assert!(
+        !tpl.code.contains("_: 3"),
+        "component without <slot> outlet should NOT have FORWARDED flag, got:\n{}",
+        tpl.code
+    );
+}
+
+#[test]
+fn component_named_slot_forwarded_when_contains_slot_outlet() {
+    // Named slot with nested <slot> outlet should still get FORWARDED flag
+    let result = compile_sfc(
+        r#"<template><Comp><template #header><slot name="inner"></slot></template></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("_: 3"),
+        "named slot with nested <slot> should have FORWARDED flag (_: 3), got:\n{}",
+        tpl.code
+    );
+}

@@ -36,6 +36,14 @@ fn format_slot_key(buf: &mut String, name: &str) {
     }
 }
 
+/// The resolved slot name for a `<slot>` outlet.
+pub(super) enum SlotName {
+    /// Static name: `name="header"` → `"header"`
+    Static(String),
+    /// Dynamic name: `:name="expr"` → resolved expression
+    Dynamic(String),
+}
+
 /// A slot entry is either a named template slot (single child) or a default
 /// slot (group of consecutive non-template children).
 pub(super) enum SlotEntry {
@@ -47,19 +55,52 @@ pub(super) enum SlotEntry {
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// Extract the slot name from a `<slot>` element's `name` attribute.
-    /// Returns "default" if no static `name` prop is found.
-    pub(super) fn extract_slot_name<'s>(&self, element: &ElementNode, source: &'s str) -> &'s str {
-        for prop in &element.props {
+    /// Returns `SlotName::Static("default")` if no `name` prop is found.
+    /// Handles both static `name="xxx"` and dynamic `:name="expr"`.
+    pub(super) fn extract_slot_name_ex(
+        &self,
+        element: &ElementNode,
+        oxc_el: Option<&OxcParsedElement<'alloc>>,
+        source: &str,
+    ) -> SlotName {
+        for (prop_idx, prop) in element.props.iter().enumerate() {
             if !prop.is_directive {
                 let name = &source[prop.start as usize..prop.name_end as usize];
                 if name == "name" {
                     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-                        return &source[vs as usize..ve as usize];
+                        return SlotName::Static(source[vs as usize..ve as usize].to_string());
+                    }
+                }
+            } else {
+                let dname = &source[prop.start as usize..prop.name_end as usize];
+                if super::is_v_bind(dname) {
+                    if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+                        let arg = &source[as_ as usize..ae as usize];
+                        if arg == "name" {
+                            // Dynamic :name="expr"
+                            if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                                let raw = &source[vs as usize..ve as usize];
+                                let oxc_exp =
+                                    super::super::vapor::find_prop_oxc_exp(oxc_el, prop_idx);
+                                let resolved = element::resolve_expr(
+                                    raw,
+                                    vs,
+                                    oxc_exp,
+                                    &self.resolver,
+                                    self.options.force_js,
+                                );
+                                return SlotName::Dynamic(resolved);
+                            } else {
+                                // Same-name shorthand: `:name` → use `name` as expression
+                                let resolved = self.resolver.resolve_simple_expr("name");
+                                return SlotName::Dynamic(resolved);
+                            }
+                        }
                     }
                 }
             }
         }
-        "default"
+        SlotName::Static("default".to_string())
     }
 
     /// Extract the slot name from a `v-slot` directive on a `<template>` element.
@@ -80,13 +121,18 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// Process a `<slot>` outlet element, generating `_renderSlot(_ctx.$slots, "name")`.
     /// When the slot has fallback children, generates
     /// `_renderSlot(_ctx.$slots, "name", {}, () => [children])`.
+    ///
+    /// Supports:
+    /// - Static `name="xxx"` and dynamic `:name="expr"` slot names
+    /// - Slot outlet props (`:prop="expr"`, shorthand `:prop`)
     pub(super) fn process_slot_outlet(
         &mut self,
         el: &ElementNode,
+        oxc_el: Option<&OxcParsedElement<'alloc>>,
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
     ) -> ChildRecord {
-        let slot_name = self.extract_slot_name(el, source);
+        let slot_name = self.extract_slot_name_ex(el, oxc_el, source);
         out.add_vdom_import(VdomHelper::RenderSlot);
 
         let tag_end = el
@@ -106,22 +152,43 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         element::resolve_whitespace(&mut children, out, false);
         element::strip_interstitial_condition_nodes(&mut children, out, false);
 
+        // Build slot outlet props object (excluding `name`/`:name`).
+        // Collects `:prop="expr"` and shorthand `:prop` bindings.
+        let slot_props = self.build_slot_outlet_props(el, oxc_el, source);
+
         let mut buf = std::mem::take(&mut self.buf);
         buf.clear();
 
-        if children.is_empty() {
-            // No fallback: _renderSlot(_ctx.$slots, "name")
-            buf.push_str("_renderSlot(_ctx.$slots, \"");
-            buf.push_str(slot_name);
-            buf.push_str("\")");
+        // Build the _renderSlot call prefix
+        buf.push_str("_renderSlot(_ctx.$slots, ");
+        match &slot_name {
+            SlotName::Static(name) => {
+                buf.push('"');
+                helpers::escape_js_string_into(&mut buf, name);
+                buf.push('"');
+            }
+            SlotName::Dynamic(expr) => {
+                buf.push_str(expr);
+            }
+        }
+
+        if children.is_empty() && slot_props.is_none() {
+            // No fallback, no props: _renderSlot(_ctx.$slots, "name")
+            buf.push(')');
+            out.overwrite(el.tag_open.start, tag_end, &buf);
+        } else if children.is_empty() {
+            // Props but no fallback: _renderSlot(_ctx.$slots, "name", { props })
+            buf.push_str(", ");
+            buf.push_str(&slot_props.unwrap());
+            buf.push(')');
             out.overwrite(el.tag_open.start, tag_end, &buf);
         } else {
             // Has fallback: split into open/close overwrites so children
             // remain in place with their own overwrites.
-            // Open: _renderSlot(_ctx.$slots, "name", {}, () => [
-            buf.push_str("_renderSlot(_ctx.$slots, \"");
-            buf.push_str(slot_name);
-            buf.push_str("\", {}, () => [");
+            // Open: _renderSlot(_ctx.$slots, "name", { props }, () => [
+            buf.push_str(", ");
+            buf.push_str(slot_props.as_deref().unwrap_or("{}"));
+            buf.push_str(", () => [");
             let open_end = children[0].start;
             out.overwrite(el.tag_open.start, open_end, &buf);
 
@@ -162,6 +229,106 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             condition_prefix: None,
             condition_expr_start: None,
             condition_binding_prefix_len: 0,
+        }
+    }
+
+    /// Build the slot outlet props object string.
+    /// Collects `:prop="expr"` and shorthand `:prop` bindings, excluding `name`/`:name`.
+    /// Returns `None` if no slot props are present.
+    fn build_slot_outlet_props(
+        &self,
+        el: &ElementNode,
+        oxc_el: Option<&OxcParsedElement<'alloc>>,
+        source: &str,
+    ) -> Option<String> {
+        let mut props_buf = String::new();
+        let mut count = 0;
+
+        for (prop_idx, prop) in el.props.iter().enumerate() {
+            if !prop.is_directive {
+                // Skip static `name` attribute
+                let name = &source[prop.start as usize..prop.name_end as usize];
+                if name == "name" {
+                    continue;
+                }
+                // Other static attributes become slot props
+                if count > 0 {
+                    props_buf.push_str(", ");
+                }
+                if super::props::needs_quoted_key(name) {
+                    props_buf.push('"');
+                    helpers::escape_js_string_into(&mut props_buf, name);
+                    props_buf.push('"');
+                } else {
+                    props_buf.push_str(name);
+                }
+                props_buf.push_str(": ");
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    props_buf.push('"');
+                    helpers::escape_js_string_into(
+                        &mut props_buf,
+                        &source[vs as usize..ve as usize],
+                    );
+                    props_buf.push('"');
+                } else {
+                    props_buf.push_str("\"\"");
+                }
+                count += 1;
+                continue;
+            }
+
+            let dname = &source[prop.start as usize..prop.name_end as usize];
+            if !super::is_v_bind(dname) {
+                continue;
+            }
+
+            if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+                let arg = &source[as_ as usize..ae as usize];
+                // Skip :name (used for dynamic slot name, not props)
+                if arg == "name" {
+                    continue;
+                }
+
+                if count > 0 {
+                    props_buf.push_str(", ");
+                }
+
+                // Emit key
+                let key = super::props::camelize(arg);
+                if super::props::needs_quoted_key(&key) {
+                    props_buf.push('"');
+                    helpers::escape_js_string_into(&mut props_buf, &key);
+                    props_buf.push('"');
+                } else {
+                    props_buf.push_str(&key);
+                }
+                props_buf.push_str(": ");
+
+                // Emit value
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    let raw = &source[vs as usize..ve as usize];
+                    let oxc_exp = super::super::vapor::find_prop_oxc_exp(oxc_el, prop_idx);
+                    let resolved = element::resolve_expr(
+                        raw,
+                        vs,
+                        oxc_exp,
+                        &self.resolver,
+                        self.options.force_js,
+                    );
+                    props_buf.push_str(&resolved);
+                } else {
+                    // Same-name shorthand: `:item` → `item: resolvedBinding`
+                    let resolved = self.resolver.resolve_simple_expr(&key);
+                    props_buf.push_str(&resolved);
+                }
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            Some(format!("{{ {} }}", props_buf))
+        } else {
+            None
         }
     }
 
@@ -542,8 +709,17 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
             buf.push(')');
         } else if has_children {
-            // Static: close the slot object
-            if self.options.is_production {
+            // Static: close the slot object.
+            // Use FORWARDED (3) when any slot body contains a <slot> outlet,
+            // otherwise STABLE (1).
+            let forwarded = self.has_forwarded_slots(el_children);
+            if forwarded {
+                if self.options.is_production {
+                    buf.push_str(", _: 3}");
+                } else {
+                    buf.push_str(", _: 3 /* FORWARDED */}");
+                }
+            } else if self.options.is_production {
                 buf.push_str(", _: 1}");
             } else {
                 buf.push_str(", _: 1 /* STABLE */}");
@@ -980,7 +1156,19 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         self.emit_slot_children_with_cache(&children, out, source, el_children);
 
         buf.clear();
-        buf.push_str("]), _: 1 /* STABLE */}");
+        // Use FORWARDED (3) when any child contains a <slot> outlet.
+        let forwarded = self.has_forwarded_slots(el_children);
+        if forwarded {
+            if self.options.is_production {
+                buf.push_str("]), _: 3}");
+            } else {
+                buf.push_str("]), _: 3 /* FORWARDED */}");
+            }
+        } else if self.options.is_production {
+            buf.push_str("]), _: 1}");
+        } else {
+            buf.push_str("]), _: 1 /* STABLE */}");
+        }
         // Add PatchFlags for components with dynamic props
         if !dynamic_props.is_empty() {
             buf.push_str(", ");
@@ -1017,6 +1205,27 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     }
 
     /// Check whether an element's AST children contain any `<template v-slot>` elements.
+    /// Check if any descendant of the given children contains a `<slot>` outlet.
+    /// When true, the parent component should use `_: 3 /* FORWARDED */` instead
+    /// of `_: 1 /* STABLE */` to ensure proper reactivity tracking.
+    pub(super) fn has_forwarded_slots(&self, el_children: &[NodeId]) -> bool {
+        for &child_id in el_children {
+            let node = &self.ast.nodes[child_id.0];
+            if let AstNodeKind::Element(ref child_el) = node.kind {
+                if child_el.tag_type.is_slot_outlet() {
+                    return true;
+                }
+                // Recurse into child's children
+                if let Some(ref content) = child_el.content {
+                    if self.has_forwarded_slots(&content.children) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub(super) fn has_slot_children(&self, el_children: &[NodeId]) -> bool {
         for &child_id in el_children {
             let node = &self.ast.nodes[child_id.0];

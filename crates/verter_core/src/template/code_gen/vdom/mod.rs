@@ -706,7 +706,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
 
         // Handle <slot> outlet: generates _renderSlot(_ctx.$slots, "name")
         if el.tag_type.is_slot_outlet() {
-            let record = self.process_slot_outlet(el, source, out);
+            let record = self.process_slot_outlet(el, oxc, source, out);
             // Apply v-for prefix (e.g., `_renderList(items, (item) => {\nreturn `).
             if let Some((prefix, iterable_src)) = self.v_for_prefixes.pop().flatten() {
                 if let Some(src_pos) = iterable_src {
