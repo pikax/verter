@@ -38,7 +38,8 @@ const TARBALLS_DIR = path.join(INTEGRATION_DIR, 'tarballs');
 const LOGS_DIR = path.join(INTEGRATION_DIR, 'logs');
 const DEFAULT_LOCAL_ROOTS = ['D:\\dev'];
 const DEFAULT_LOCAL_RUNS_DIR = path.join('D:\\dev', 'temp', 'verter-toolchain-runs');
-const LOCAL_SANDBOX_SKIP = ['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.nuxt', '.output', 'out', 'target', '.turbo', 'tmp', 'temp'];
+const LOCAL_SANDBOX_SKIP_ALWAYS = ['.git', 'node_modules', 'dist', 'coverage', '.next', '.nuxt', '.output', 'out', 'target', '.turbo', 'tmp', 'temp'];
+const LOCAL_SANDBOX_SKIP_TOP_ONLY = ['build'];
 
 // ── Type-Check Binary Detection ─────────────────────────────────────────────
 
@@ -316,13 +317,18 @@ function run(cmd, cwd, { timeout = 10 * 60_000, env: extraEnv = {} } = {}) {
     }
   }
 
+  const binDir = path.join(cwd, 'node_modules', '.bin');
+  const augmentedPath = fs.existsSync(binDir)
+    ? `${binDir}${path.delimiter}${process.env.PATH || ''}`
+    : process.env.PATH;
+
   try {
     const stdout = execSync(finalCmd, {
       cwd,
       stdio: 'pipe',
       shell: true,
       timeout,
-      env: { ...process.env, FORCE_COLOR: '0', COREPACK_ENABLE_STRICT: '0', ...parsedEnv },
+      env: { ...process.env, PATH: augmentedPath, FORCE_COLOR: '0', COREPACK_ENABLE_STRICT: '0', ...parsedEnv },
       maxBuffer: 50 * 1024 * 1024,
     });
     return {
@@ -354,7 +360,7 @@ function extractTestCounts(output) {
 /** Recursively find files matching a predicate (skips node_modules, .git). */
 function findFiles(dir, predicate) {
   const results = [];
-  const SKIP = new Set(['node_modules', '.git', '.output', '.nuxt', 'dist']);
+  const SKIP = new Set(['node_modules', '.git', '.output', '.nuxt', 'dist', '.vite-temp']);
 
   function walk(current) {
     let entries;
@@ -384,15 +390,17 @@ function log(prefix, msg) {
 }
 
 /** Recursively copy a directory, skipping entries whose names are in `skipNames`. */
-function copyRecursive(src, dest, skipNames = []) {
+function copyRecursive(src, dest, skipNames = [], topOnlySkipNames = [], depth = 0) {
   const skip = new Set(skipNames);
+  const topSkip = depth === 0 ? new Set(topOnlySkipNames) : null;
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     if (skip.has(entry.name)) continue;
+    if (topSkip?.has(entry.name)) continue;
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     if (entry.isDirectory()) {
-      copyRecursive(srcPath, destPath, skipNames);
+      copyRecursive(srcPath, destPath, skipNames, topOnlySkipNames, depth + 1);
     } else {
       try {
         fs.copyFileSync(srcPath, destPath);
@@ -435,7 +443,7 @@ function createLocalRunContext(opts) {
 function prepareLocalSandbox(project, runContext) {
   const sandboxDir = path.join(runContext.sandboxesDir, sanitizeLocalName(project));
   fs.rmSync(sandboxDir, { recursive: true, force: true });
-  copyRecursive(project.repoRoot, sandboxDir, LOCAL_SANDBOX_SKIP);
+  copyRecursive(project.repoRoot, sandboxDir, LOCAL_SANDBOX_SKIP_ALWAYS, LOCAL_SANDBOX_SKIP_TOP_ONLY);
   return sandboxDir;
 }
 
@@ -473,6 +481,7 @@ function writeProjectSummary(project, artifactDir, result, diff, queue) {
   if (project.chosenTsconfig) lines.push(`- Tsconfig: ${project.chosenTsconfig}`);
   if (project.replacementSteps?.length) lines.push(`- Steps: ${project.replacementSteps.join(', ')}`);
   if (result.typeCheckCrash) lines.push('- Type-check crash: yes');
+  if (result.skippedReason) lines.push(`- Skipped: ${result.skippedReason}`);
   if (result.error) lines.push(`- Error: ${result.error}`);
   lines.push('');
 
@@ -789,6 +798,46 @@ function fixWindowsScripts(project, repoDir) {
   }
 }
 
+// ── Build Artifact Validation ─────────────────────────────────────────────────
+
+function expectedNativeBinaries() {
+  const { platform, arch } = process;
+  switch (platform) {
+    case 'win32':
+      switch (arch) {
+        case 'x64': return ['verter-native.win32-x64-msvc.node', 'verter.win32-x64-msvc.node'];
+        case 'ia32': return ['verter-native.win32-ia32-msvc.node', 'verter.win32-ia32-msvc.node'];
+        case 'arm64': return ['verter-native.win32-arm64-msvc.node', 'verter.win32-arm64-msvc.node'];
+      }
+      break;
+    case 'darwin':
+      switch (arch) {
+        case 'x64': return ['verter-native.darwin-universal.node', 'verter.darwin-universal.node', 'verter-native.darwin-x64.node', 'verter.darwin-x64.node'];
+        case 'arm64': return ['verter-native.darwin-universal.node', 'verter.darwin-universal.node', 'verter-native.darwin-arm64.node', 'verter.darwin-arm64.node'];
+      }
+      break;
+    case 'linux':
+      switch (arch) {
+        case 'x64': return ['verter-native.linux-x64-gnu.node', 'verter.linux-x64-gnu.node', 'verter-native.linux-x64-musl.node', 'verter.linux-x64-musl.node'];
+        case 'arm64': return ['verter-native.linux-arm64-gnu.node', 'verter.linux-arm64-gnu.node', 'verter-native.linux-arm64-musl.node', 'verter.linux-arm64-musl.node'];
+      }
+      break;
+  }
+  return [];
+}
+
+const REQUIRED_BUILD_ARTIFACTS = {
+  unplugin: ['index.mjs', 'index.cjs', 'vite.mjs', 'vite.cjs'],
+  native: [],
+  nuxt: ['module.mjs', 'module.cjs'],
+};
+
+function validateNativeDist(distDir) {
+  const expected = expectedNativeBinaries();
+  if (expected.length === 0) return false;
+  return expected.some(f => fs.existsSync(path.join(distDir, f)));
+}
+
 // ── Install Verter Tarballs ──────────────────────────────────────────────────
 
 function installVerterTarballs(project, repoDir) {
@@ -901,12 +950,34 @@ function installVerterTarballs(project, repoDir) {
     };
     findVerterDists(pnpmDir, distsToOverwrite);
   }
+  const srcRoots = {
+    unplugin: path.join(ROOT, 'packages', 'unplugin'),
+    native: path.join(ROOT, 'packages', 'native'),
+    nuxt: path.join(ROOT, 'packages', 'nuxt'),
+  };
   let overwritten = 0;
+  const overwrittenPkgs = new Set();
   for (const { dist: destDist, pkg } of distsToOverwrite) {
     const srcDist = srcDists[pkg];
     if (!srcDist || !fs.existsSync(srcDist)) continue;
+
+    if (pkg === 'native') {
+      if (!validateNativeDist(srcDist)) {
+        log(project.name, `  WARNING: @verter/native source dist has no .node binary. Build native bindings first. Skipping overwrite.`);
+        continue;
+      }
+    } else {
+      const required = REQUIRED_BUILD_ARTIFACTS[pkg] || [];
+      const missing = required.filter(f => !fs.existsSync(path.join(srcDist, f)));
+      if (missing.length > 0) {
+        log(project.name, `  WARNING: @verter/${pkg} source dist is missing: ${missing.join(', ')}. Build @verter/${pkg} first. Skipping overwrite.`);
+        continue;
+      }
+    }
+
     fs.rmSync(destDist, { recursive: true, force: true });
     copyRecursive(srcDist, destDist);
+    overwrittenPkgs.add(pkg);
     overwritten++;
   }
   if (overwritten > 0) {
@@ -914,19 +985,13 @@ function installVerterTarballs(project, repoDir) {
   }
 
   // Also overwrite root-level JS/TS files (index.js, index.ts) for each
-  // @verter package. The dist overwrite only covers the dist/ subdirectory,
-  // but files like native/index.js (which contains Buffer coercion wrappers)
-  // live at the package root and may be stale in old tarballs.
-  const srcRoots = {
-    unplugin: path.join(ROOT, 'packages', 'unplugin'),
-    native: path.join(ROOT, 'packages', 'native'),
-    nuxt: path.join(ROOT, 'packages', 'nuxt'),
-  };
+  // @verter package whose dist was successfully overwritten.
   const rootFiles = ['index.js', 'index.ts'];
   for (const { dist: destDist, pkg } of distsToOverwrite) {
+    if (!overwrittenPkgs.has(pkg)) continue;
     const srcPkgDir = srcRoots[pkg];
     if (!srcPkgDir) continue;
-    const destPkgDir = path.dirname(destDist); // parent of dist/ = package root
+    const destPkgDir = path.dirname(destDist);
     for (const file of rootFiles) {
       const srcFile = path.join(srcPkgDir, file);
       if (fs.existsSync(srcFile)) {
@@ -1050,6 +1115,7 @@ function ensureUnpluginResolvable(project, repoDir, unpluginDir) {
 const REPLACEABLE_EXTS = new Set(['.ts', '.js', '.mjs', '.mts', '.cjs']);
 
 function isConfigFile(name) {
+  if (name.includes('.timestamp-')) return false;
   return (
     name.startsWith('vite.config') ||
     name.startsWith('vitest.config') ||
@@ -1391,6 +1457,7 @@ async function processLocalProject(project, opts, runContext) {
     typeCheck: null,
     typeCheckCrash: false,
     artifactDir: null,
+    skippedReason: null,
     error: null,
   };
 
@@ -1399,6 +1466,7 @@ async function processLocalProject(project, opts, runContext) {
   results.artifactDir = artifactDir;
   writeJson(path.join(artifactDir, 'project.json'), project);
 
+  let typeCheckArtifacts = { diff: null, queue: null };
   try {
     const repoDir = prepareLocalSandbox(project, runContext);
     writeJson(path.join(artifactDir, 'sandbox.json'), {
@@ -1417,7 +1485,10 @@ async function processLocalProject(project, opts, runContext) {
     }
 
     if (!['pnpm', 'npm'].includes(project.packageManager || '')) {
-      throw new Error(`Unsupported package manager for local execution: ${project.packageManager ?? 'unknown'}`);
+      results.skippedReason = `Unsupported package manager: ${project.packageManager ?? 'unknown'}`;
+      log(project.name, `SKIP: ${results.skippedReason}`);
+      writeProjectSummary(project, artifactDir, results, null, null);
+      return results;
     }
 
     installDeps(project, repoDir);
@@ -1447,6 +1518,8 @@ async function processLocalProject(project, opts, runContext) {
     if (runTypeChecksForProject) {
       results.typeCheck = runTypeChecks(project, repoDir);
     }
+    typeCheckArtifacts = writeTypeCheckArtifacts(project, repoDir, artifactDir, results.typeCheck);
+    results.typeCheckCrash = Boolean(typeCheckArtifacts.diff?.summary?.tool_crash);
 
     if (project.surfaces?.editor) {
       results.replacement.editorModified = replaceEditorTooling(project, repoDir);
@@ -1469,7 +1542,10 @@ async function processLocalProject(project, opts, runContext) {
       results.replacement.modified = modified;
       results.replacement.verified = verifyReplacement(buildProject, repoDir);
       if (!results.replacement.verified) {
-        throw new Error('Plugin replacement verification failed');
+        results.error = 'Plugin replacement verification failed';
+        writeJson(path.join(artifactDir, 'replacement.json'), results.replacement);
+        writeProjectSummary(project, artifactDir, results, typeCheckArtifacts.diff, typeCheckArtifacts.queue);
+        return results;
       }
     } else {
       results.replacement.verified = true;
@@ -1491,14 +1567,12 @@ async function processLocalProject(project, opts, runContext) {
       }
     }
 
-    const { diff, queue } = writeTypeCheckArtifacts(project, repoDir, artifactDir, results.typeCheck);
-    results.typeCheckCrash = Boolean(diff?.summary?.tool_crash);
     writeJson(path.join(artifactDir, 'replacement.json'), results.replacement);
-    writeProjectSummary(project, artifactDir, results, diff, queue);
+    writeProjectSummary(project, artifactDir, results, typeCheckArtifacts.diff, typeCheckArtifacts.queue);
   } catch (/** @type {any} */ err) {
     results.error = err.message;
     writeJson(path.join(artifactDir, 'error.json'), { error: err.message });
-    writeProjectSummary(project, artifactDir, results, null, null);
+    writeProjectSummary(project, artifactDir, results, typeCheckArtifacts.diff, typeCheckArtifacts.queue);
     log(project.name, `ERROR: ${err.message}`);
   }
 
@@ -1701,8 +1775,24 @@ function printSummary(allResults) {
   let passed = 0;
   let failed = 0;
   let warnings = 0;
+  let skipped = 0;
 
   for (const r of allResults) {
+    if (r.skippedReason) {
+      const row = [
+        r.name.padEnd(22),
+        'SKIP'.padEnd(10),
+        ''.padEnd(10),
+        ''.padEnd(10),
+        ''.padEnd(14),
+        ''.padEnd(14),
+        ''.padEnd(8),
+        'SKIPPED'.padEnd(12),
+      ];
+      console.log(row.join(' | '));
+      skipped++;
+      continue;
+    }
     if (r.error) {
       const row = [
         r.name.padEnd(22),
@@ -1779,7 +1869,7 @@ function printSummary(allResults) {
   }
 
   console.log('-'.repeat(100));
-  console.log(`${passed} passed / ${warnings} warnings / ${failed} failed`);
+  console.log(`${passed} passed / ${warnings} warnings / ${failed} failed / ${skipped} skipped`);
   console.log('');
   const artifactRoots = [...new Set(
     allResults
