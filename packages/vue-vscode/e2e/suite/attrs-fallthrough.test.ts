@@ -81,6 +81,12 @@ suite(`Attrs Fallthrough [${FIXTURE_NAME}]`, function () {
   test("S3: fragment — extra attr flagged (FragmentComp)", function () {
     // FragmentComp has multiple roots (fragment). data-test cannot fall
     // through, so it should be flagged as unknown-prop.
+    const text = doc.getText();
+    if (!text.includes('<FragmentComp msg="hello"')) {
+      console.log("    FragmentComp not in this fixture — skip");
+      return;
+    }
+
     const diags = unknownPropsOnLine('<FragmentComp msg="hello"');
     const msgWarning = diags.find((d) => d.message.includes("msg"));
     expect(msgWarning, "msg is a declared prop and should NOT be flagged").to.be
