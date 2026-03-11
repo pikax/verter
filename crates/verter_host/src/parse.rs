@@ -803,6 +803,8 @@ pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseS
     let (script_analysis, script_panic_diag) = catch_analysis_panic(
         "script analysis (non-SFC)",
         std::panic::AssertUnwindSafe(|| {
+            // All script-applicable flags (skip template/style flags since they're SFC-specific).
+            // TODO: may reduce to a lighter scope if analysis of non-SFC files becomes a performance bottleneck
             verter_analysis::build_script_analysis_with_scope(
                 source,
                 source_type,
@@ -810,7 +812,12 @@ pub(crate) fn parse_non_sfc_snapshot(canonical_id: &str, source: &str) -> ParseS
                 verter_analysis::AnalysisScope::IMPORTS
                     | verter_analysis::AnalysisScope::BINDINGS
                     | verter_analysis::AnalysisScope::FUNC_RETURNS
-                    | verter_analysis::AnalysisScope::REACTIVITY,
+                    | verter_analysis::AnalysisScope::REACTIVITY
+                    | verter_analysis::AnalysisScope::MACROS
+                    | verter_analysis::AnalysisScope::MACRO_TYPE_DEPS
+                    | verter_analysis::AnalysisScope::VUE_API_USAGE
+                    | verter_analysis::AnalysisScope::EXPORT_SIGNATURES
+                    | verter_analysis::AnalysisScope::SCRIPT_USAGES,
             )
         }),
     );
@@ -1625,6 +1632,54 @@ export type VNodeRef = string | Ref | ((ref: Element | null, refs: Record<string
         assert!(
             snapshot.parse_diagnostics.diagnostics.is_empty(),
             "should not have parse diagnostics for valid .d.ts content"
+        );
+    }
+
+    /// Non-SFC analysis scope includes VUE_API_USAGE, MACROS, MACRO_TYPE_DEPS,
+    /// EXPORT_SIGNATURES, and SCRIPT_USAGES (all script-applicable flags).
+    #[test]
+    fn parse_non_sfc_expanded_analysis_scope() {
+        // A .ts file that uses Vue APIs at top level — provide() call detected
+        let source = r#"import { provide, ref, onMounted } from 'vue'
+const count = ref(0)
+provide('counter', count)
+onMounted(() => { console.log('mounted') })
+"#;
+        let snap = parse_non_sfc_snapshot("composable.ts", source);
+        let analysis = &snap.script_analysis;
+        // Positive: VUE_API_USAGE should detect provide() and onMounted() calls
+        assert!(
+            !analysis.vue_api_calls.is_empty(),
+            "should detect vue API calls (provide, onMounted) in non-SFC .ts file"
+        );
+        assert!(
+            analysis
+                .vue_api_calls
+                .iter()
+                .any(|c| c.api == verter_analysis::VueApiClassification::Provide),
+            "should detect provide() call"
+        );
+        assert!(
+            analysis
+                .vue_api_calls
+                .iter()
+                .any(|c| c.api == verter_analysis::VueApiClassification::OnMounted),
+            "should detect onMounted() call"
+        );
+        // Positive: IMPORTS should be populated
+        assert!(!analysis.imports.is_empty(), "should have imports from vue");
+        // Positive: BINDINGS should be populated
+        assert!(
+            !analysis.bindings.is_empty(),
+            "should have bindings (count)"
+        );
+        // Negative: should not have lifecycle hooks that aren't in the source
+        assert!(
+            analysis
+                .vue_api_calls
+                .iter()
+                .all(|c| c.api != verter_analysis::VueApiClassification::OnUnmounted),
+            "should not detect onUnmounted which isn't in the source"
         );
     }
 

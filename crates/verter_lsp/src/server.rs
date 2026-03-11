@@ -414,10 +414,10 @@ struct TypeProviderContext {
 }
 
 #[derive(Debug, Clone)]
-struct PreparedNonVueProviderSync {
-    provider_path: String,
-    rewritten: String,
-    resolved_dependencies: Vec<crate::project_resolver::ResolveResult>,
+pub(crate) struct PreparedNonVueProviderSync {
+    pub(crate) provider_path: String,
+    pub(crate) rewritten: String,
+    pub(crate) resolved_dependencies: Vec<crate::project_resolver::ResolveResult>,
 }
 
 struct ResolvedComponentDocument {
@@ -896,6 +896,9 @@ impl VerterLanguageServer {
             .filter(|dependency| {
                 dependency.provider_target
                     == crate::project_resolver::ProviderTarget::ShadowSourceFile
+                    || (dependency.provider_target
+                        == crate::project_resolver::ProviderTarget::SourceFile
+                        && dependency.source_id.contains("node_modules"))
             })
             .map(|dependency| dependency.source_id.clone())
             .collect::<Vec<_>>();
@@ -998,6 +1001,12 @@ impl VerterLanguageServer {
                 } else if dependency.provider_target
                     == crate::project_resolver::ProviderTarget::ShadowSourceFile
                 {
+                    pending.push(dependency.source_id.clone());
+                } else if dependency.provider_target
+                    == crate::project_resolver::ProviderTarget::SourceFile
+                    && dependency.source_id.contains("node_modules")
+                {
+                    // Follow node_modules dependencies transitively
                     pending.push(dependency.source_id.clone());
                 }
             }
@@ -2745,7 +2754,7 @@ fn compute_relative_path(from_dir: &str, to_file: &str) -> String {
     }
 }
 
-fn quote_wrapped_specifier(raw_text: &str, specifier: &str) -> String {
+pub(crate) fn quote_wrapped_specifier(raw_text: &str, specifier: &str) -> String {
     let quote = match raw_text.chars().next() {
         Some('\'') => '\'',
         Some('"') => '"',
@@ -2822,7 +2831,7 @@ impl crate::project_resolver::ProjectResolverReader for LspProjectResolverReader
     }
 }
 
-fn rewrite_non_vue_source_with_resolver(
+pub(crate) fn rewrite_non_vue_source_with_resolver(
     resolver: &crate::project_resolver::NativeProjectResolver,
     reader: &dyn crate::project_resolver::ProjectResolverReader,
     importer_id: &str,
@@ -2868,7 +2877,7 @@ fn rewrite_non_vue_source_with_resolver(
     rewritten
 }
 
-fn prepare_non_vue_provider_sync(
+pub(crate) fn prepare_non_vue_provider_sync(
     snapshot: Option<&ResolverSnapshot>,
     reader: &dyn crate::project_resolver::ProjectResolverReader,
     importer_id: &str,
@@ -2898,7 +2907,7 @@ fn prepare_non_vue_provider_sync(
     })
 }
 
-fn collect_resolved_provider_dependencies(
+pub(crate) fn collect_resolved_provider_dependencies(
     resolver: &crate::project_resolver::NativeProjectResolver,
     reader: &dyn crate::project_resolver::ProjectResolverReader,
     importer_id: &str,
@@ -2953,7 +2962,7 @@ fn collect_resolved_provider_dependencies(
     resolved
 }
 
-fn module_reference_request_kind(
+pub(crate) fn module_reference_request_kind(
     reference: &verter_host::ScriptModuleReference,
 ) -> crate::project_resolver::ResolveRequestKind {
     if reference.is_type_only {

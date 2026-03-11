@@ -84,6 +84,12 @@ impl ProjectSync {
         self.provider.close_file(dts_path).await
     }
 
+    /// Load a non-Vue file into the type provider for import resolution only.
+    /// Unlike `sync_file`, this uses `load_file` (background semantics — no diagnostics).
+    pub async fn load_file(&self, path: &str, content: &str) -> Result<(), TypeProviderError> {
+        self.provider.load_file(path, content).await
+    }
+
     /// Sync a non-Vue file to the type provider.
     pub async fn sync_file(&self, path: &str, content: &str) -> Result<(), TypeProviderError> {
         self.provider.update_file(path, content).await
@@ -293,6 +299,38 @@ mod tests {
             }
             _ => panic!("expected UpdateFile"),
         }
+    }
+
+    /// load_file sends load_file (background semantics, no diagnostics)
+    #[tokio::test]
+    async fn load_file_sends_load_file() {
+        let mock = MockTypeProvider::new();
+        let sync = make_sync(&mock, ProjectSyncMode::FullProject);
+
+        sync.load_file("utils.ts", "export const x = 1;")
+            .await
+            .unwrap();
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            MockCall::LoadFile { path, content } => {
+                assert_eq!(path, "utils.ts");
+                assert_eq!(content, "export const x = 1;");
+            }
+            _ => panic!("expected LoadFile, got {:?}", calls[0]),
+        }
+    }
+
+    /// load_file propagates provider errors
+    #[tokio::test]
+    async fn load_file_propagates_provider_errors() {
+        let failing =
+            FailingTypeProvider::new("flush error: The pipe is being closed. (os error 232)");
+        let sync = make_sync_failing(&failing, ProjectSyncMode::FullProject);
+
+        let result = sync.load_file("utils.ts", "export const x = 1;").await;
+        assert!(result.is_err(), "load_file should propagate provider error");
     }
 
     #[tokio::test]

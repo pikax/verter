@@ -1,12 +1,16 @@
 //! Async priority-based workspace scanner for LSP initialization.
 //!
-//! Instead of synchronously scanning all `.vue` files during `initialized()` (which
+//! Instead of synchronously scanning all files during `initialized()` (which
 //! blocks the LSP handler for seconds), this module spawns a background task that:
 //!
-//! 1. Walks the filesystem for `.vue` files
+//! 1. Walks the filesystem for `.vue` and non-Vue source files (`.ts`, `.tsx`, `.js`, `.jsx`)
 //! 2. Classifies them into priority tiers (project source vs. other)
-//! 3. Processes them in priority order, yielding between batches
-//! 4. Accepts priority signals from `did_open` to dynamically reorder the queue
+//! 3. Processes files in two phases: Vue first, then non-Vue source files
+//! 4. Follows node_modules dependencies transitively via import resolution
+//! 5. Accepts priority signals from `did_open` to dynamically reorder the queue
+//!
+//! Vue files are processed first because they produce `.vue.ts` public API files
+//! that barrel re-exports depend on.
 //!
 //! This makes `initialized()` return in <1s instead of blocking for the full scan.
 
@@ -16,9 +20,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
-use verter_host::{CompileProfile, VerterHost};
-#[cfg(test)]
-use verter_host::{FileKind, UpsertRequest};
+use verter_host::{CompileProfile, FileKind, UpsertRequest, VerterHost};
 
 use crate::provider_sync::{
     commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
@@ -85,6 +87,14 @@ pub enum Tier {
     Other = 1,
 }
 
+/// Directories excluded from workspace scanning.
+const EXCLUDED_DIRS: &[&str] = &["node_modules", "dist", "build"];
+
+/// Returns true if a directory name should be excluded from workspace scanning.
+fn is_excluded_dir(name: &str) -> bool {
+    name.starts_with('.') || EXCLUDED_DIRS.contains(&name)
+}
+
 /// Recursively collect all `.vue` file paths under `root`.
 ///
 /// Skips `node_modules`, dot-directories (`.git`, `.vscode`, etc.),
@@ -94,11 +104,47 @@ pub enum Tier {
 /// Returns paths with forward slashes (canonical form).
 pub fn collect_vue_paths(root: &Path) -> Vec<String> {
     let mut result = Vec::new();
-    collect_vue_paths_recursive(root, &mut result);
+    collect_paths_recursive(root, &mut result, |name| name.ends_with(".vue"));
     result
 }
 
-fn collect_vue_paths_recursive(dir: &Path, result: &mut Vec<String>) {
+/// Recursively collect all non-Vue source file paths (`.ts`, `.tsx`, `.js`, `.jsx`)
+/// under `root`.
+///
+/// Excludes `.d.ts`/`.d.mts`/`.d.cts` files (type declarations loaded via dependency
+/// resolution, not FS walk), `node_modules`, dot-directories, `dist`, and `build`.
+///
+/// Returns paths with forward slashes (canonical form).
+pub fn collect_source_paths(root: &Path) -> Vec<String> {
+    let mut result = Vec::new();
+    collect_paths_recursive(root, &mut result, is_non_vue_source_file);
+    result
+}
+
+/// Returns true if the file name is a non-Vue source file we want to sync.
+fn is_non_vue_source_file(name: &str) -> bool {
+    // Must be .ts/.tsx/.js/.jsx but NOT .d.ts/.d.mts/.d.cts
+    let is_source_ext = name.ends_with(".ts")
+        || name.ends_with(".tsx")
+        || name.ends_with(".js")
+        || name.ends_with(".jsx")
+        || name.ends_with(".mts")
+        || name.ends_with(".mjs")
+        || name.ends_with(".cts")
+        || name.ends_with(".cjs");
+    if !is_source_ext {
+        return false;
+    }
+    // Exclude declaration files
+    !is_declaration_file(name)
+}
+
+/// Returns true if the file name is a TypeScript declaration file.
+fn is_declaration_file(name: &str) -> bool {
+    name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts")
+}
+
+fn collect_paths_recursive(dir: &Path, result: &mut Vec<String>, matcher: fn(&str) -> bool) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -110,12 +156,11 @@ fn collect_vue_paths_recursive(dir: &Path, result: &mut Vec<String>) {
         let name = file_name.to_string_lossy();
 
         if path.is_dir() {
-            if name == "node_modules" || name.starts_with('.') || name == "dist" || name == "build"
-            {
+            if is_excluded_dir(&name) {
                 continue;
             }
-            collect_vue_paths_recursive(&path, result);
-        } else if name.ends_with(".vue") {
+            collect_paths_recursive(&path, result, matcher);
+        } else if matcher(&name) {
             result.push(path.to_string_lossy().replace('\\', "/"));
         }
     }
@@ -239,66 +284,64 @@ async fn scanner_loop(
     let roots = config.root_paths.clone();
     let tsconfig_patterns = config.tsconfig_patterns.clone();
 
-    // Step 1: FS walk all roots (blocking)
-    let paths = tokio::task::spawn_blocking(move || {
-        let mut all_paths = Vec::new();
+    // Step 1: FS walk all roots (blocking) — collect both Vue and non-Vue files
+    let (vue_paths, source_paths) = tokio::task::spawn_blocking(move || {
+        let mut vue = Vec::new();
+        let mut src = Vec::new();
         for root in &roots {
-            all_paths.extend(collect_vue_paths(root));
+            vue.extend(collect_vue_paths(root));
+            src.extend(collect_source_paths(root));
         }
-        all_paths
+        (vue, src)
     })
     .await
     .unwrap_or_default();
 
-    if paths.is_empty() {
-        tracing::info!("workspace_scanner: no .vue files found");
+    if vue_paths.is_empty() && source_paths.is_empty() {
+        tracing::info!("workspace_scanner: no source files found");
         return;
     }
 
     // Step 2: Classify into tiers
-    let mut classified = classify_tiers(&paths, &tsconfig_patterns);
-    let tier1_count = classified
+    let mut vue_classified = classify_tiers(&vue_paths, &tsconfig_patterns);
+    let vue_project_count = vue_classified
+        .iter()
+        .filter(|(_, t)| *t == Tier::ProjectSource)
+        .count();
+    let mut source_classified = classify_tiers(&source_paths, &tsconfig_patterns);
+    let source_project_count = source_classified
         .iter()
         .filter(|(_, t)| *t == Tier::ProjectSource)
         .count();
 
     // Initial sort (no priority dirs yet)
-    priority_sort(&mut classified, &[]);
+    priority_sort(&mut vue_classified, &[]);
+    priority_sort(&mut source_classified, &[]);
 
     tracing::info!(
-        "workspace_scanner: found {} .vue files ({} project source, {} other)",
-        classified.len(),
-        tier1_count,
-        classified.len() - tier1_count,
+        "workspace_scanner: found {} .vue files ({} project), {} source files ({} project)",
+        vue_classified.len(),
+        vue_project_count,
+        source_classified.len(),
+        source_project_count,
     );
 
-    // Step 3: Process loop
+    // Tracks all synced files (Vue + non-Vue + node_modules dependencies)
     let mut processed: HashSet<String> = HashSet::new();
     let mut priority_dirs: Vec<String> = Vec::new();
+    let mut batch_count: usize = 0;
+
+    // ── Phase 1: All .vue files (produces .vue.ts public API files for barrel re-exports) ──
     let mut idx = 0;
+    while idx < vue_classified.len() {
+        drain_priority_signals(&mut rx, &mut priority_dirs, &mut vue_classified[idx..]);
 
-    while idx < classified.len() {
-        // Drain priority signals
-        while let Ok(signal) = rx.try_recv() {
-            match signal {
-                ScannerSignal::PriorityFile(canonical_id) => {
-                    let dir = parent_dir(&canonical_id);
-                    if !priority_dirs.contains(&dir) {
-                        priority_dirs.push(dir);
-                    }
-                    // Re-sort remaining unprocessed files
-                    priority_sort(&mut classified[idx..], &priority_dirs);
-                }
-            }
-        }
-
-        let (ref path, _tier) = classified[idx];
+        let (ref path, _tier) = vue_classified[idx];
         idx += 1;
 
-        if processed.contains(path) {
+        if !processed.insert(path.clone()) {
             continue;
         }
-        processed.insert(path.clone());
 
         // Upsert + compile (blocking)
         let path_clone = path.clone();
@@ -330,18 +373,260 @@ async fn scanner_loop(
             }
         }
 
-        // Yield every BATCH_SIZE files to let request handlers run
-        if processed.len().is_multiple_of(BATCH_SIZE) {
+        batch_count += 1;
+        if batch_count.is_multiple_of(BATCH_SIZE) {
             tokio::task::yield_now().await;
         }
     }
 
     tracing::info!(
-        "workspace_scanner: completed {} files ({} project source, {} other)",
-        processed.len(),
-        tier1_count,
-        processed.len().saturating_sub(tier1_count),
+        "workspace_scanner: phase 1 complete — {} .vue files processed",
+        batch_count,
     );
+
+    // ── Phase 2: All non-Vue source files (.ts/.tsx/.js/.jsx) ──
+    // Also follows node_modules dependencies transitively.
+    let mut node_modules_synced: HashSet<String> = HashSet::new();
+    let mut idx = 0;
+    while idx < source_classified.len() {
+        drain_priority_signals(&mut rx, &mut priority_dirs, &mut source_classified[idx..]);
+
+        let (ref path, _tier) = source_classified[idx];
+        idx += 1;
+
+        if !processed.insert(path.clone()) {
+            continue;
+        }
+
+        if let Some(sync) = &config.project_sync {
+            let deps = sync_non_vue_file_to_provider(
+                path,
+                &config.host,
+                sync,
+                &config.resolver_snapshot,
+                &config.provider_sync_states,
+            )
+            .await;
+
+            // Follow node_modules dependencies transitively
+            follow_node_modules_deps(
+                deps,
+                &config.host,
+                sync,
+                &config.resolver_snapshot,
+                &config.provider_sync_states,
+                &mut node_modules_synced,
+            )
+            .await;
+        }
+
+        batch_count += 1;
+        if batch_count.is_multiple_of(BATCH_SIZE) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    tracing::info!(
+        "workspace_scanner: complete — {} total files ({} .vue, {} source, {} node_modules deps)",
+        batch_count + node_modules_synced.len(),
+        vue_paths.len(),
+        source_paths.len(),
+        node_modules_synced.len(),
+    );
+}
+
+/// Drain priority signals from the channel and re-sort remaining unprocessed files.
+fn drain_priority_signals(
+    rx: &mut mpsc::UnboundedReceiver<ScannerSignal>,
+    priority_dirs: &mut Vec<String>,
+    remaining: &mut [(String, Tier)],
+) {
+    while let Ok(signal) = rx.try_recv() {
+        match signal {
+            ScannerSignal::PriorityFile(canonical_id) => {
+                let dir = parent_dir(&canonical_id);
+                if !priority_dirs.contains(&dir) {
+                    priority_dirs.push(dir);
+                }
+                priority_sort(remaining, priority_dirs);
+            }
+        }
+    }
+}
+
+/// Sync a non-Vue source file to the type provider.
+///
+/// Reads from disk, upserts into host, rewrites imports, and loads into provider.
+/// Returns the resolved dependencies for node_modules follow-through.
+async fn sync_non_vue_file_to_provider(
+    canonical_id: &str,
+    host: &Arc<VerterHost>,
+    sync: &ProjectSync,
+    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    sync_states: &DashMap<String, ProviderSyncState>,
+) -> Vec<crate::project_resolver::ResolveResult> {
+    let snapshot = match resolver_snapshot.read().clone() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    // Load source from disk into host
+    let host_clone = Arc::clone(host);
+    let id_clone = canonical_id.to_string();
+    let load_result = tokio::task::spawn_blocking(move || {
+        crate::compile_blockers::ensure_source_loaded_into_host(&host_clone, &id_clone);
+        host_clone.get_source(&id_clone)
+    })
+    .await
+    .unwrap_or(None);
+
+    let Some(source) = load_result else {
+        return Vec::new();
+    };
+
+    // Upsert + prepare non-Vue sync (CPU-bound parsing + disk I/O for import resolution)
+    let host_clone = Arc::clone(host);
+    let snap_clone = snapshot.clone();
+    let id_clone = canonical_id.to_string();
+    let source_clone = Arc::clone(&source);
+    let prepared = tokio::task::spawn_blocking(move || {
+        let module_references = host_clone
+            .upsert(UpsertRequest {
+                canonical_id: Some(id_clone.clone()),
+                input_id: id_clone.clone(),
+                source: source_clone.clone(),
+                file_kind: FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .map(|result| result.module_references)
+            .unwrap_or_default();
+
+        let reader = crate::compile_blockers::HostFsProjectResolverReader::new(&host_clone);
+        crate::server::prepare_non_vue_provider_sync(
+            Some(&snap_clone),
+            &reader,
+            &id_clone,
+            &source_clone,
+            &module_references,
+        )
+    })
+    .await
+    .unwrap_or(None);
+
+    let Some(prepared) = prepared else {
+        return Vec::new();
+    };
+
+    // Sync state management
+    let next_state =
+        crate::provider_sync::non_vue_sync_state_for_source(&snapshot.resolver, canonical_id);
+    if let Some(next) = next_state {
+        let transition = prepare_sync_transition(sync_states, canonical_id, next);
+        close_stale_paths(sync, &transition.stale_paths).await;
+        let mut committed = transition.next;
+
+        if let Err(error) = sync
+            .load_file(&prepared.provider_path, &prepared.rewritten)
+            .await
+        {
+            tracing::warn!(
+                "workspace_scanner: failed to load non-Vue file {}: {error}",
+                prepared.provider_path
+            );
+        } else {
+            committed.set_background_loaded(ProviderPathKind::Shadow, true);
+        }
+
+        commit_sync_transition(sync_states, canonical_id, committed);
+    } else {
+        // No project owner — still sync for import resolution
+        if let Err(error) = sync
+            .load_file(&prepared.provider_path, &prepared.rewritten)
+            .await
+        {
+            tracing::warn!(
+                "workspace_scanner: failed to load non-Vue file {}: {error}",
+                prepared.provider_path
+            );
+        }
+    }
+
+    // Store import dependencies in host for dependency tracking
+    if !prepared.resolved_dependencies.is_empty() {
+        host.set_import_dependencies(
+            canonical_id,
+            prepared
+                .resolved_dependencies
+                .iter()
+                .map(|entry| verter_host::DependencyResolution {
+                    specifier: entry.provider_specifier.clone(),
+                    resolved_canonical_id: Some(entry.source_id.clone()),
+                    possible_canonical_ids: Vec::new(),
+                })
+                .collect(),
+        );
+    }
+
+    prepared.resolved_dependencies
+}
+
+/// Follow node_modules dependencies transitively via BFS.
+///
+/// For each resolved dependency that targets a node_modules file (ProviderTarget::SourceFile
+/// with a node_modules path), reads the file, rewrites its imports, syncs to the provider,
+/// and follows its own dependencies recursively.
+async fn follow_node_modules_deps(
+    initial_deps: Vec<crate::project_resolver::ResolveResult>,
+    host: &Arc<VerterHost>,
+    sync: &ProjectSync,
+    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    sync_states: &DashMap<String, ProviderSyncState>,
+    node_modules_synced: &mut HashSet<String>,
+) {
+    let mut pending: Vec<crate::project_resolver::ResolveResult> = initial_deps;
+
+    while let Some(dep) = pending.pop() {
+        // Handle Vue public API dependencies (sync .vue.ts files)
+        if dep.provider_target == crate::project_resolver::ProviderTarget::VuePublicApi {
+            // Vue public API files are handled in phase 1 by sync_file_to_provider
+            continue;
+        }
+
+        // Handle shadow source files (non-Vue workspace files — already in phase 2 queue)
+        if dep.provider_target == crate::project_resolver::ProviderTarget::ShadowSourceFile {
+            // These are workspace files already queued in source_classified
+            continue;
+        }
+
+        // ProviderTarget::SourceFile — may be node_modules
+        if !dep.source_id.contains("node_modules") {
+            // Non-node_modules SourceFile — provider reads from disk
+            continue;
+        }
+
+        if !node_modules_synced.insert(dep.source_id.clone()) {
+            // Already synced
+            continue;
+        }
+
+        // Load, rewrite, and sync the node_modules file
+        let child_deps = sync_non_vue_file_to_provider(
+            &dep.source_id,
+            host,
+            sync,
+            resolver_snapshot,
+            sync_states,
+        )
+        .await;
+
+        // Follow its dependencies too (transitive)
+        pending.extend(child_deps);
+
+        // Yield periodically to prevent starvation
+        if node_modules_synced.len().is_multiple_of(BATCH_SIZE) {
+            tokio::task::yield_now().await;
+        }
+    }
 }
 
 /// Sync a single compiled file's IDE and DTS output to the type provider.
@@ -827,5 +1112,127 @@ mod tests {
             "/workspace",
             "unmatched Vue files should have owner_key set to the workspace root (fallback project)"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // collect_source_paths — non-Vue file collection
+    // ═══════════════════════════════════════════════════════════
+
+    fn create_mixed_test_dir() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Source files (various extensions)
+        fs::create_dir_all(root.join("src/utils")).unwrap();
+        fs::write(root.join("src/App.vue"), "<template><div/></template>").unwrap();
+        fs::write(root.join("src/main.ts"), "import App from './App.vue'").unwrap();
+        fs::write(root.join("src/utils/helpers.ts"), "export const x = 1").unwrap();
+        fs::write(root.join("src/utils/format.js"), "export function fmt() {}").unwrap();
+        fs::write(root.join("src/types.tsx"), "export type Props = {}").unwrap();
+        fs::write(root.join("src/render.jsx"), "export default <div/>").unwrap();
+
+        // .d.ts files (should be excluded)
+        fs::write(root.join("src/env.d.ts"), "declare module '*.vue' {}").unwrap();
+        fs::write(root.join("src/global.d.mts"), "export {}").unwrap();
+
+        // Excluded directories
+        fs::create_dir_all(root.join("node_modules/vue")).unwrap();
+        fs::write(root.join("node_modules/vue/index.js"), "export {}").unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "").unwrap();
+        fs::create_dir_all(root.join("dist")).unwrap();
+        fs::write(root.join("dist/app.js"), "").unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build/output.js"), "").unwrap();
+
+        tmp
+    }
+
+    #[test]
+    fn test_collect_source_paths_finds_ts_js_tsx_jsx() {
+        let tmp = create_mixed_test_dir();
+        let paths = collect_source_paths(tmp.path());
+
+        // Positive: finds .ts, .js, .tsx, .jsx files
+        assert!(
+            paths.iter().any(|p| p.ends_with("src/main.ts")),
+            "should find .ts files"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("src/utils/helpers.ts")),
+            "should find nested .ts files"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("src/utils/format.js")),
+            "should find .js files"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("src/types.tsx")),
+            "should find .tsx files"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("src/render.jsx")),
+            "should find .jsx files"
+        );
+
+        // Negative: must NOT include .vue files
+        assert!(
+            !paths.iter().any(|p| p.ends_with(".vue")),
+            "should not include .vue files (those use collect_vue_paths)"
+        );
+        // Negative: must NOT include .d.ts files
+        assert!(
+            !paths
+                .iter()
+                .any(|p| p.contains(".d.ts") || p.contains(".d.mts") || p.contains(".d.cts")),
+            "should not include .d.ts/.d.mts/.d.cts files"
+        );
+        // Negative: must NOT include node_modules, dot-dirs, dist, build
+        assert!(
+            !paths.iter().any(|p| p.contains("node_modules")),
+            "must not include node_modules"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains(".git")),
+            "must not include dot-directories"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("/dist/")),
+            "must not include dist/"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("/build/")),
+            "must not include build/"
+        );
+
+        // All paths use forward slashes
+        for p in &paths {
+            assert!(!p.contains('\\'), "paths should use forward slashes: {p}");
+        }
+    }
+
+    #[test]
+    fn test_collect_source_paths_empty_dir() {
+        let tmp = TempDir::new().unwrap();
+        let paths = collect_source_paths(tmp.path());
+        assert!(paths.is_empty(), "empty dir should return no paths");
+    }
+
+    #[test]
+    fn test_classify_tiers_works_for_non_vue() {
+        let paths = vec![
+            "C:/project/src/main.ts".to_string(),
+            "C:/project/src/utils/helpers.ts".to_string(),
+            "C:/project/scripts/build.js".to_string(),
+        ];
+        let patterns = vec!["C:/project/src/**".to_string()];
+
+        let classified = classify_tiers(&paths, &patterns);
+
+        // src/ files → ProjectSource
+        assert_eq!(classified[0].1, Tier::ProjectSource);
+        assert_eq!(classified[1].1, Tier::ProjectSource);
+        // scripts/ → Other
+        assert_eq!(classified[2].1, Tier::Other);
     }
 }
