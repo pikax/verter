@@ -1278,6 +1278,52 @@ impl TypeProvider for TsgoTypeProvider {
         })
     }
 
+    fn get_type_definition(
+        &self,
+        path: &str,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        tracing::debug!("TSGO get_type_definition: {} at offset {}", path, offset);
+        let uri = Self::path_to_uri(path);
+        let path_owned = path.to_string();
+        let transport = Arc::clone(&self.transport);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, character, content_snapshot) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&path_owned) {
+                    Some(c) => {
+                        let (l, ch) = offset_to_position(c, offset);
+                        (l, ch, Some(c.clone()))
+                    }
+                    None => (0, offset, None),
+                }
+            };
+            let result = transport
+                .request(
+                    "textDocument/typeDefinition",
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": { "line": line, "character": character },
+                    }),
+                )
+                .await?;
+
+            let locations = if result.is_array() {
+                result.as_array().cloned().unwrap_or_default()
+            } else if result.is_object() {
+                vec![result]
+            } else {
+                return Ok(vec![]);
+            };
+
+            Ok(locations
+                .iter()
+                .filter_map(|loc| parse_lsp_location(loc, content_snapshot.as_deref()))
+                .collect())
+        })
+    }
+
     fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         tracing::debug!("TSGO get_references: {} at offset {}", path, offset);
         let uri = Self::path_to_uri(path);

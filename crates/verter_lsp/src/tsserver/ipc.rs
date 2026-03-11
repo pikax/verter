@@ -925,6 +925,43 @@ impl TypeProvider for TsserverTypeProvider {
         })
     }
 
+    fn get_type_definition(
+        &self,
+        path: &str,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(path);
+        let transport = Arc::clone(&self.transport);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let result = transport
+                .request(
+                    "typeDefinition",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                    }),
+                )
+                .await?;
+
+            let locs = result
+                .as_array()
+                .map(|arr| arr.iter().filter_map(parse_tsserver_location).collect())
+                .unwrap_or_default();
+
+            Ok(locs)
+        })
+    }
+
     fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let file = Self::normalize_path(path);
         let transport = Arc::clone(&self.transport);

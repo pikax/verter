@@ -46,6 +46,10 @@ mod inner {
             path: String,
             offset: u32,
         },
+        GetTypeDefinition {
+            path: String,
+            offset: u32,
+        },
         GetReferences {
             path: String,
             offset: u32,
@@ -97,6 +101,7 @@ mod inner {
         completion_responses: Vec<(String, u32, Vec<Completion>)>,
         diagnostic_responses: Vec<(String, Vec<TypeDiagnostic>)>,
         definition_responses: Vec<(String, u32, Vec<TypeLocation>)>,
+        type_definition_responses: Vec<(String, u32, Vec<TypeLocation>)>,
         reference_responses: Vec<(String, u32, Vec<TypeLocation>)>,
         rename_responses: Vec<(String, u32, Vec<RenameLocation>)>,
         highlight_responses: Vec<(String, u32, Vec<TypeDocumentHighlight>)>,
@@ -149,6 +154,14 @@ mod inner {
             let mut state = self.state.lock().unwrap();
             state
                 .definition_responses
+                .push((path.to_string(), offset, locs));
+        }
+
+        /// Configure type definition locations for a specific path and offset.
+        pub fn set_type_definitions(&self, path: &str, offset: u32, locs: Vec<TypeLocation>) {
+            let mut state = self.state.lock().unwrap();
+            state
+                .type_definition_responses
                 .push((path.to_string(), offset, locs));
         }
 
@@ -318,6 +331,15 @@ mod inner {
         }
 
         fn get_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let msg = self.error_message.clone();
+            Box::pin(async move { Err(TypeProviderError::new(msg)) })
+        }
+
+        fn get_type_definition(
             &self,
             _path: &str,
             _offset: u32,
@@ -512,6 +534,25 @@ mod inner {
             });
             let result = state
                 .definition_responses
+                .iter()
+                .find(|(p, o, _)| p == path && *o == offset)
+                .map(|(_, _, locs)| locs.clone())
+                .unwrap_or_default();
+            Box::pin(async move { Ok(result) })
+        }
+
+        fn get_type_definition(
+            &self,
+            path: &str,
+            offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::GetTypeDefinition {
+                path: path.to_string(),
+                offset,
+            });
+            let result = state
+                .type_definition_responses
                 .iter()
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, locs)| locs.clone())

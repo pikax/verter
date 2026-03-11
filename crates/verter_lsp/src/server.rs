@@ -5593,6 +5593,113 @@ impl LanguageServer for VerterLanguageServer {
         Ok(verter_result)
     }
 
+    async fn goto_type_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let _hg = HandlerGuard::new("goto_type_definition");
+        let uri = &params.text_document_position_params.text_document.uri;
+        let _timer = self
+            .statistics
+            .timer("type_definition", Some(uri.as_str().to_string()));
+        let position = &params.text_document_position_params.position;
+        tracing::debug!(
+            "type_definition: {} at {}:{}",
+            uri.as_str(),
+            position.line,
+            position.character
+        );
+
+        self.ensure_provider_synced(uri).await;
+
+        // Virtual file: route directly through type provider (position is already in TSX coordinates)
+        if let Some(tp) = &self.type_provider {
+            if let Some((tsx_path, vf_li)) = self.virtual_file_context(uri) {
+                if let Some(offset) = vf_li.position_to_offset(position) {
+                    if let Ok(type_defs) = tp.get_type_definition(&tsx_path, offset).await {
+                        let locations: Vec<Location> = type_defs
+                            .into_iter()
+                            .filter_map(|d| {
+                                let vue_source_exists =
+                                    |p: &str| self.documents.host().get_source(p).is_some();
+                                let target_path =
+                                    merge::normalize_vue_path_owned(&d.path, &vue_source_exists);
+                                let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
+                                let range = if d.path == tsx_path {
+                                    Range {
+                                        start: vf_li
+                                            .offset_to_position(d.start)
+                                            .unwrap_or_default(),
+                                        end: vf_li.offset_to_position(d.end).unwrap_or_default(),
+                                    }
+                                } else {
+                                    Range::default()
+                                };
+                                Some(Location {
+                                    uri: target_uri,
+                                    range,
+                                })
+                            })
+                            .collect();
+                        if !locations.is_empty() {
+                            return Ok(Some(GotoDefinitionResponse::Array(locations)));
+                        }
+                    }
+                }
+                return Ok(None);
+            }
+        }
+
+        // Type definition is purely a type provider operation — no verter analysis phase.
+        if let Some(tp) = &self.type_provider {
+            if let Some(ctx) = self.type_provider_context(uri) {
+                if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+                    position,
+                    &ctx.vue_line_index,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                ) {
+                    tracing::debug!(
+                        "type_definition: querying type provider at tsx offset {}",
+                        tsx_offset
+                    );
+                    match tp.get_type_definition(&ctx.tsx_path, tsx_offset).await {
+                        Ok(type_defs) => {
+                            tracing::debug!(
+                                "type_definition: type provider returned {} locations",
+                                type_defs.len()
+                            );
+                            let vue_source_exists =
+                                |p: &str| self.documents.host().get_source(p).is_some();
+                            return Ok(merge::merge_definitions(
+                                None,
+                                type_defs,
+                                &ctx.tsx_line_index,
+                                &ctx.mapper,
+                                &ctx.vue_line_index,
+                                Some(&|ide_path: &str| self.external_ide_context(ide_path)),
+                                uri,
+                                &vue_source_exists,
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::warn!("type_definition: type provider error: {e}");
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "type_definition: position mapping failed for {}:{}:{}",
+                        uri.as_str(),
+                        position.line,
+                        position.character
+                    );
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let _hg = HandlerGuard::new("references");
         let uri = &params.text_document_position.text_document.uri;
@@ -6749,6 +6856,14 @@ mod tests {
         }
 
         fn get_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_type_definition(
             &self,
             _path: &str,
             _offset: u32,
@@ -8240,6 +8355,133 @@ mod tests {
                 .iter()
                 .any(|call| matches!(call, MockCall::GetDefinition { .. })),
             "native component event resolution should skip the type provider entirely"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn goto_type_definition_returns_none_without_provider() {
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host),
+                    type_provider: None,
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                },
+            )
+        });
+        let drain_handle = tokio::spawn(async move {
+            let mut socket = socket;
+            while socket.next().await.is_some() {}
+        });
+
+        let server = service.inner();
+        let source = "<script setup lang=\"ts\">\nconst count: number = 0\n</script>\n";
+        let uri: Uri = "file:///test/App.vue".parse().unwrap();
+        let _ = server.documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+
+        let params = GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position {
+                    line: 1,
+                    character: 6,
+                },
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let result = server
+            .goto_type_definition(params)
+            .await
+            .expect("handler should not error");
+
+        assert!(
+            result.is_none(),
+            "type definition should return None without a type provider"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn goto_type_definition_delegates_to_provider() {
+        let source = "<script setup lang=\"ts\">\nconst count: number = 0\n</script>\n";
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_definition_test_server(&[("src/App.vue", "vue", source)]).await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let server = service.inner();
+        let position = find_document_position(server, &app_uri, "count", 0);
+
+        // Set up mock to return a type definition when queried
+        if let Some(ctx) = server.type_provider_context(&app_uri) {
+            if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+                &position,
+                &ctx.vue_line_index,
+                &ctx.mapper,
+                &ctx.tsx_line_index,
+            ) {
+                provider.set_type_definitions(
+                    &ctx.tsx_path,
+                    tsx_offset,
+                    vec![TypeLocation {
+                        path: ctx.tsx_path.clone(),
+                        start: 0,
+                        end: 5,
+                    }],
+                );
+            }
+        }
+
+        let params = GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let result = server
+            .goto_type_definition(params)
+            .await
+            .expect("handler should not error");
+
+        // Verify the provider was called with get_type_definition (not get_definition)
+        assert!(
+            provider
+                .calls()
+                .iter()
+                .any(|call| matches!(call, MockCall::GetTypeDefinition { .. })),
+            "handler should delegate to get_type_definition on the provider"
+        );
+        assert!(
+            !provider
+                .calls()
+                .iter()
+                .any(|call| matches!(call, MockCall::GetDefinition { .. })),
+            "handler should NOT call get_definition"
+        );
+
+        // The merge logic should produce a response when the provider returns locations
+        assert!(
+            result.is_some(),
+            "type definition should return locations when provider has results"
         );
 
         drain_handle.abort();

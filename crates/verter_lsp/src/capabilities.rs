@@ -27,8 +27,7 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
         }),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
-        // type_definition_provider and declaration_provider intentionally omitted —
-        // handlers are not yet implemented (WS 3.3).
+        type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),
         rename_provider: Some(OneOf::Right(RenameOptions {
             prepare_provider: Some(true),

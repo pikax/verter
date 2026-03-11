@@ -47,6 +47,12 @@ pub trait TypeProvider: Send + Sync {
 
     fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>>;
 
+    fn get_type_definition(
+        &self,
+        path: &str,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>>;
+
     fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>>;
 
     fn get_rename_locations(

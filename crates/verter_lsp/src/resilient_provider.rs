@@ -387,6 +387,18 @@ where
         })
     }
 
+    fn get_type_definition(
+        &self,
+        path: &str,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let path_owned = path.to_string();
+        Box::pin(async move {
+            let provider = self.get_inner().await?;
+            provider.get_type_definition(&path_owned, offset).await
+        })
+    }
+
     fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let path_owned = path.to_string();
         Box::pin(async move {
