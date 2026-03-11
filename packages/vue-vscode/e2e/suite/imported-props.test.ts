@@ -8,6 +8,7 @@ import {
   measureHover,
   openVueFile,
   sleep,
+  TYPE_PROVIDER,
   waitForExtensionReady,
 } from "../helpers";
 
@@ -17,7 +18,7 @@ suite(`Imported Props [${FIXTURE_NAME}]`, function () {
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    if (FIXTURE_NAME !== "single-project") {
+    if (FIXTURE_NAME !== "single-project" || !TYPE_PROVIDER) {
       this.skip();
       return;
     }

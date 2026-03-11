@@ -11,6 +11,7 @@ import {
   findPosition,
   findNthPosition,
   FIXTURE_NAME,
+  TYPE_PROVIDER,
 } from "../helpers";
 import { getTimer } from "../timer";
 
@@ -480,6 +481,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on v-slot local and member are typed", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");
       return;
@@ -554,6 +556,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover in JS SFC keeps typed template bindings", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");
       return;

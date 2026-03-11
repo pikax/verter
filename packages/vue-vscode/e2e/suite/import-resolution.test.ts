@@ -27,6 +27,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
   });
 
   test("no 'Cannot find module' diagnostics on App.vue", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     if (!IMPORT_FIXTURES.includes(FIXTURE_NAME)) {
       console.log("    pass (N/A for this fixture)");
       return;
@@ -93,6 +94,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
   });
 
   test(".vue imports resolve without .vue.ts errors", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME === "no-config" || FIXTURE_NAME === "single-file") {
       console.log("    pass (N/A for this fixture)");
       return;

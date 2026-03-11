@@ -10,6 +10,7 @@ import {
   findPosition,
   sleep,
   FIXTURE_NAME,
+  TYPE_PROVIDER,
 } from "../helpers";
 import { getTimer } from "../timer";
 
@@ -136,6 +137,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
   });
 
   test("$event on component emit has no implicit any (TS7006)", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     const doc = await openVueFile(getAppVuePath());
 
     // The fixture has @custom="handleCustom($event)" on <MyComp>

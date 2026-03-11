@@ -6,6 +6,7 @@ import {
   getAppVuePath,
   getInlayHints,
   FIXTURE_NAME,
+  TYPE_PROVIDER,
 } from "../helpers";
 
 suite(`Inlay Hints [${FIXTURE_NAME}]`, function () {
@@ -19,6 +20,7 @@ suite(`Inlay Hints [${FIXTURE_NAME}]`, function () {
   });
 
   test("inlay hints present for ref declarations in script", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     // Request inlay hints for the full document range
     const fullRange = new vscode.Range(
       new vscode.Position(0, 0),
@@ -48,6 +50,7 @@ suite(`Inlay Hints [${FIXTURE_NAME}]`, function () {
   });
 
   test("inlay hints with partial range into template still returns script hints", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     // Start in <script> (line 16), end deep in <template> (line 60)
     // This exercises the range-end fallback since template maps to synthetic JSX
     const partialRange = new vscode.Range(
