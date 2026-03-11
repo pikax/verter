@@ -100,6 +100,7 @@ impl VerterHost {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_external_type_from_loaded_files(
         &self,
         files: &HashMap<String, FileEntry>,

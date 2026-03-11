@@ -37,7 +37,7 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5.1",
-    "@types/node": "^25.3.3",
+    "@types/node": "^25.4.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
   },

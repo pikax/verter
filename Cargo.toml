@@ -11,15 +11,15 @@ repository = "https://github.com/pikax/verter"
 homepage = "https://verterjs.dev/"
 
 [workspace.dependencies]
-oxc_allocator = "0.116.0"
-oxc_ast = "0.116.0"
-oxc_parser = "0.116.0"
-oxc_span = "0.116.0"
+oxc_allocator = "0.117.0"
+oxc_ast = "0.117.0"
+oxc_parser = "0.117.0"
+oxc_span = "0.117.0"
 rustc-hash = "2.1"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 sha2 = "0.10"
-lightningcss = { version = "1.0.0-alpha.70", features = ["visitor"] }
+lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
 
 [profile.release]
 opt-level = 3

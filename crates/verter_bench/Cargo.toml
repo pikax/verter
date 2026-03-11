@@ -27,7 +27,7 @@ rayon = "1.7"
 hotpath = { version = "0.13", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.8.1", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 smallvec = "1"
 
 [[bench]]

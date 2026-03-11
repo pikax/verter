@@ -27,7 +27,7 @@ pub struct ActionContext<'a> {
 /// Removes all contiguous whitespace before `start`, matching the behavior
 /// needed when deleting an attribute from an element tag.
 pub fn expand_remove_start(source: &str, start: usize) -> usize {
-    let before = source[..start].as_bytes();
+    let before = &source.as_bytes()[..start];
     let ws = before
         .iter()
         .rev()

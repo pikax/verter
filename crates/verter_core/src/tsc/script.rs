@@ -295,7 +295,6 @@ pub struct ExtractedTscState {
     test_bindings: Vec<TestBindingEntry>,
     /// Script setup content string (owned).
     content_str: String,
-    content_offset: u32,
     /// Filename for source maps.
     filename: Option<String>,
     /// Unresolved external props type ref name (e.g. `"ImportedProps"`).
@@ -473,7 +472,6 @@ pub fn extract_tsc_state(
         root_element_tag,
         test_bindings,
         content_str: content_str.to_string(),
-        content_offset: content_span.start,
         filename: options.filename.clone(),
         unresolved_props_ref,
         unresolved_props_type_span,
@@ -634,11 +632,9 @@ pub fn generate_tsc_output(sfc_source: &str, component_name: &str) -> TscOutput 
 /// This handles dotted file stems like `Drawer.draggable` → `Drawer_draggable`.
 fn sanitize_tsc_component_name(name: &str) -> String {
     let mut result = String::with_capacity(name.len());
-    for (i, ch) in name.chars().enumerate() {
+    for ch in name.chars() {
         if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
             result.push(ch);
-        } else if i == 0 {
-            result.push('_');
         } else {
             result.push('_');
         }
@@ -1215,6 +1211,7 @@ fn render_resolved_prop_ts_type(
     runtime_types_to_ts(&prop.types)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_props<'a>(
     type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
@@ -1871,6 +1868,7 @@ fn extract_tsc_narrowing(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_testing_code(
     component_name: &str,
     state: &TscMacroState,
@@ -2060,6 +2058,7 @@ fn generate_testing_code(
     TscOutput { code, source_map }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_code(
     component_name: &str,
     state: &TscMacroState,
@@ -2292,27 +2291,6 @@ fn generate_code(
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
-/// Build an inline emit function type (overloaded function signatures).
-///
-/// Instead of relying on `EmitFn` (which is internal to Vue and not exported),
-/// we build the overloaded emit function type directly:
-/// ```text
-/// ((event: 'change') => void) & ((event: 'update:model', v: string) => void)
-/// ```
-fn build_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> String {
-    if emits.is_empty() && models.is_empty() {
-        return "(event: string, ...args: unknown[]) => void".to_string();
-    }
-    let mut overloads: Vec<String> = emits.iter().map(emit_overload_type).collect();
-    for model in models {
-        overloads.push(format!(
-            "((event: 'update:{}', v: {}) => void)",
-            model.name, model.ts_type
-        ));
-    }
-    overloads.join(" & ")
-}
-
 fn render_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> RenderedText {
     let mut rendered = RenderedText::default();
     if emits.is_empty() && models.is_empty() {
@@ -2368,27 +2346,6 @@ fn render_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> RenderedTe
     }
 
     rendered
-}
-
-/// Convert emit entries to event handler props for the `$props` type.
-///
-/// Each emit becomes one or two optional `onEventName` props:
-/// ```text
-/// EmitEntry { name: "clickOverlay", payload: Call { params_text: "event: MouseEvent" } }
-///   → "onClickOverlay"?: (event: MouseEvent) => void
-/// ```
-fn build_emits_to_props_type(emits: &[EmitEntry]) -> Option<String> {
-    if emits.is_empty() {
-        return None;
-    }
-    let mut fields: Vec<String> = Vec::new();
-    for e in emits {
-        let handler = emit_handler_type(e);
-        for key in emit_handler_keys(&e.name) {
-            fields.push(format!("\"{}\"?: {}", key, handler));
-        }
-    }
-    Some(format!("{{ {} }}", fields.join("; ")))
 }
 
 fn render_emits_to_props_type(emits: &[EmitEntry]) -> RenderedText {
@@ -2551,25 +2508,6 @@ fn emit_handler_type(emit: &EmitEntry) -> String {
     }
 }
 
-fn emit_overload_type(emit: &EmitEntry) -> String {
-    match &emit.payload {
-        EmitPayload::Unknown => format!("((event: '{}', ...args: unknown[]) => void)", emit.name),
-        EmitPayload::Call { params_text } => {
-            if params_text.is_empty() {
-                format!("((event: '{}') => void)", emit.name)
-            } else {
-                format!("((event: '{}', {}) => void)", emit.name, params_text)
-            }
-        }
-        EmitPayload::Tuple { tuple_text } => {
-            format!(
-                "((event: '{}', ...args: {}) => void)",
-                emit.name, tuple_text
-            )
-        }
-    }
-}
-
 fn emit_handler_keys(name: &str) -> Vec<String> {
     let mut keys = Vec::new();
     let canonical = format!("on{}", capitalize_first(name));
@@ -2680,104 +2618,6 @@ fn wrap_defaulted_props(base: &str, defaulted_prop_names: &[String]) -> String {
         base = base,
         quoted_names = quoted_names,
     )
-}
-
-fn build_props_type(
-    props_ts: &Option<PropsTs>,
-    models: &[ModelEntry],
-    defaulted_prop_names: &[String],
-) -> String {
-    let mut parts: Vec<String> = Vec::new();
-
-    match props_ts {
-        Some(PropsTs::TypeRef(name)) => {
-            parts.push(wrap_defaulted_props(name, defaulted_prop_names));
-        }
-        Some(PropsTs::TypeText(text)) => {
-            parts.push(wrap_defaulted_props(text, defaulted_prop_names));
-        }
-        Some(PropsTs::Inline(entries)) if !entries.is_empty() => {
-            let fields: Vec<String> = entries
-                .iter()
-                .map(|e| {
-                    let field = if e.optional {
-                        format!("{}?: {}", e.name, e.ts_type)
-                    } else {
-                        format!("{}: {}", e.name, e.ts_type)
-                    };
-                    match &e.comment {
-                        Some(comment) => format!("{} {}", comment, field),
-                        None => field,
-                    }
-                })
-                .collect();
-            parts.push(format!("{{ {} }}", fields.join("; ")));
-        }
-        _ => {}
-    }
-
-    for model in models {
-        parts.push(format!(
-            "{{ {}?: {}; \"onUpdate:{}\"?: (v: {}) => void }}",
-            model.name, model.ts_type, model.name, model.ts_type,
-        ));
-    }
-
-    if parts.is_empty() {
-        "{}".to_string()
-    } else {
-        parts.join(" & ")
-    }
-}
-
-/// Build props type with narrowing generic substitutions.
-/// For inline props, replaces the type of narrowing props with T_{prop}.
-fn build_narrowing_props_type(
-    props_ts: &Option<PropsTs>,
-    models: &[ModelEntry],
-    narrowing: &crate::ide::condition_narrowing::ConditionalRootNarrowing,
-) -> Option<String> {
-    let entries = match props_ts {
-        Some(PropsTs::Inline(entries)) if !entries.is_empty() => entries,
-        _ => return None, // Can't substitute for TypeRef/TypeText
-    };
-
-    let generic_props: rustc_hash::FxHashSet<&str> = narrowing
-        .generics
-        .iter()
-        .map(|g| g.prop_name.as_str())
-        .collect();
-
-    let fields: Vec<String> = entries
-        .iter()
-        .map(|e| {
-            let ts_type = if generic_props.contains(e.name.as_str()) {
-                format!("T_{}", e.name)
-            } else {
-                e.ts_type.clone()
-            };
-            let field = if e.optional {
-                format!("{}?: {}", e.name, ts_type)
-            } else {
-                format!("{}: {}", e.name, ts_type)
-            };
-            match &e.comment {
-                Some(comment) => format!("{} {}", comment, field),
-                None => field,
-            }
-        })
-        .collect();
-
-    let mut parts = vec![format!("{{ {} }}", fields.join("; "))];
-
-    for model in models {
-        parts.push(format!(
-            "{{ {}?: {}; \"onUpdate:{}\"?: (v: {}) => void }}",
-            model.name, model.ts_type, model.name, model.ts_type,
-        ));
-    }
-
-    Some(parts.join(" & "))
 }
 
 /// Map HTML tag name to TypeScript DOM element type.

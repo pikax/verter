@@ -41,14 +41,21 @@
     "typescript": "^5.9.3"
   },
   "devDependencies": {
+    "@types/chai": "^5.2.3",
     "@types/lodash": "^4.17.24",
-    "@types/vscode": "^1.109.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.4.0",
+    "@types/vscode": "^1.110.0",
     "@verter/language-shared": "workspace:^",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.7.1",
     "brace-expansion": "^5.0.4",
+    "chai": "^6.2.2",
     "esbuild": "^0.27.3",
     "lodash": "^4.17.23",
     "minimatch": "^10.2.4",
+    "mocha": "^11.7.5",
     "source-map": "^0.7.6",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
@@ -57,14 +64,7 @@
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver-protocol": "^3.17.5",
     "vscode-languageserver-textdocument": "^1.0.12",
-    "vscode-languageserver-types": "^3.17.5",
-    "@vscode/test-cli": "^0.0.10",
-    "@vscode/test-electron": "^2.5.2",
-    "@types/mocha": "^10.0.10",
-    "@types/node": "^22.0.0",
-    "@types/chai": "^4.3.19",
-    "chai": "^4.5.0",
-    "mocha": "^11.5.0"
+    "vscode-languageserver-types": "^3.17.5"
   },
   "configurationDefaults": {
     "emmet.includeLanguages": {
@@ -223,7 +223,9 @@
         },
         "verter.viteConfig.trustedFiles": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Vite config file paths trusted for Node.js execution. Required when static analysis cannot extract aliases from complex configs (e.g. configs using environment variables or dynamic imports)."
         },

@@ -17,12 +17,12 @@
   "dependencies": {
     "@verter/native": "workspace:*",
     "@verter/wasm": "workspace:*",
-    "@vue/compiler-sfc": "^3.5.29",
+    "@vue/compiler-sfc": "^3.5.30",
     "magic-string": "^0.30.21",
     "tinybench": "^6.0.0"
   },
   "devDependencies": {
-    "@types/node": "^25.3.3",
+    "@types/node": "^25.4.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

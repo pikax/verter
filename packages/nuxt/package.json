@@ -2,7 +2,12 @@
   "name": "@verter/nuxt",
   "version": "0.0.1-alpha.3",
   "description": "Nuxt module for Verter Vue compiler",
-  "keywords": ["vue", "nuxt", "compiler", "module"],
+  "keywords": [
+    "vue",
+    "nuxt",
+    "compiler",
+    "module"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -33,7 +38,7 @@
     "@verter/unplugin": "workspace:*"
   },
   "devDependencies": {
-    "tsdown": "^0.20.3",
+    "tsdown": "^0.21.1",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {

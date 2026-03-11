@@ -4208,6 +4208,7 @@ impl LanguageServer for VerterLanguageServer {
                 name: "verter-lsp".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
+            offset_encoding: Some(encoding.as_str().to_owned()),
         })
     }
 
