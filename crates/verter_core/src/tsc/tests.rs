@@ -2960,3 +2960,102 @@ defineExpose({ foo, bar: computed(() => 1), baz: 'literal' })
     assert!(r.contains("bar: any"), "should have bar: any: {r}");
     assert!(r.contains("baz: any"), "should have baz: any: {r}");
 }
+
+// ── Dual-script JS SFC (verter-tsc path) ────────────────────────
+
+#[test]
+fn tsc_dual_script_js_sfc_basic() {
+    let r = gen_tsc(
+        r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<script>
+export default {
+  inheritAttrs: false,
+}
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+
+    // Should still produce valid TSC output
+    assert!(
+        r.contains("defineComponent"),
+        "should have defineComponent call:\n{r}"
+    );
+    assert!(
+        r.contains("export default"),
+        "should have export default:\n{r}"
+    );
+
+    // Should NOT contain raw script tags
+    assert!(!r.contains("<script"), "script tags must not appear:\n{r}");
+    assert!(
+        !r.contains("</script>"),
+        "close script tags must not appear:\n{r}"
+    );
+
+    // Should parse as valid TypeScript
+    let alloc = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &r, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC TSC ERROR: {err}");
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "generated TSC output should have no parse errors, got {}:\n{r}",
+        parsed.errors.len()
+    );
+}
+
+#[test]
+fn tsc_dual_script_js_vuetify_figure_pattern() {
+    let r = gen_tsc(
+        r#"<template>
+  <figure>
+    <figcaption v-if="caption" v-text="caption" />
+    <slot v-else />
+  </figure>
+</template>
+
+<script setup>
+  import { computed, useAttrs } from 'vue'
+
+  const attrs = useAttrs()
+
+  defineProps({
+    name: String,
+  })
+
+  const caption = computed(() => attrs.title === 'null' ? null : attrs.title)
+</script>
+
+<script>
+  export default {
+    inheritAttrs: false,
+  }
+</script>"#,
+    );
+
+    // Should generate valid TSC output with props
+    assert!(
+        r.contains("defineComponent"),
+        "should have defineComponent:\n{r}"
+    );
+    assert!(r.contains("name:"), "should have name prop:\n{r}");
+
+    // Should NOT contain script tags or companion export default content
+    assert!(!r.contains("<script"), "script tags must not appear:\n{r}");
+
+    // Should parse as valid TypeScript
+    let alloc = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &r, oxc_span::SourceType::tsx()).parse();
+    for err in &parsed.errors {
+        eprintln!("OXC TSC ERROR: {err}");
+    }
+    assert!(
+        parsed.errors.is_empty(),
+        "generated TSC output should have no parse errors, got {}:\n{r}",
+        parsed.errors.len()
+    );
+}

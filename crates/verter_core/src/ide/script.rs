@@ -2807,9 +2807,7 @@ fn process_single_macro(
             state.macro_bindings.push(entry);
         }
         ScriptMacro::DefineExpose {
-            span,
-            declarator,
-            ..
+            span, declarator, ..
         } => {
             let entry = process_standard_macro(
                 "defineExpose",
@@ -10131,6 +10129,283 @@ const props = defineProps<{ zIndex: number }>()
         assert!(
             parsed.errors.is_empty(),
             "generated TSX should have no parse errors, got {}: {code}",
+            parsed.errors.len()
+        );
+    }
+
+    // ── Dual-script JS SFC (is_jsx: true + companion script) ────────
+
+    #[test]
+    fn jsx_dual_script_companion_export_default() {
+        let (code, _type_constructs) = gen_jsx_script(
+            r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<script>
+export default {
+  inheritAttrs: false,
+}
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+
+        // Positive: setup content should be present
+        assert!(
+            code.contains("const count = ref(0)"),
+            "setup content should be present:\n{code}"
+        );
+        assert!(
+            code.contains("TemplateBindingFN"),
+            "wrapper function should exist:\n{code}"
+        );
+        assert!(
+            code.contains("import { ref } from 'vue'"),
+            "setup import should be present:\n{code}"
+        );
+
+        // Negative: script tags and export default must be removed
+        assert!(
+            !code.contains("<script"),
+            "script tags must be removed:\n{code}"
+        );
+        assert!(
+            !code.contains("</script>"),
+            "close script tags must be removed:\n{code}"
+        );
+        assert!(
+            !code.contains("export default"),
+            "companion export default should be removed:\n{code}"
+        );
+        assert!(
+            !code.contains("inheritAttrs"),
+            "companion options should not appear:\n{code}"
+        );
+
+        // Should parse as valid JSX
+        let alloc = oxc_allocator::Allocator::new();
+        let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+        for err in &parsed.errors {
+            eprintln!("OXC JSX ERROR: {err}");
+        }
+        assert!(
+            parsed.errors.is_empty(),
+            "generated JSX should have no parse errors, got {}:\n{code}",
+            parsed.errors.len()
+        );
+    }
+
+    #[test]
+    fn jsx_dual_script_companion_imports_hoisted() {
+        let (code, _type_constructs) = gen_jsx_script(
+            r#"<script>
+import MyComponent from './MyComponent.vue'
+export default {
+  components: { MyComponent },
+}
+</script>
+<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><MyComponent/></template>"#,
+        );
+
+        // Companion imports should be hoisted
+        assert!(
+            code.contains("import MyComponent from './MyComponent.vue.ts'"),
+            "companion import should be hoisted with .vue.ts rewrite:\n{code}"
+        );
+
+        // Import should appear before the wrapper function
+        let import_pos = code
+            .find("import MyComponent")
+            .expect("import should exist");
+        let wrapper_pos = code
+            .find("TemplateBindingFN")
+            .expect("wrapper fn should exist");
+        assert!(
+            import_pos < wrapper_pos,
+            "companion import should be hoisted before wrapper function"
+        );
+
+        // Should parse as valid JSX
+        let alloc = oxc_allocator::Allocator::new();
+        let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "generated JSX should have no parse errors, got {}:\n{code}",
+            parsed.errors.len()
+        );
+    }
+
+    #[test]
+    fn jsx_dual_script_companion_value_declarations() {
+        let (code, _type_constructs) = gen_jsx_script(
+            r#"<script>
+const BASE_URL = 'https://example.com'
+export default {}
+</script>
+<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+
+        // Companion value declarations should be present outside wrapper
+        assert!(
+            code.contains("const BASE_URL = 'https://example.com'"),
+            "companion value declaration should remain:\n{code}"
+        );
+
+        // export default should be removed
+        assert!(
+            !code.contains("export default"),
+            "companion export default should be removed:\n{code}"
+        );
+
+        // Should parse as valid JSX
+        let alloc = oxc_allocator::Allocator::new();
+        let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "generated JSX should have no parse errors, got {}:\n{code}",
+            parsed.errors.len()
+        );
+    }
+
+    #[test]
+    fn jsx_dual_script_no_export_default() {
+        let (code, _type_constructs) = gen_jsx_script(
+            r#"<script>
+const SHARED = 42
+</script>
+<script setup>
+import { ref } from 'vue'
+const count = ref(SHARED)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+
+        // Companion content should be present
+        assert!(
+            code.contains("const SHARED = 42"),
+            "companion value should remain:\n{code}"
+        );
+
+        // Should parse as valid JSX
+        let alloc = oxc_allocator::Allocator::new();
+        let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "generated JSX should have no parse errors, got {}:\n{code}",
+            parsed.errors.len()
+        );
+    }
+
+    #[test]
+    fn jsx_dual_script_template_first() {
+        let (code, _type_constructs) = gen_jsx_script(
+            r#"<template><div>{{ count }}</div></template>
+<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<script>
+export default {
+  inheritAttrs: false,
+}
+</script>"#,
+        );
+
+        // Should still work with template-first ordering
+        assert!(
+            code.contains("const count = ref(0)"),
+            "setup content should be present:\n{code}"
+        );
+        assert!(
+            !code.contains("<script"),
+            "script tags must be removed:\n{code}"
+        );
+        assert!(
+            !code.contains("export default"),
+            "companion export default should be removed:\n{code}"
+        );
+
+        // Should parse as valid JSX
+        let alloc = oxc_allocator::Allocator::new();
+        let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "generated JSX should have no parse errors, got {}:\n{code}",
+            parsed.errors.len()
+        );
+    }
+
+    /// Test with actual vuetify-like pattern: template-first with defineProps
+    #[test]
+    fn jsx_dual_script_vuetify_figure_pattern() {
+        let (code, _type_constructs) = gen_jsx_script(
+            r#"<template>
+  <figure>
+    <figcaption v-if="caption" v-text="caption" />
+    <slot v-else />
+  </figure>
+</template>
+
+<script setup>
+  import { computed, useAttrs } from 'vue'
+
+  const attrs = useAttrs()
+
+  defineProps({
+    name: String,
+  })
+
+  const caption = computed(() => attrs.title === 'null' ? null : attrs.title)
+</script>
+
+<script>
+  export default {
+    inheritAttrs: false,
+  }
+</script>"#,
+        );
+
+        // Positive assertions
+        assert!(
+            code.contains("const caption = computed("),
+            "setup computed should be present:\n{code}"
+        );
+        assert!(
+            code.contains("TemplateBindingFN"),
+            "wrapper function should exist:\n{code}"
+        );
+
+        // Negative assertions
+        assert!(
+            !code.contains("<script"),
+            "script tags must be removed:\n{code}"
+        );
+        assert!(
+            !code.contains("</script>"),
+            "close script tags must be removed:\n{code}"
+        );
+        assert!(
+            !code.contains("export default"),
+            "companion export default should be removed:\n{code}"
+        );
+
+        // Should parse as valid JSX
+        let alloc = oxc_allocator::Allocator::new();
+        let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::jsx()).parse();
+        for err in &parsed.errors {
+            eprintln!("OXC JSX ERROR: {err}");
+        }
+        assert!(
+            parsed.errors.is_empty(),
+            "generated JSX should have no parse errors, got {}:\n{code}",
             parsed.errors.len()
         );
     }
