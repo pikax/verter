@@ -586,6 +586,382 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     expect(content, "JS SFC hover should not degrade to any").to.not.match(/:\s*any\b/);
   });
 
+  test("hover on v-model binding shows Ref<string>", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, 'v-model="inputVal"', 9);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    console.log(`    Hover on v-model inputVal: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "v-model hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "v-model hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "v-model hover should mention inputVal").to.include("inputVal");
+    // Verter-only hover may show `const inputVal` without inferred type
+    if (TYPE_PROVIDER) {
+      expect(content, "v-model hover should mention string").to.include("string");
+    }
+    expectNoHoverDegrade(content, "v-model hover");
+  });
+
+  test("hover on v-for destructured param shows string type", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // In: <div v-for="{ name, email } in users" :key="email">{{ name }} ({{ email }})</div>
+    // Find the {{ name }} usage which is inside the v-for scope
+    const pos = findPosition(doc, "{{ name }} ({{ email }})", 3);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    console.log(`    Hover on destructured name: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    // Verter-only mode may not provide hover for destructured v-for params
+    if (hovers.length === 0 && !TYPE_PROVIDER) {
+      console.log("    Verter-only: no hover for destructured v-for param (needs type provider)");
+      return;
+    }
+
+    expect(hovers.length, "destructured param hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "destructured param hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "destructured param hover should mention name").to.include("name");
+    expect(content, "destructured param hover should mention string").to.include("string");
+    expectNoHoverDegrade(content, "destructured param hover");
+  });
+
+  test("hover on v-for index shows number type", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // In: <span v-for="(user, idx) in users" :key="idx">
+    const pos = findPosition(doc, "(user, idx)", 7);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    console.log(`    Hover on v-for idx: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "v-for index hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "v-for index hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "v-for index hover should mention idx").to.include("idx");
+    expect(content, "v-for index hover should mention number").to.include("number");
+    expectNoHoverDegrade(content, "v-for index hover");
+  });
+
+  test("hover on $event parameter shows Event type", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, 'handleInput($event)', 12);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    console.log(`    Hover on $event: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "$event hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "$event hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "$event hover should mention Event").to.include("Event");
+    expect(content, "$event hover should not be any").to.not.match(/:\s*any\b/);
+  });
+
+  test("hover on ref shows Ref<number> not Ref<any>", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    // Hover on "count" in the script: const count = ref(0)
+    const pos = findPosition(doc, "const count = ref(0)", 6);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    console.log(`    Hover on count decl: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "ref decl hover should exist").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "ref decl hover should include Ref").to.include("Ref");
+    expect(content, "ref decl hover should include number").to.include("number");
+    expect(content, "ref decl hover should NOT be Ref<any>").to.not.include("Ref<any>");
+    expect(content, "ref decl hover should NOT be unknown").to.not.include("unknown");
+  });
+
+  test("hover on computed shows ComputedRef<number>", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "const doubled = computed(", 6);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    console.log(`    Hover on doubled decl: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "computed decl hover should exist").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "computed decl hover should include ComputedRef or number").to.satisfy(
+      (c: string) => c.includes("ComputedRef") || c.includes("number"),
+      "expected ComputedRef or number type",
+    );
+    expect(content, "computed decl hover should NOT be any").to.not.match(/:\s*any\b/);
+  });
+
+  test("hover on TypeResolutionCases union type shows exact union", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const trDoc = await openAndReady("src/TypeResolutionCases.vue");
+
+    const pos = findPosition(trDoc, "{{ mixed }}", 3);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers } = await measureHover(trDoc.uri, pos);
+    expect(hovers.length, "union type hover should exist").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "union type hover should mention string").to.include("string");
+    expect(content, "union type hover should mention number").to.include("number");
+    expectNoHoverDegrade(content, "union type hover");
+  });
+
+  // ── Monorepo Fixture ──────────────────────────────────────────
+
+  test("hover on cross-package component tag shows typed props (monorepo)", async function () {
+    if (FIXTURE_NAME !== "monorepo") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "<SharedComp", 1);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("SharedComp (monorepo)", latencyMs);
+    console.log(`    Hover on <SharedComp: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "component tag hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "component hover should mention foo").to.include("foo");
+    expect(content, "component hover should mention bar").to.include("bar");
+    expectNoHoverDegrade(content, "monorepo component tag hover");
+  });
+
+  test("hover on cross-package imported function return (monorepo)", async function () {
+    if (FIXTURE_NAME !== "monorepo") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "{{ greeting }}", 3);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("greeting (monorepo)", latencyMs);
+    console.log(`    Hover on greeting: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "greeting hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "greeting hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    console.log(`    greeting hover content: ${content.slice(0, 120)}`);
+
+    // Without a type provider, cross-package imports may degrade to `any`
+    if (!TYPE_PROVIDER && content.match(/:\s*any\b/)) {
+      console.log("    Verter-only: cross-package import type degrades to any (needs type provider)");
+      return;
+    }
+
+    const hasGreeting = content.includes("greeting");
+    const hasString = content.includes("string");
+    const hasHelper = content.includes("helper");
+    expect(
+      hasGreeting || hasString || hasHelper,
+      `greeting hover should mention greeting, string, or helper:\n${content}`,
+    ).to.equal(true);
+    expectNoHoverDegrade(content, "monorepo greeting hover");
+  });
+
+  // ── Composite Paths Fixture ────────────────────────────────────
+
+  test("hover on @/-imported component in composite project (composite-paths)", async function () {
+    if (FIXTURE_NAME !== "composite-paths") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "<HelloWorld", 1);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("HelloWorld (composite-paths)", latencyMs);
+    console.log(`    Hover on <HelloWorld: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "component tag hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "component hover should mention msg").to.include("msg");
+    expectNoHoverDegrade(content, "composite-paths component hover");
+  });
+
+  // ── Path Aliases Fixture ───────────────────────────────────────
+
+  test("hover on @/-imported component shows typed props (path-aliases)", async function () {
+    if (FIXTURE_NAME !== "path-aliases") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "<MyComp", 1);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("MyComp (path-aliases)", latencyMs);
+    console.log(`    Hover on <MyComp: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "component tag hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "component hover should mention foo").to.include("foo");
+    expectNoHoverDegrade(content, "path-aliases component hover");
+  });
+
+  // ── Tsconfig References Fixture ────────────────────────────────
+
+  test("hover on component in solution-style project (tsconfig-references)", async function () {
+    if (FIXTURE_NAME !== "tsconfig-references") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "<MyComp", 1);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("MyComp (tsconfig-references)", latencyMs);
+    console.log(`    Hover on <MyComp: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "component tag hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "component hover should mention foo").to.include("foo");
+    expectNoHoverDegrade(content, "tsconfig-references component hover");
+  });
+
+  // ── No-Config Fixture ──────────────────────────────────────────
+
+  test("hover on ref binding works without tsconfig (no-config)", async function () {
+    if (FIXTURE_NAME !== "no-config") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "{{ count }}", 3);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("count (no-config)", latencyMs);
+    console.log(`    Hover on count: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "ref hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "ref hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "ref hover should mention count").to.include("count");
+    expectNoHoverDegrade(content, "no-config ref hover");
+  });
+
+  // ── Single-File Fixture ────────────────────────────────────────
+
+  test("hover works in single-file project (single-file)", async function () {
+    if (FIXTURE_NAME !== "single-file") {
+      console.log("    N/A");
+      return;
+    }
+
+    const pos = findPosition(doc, "{{ count }}", 3);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("count (single-file)", latencyMs);
+    console.log(`    Hover on count: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "ref hover should exist").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "ref hover should have content").to.be.greaterThan(0);
+
+    const content = hoverText(hovers[0]);
+    expect(content, "ref hover should mention count").to.include("count");
+    expectNoHoverDegrade(content, "single-file ref hover");
+  });
+
   test("hover latency is reasonable", function () {
     const report = getTimer().getReport();
     const samples = report.hover.samples;

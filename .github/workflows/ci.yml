@@ -251,10 +251,23 @@ jobs:
         run: pnpm --filter @verter/wasm test
 
   vscode-e2e:
-    name: VS Code E2E Tests
+    name: VS Code E2E (${{ matrix.fixture }})
     needs: detect-changes
     if: needs.detect-changes.outputs.vscode == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture:
+          - single-project
+          - barrel-exports
+          - path-aliases
+          - monorepo
+          - tsconfig-extends
+          - tsconfig-references
+          - composite-paths
+          - no-config
+          - single-file
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -281,15 +294,15 @@ jobs:
         run: pnpm --filter verter-vscode build:dev
       - name: Compile E2E tests
         run: pnpm --filter verter-vscode pretest:e2e
-      - name: Run E2E tests (single-project)
+      - name: Run E2E tests (${{ matrix.fixture }})
         run: xvfb-run -a pnpm --filter verter-vscode test:e2e
         env:
-          E2E_FIXTURE: single-project
+          E2E_FIXTURE: ${{ matrix.fixture }}
       - name: Upload timing report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-timing-report
+          name: e2e-timing-${{ matrix.fixture }}
           path: /tmp/verter-e2e-timing-*.json
           if-no-files-found: ignore
 

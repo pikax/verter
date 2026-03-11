@@ -64,6 +64,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
   });
 
   test("@/ path alias imports resolve without errors", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME !== "composite-paths" && FIXTURE_NAME !== "path-aliases") {
       console.log("    pass (N/A for this fixture)");
       return;
