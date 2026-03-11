@@ -32,6 +32,7 @@ nul
 .claude/settings.local.json
 .claude/*.md
 .claude/feedback/
+.claude/worktrees/
 
 # Benchmark results (generated artifacts)
 packages/bench/results/
