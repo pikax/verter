@@ -3385,3 +3385,83 @@ fn is_member_expression_accepts_ts_as_cast() {
     assert!(!super::is_member_expression("fn()"));
     assert!(!super::is_member_expression(""));
 }
+
+#[test]
+fn v_slot_dotted_name_includes_full_name_in_arg() {
+    // v-slot:item.title should have arg_end covering "item.title", not just "item"
+    let input = r#"<template><Comp><template v-slot:item.title="{ val }"><span>{{ val }}</span></template></Comp></template>"#;
+    let parsed = crate::compile::parse_sfc(input, None, None);
+    let ast = parsed.template_ast().expect("template AST");
+
+    // Find the inner <template v-slot:item.title> element
+    let comp_node = &ast.nodes[ast.root.content.as_ref().unwrap().children[0].0];
+    let comp_el = match &comp_node.kind {
+        AstNodeKind::Element(el) => el,
+        _ => panic!("expected element"),
+    };
+    let inner_id = comp_el.content.as_ref().unwrap().children[0];
+    let inner_node = &ast.nodes[inner_id.0];
+    let inner_el = match &inner_node.kind {
+        AstNodeKind::Element(el) => el,
+        _ => panic!("expected element"),
+    };
+
+    let v_slot = inner_el.v_slot.as_ref().expect("v_slot should exist");
+    let arg_start = v_slot.arg_start.expect("arg_start");
+    let arg_end = v_slot.arg_end.expect("arg_end");
+    let slot_name = &input[arg_start as usize..arg_end as usize];
+
+    // Positive: full dotted name
+    assert_eq!(
+        slot_name, "item.title",
+        "v-slot arg should include the full dotted name"
+    );
+
+    // Negative: modifiers should be empty (dots merged into arg)
+    assert!(
+        v_slot.modifiers.is_empty(),
+        "v-slot modifiers should be empty after dot merging, got: {:?}",
+        v_slot.modifiers
+    );
+
+    // No parse errors
+    assert!(
+        !parsed.has_errors(),
+        "should have no errors for dotted slot names"
+    );
+}
+
+#[test]
+fn v_slot_shorthand_dotted_name() {
+    // #item.title shorthand should also get the full name
+    let input =
+        r#"<template><Comp><template #item.title="{ val }"><span/></template></Comp></template>"#;
+    let parsed = crate::compile::parse_sfc(input, None, None);
+    let ast = parsed.template_ast().expect("template AST");
+
+    let comp_node = &ast.nodes[ast.root.content.as_ref().unwrap().children[0].0];
+    let comp_el = match &comp_node.kind {
+        AstNodeKind::Element(el) => el,
+        _ => panic!("expected element"),
+    };
+    let inner_id = comp_el.content.as_ref().unwrap().children[0];
+    let inner_node = &ast.nodes[inner_id.0];
+    let inner_el = match &inner_node.kind {
+        AstNodeKind::Element(el) => el,
+        _ => panic!("expected element"),
+    };
+
+    let v_slot = inner_el.v_slot.as_ref().expect("v_slot should exist");
+    let arg_start = v_slot.arg_start.expect("arg_start");
+    let arg_end = v_slot.arg_end.expect("arg_end");
+    let slot_name = &input[arg_start as usize..arg_end as usize];
+
+    assert_eq!(
+        slot_name, "item.title",
+        "#item.title shorthand should include full dotted name"
+    );
+    assert!(
+        v_slot.modifiers.is_empty(),
+        "shorthand v-slot modifiers should be empty"
+    );
+}

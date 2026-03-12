@@ -3294,26 +3294,16 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         false
     }
 
-    /// Build a slot name from a `v-slot` directive prop, including modifiers for
-    /// dot-notation names. `#header.id` → `"header.id"`, `#default` → `default`.
+    /// Build a slot name from a `v-slot` directive prop.
+    /// Dot-notation is already included in `arg_end` (parser merges modifiers).
+    /// `#header.id` → `"header.id"`, `#default` → `default`.
     fn build_slot_name(v_slot: &NodeProp, source: &str) -> String {
         if let (Some(as_), Some(ae)) = (v_slot.arg_start, v_slot.arg_end) {
             let raw = &source[as_ as usize..ae as usize];
-            if v_slot.modifiers.is_empty() {
-                if needs_quoted_key(raw) {
-                    format!("\"{}\"", raw)
-                } else {
-                    raw.to_string()
-                }
+            if needs_quoted_key(raw) {
+                format!("\"{}\"", raw)
             } else {
-                // Dot-notation slot names: #header.id → "header.id"
-                let mut name = raw.to_string();
-                for modifier in &v_slot.modifiers {
-                    name.push('.');
-                    name.push_str(modifier.slice(source));
-                }
-                // Names with dots always need quoting
-                format!("\"{}\"", name)
+                raw.to_string()
             }
         } else {
             "default".to_string()

@@ -1228,10 +1228,17 @@ impl Syntax {
                                 );
                             }
                         }
-                        warn_if_dup!(builder.set_v_slot(
-                            prop.take()
-                                .expect("invariant: prop not yet taken in v-slot branch"),
-                        ));
+                        // v-slot uses dots as part of the slot name (e.g. v-slot:item.title),
+                        // not as modifier separators. Extend arg_end to include modifiers
+                        // so downstream code gets the full slot name from arg_start..arg_end.
+                        let mut slot_prop = prop
+                            .take()
+                            .expect("invariant: prop not yet taken in v-slot branch");
+                        if let Some(last_mod) = slot_prop.modifiers.last() {
+                            slot_prop.arg_end = Some(last_mod.end);
+                            slot_prop.modifiers.clear();
+                        }
+                        warn_if_dup!(builder.set_v_slot(slot_prop));
                     }
                     b"v-once" => {
                         warn_if_dup!(builder.set_v_once(
@@ -1595,7 +1602,8 @@ impl Syntax {
                 continue;
             };
 
-            // Extract slot name from the directive arg
+            // Extract slot name from the directive arg.
+            // Modifiers have already been merged into arg_end for v-slot (see set_v_slot).
             let slot_name: &[u8] = match (v_slot.arg_start, v_slot.arg_end) {
                 (Some(s), Some(e)) if e > s => &ctx.bytes[s as usize..e as usize],
                 _ => b"default",

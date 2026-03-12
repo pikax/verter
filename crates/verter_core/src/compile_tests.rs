@@ -13842,3 +13842,145 @@ import TabItem from './TabItem.vue'
         tsx.code
     );
 }
+
+#[test]
+fn dual_script_tsx_does_not_leak_raw_template() {
+    // Vuetify pattern: <script setup> + <script> (Options API) + <template>
+    // The TSX output should NOT contain raw HTML template tags.
+    let result = compile_tsx(
+        r#"<template>
+  <div>
+    <MyComp v-model="step">
+      <template v-slot:header>
+        <span>Title</span>
+      </template>
+      <template v-slot:body="{ item }">
+        <p>{{ item }}</p>
+      </template>
+    </MyComp>
+  </div>
+</template>
+
+<script setup>
+const step = ref(1)
+</script>
+
+<script>
+export default {
+  components: {},
+}
+</script>"#,
+    );
+
+    let tsx = result
+        .tsx
+        .as_ref()
+        .expect("tsx output should exist for dual-script SFC");
+
+    // Positive: should contain JSX elements
+    assert!(
+        tsx.code.contains("<div"),
+        "TSX should contain JSX elements. Got:\n{}",
+        tsx.code
+    );
+
+    // Negative: raw <template v-slot:xxx> must NOT leak into JSX output
+    assert!(
+        !tsx.code.contains("<template v-slot"),
+        "raw <template v-slot:...> must not appear in TSX output. Got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("</template>"),
+        "raw </template> closing tag must not appear in TSX output. Got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn dual_script_tsx_dotted_slot_names() {
+    // Vuetify stepper/data-table pattern: v-slot:item.1, v-slot:item.title
+    // Dot-separated slot names in a dual-script SFC with template-first layout.
+    let source = r#"<template>
+  <v-data-table :items="items">
+    <template v-slot:item.title="{ value }">
+      <span>{{ value }}</span>
+    </template>
+    <template v-slot:item.actions="{ item }">
+      <button @click="edit(item.id)">Edit</button>
+    </template>
+  </v-data-table>
+</template>
+
+<script setup>
+const items = ref([])
+function edit(id) {}
+</script>
+
+<script>
+export default {
+  components: {},
+}
+</script>"#;
+
+    let result = compile_tsx(source);
+
+    let tsx = result
+        .tsx
+        .as_ref()
+        .expect("tsx output should exist for dotted slot SFC");
+
+    // Positive: should produce valid JSX
+    assert!(
+        tsx.code.contains("<span"),
+        "TSX should contain inner JSX elements. Got:\n{}",
+        tsx.code
+    );
+
+    // Negative: no raw template tags
+    assert!(
+        !tsx.code.contains("<template v-slot"),
+        "raw <template v-slot:item.title> must not appear in TSX output. Got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("</template>"),
+        "raw </template> must not appear in TSX output. Got:\n{}",
+        tsx.code
+    );
+
+    // Negative: no parse errors
+    let errors: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("parse") || e.message.contains("Parse"))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "should have no parse errors, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn dotted_slot_names_true_duplicate_still_detected() {
+    // Two slots with the SAME dotted name should still be flagged as duplicates.
+    let source = r#"<template>
+  <MyComp>
+    <template v-slot:item.title="{ a }"><span>{{ a }}</span></template>
+    <template v-slot:item.title="{ b }"><span>{{ b }}</span></template>
+  </MyComp>
+</template>
+
+<script setup>
+</script>"#;
+    let result = compile_tsx(source);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Duplicate slot")),
+        "should detect duplicate dotted slot names, errors: {:?}",
+        result.errors
+    );
+}
