@@ -188,22 +188,21 @@ The server sends `$/verter/viteConfigTrustRequired` notifications for complex co
 
 ### Style Preprocessing in Bundler Mode
 
-Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preprocessing to CSS before Vite can consume them. The preprocessing pipeline differs between Verter and `@vitejs/plugin-vue`:
+Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preprocessing to CSS. The pipeline differs between Vite and non-Vite bundlers:
 
-**Verter's approach** (preprocess-then-serve):
-1. `transform()` on the main `.vue` file triggers `applyPreprocessorRequests()` in the unplugin (`packages/unplugin/src/core/preprocessor-session.ts`).
-2. The preprocessor session spawns a child process to compile SCSS/SASS/Less → CSS.
-3. The compiled CSS is sent to the Rust host via `apply_block_overrides()` (`host_upsert.rs`).
-4. **Critical**: `apply_style_overrides()` updates `meta.style_langs[idx]` from the original lang (e.g., `"sass"`) to `"css"`. This ensures `render_ids()` generates URLs with `lang.css` instead of `lang.sass`.
-5. When Vite requests the style sub-module (e.g., `App.vue?vue&type=style&index=0&lang.css`), the `load()` hook returns already-compiled CSS.
+**Vite mode** (Vite-owned preprocessing, matching `@vitejs/plugin-vue`):
+1. During main `.vue` `transform()`, the plugin parses the SFC with `compiler.parse()` and caches raw style block content in `styleBlockCache`. Style preprocessing is **skipped** in `applyPreprocessorRequests()`.
+2. `load()` returns raw style source (e.g., SCSS with `$variables`) from `styleBlockCache`.
+3. Style URLs preserve the original lang (`lang.scss`, not `lang.css`) since `meta.style_langs` is never overwritten.
+4. Vite's CSS pipeline preprocesses SCSS/SASS/Less/Stylus automatically between `load()` and `transform()`.
+5. `transform()` always runs `compiler.compileStyleAsync()` for Vue-specific post-processing: scoped CSS attribute selectors (`[data-v-...]`) and CSS `v-bind()` rewriting. This runs even for unscoped plain CSS blocks (CSS `v-bind()` still needs rewriting).
 
-**Why `meta.style_langs` must be updated**: `render_ids()` (`host/src/id.rs`) uses `meta.style_langs` to construct virtual file URLs. If the lang stays as `"sass"` after preprocessing, Vite sees `lang.sass` in the URL, feeds the already-compiled CSS back through its SASS preprocessor, and fails because CSS syntax (e.g., `{`) is invalid in SASS indented syntax.
+**Non-Vite mode** (preprocessor fallback):
+Style preprocessing goes through `preprocessBlock()` → `preprocessStyle()` which calls Vite's `preprocessCSS()` in-process (if Vite config is available). The compiled CSS is sent to the Rust host via `applyBlockOverrides()`, and `apply_style_overrides()` updates `meta.style_langs` to `"css"`. The `transform()` hook uses Rust `processStyle()` for CSS scoping only.
 
-**`@vitejs/plugin-vue` approach** (for comparison): Returns raw style content from `load()`, performs only scoping (not preprocessing) in `transform()` via `compileStyleAsync`, and lets Vite's built-in CSS pipeline handle all preprocessing. Verter preprocesses eagerly because it needs the compiled CSS for analysis.
+**Compiler resolution**: `vue/compiler-sfc` is resolved once per plugin instance from the project root in `configResolved()` via `createRequire(join(root, "package.json"))("vue/compiler-sfc")`. This is stored in the `compiler` variable and used for both SFC parsing (`compiler.parse()`) and style post-processing (`compiler.compileStyleAsync()`).
 
-**Preprocessor tuning**: The child process has a 120s request timeout (`REQUEST_TIMEOUT_MS`) and max 8 concurrent `preprocessCSS()` calls. The timeout was raised from 30s because projects like zyronon-douyin have 123 Less files — with default Vite Less preprocessing, individual files can take 10-30s. The concurrency limiter prevents resource exhaustion when all files queue simultaneously.
-
-**Key files**: `packages/unplugin/src/core/preprocessor-session.ts` (child process preprocessing, timeout + session lifecycle), `packages/unplugin/src/core/style-preprocess-worker.ts` (concurrency limiter, actual preprocessing), `crates/verter_host/src/host_upsert.rs` (`apply_style_overrides` — lang update), `crates/verter_host/src/id.rs` (`render_ids` — URL generation).
+**Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_host/src/host_upsert.rs` (`apply_style_overrides` — lang update, non-Vite only), `crates/verter_host/src/id.rs` (`render_ids` — URL generation).
 
 ### Cached Directive Fields on ElementNode
 

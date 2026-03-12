@@ -158,9 +158,6 @@ describe("vite style virtual modules", () => {
   });
 
   afterEach(async () => {
-    // Always close the plugin to kill the preprocessor child process.
-    // Without this, leaked child processes keep the Node.js event loop alive
-    // and cause vitest to hang after tests complete.
     if (activePlugin) {
       await activePlugin.closeBundle();
       activePlugin = null;
@@ -189,10 +186,9 @@ describe("vite style virtual modules", () => {
     return plugin;
   }
 
-  it("preprocessed style block uses lang.css in script sub-request (prevents Vite double-preprocessing)", async () => {
+  it("style URL preserves original lang (lang.sass, not lang.css)", async () => {
     const plugin = await createVitePlugin();
     const file = join(tempDir, "SassLang.vue").replace(/\\/g, "/");
-    // SASS indented syntax: Vite would fail to re-preprocess compiled CSS as SASS
     const sfc = `<template><div>hello</div></template>
 <style lang="sass">
 $color: red
@@ -200,151 +196,134 @@ $color: red
   color: $color
 </style>`;
 
-    try {
-      await plugin.transform(sfc, file);
+    await plugin.transform(sfc, file);
 
-      // The script sub-request contains the assembled main module with style imports.
-      // After preprocessing, the style URL should use lang.css, NOT lang.sass.
-      const script = await plugin.load(`${file}?vue&type=script&lang.js`);
-      expect(script).toBeDefined();
-      expect(script.code).toContain("lang.css");
-      expect(script.code).not.toContain("lang.sass");
-
-      // The style virtual file should contain compiled CSS (not raw SASS)
-      const style = await plugin.load(`${file}?vue&type=style&index=0&lang.css`);
-      expect(style).toBeDefined();
-      expect(style.code).toContain(".sass-lang");
-      expect(style.code).toContain("red");
-      expect(style.code).not.toContain("$color");
-    } finally {
-      await plugin.closeBundle();
-    }
+    // The Rust host output should contain lang.sass (original lang), not lang.css
+    const script = await plugin.load(`${file}?vue&type=script&lang.js`);
+    expect(script).toBeDefined();
+    expect(script.code).toContain("lang.sass");
+    expect(script.code).not.toContain("lang.css");
   });
 
-  it("loads compiled CSS for a scoped scss style virtual module", async () => {
+  it("load() returns raw SCSS source (Vite owns preprocessing)", async () => {
     const plugin = await createVitePlugin();
-    const file = join(tempDir, "ScopedStyle.vue").replace(/\\/g, "/");
-    const sfc = `<template><button class="scoped-style">x</button></template>
-<style scoped lang="scss">
+    const file = join(tempDir, "RawScss.vue").replace(/\\/g, "/");
+    const sfc = `<template><button>x</button></template>
+<style lang="scss">
 $border: #555;
-.scoped-style {
+.raw-scss {
   &:hover {
     border-color: $border;
   }
 }
 </style>`;
 
-    try {
-      await plugin.transform(sfc, file);
-      const style = await plugin.load(`${file}?vue&type=style&index=0&lang.scss`);
+    await plugin.transform(sfc, file);
+    const style = await plugin.load(`${file}?vue&type=style&index=0&lang.scss`);
 
-      expect(style).toBeDefined();
-      expect(style.code).toContain(".scoped-style:hover");
-      expect(style.code).toContain("#555");
-      expect(style.code).not.toContain("$border");
-      expect(style.code).not.toContain("[data-v-");
-    } finally {
-      await plugin.closeBundle();
-    }
+    expect(style).toBeDefined();
+    // Raw source: SCSS variables should still be present (not compiled)
+    expect(style.code).toContain("$border");
+    expect(style.code).toContain(".raw-scss");
+    // Should NOT contain compiled output
+    expect(style.code).not.toContain("[data-v-");
   });
 
-  it("does NOT scope CSS for non-scoped scss style virtual modules", async () => {
-    const plugin = await createVitePlugin();
-    const file = join(tempDir, "NonScoped.vue").replace(/\\/g, "/");
-    const sfc = `<template><button class="non-scoped">x</button></template>
-<style lang="scss">
-$color: #333;
-.non-scoped {
-  color: $color;
-}
-</style>`;
-
-    try {
-      await plugin.transform(sfc, file);
-      const styleId = `${file}?vue&type=style&index=0&lang.scss`;
-      const style = await plugin.load(styleId);
-      const transformed = await plugin.transform(style.code, styleId);
-
-      expect(transformed).toBeDefined();
-      expect(transformed.code).not.toContain("[data-v-");
-      expect(transformed.code).toContain("#333");
-    } finally {
-      await plugin.closeBundle();
-    }
-  });
-
-  it("scopes compiled CSS for non-css style virtual modules without re-preprocessing", async () => {
+  it("transform() scopes CSS via compileStyleAsync for scoped blocks", async () => {
     const plugin = await createVitePlugin();
     const file = join(tempDir, "ScopedTransform.vue").replace(/\\/g, "/");
     const sfc = `<template><button class="scoped-transform">x</button></template>
-<style scoped lang="scss">
-$border: #555;
+<style scoped>
 .scoped-transform {
-  &:hover {
-    border-color: $border;
-  }
+  color: red;
 }
 </style>`;
 
-    try {
-      await plugin.transform(sfc, file);
-      const styleId = `${file}?vue&type=style&index=0&lang.scss`;
-      const style = await plugin.load(styleId);
-      const transformed = await plugin.transform(style.code, styleId);
+    await plugin.transform(sfc, file);
+    const styleId = `${file}?vue&type=style&index=0&lang.css`;
+    const style = await plugin.load(styleId);
+    // Feed the raw CSS through the style transform (simulating what Vite does)
+    const transformed = await plugin.transform(style.code, styleId);
 
-      expect(transformed).toBeDefined();
-      expect(transformed.code).toContain("[data-v-");
-      expect(transformed.code).toContain("#555");
-      expect(transformed.code).not.toContain("$border");
-    } finally {
-      await plugin.closeBundle();
-    }
+    expect(transformed).toBeDefined();
+    expect(transformed.code).toContain("[data-v-");
+    expect(transformed.code).toContain(".scoped-transform");
+    expect(transformed.code).toContain("red");
   });
 
-  it("buildEnd closes the style preprocessor session and later transforms respawn it", async () => {
+  it("transform() does NOT scope non-scoped blocks", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "NonScoped.vue").replace(/\\/g, "/");
+    const sfc = `<template><button class="non-scoped">x</button></template>
+<style>
+.non-scoped {
+  color: #333;
+}
+</style>`;
+
+    await plugin.transform(sfc, file);
+    const styleId = `${file}?vue&type=style&index=0&lang.css`;
+    const style = await plugin.load(styleId);
+    const transformed = await plugin.transform(style.code, styleId);
+
+    expect(transformed).toBeDefined();
+    expect(transformed.code).not.toContain("[data-v-");
+    expect(transformed.code).toContain("#333");
+    expect(transformed.code).toContain(".non-scoped");
+  });
+
+  it("buildEnd and later transforms still work (no session lifecycle)", async () => {
     const plugin = await createVitePlugin();
     const firstFile = join(tempDir, "BuildEndOne.vue").replace(/\\/g, "/");
     const secondFile = join(tempDir, "BuildEndTwo.vue").replace(/\\/g, "/");
-    const firstSfc = `<template><button class="first-build-end">x</button></template>
-<style scoped lang="scss">
-$border: #555;
-.first-build-end {
-  &:hover {
-    border-color: $border;
-  }
-}
+    const firstSfc = `<template><button class="first">x</button></template>
+<style scoped>
+.first { color: red; }
 </style>`;
-    const secondSfc = `<template><button class="second-build-end">x</button></template>
-<style scoped lang="scss">
-$border: #0a84ff;
-.second-build-end {
-  &:hover {
-    border-color: $border;
-  }
-}
+    const secondSfc = `<template><button class="second">x</button></template>
+<style scoped>
+.second { color: blue; }
 </style>`;
 
-    try {
-      await plugin.transform(firstSfc, firstFile);
-      await expect(
-        Promise.race([
-          plugin.buildEnd(),
-          new Promise((_, reject) => {
-            setTimeout(() => reject(new Error("buildEnd timed out")), 4_000);
-          }),
-        ]),
-      ).resolves.toBeUndefined();
+    await plugin.transform(firstSfc, firstFile);
+    await plugin.buildEnd();
 
-      await plugin.transform(secondSfc, secondFile);
-      const style = await plugin.load(`${secondFile}?vue&type=style&index=0&lang.scss`);
+    await plugin.transform(secondSfc, secondFile);
+    const styleId = `${secondFile}?vue&type=style&index=0&lang.css`;
+    const style = await plugin.load(styleId);
+    const transformed = await plugin.transform(style.code, styleId);
 
-      expect(style).toBeDefined();
-      expect(style.code).toContain("#0a84ff");
-      expect(style.code).not.toContain("$border");
-    } finally {
-      await plugin.closeBundle();
-    }
-  }, 45_000);
+    expect(transformed).toBeDefined();
+    expect(transformed.code).toContain("[data-v-");
+    expect(transformed.code).toContain(".second");
+    expect(transformed.code).toContain("blue");
+    expect(transformed.code).not.toContain(".first");
+  });
+
+  it("template/script preprocessing still works in Vite mode", async () => {
+    // Template and script preprocessing should still work through preprocessBlock,
+    // only style preprocessing is skipped in Vite mode.
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "ScriptOnly.vue").replace(/\\/g, "/");
+    const sfc = `<script setup>
+const x = 1
+</script>
+<template><div>{{ x }}</div></template>`;
+
+    const result = await plugin.transform(sfc, file);
+    expect(result).toBeDefined();
+    expect(result.code).toBeDefined();
+  });
+
+  it("transformInclude returns true for ALL style VFs in Vite mode", async () => {
+    const plugin = await createVitePlugin();
+    // CSS (no lang) — should also return true in Vite mode for v-bind() rewriting
+    expect(plugin.transformInclude("/path/to/App.vue?vue&type=style&index=0&lang.css")).toBe(true);
+    // SCSS
+    expect(plugin.transformInclude("/path/to/App.vue?vue&type=style&index=0&lang.scss")).toBe(true);
+    // SASS
+    expect(plugin.transformInclude("/path/to/App.vue?vue&type=style&index=0&lang.sass")).toBe(true);
+  });
 });
 
 describe("vite compat shim", () => {

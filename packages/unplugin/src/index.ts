@@ -15,7 +15,6 @@ import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-re
 import { hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
 import { preprocessBlock } from "./core/preprocessor";
-import { isStylePreprocessorRequest, PreprocessorSession } from "./core/preprocessor-session";
 import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
@@ -159,18 +158,15 @@ async function applyPreprocessorRequests(
   profile: HostCompileProfile | undefined,
   viteConfig: unknown | null,
   customBlocks?: Record<string, BlockPreprocessor>,
-  preprocessorSession?: PreprocessorSession | null,
 ): Promise<void> {
   if (!upsertResult.preprocessorRequests?.length) return;
 
   const overrides: NativeBlockOverrideEntry[] = [];
   for (const req of upsertResult.preprocessorRequests) {
-    let result;
-    if (preprocessorSession) {
-      result = await preprocessorSession.process(req, filename, customBlocks);
-    } else {
-      result = await preprocessBlock(req, filename, viteConfig, customBlocks);
-    }
+    // In Vite mode, skip style preprocessing — Vite's CSS pipeline handles it.
+    if (viteConfig && req.blockType === "style") continue;
+
+    const result = await preprocessBlock(req, filename, viteConfig, customBlocks);
     if (result) {
       overrides.push({
         blockType: req.blockType,
@@ -187,15 +183,6 @@ async function applyPreprocessorRequests(
       overrides,
     });
   }
-}
-
-function prewarmStylePreprocessorSession(
-  upsertResult: HostUpdateResult,
-  preprocessorSession?: PreprocessorSession | null,
-): void {
-  if (!preprocessorSession) return;
-  if (!upsertResult.preprocessorRequests?.some(isStylePreprocessorRequest)) return;
-  void preprocessorSession.prewarm().catch(() => {});
 }
 
 function getHmrStrategy(framework: string): HmrStrategy {
@@ -293,13 +280,20 @@ function isClientComponent(filename: string): boolean {
   return filename.endsWith(".client.vue");
 }
 
+interface StyleBlockEntry {
+  content: string;
+  lang: string;
+  scoped: boolean;
+  module: boolean | string;
+}
+
 export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> = (
   options,
   meta,
 ) => {
   const opts = options ?? {};
   let viteConfig: ResolvedConfig | null = null;
-  let session: PreprocessorSession | null = null;
+  let compiler: any = null;
   const hmrStrategy = getHmrStrategy(meta.framework);
   const filter = createFilter(opts.include);
   let isNuxt = false;
@@ -320,6 +314,12 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
   // @vitejs/plugin-vue-jsx handle TS stripping and JSX transformation natively,
   // matching @vitejs/plugin-vue's behavior.
   const scriptCache = new Map<string, { code: string; map: any }>();
+
+  // Cache raw style block content for Vite mode.
+  // In Vite mode, load() serves raw style source (e.g., SCSS) and lets Vite's
+  // CSS pipeline handle preprocessing. transform() then runs compileStyleAsync()
+  // for Vue-specific post-processing (scoping + CSS v-bind() rewriting).
+  const styleBlockCache = new Map<string, StyleBlockEntry[]>();
 
   // Build timing instrumentation â€” accumulates per-phase timings across all .vue transforms.
   // Enabled when VERTER_TIMING=1 env var is set.
@@ -368,6 +368,17 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         }
       }
 
+      // Vite mode: return raw style source from cache.
+      // Vite's CSS pipeline preprocesses (SCSS/SASS/Less), then our transform()
+      // runs compileStyleAsync() for Vue-specific scoping + CSS v-bind() rewriting.
+      if (viteConfig && query.type === "style") {
+        const styles = styleBlockCache.get(filename);
+        const entry = styles?.[query.index ?? 0];
+        if (entry) {
+          return { code: entry.content };
+        }
+      }
+
       const host = loadHost();
 
       // Reuse the compile profile from transform() to ensure the same componentId
@@ -412,15 +423,13 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       const { filename, query } = parseVueRequest(id);
       // Main .vue files for compilation
       if (filter(filename) && !query.vue) return true;
-      // Style virtual files need one more pass for CSS scoping.
-      if (
-        query.vue &&
-        query.type === "style" &&
-        query.lang &&
-        query.lang !== "css" &&
-        filter(filename)
-      )
-        return true;
+      // Style virtual files need a transform pass.
+      // Vite mode: ALL styles need compileStyleAsync (scoping + CSS v-bind rewriting).
+      // Non-Vite: only preprocessed (non-CSS) styles need the scoping pass.
+      if (query.vue && query.type === "style" && filter(filename)) {
+        if (viteConfig) return true;
+        if (query.lang && query.lang !== "css") return true;
+      }
       return false;
     },
 
@@ -459,8 +468,6 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           inputId: filename,
           source,
         });
-        prewarmStylePreprocessorSession(upsertResult, session);
-
         await resolveUpsertDependencies(
           host,
           filename,
@@ -475,7 +482,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
         );
 
-        // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
+        // Preprocess non-native blocks (Pug, CoffeeScript, custom; style skipped in Vite mode)
         await applyPreprocessorRequests(
           host,
           filename,
@@ -483,7 +490,6 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           profile,
           viteConfig,
           opts.customBlocks,
-          session,
         );
 
         const main = host.getVirtualFile({
@@ -529,14 +535,40 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
     async transform(code, id) {
       const { filename, query } = parseVueRequest(id);
 
-      // Non-CSS style blocks are already preprocessed during the main SFC transform.
-      // The virtual style transform only needs to scope the compiled CSS.
+      // Style virtual module transform:
+      // - Vite mode: run compileStyleAsync() for scoping + CSS v-bind() rewriting.
+      //   Vite's CSS pipeline has already preprocessed SCSS/SASS/Less before this.
+      // - Non-Vite: use Rust processStyle for CSS scoping only.
       if (query.vue && query.type === "style") {
+        if (viteConfig && compiler) {
+          const profile = profileCache.get(filename);
+          const styleIndex = query.index ?? 0;
+          const styles = styleBlockCache.get(filename);
+          const entry = styles?.[styleIndex];
+          const scopedFlags = styleScopedCache.get(filename);
+          const isScoped = query.scoped || entry?.scoped || (scopedFlags?.[styleIndex] ?? false);
+
+          const result = await compiler.compileStyleAsync({
+            source: code,
+            filename,
+            id: `data-v-${profile?.componentId ?? ""}`,
+            scoped: isScoped,
+            isProd: profile?.isProduction ?? false,
+          });
+
+          if (result.errors.length) {
+            for (const err of result.errors) {
+              this.error(typeof err === "string" ? err : err.message);
+            }
+          }
+
+          return { code: result.code, map: result.map ?? null };
+        }
+
+        // Non-Vite: use Rust processStyle for CSS scoping only.
         let css = code;
         const profile = profileCache.get(filename);
         if (profile) {
-          // Determine if this specific style block is scoped.
-          // Check URL query first, then fall back to cached SFC-level flags.
           const styleIndex = query.index ?? 0;
           const scopedFlags = styleScopedCache.get(filename);
           const isScoped = query.scoped || (scopedFlags?.[styleIndex] ?? false);
@@ -598,7 +630,19 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         source: code,
       });
       const t1 = timing ? performance.now() : 0;
-      prewarmStylePreprocessorSession(upsertResult, session);
+
+      // In Vite mode, populate the style block cache with raw style content.
+      // Vite's CSS pipeline will preprocess SCSS/SASS/Less between load() and transform().
+      if (viteConfig && compiler) {
+        const { descriptor } = compiler.parse(code, { filename });
+        const entries: StyleBlockEntry[] = descriptor.styles.map((s: any) => ({
+          content: s.content,
+          lang: s.lang || "css",
+          scoped: s.scoped ?? false,
+          module: s.module ?? false,
+        }));
+        styleBlockCache.set(filename, entries);
+      }
 
       await resolveUpsertDependencies(
         host,
@@ -614,7 +658,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
       );
 
-      // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
+      // Preprocess non-native blocks (Pug, CoffeeScript, custom; style skipped in Vite mode)
       await applyPreprocessorRequests(
         host,
         filename,
@@ -622,7 +666,6 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         profile,
         viteConfig,
         opts.customBlocks,
-        session,
       );
       const t2 = timing ? performance.now() : 0;
 
@@ -691,13 +734,11 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
     },
 
     async closeBundle() {
-      await session?.close();
-      session = null;
+      styleBlockCache.clear();
       resetHost();
     },
 
     async buildEnd() {
-      await session?.close();
       if (!timing) return;
       const transformTotal = tUpsertMs + tDepsMs + tCompileMs;
       const lines = [
@@ -723,6 +764,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         profileCache.delete(id);
         scriptCache.delete(id);
         styleScopedCache.delete(id);
+        styleBlockCache.delete(id);
       }
     },
 
@@ -732,13 +774,18 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         viteConfig = resolvedConfig;
         projectRoot = resolvedConfig.root;
         isNuxt = detectNuxt(projectRoot);
-        // Create the preprocessor session from resolved Vite config.
-        // Style preprocessing runs in a child process to isolate leaked Sass workers.
-        session = new PreprocessorSession({
-          configFile: resolvedConfig.configFile || undefined,
-          root: resolvedConfig.root,
-          cssOptions: resolvedConfig.css as Record<string, unknown>,
-        });
+        // Resolve vue/compiler-sfc from the project root for compileStyleAsync().
+        // This handles scoping + CSS v-bind() rewriting after Vite preprocesses styles.
+        if (!compiler) {
+          try {
+            const { createRequire } = require("node:module");
+            const { join } = require("node:path");
+            const _require = createRequire(join(resolvedConfig.root, "package.json"));
+            compiler = _require("vue/compiler-sfc");
+          } catch {
+            // compiler-sfc not available — style post-processing will be skipped
+          }
+        }
       },
 
       handleHotUpdate({ file, server, modules }) {
@@ -749,6 +796,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         profileCache.delete(file);
         scriptCache.delete(file);
         styleScopedCache.delete(file);
+        styleBlockCache.delete(file);
 
         const affectedModules = modules.filter((m) => m.file === file);
         if (affectedModules.length > 0) {
