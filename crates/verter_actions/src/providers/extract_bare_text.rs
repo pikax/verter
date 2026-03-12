@@ -11,7 +11,10 @@
 // @ai-generated
 
 use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement, TemplateTextSegment};
-use verter_analysis::types::{ReactivityKind, ScriptAnalysisSnapshot};
+use verter_analysis::types::{
+    AnalyzedMacroKind, BindingInitializer, ReactivityKind, ScriptAnalysisSnapshot,
+    VueApiClassification,
+};
 use verter_diagnostics::LintDiagnostic;
 use verter_span::Span;
 
@@ -247,6 +250,109 @@ fn generate_name(el: &TemplateElement, source: &str) -> String {
     }
 }
 
+/// Check if an `AnalyzedBinding` came from `defineProps` via its initializer.
+fn is_define_props_binding(binding: &verter_analysis::types::AnalyzedBinding) -> bool {
+    matches!(
+        &binding.initializer,
+        Some(BindingInitializer::FunctionCall {
+            vue_api: Some(VueApiClassification::DefineProps),
+            ..
+        })
+    )
+}
+
+/// Info about how to access props in generated code.
+struct PropsInfo {
+    accessor_name: String,
+    needs_wrapping: bool,
+    macro_span: Option<Span>,
+}
+
+/// Find how to access props: check macros for existing binding name or determine we need wrapping.
+fn find_props_accessor(script: &ScriptAnalysisSnapshot) -> Option<PropsInfo> {
+    let with_defaults = script
+        .macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::WithDefaults);
+    let define_props = script
+        .macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineProps);
+
+    let primary = with_defaults.or(define_props)?;
+
+    if let Some(ref name) = primary.binding_name {
+        Some(PropsInfo {
+            accessor_name: name.clone(),
+            needs_wrapping: false,
+            macro_span: None,
+        })
+    } else {
+        let name = choose_props_name(script);
+        Some(PropsInfo {
+            accessor_name: name,
+            needs_wrapping: true,
+            macro_span: Some(primary.span),
+        })
+    }
+}
+
+/// Choose a non-conflicting name for the props accessor variable.
+fn choose_props_name(script: &ScriptAnalysisSnapshot) -> String {
+    let taken: std::collections::HashSet<&str> =
+        script.bindings.iter().map(|b| b.name.as_str()).collect();
+
+    for candidate in &["props", "_props", "componentProps"] {
+        if !taken.contains(candidate) {
+            return candidate.to_string();
+        }
+    }
+    for i in 0u32.. {
+        let name = format!("props{}", i);
+        if !taken.contains(name.as_str()) {
+            return name;
+        }
+    }
+    unreachable!()
+}
+
+/// Replace an identifier at word boundaries within an expression.
+fn replace_ident_at_word_boundary(expr: &str, ident: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(expr.len() + replacement.len());
+    let bytes = expr.as_bytes();
+    let ident_bytes = ident.as_bytes();
+    let ident_len = ident.len();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if i + ident_len <= bytes.len() && &bytes[i..i + ident_len] == ident_bytes {
+            let before_ok = i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric()
+                    || bytes[i - 1] == b'_'
+                    || bytes[i - 1] == b'$');
+            let after_ok = i + ident_len >= bytes.len()
+                || !(bytes[i + ident_len].is_ascii_alphanumeric()
+                    || bytes[i + ident_len] == b'_'
+                    || bytes[i + ident_len] == b'$');
+            if before_ok && after_ok {
+                result.push_str(replacement);
+                i += ident_len;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Check if an identifier matches a prop field in any DefineProps macro.
+fn is_prop_field(ident: &str, script: &ScriptAnalysisSnapshot) -> bool {
+    script.macros.iter().any(|m| {
+        m.kind == AnalyzedMacroKind::DefineProps && m.prop_fields.iter().any(|f| f.name == ident)
+    })
+}
+
 /// Build the extraction action for an element with bare text.
 fn build_extract_action(
     el: &TemplateElement,
@@ -285,6 +391,9 @@ fn build_extract_action(
             }
         });
 
+    // Resolve props accessor info (if defineProps is present)
+    let props_info = script.and_then(find_props_accessor);
+
     let name = generate_name(el, source);
 
     // Build template literal body from text_children
@@ -292,6 +401,7 @@ fn build_extract_action(
     let mut needs_value_unwrap = Vec::new(); // (ident, ReactivityKind)
     let mut needs_unref = false;
     let mut scoped_params: Vec<String> = Vec::new();
+    let mut used_props = false;
 
     for seg in &el.text_children {
         match seg {
@@ -299,7 +409,6 @@ fn build_extract_action(
                 let s = span.start as usize;
                 let e = span.end as usize;
                 if s < source.len() && e <= source.len() {
-                    // Escape backticks and ${} in text
                     let text = &source[s..e];
                     for c in text.chars() {
                         if c == '`' {
@@ -320,25 +429,46 @@ fn build_extract_action(
                     let idents = extract_identifiers(expr);
 
                     if has_scoped {
-                        // Function mode: scoped vars become params, no .value
+                        // Function mode: scoped vars become params
+                        let mut transformed_expr = expr.to_string();
                         for id in &idents {
                             if scoped_vars.contains(*id) && !scoped_params.contains(&id.to_string())
                             {
                                 scoped_params.push(id.to_string());
+                            } else if let Some(script) = script {
+                                // Non-scoped ident: check if it's a prop
+                                let binding = script.bindings.iter().find(|b| b.name == *id);
+                                if binding.is_some() {
+                                    // Script binding wins — no prop prefix
+                                } else if let Some(ref pi) = props_info {
+                                    if is_prop_field(id, script) {
+                                        let replacement = format!("{}.{}", pi.accessor_name, id);
+                                        transformed_expr = replace_ident_at_word_boundary(
+                                            &transformed_expr,
+                                            id,
+                                            &replacement,
+                                        );
+                                        used_props = true;
+                                    }
+                                }
                             }
                         }
-                        template_parts.push_str(&format!("${{{}}}", expr));
+                        template_parts.push_str(&format!("${{{}}}", transformed_expr));
                     } else {
-                        // Computed mode: apply .value / unref() as needed
+                        // Computed mode: apply .value / unref() / props as needed
                         let mut transformed_expr = expr.to_string();
                         if let Some(script) = script {
                             for id in &idents {
                                 if let Some(binding) =
                                     script.bindings.iter().find(|b| b.name == *id)
                                 {
+                                    // Script binding found — ALWAYS wins
+                                    if is_define_props_binding(binding) {
+                                        // Destructured prop → raw ident, no .value
+                                        continue;
+                                    }
                                     match binding.reactivity_kind {
                                         ReactivityKind::Ref | ReactivityKind::Computed => {
-                                            // Simple identifier → append .value
                                             if expr.trim() == *id {
                                                 transformed_expr = format!("{}.value", id);
                                             }
@@ -352,6 +482,17 @@ fn build_extract_action(
                                             needs_unref = true;
                                         }
                                         _ => {}
+                                    }
+                                } else if let Some(ref pi) = props_info {
+                                    // No script binding — check prop fields
+                                    if is_prop_field(id, script) {
+                                        let replacement = format!("{}.{}", pi.accessor_name, id);
+                                        transformed_expr = replace_ident_at_word_boundary(
+                                            &transformed_expr,
+                                            id,
+                                            &replacement,
+                                        );
+                                        used_props = true;
                                     }
                                 }
                             }
@@ -406,6 +547,22 @@ fn build_extract_action(
     if needs_unref {
         if let Some(edit) = find_or_extend_vue_import(source, script, "unref") {
             edits.push(edit);
+        }
+    }
+
+    // 4. Wrapping edit: if bare defineProps needs `const X = ` prepended
+    if used_props {
+        if let Some(ref pi) = props_info {
+            if pi.needs_wrapping {
+                if let Some(macro_span) = pi.macro_span {
+                    let wrap_text = format!("const {} = ", pi.accessor_name);
+                    edits.push(FileEdit {
+                        file_id: None,
+                        replacement: wrap_text,
+                        span: Span::new(macro_span.start, macro_span.start),
+                    });
+                }
+            }
         }
     }
 
@@ -1442,6 +1599,805 @@ mod tests {
         assert!(
             actions.is_empty(),
             "should not produce action without <script setup>"
+        );
+    }
+
+    // ── Test helper: build macro ──
+
+    fn make_macro(
+        kind: AnalyzedMacroKind,
+        binding_name: Option<&str>,
+        prop_names: &[&str],
+        span: Span,
+    ) -> AnalyzedMacro {
+        AnalyzedMacro {
+            kind,
+            is_type_based: true,
+            type_references: vec![],
+            binding_name: binding_name.map(|s| s.to_string()),
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: prop_names
+                .iter()
+                .map(|n| AnalyzedPropField {
+                    name: n.to_string(),
+                    span: Span::new(0, 0),
+                    type_annotation: None,
+                })
+                .collect(),
+            emit_fields: vec![],
+            span,
+        }
+    }
+
+    fn make_script_with_macros(
+        bindings: Vec<AnalyzedBinding>,
+        macros: Vec<AnalyzedMacro>,
+        imports: Vec<AnalyzedImport>,
+    ) -> ScriptAnalysisSnapshot {
+        ScriptAnalysisSnapshot {
+            bindings,
+            macros,
+            imports,
+            ..Default::default()
+        }
+    }
+
+    fn make_props_binding(name: &str, kind: AnalyzedBindingKind) -> AnalyzedBinding {
+        AnalyzedBinding {
+            name: name.to_string(),
+            kind,
+            is_reactive: false,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: Some(BindingInitializer::FunctionCall {
+                callee: "defineProps".to_string(),
+                callee_import_source: None,
+                vue_api: Some(VueApiClassification::DefineProps),
+            }),
+            span: Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
+        }
+    }
+
+    /// Build a simple test context for prop tests.
+    /// Source: `<script setup lang="ts">\n{script_body}\n</script>\n<template>\n<p>{content}</p>\n</template>`
+    fn prop_test_action(
+        script_body: &str,
+        content: &str,
+        script: ScriptAnalysisSnapshot,
+    ) -> Vec<CodeAction> {
+        let source_str = format!(
+            "<script setup lang=\"ts\">\n{}\n</script>\n<template>\n<p>{}</p>\n</template>",
+            script_body, content
+        );
+        // Leak source to get 'static lifetime for test convenience
+        let source: &'static str = Box::leak(source_str.into_boxed_str());
+
+        let p_tag_start = source.find("<p>").unwrap() as u32;
+        let tag_span_end = p_tag_start + 3;
+        let content_end = source.find("</p>").unwrap() as u32;
+        let content_text = &source[tag_span_end as usize..content_end as usize];
+
+        // Parse text_children from content
+        let mut text_children = Vec::new();
+        let mut pos = 0usize;
+        while pos < content_text.len() {
+            if let Some(interp_rel) = content_text[pos..].find("{{") {
+                // Text before interpolation
+                if interp_rel > 0 {
+                    text_children.push(TemplateTextSegment::Text {
+                        span: Span::new(
+                            tag_span_end + pos as u32,
+                            tag_span_end + pos as u32 + interp_rel as u32,
+                        ),
+                        is_entity: false,
+                    });
+                }
+                let interp_abs_start = pos + interp_rel;
+                let close = content_text[interp_abs_start..].find("}}").unwrap();
+                let interp_abs_end = interp_abs_start + close + 2;
+                let expr_start = interp_abs_start + 3; // skip "{{ "
+                let expr_end = interp_abs_start + close - 1; // before " }}"
+                text_children.push(TemplateTextSegment::Interpolation {
+                    span: Span::new(
+                        tag_span_end + interp_abs_start as u32,
+                        tag_span_end + interp_abs_end as u32,
+                    ),
+                    expression_span: Span::new(
+                        tag_span_end + expr_start as u32,
+                        tag_span_end + expr_end as u32,
+                    ),
+                });
+                pos = interp_abs_end;
+            } else {
+                // Remaining text
+                text_children.push(TemplateTextSegment::Text {
+                    span: Span::new(
+                        tag_span_end + pos as u32,
+                        tag_span_end + content_text.len() as u32,
+                    ),
+                    is_entity: false,
+                });
+                break;
+            }
+        }
+
+        let template = TemplateAnalysisSnapshot {
+            elements: vec![make_element("p", tag_span_end, content_end, text_children)],
+            ..Default::default()
+        };
+
+        let diag = make_diag(tag_span_end, content_end);
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "test.vue",
+            diagnostics: &set,
+            template: Some(&template),
+            script: Some(&script),
+            styles: &[],
+        };
+
+        ExtractBareText.fixes_for_diagnostic(&diag, &ctx)
+    }
+
+    // ── Test 13: Bare defineProps<{ title }>(), {{ title }} → props.title ──
+
+    #[test]
+    fn bare_define_props_uses_props_accessor() {
+        let script = make_script_with_macros(
+            vec![],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None, // bare — no binding name
+                &["title"],
+                Span::new(24, 55),
+            )],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "defineProps<{ title: string }>()",
+            "Hello {{ title }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1, "should produce one action");
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("props.title"),
+            "bare defineProps should use props.title: got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            !script_edit.replacement.contains(".value"),
+            "props should NOT use .value: got '{}'",
+            script_edit.replacement
+        );
+        // Should have wrapping edit (const props = before defineProps)
+        let has_wrap = actions[0]
+            .edits
+            .iter()
+            .any(|e| e.replacement.contains("const ") && e.replacement.contains(" = "));
+        assert!(has_wrap, "bare defineProps should generate wrapping edit");
+    }
+
+    // ── Test 14: const props = defineProps<{ title }>(), {{ title }} → props.title ──
+
+    #[test]
+    fn named_define_props_uses_existing_accessor() {
+        let script = make_script_with_macros(
+            vec![make_props_binding("props", AnalyzedBindingKind::Const)],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                Some("props"),
+                &["title"],
+                Span::new(24, 65),
+            )],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "const props = defineProps<{ title: string }>()",
+            "Hello {{ title }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("props.title"),
+            "named defineProps should use props.title: got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            !script_edit.replacement.contains(".value"),
+            "props should NOT use .value"
+        );
+        // Should NOT have wrapping edit
+        let has_wrap = actions[0]
+            .edits
+            .iter()
+            .any(|e| e.replacement.contains("const props = ") && e.span.start == e.span.end);
+        assert!(
+            !has_wrap,
+            "named defineProps should NOT generate wrapping edit"
+        );
+    }
+
+    // ── Test 15: const { title } = defineProps<{ title }>() → raw title ──
+
+    #[test]
+    fn destructured_define_props_uses_raw_ident() {
+        let script = make_script_with_macros(
+            vec![make_props_binding("title", AnalyzedBindingKind::Const)],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None, // destructured — no single binding name
+                &["title"],
+                Span::new(24, 70),
+            )],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "const { title } = defineProps<{ title: string }>()",
+            "Hello {{ title }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        // Destructured prop binding → raw identifier, no .value, no prefix
+        assert!(
+            script_edit.replacement.contains("title"),
+            "destructured prop should use raw title: got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            !script_edit.replacement.contains("props.title"),
+            "destructured prop should NOT use props.title"
+        );
+        assert!(
+            !script_edit.replacement.contains(".value"),
+            "destructured prop should NOT use .value"
+        );
+    }
+
+    // ── Test 16: Bare defineProps, multiple props in expression ──
+
+    #[test]
+    fn bare_define_props_multiple_idents() {
+        let script = make_script_with_macros(
+            vec![],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None,
+                &["first", "last"],
+                Span::new(24, 65),
+            )],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "defineProps<{ first: string, last: string }>()",
+            "{{ first + ' ' + last }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("props.first"),
+            "should prefix first with props.: got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            script_edit.replacement.contains("props.last"),
+            "should prefix last with props.: got '{}'",
+            script_edit.replacement
+        );
+    }
+
+    // ── Test 17: Bare defineProps + ref → props.title + count.value ──
+
+    #[test]
+    fn bare_define_props_mixed_with_ref() {
+        let script = make_script_with_macros(
+            vec![make_binding("count", ReactivityKind::Ref)],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None,
+                &["title"],
+                Span::new(24, 55),
+            )],
+            vec![AnalyzedImport {
+                source: "vue".to_string(),
+                is_type_only: false,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "ref".to_string(),
+                    is_type_only: false,
+                    vue_api: None,
+                    span: Span::new(0, 0),
+                }],
+                span: Span::new(24, 49),
+                resolved_canonical_id: None,
+            }],
+        );
+
+        let actions = prop_test_action(
+            "defineProps<{ title: string }>()\nconst count = ref(0)",
+            "{{ title }}: {{ count }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("props.title"),
+            "prop should use props.title: got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            script_edit.replacement.contains("count.value"),
+            "ref should use count.value: got '{}'",
+            script_edit.replacement
+        );
+    }
+
+    // ── Test 18: Bare withDefaults(defineProps<...>()) → wrap before withDefaults ──
+
+    #[test]
+    fn bare_with_defaults_wraps_correctly() {
+        let script = make_script_with_macros(
+            vec![],
+            vec![
+                make_macro(
+                    AnalyzedMacroKind::WithDefaults,
+                    None,
+                    &[],
+                    Span::new(24, 90), // outer withDefaults span
+                ),
+                make_macro(
+                    AnalyzedMacroKind::DefineProps,
+                    None,
+                    &["title"],
+                    Span::new(37, 70), // inner defineProps span
+                ),
+            ],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "withDefaults(defineProps<{ title: string }>(), { title: 'hi' })",
+            "Hello {{ title }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("props.title"),
+            "withDefaults prop should use props.title: got '{}'",
+            script_edit.replacement
+        );
+        // Should wrap before withDefaults span (24), not defineProps span
+        let has_wrap = actions[0].edits.iter().any(|e| {
+            e.replacement.contains("const ")
+                && e.replacement.contains(" = ")
+                && e.span.start == e.span.end
+        });
+        assert!(has_wrap, "bare withDefaults should generate wrapping edit");
+    }
+
+    // ── Test 19: const props = withDefaults(...) → no wrap ──
+
+    #[test]
+    fn named_with_defaults_no_wrap() {
+        let script = make_script_with_macros(
+            vec![make_props_binding("props", AnalyzedBindingKind::Const)],
+            vec![
+                make_macro(
+                    AnalyzedMacroKind::WithDefaults,
+                    Some("props"),
+                    &[],
+                    Span::new(24, 100),
+                ),
+                make_macro(
+                    AnalyzedMacroKind::DefineProps,
+                    None,
+                    &["title"],
+                    Span::new(44, 80),
+                ),
+            ],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "const props = withDefaults(defineProps<{ title: string }>(), { title: 'hi' })",
+            "Hello {{ title }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("props.title"),
+            "named withDefaults should use props.title: got '{}'",
+            script_edit.replacement
+        );
+        // No wrap edit — wrapping edit is "const props = " without "computed"/"import"
+        let has_wrap_edit = actions[0].edits.iter().any(|e| {
+            e.span.start == e.span.end
+                && e.replacement.starts_with("const ")
+                && !e.replacement.contains("computed")
+                && !e.replacement.contains("import")
+        });
+        assert!(
+            !has_wrap_edit,
+            "named withDefaults should NOT generate wrapping edit"
+        );
+    }
+
+    // ── Test 20: "props" name taken → _props ──
+
+    #[test]
+    fn props_name_conflict_uses_underscore() {
+        let script = make_script_with_macros(
+            vec![make_binding("props", ReactivityKind::None)],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None,
+                &["title"],
+                Span::new(24, 55),
+            )],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "defineProps<{ title: string }>()\nconst props = { x: 1 }",
+            "Hello {{ title }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("_props.title"),
+            "conflicting name should use _props.title: got '{}'",
+            script_edit.replacement
+        );
+        // Check that we don't use bare "props.title" (without underscore prefix)
+        // Note: _props.title contains "props.title" as substring, so we check for
+        // the absence of "props.title" NOT preceded by an underscore
+        assert!(
+            !script_edit.replacement.contains("${props.title}"),
+            "should NOT use conflicting 'props' name in expression: got '{}'",
+            script_edit.replacement
+        );
+    }
+
+    // ── Test 21: Bare defineProps + v-for (function mode) ──
+
+    #[test]
+    fn bare_define_props_with_vfor_function_mode() {
+        let script_body = "defineProps<{ prefix: string }>()";
+        let content = "{{ prefix }}: {{ item }}";
+        let source_str = format!(
+            "<script setup lang=\"ts\">\n{}\n</script>\n<template>\n<li v-for=\"item in items\">{}</li>\n</template>",
+            script_body, content
+        );
+        let source: &'static str = Box::leak(source_str.into_boxed_str());
+
+        let li_start = source.find("<li").unwrap() as u32;
+        let tag_span_end = source.find(">{{ prefix }}").unwrap() as u32 + 1;
+        let content_end = source.find("</li>").unwrap() as u32;
+        let content_text = &source[tag_span_end as usize..content_end as usize];
+
+        // Parse text_children
+        let mut text_children = Vec::new();
+        let mut pos = 0usize;
+        while pos < content_text.len() {
+            if let Some(interp_rel) = content_text[pos..].find("{{") {
+                if interp_rel > 0 {
+                    text_children.push(TemplateTextSegment::Text {
+                        span: Span::new(
+                            tag_span_end + pos as u32,
+                            tag_span_end + pos as u32 + interp_rel as u32,
+                        ),
+                        is_entity: false,
+                    });
+                }
+                let interp_abs_start = pos + interp_rel;
+                let close = content_text[interp_abs_start..].find("}}").unwrap();
+                let interp_abs_end = interp_abs_start + close + 2;
+                let expr_start = interp_abs_start + 3;
+                let expr_end = interp_abs_start + close - 1;
+                text_children.push(TemplateTextSegment::Interpolation {
+                    span: Span::new(
+                        tag_span_end + interp_abs_start as u32,
+                        tag_span_end + interp_abs_end as u32,
+                    ),
+                    expression_span: Span::new(
+                        tag_span_end + expr_start as u32,
+                        tag_span_end + expr_end as u32,
+                    ),
+                });
+                pos = interp_abs_end;
+            } else {
+                text_children.push(TemplateTextSegment::Text {
+                    span: Span::new(
+                        tag_span_end + pos as u32,
+                        tag_span_end + content_text.len() as u32,
+                    ),
+                    is_entity: false,
+                });
+                break;
+            }
+        }
+
+        let mut el = make_element("li", tag_span_end, content_end, text_children);
+        el.v_for = Some(VForDirective {
+            variable: "item".to_string(),
+            index: None,
+            iterable: "items".to_string(),
+            has_key: false,
+            key_expression: None,
+            key_uses_index: false,
+            span: Span::new(li_start + 4, li_start + 30),
+        });
+        el.span = Span::new(li_start, content_end + 5);
+
+        let template = TemplateAnalysisSnapshot {
+            elements: vec![el],
+            ..Default::default()
+        };
+
+        let script = make_script_with_macros(
+            vec![],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None,
+                &["prefix"],
+                Span::new(24, 57),
+            )],
+            vec![],
+        );
+
+        let diag = make_diag(tag_span_end, content_end);
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "test.vue",
+            diagnostics: &set,
+            template: Some(&template),
+            script: Some(&script),
+            styles: &[],
+        };
+
+        let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
+        assert_eq!(actions.len(), 1);
+
+        assert!(
+            actions[0].title.contains("function"),
+            "v-for should use function mode: got '{}'",
+            actions[0].title
+        );
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("props.prefix"),
+            "prop in function mode should use props.prefix: got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            script_edit.replacement.contains("item"),
+            "scoped var should be param: got '{}'",
+            script_edit.replacement
+        );
+    }
+
+    // ── Test 22: props.items.length in computed ──
+
+    #[test]
+    fn named_define_props_member_access() {
+        let script = make_script_with_macros(
+            vec![make_props_binding("props", AnalyzedBindingKind::Const)],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                Some("props"),
+                &["items"],
+                Span::new(24, 75),
+            )],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "const props = defineProps<{ items: string[] }>()",
+            "Count: {{ items.length }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("props.items"),
+            "member access on prop should prefix with props.: got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            !script_edit.replacement.contains(".value"),
+            "props member access should NOT use .value"
+        );
+    }
+
+    // ── Test 23: Script binding shadows prop name (ref wins) ──
+
+    #[test]
+    fn script_binding_shadows_prop() {
+        let script = make_script_with_macros(
+            vec![make_binding("title", ReactivityKind::Ref)],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None,
+                &["title"],
+                Span::new(24, 55),
+            )],
+            vec![AnalyzedImport {
+                source: "vue".to_string(),
+                is_type_only: false,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "ref".to_string(),
+                    is_type_only: false,
+                    vue_api: None,
+                    span: Span::new(0, 0),
+                }],
+                span: Span::new(24, 49),
+                resolved_canonical_id: None,
+            }],
+        );
+
+        let actions = prop_test_action(
+            "defineProps<{ title: string }>()\nconst title = ref('override')",
+            "Hello {{ title }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("title.value"),
+            "script binding should win (ref → .value): got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            !script_edit.replacement.contains("props.title"),
+            "script binding should shadow prop: NOT props.title"
+        );
+    }
+
+    // ── Test 24: Computed overrides prop ──
+
+    #[test]
+    fn computed_overrides_prop() {
+        let script = make_script_with_macros(
+            vec![make_binding("foo", ReactivityKind::Computed)],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None,
+                &["foo"],
+                Span::new(24, 50),
+            )],
+            vec![AnalyzedImport {
+                source: "vue".to_string(),
+                is_type_only: false,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "computed".to_string(),
+                    is_type_only: false,
+                    vue_api: None,
+                    span: Span::new(0, 0),
+                }],
+                span: Span::new(24, 52),
+                resolved_canonical_id: None,
+            }],
+        );
+
+        let actions = prop_test_action(
+            "defineProps<{ foo: string }>()\nconst foo = computed(() => 'x')",
+            "Value: {{ foo }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            script_edit.replacement.contains("foo.value"),
+            "computed should win over prop (→ .value): got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            !script_edit.replacement.contains("props.foo"),
+            "computed should shadow prop: NOT props.foo"
+        );
+    }
+
+    // ── Test 25: Function overrides prop ──
+
+    #[test]
+    fn function_overrides_prop() {
+        let mut binding = make_binding("foo", ReactivityKind::None);
+        binding.kind = AnalyzedBindingKind::Function;
+
+        let script = make_script_with_macros(
+            vec![binding],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None,
+                &["foo"],
+                Span::new(24, 50),
+            )],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "defineProps<{ foo: string }>()\nfunction foo() { return 1 }",
+            "Value: {{ foo }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        // Function wins — raw identifier, no .value, no props prefix
+        assert!(
+            script_edit.replacement.contains("foo"),
+            "function should use raw identifier: got '{}'",
+            script_edit.replacement
+        );
+        assert!(
+            !script_edit.replacement.contains("props.foo"),
+            "function should shadow prop"
+        );
+        assert!(
+            !script_edit.replacement.contains(".value"),
+            "function should NOT use .value"
+        );
+    }
+
+    // ── Test 26: Class overrides prop ──
+
+    #[test]
+    fn class_overrides_prop() {
+        let mut binding = make_binding("foo", ReactivityKind::None);
+        binding.kind = AnalyzedBindingKind::Class;
+
+        let script = make_script_with_macros(
+            vec![binding],
+            vec![make_macro(
+                AnalyzedMacroKind::DefineProps,
+                None,
+                &["foo"],
+                Span::new(24, 50),
+            )],
+            vec![],
+        );
+
+        let actions = prop_test_action(
+            "defineProps<{ foo: string }>()\nclass foo {}",
+            "Value: {{ foo }}",
+            script,
+        );
+        assert_eq!(actions.len(), 1);
+
+        let script_edit = &actions[0].edits[1];
+        assert!(
+            !script_edit.replacement.contains("props.foo"),
+            "class should shadow prop"
+        );
+        assert!(
+            !script_edit.replacement.contains(".value"),
+            "class should NOT use .value"
         );
     }
 
