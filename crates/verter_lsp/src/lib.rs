@@ -65,6 +65,10 @@ pub struct LspConfig {
     /// Actual MCP HTTP port (already bound). `None` when MCP is disabled.
     /// The LSP sends a `$/verter/mcpReady` notification during `initialized()`.
     pub mcp_port: Option<u16>,
+    /// Why no type provider could be started (only set when `type_provider` is `None`).
+    /// Sent to the extension via `$/verter/typeProviderStatus` so it can show a meaningful
+    /// status bar warning (e.g., "Node.js not found", "TypeScript not installed").
+    pub type_provider_none_reason: Option<String>,
 }
 
 /// Controls what data `verter_lsp` sends to the type provider.

@@ -541,6 +541,10 @@
     ],
     "commands": [
       {
+        "command": "verter.showOutputChannel",
+        "title": "Verter: Show Output Channel"
+      },
+      {
         "command": "verter.restartLanguageServer",
         "title": "Verter: Restart Language Server"
       },

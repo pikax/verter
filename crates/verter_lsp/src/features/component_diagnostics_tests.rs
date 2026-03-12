@@ -959,6 +959,7 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
                     name: name.to_string(),
                     is_required: *required,
                     span: verter_span::Span::new(0, 10),
+                    bindings: vec![],
                 })
                 .collect(),
             span: verter_span::Span::new(0, 30),

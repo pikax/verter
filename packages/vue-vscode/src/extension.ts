@@ -9,6 +9,8 @@ import {
   WorkspaceFolder,
   OutputChannel,
   LogOutputChannel,
+  StatusBarAlignment,
+  StatusBarItem,
   languages,
   lm,
   Uri,
@@ -20,6 +22,7 @@ import {
   Position as VPosition,
   DiagnosticSeverity,
   ConfigurationTarget,
+  ThemeColor,
 } from "vscode";
 import {
   LanguageClient,
@@ -32,9 +35,10 @@ import {
 import { join, normalize } from "path";
 import { appendFileSync, existsSync, writeFileSync } from "fs";
 
-import type { PatchClient } from "@verter/language-shared";
+import type { PatchClient, NotificationParams } from "@verter/language-shared";
 import { patchClient, NotificationType, RequestType } from "@verter/language-shared";
 import type { StatisticsSnapshot, StatisticsSummary } from "@verter/language-shared";
+import { computeStatusBarState } from "./statusBar";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
 import { VirtualFileContentProvider } from "./VirtualFileManager";
 import { UnifiedVirtualFilesProvider } from "./UnifiedVirtualFilesProvider";
@@ -50,14 +54,14 @@ import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
 import { findStyleBlockAt, scanStyleBlocks } from "./css/styleBlockScanner";
 import { restartLanguageServer } from "./restart";
-import { checkClaudeCodeAndNotify, setupMcpForClaudeCode, updateMcpPort } from "./claudeCodeDetection";
+import {
+  checkClaudeCodeAndNotify,
+  setupMcpForClaudeCode,
+  updateMcpPort,
+} from "./claudeCodeDetection";
 import { createActivationGate } from "./activationGate";
 import { shouldConfigureBuiltInTypeScriptPlugin } from "./startupOptimizations";
-import {
-  StartupProbe,
-  readStartupProbeConfig,
-  writeTimingMarker,
-} from "./startupProbe";
+import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
 
 type GetClient = () => PatchClient<LanguageClient>;
 type ActivationRuntime = Awaited<ReturnType<typeof activateExtension>>;
@@ -88,44 +92,61 @@ async function activateExtension(context: ExtensionContext) {
   // ── E2E test mode: dual-write logs to file + timing markers ──
   const testLogFile = process.env.VERTER_E2E_LOG_FILE;
   if (process.env.VERTER_E2E_TEST && testLogFile) {
-    try { writeFileSync(testLogFile, ""); } catch {}
+    try {
+      writeFileSync(testLogFile, "");
+    } catch {}
     const writeLog = (level: string, msg: string, ...args: unknown[]) => {
       const line = `[${level}] ${msg}${args.length ? " " + args.map(String).join(" ") : ""}\n`;
-      try { appendFileSync(testLogFile, line); } catch {}
+      try {
+        appendFileSync(testLogFile, line);
+      } catch {}
     };
     const origInfo = log.info.bind(log);
     const origWarn = log.warn.bind(log);
     const origError = log.error.bind(log);
     const origDebug = log.debug.bind(log);
     const origTrace = log.trace.bind(log);
-    log.info = ((msg: string, ...args: unknown[]) => { writeLog("INFO", msg, ...args); origInfo(msg, ...args); }) as typeof log.info;
-    log.warn = ((msg: string, ...args: unknown[]) => { writeLog("WARN", msg, ...args); origWarn(msg, ...args); }) as typeof log.warn;
-    log.error = ((msg: string, ...args: unknown[]) => { writeLog("ERROR", msg, ...args); origError(msg, ...args); }) as typeof log.error;
-    log.debug = ((msg: string, ...args: unknown[]) => { writeLog("DEBUG", msg, ...args); origDebug(msg, ...args); }) as typeof log.debug;
-    log.trace = ((msg: string, ...args: unknown[]) => { writeLog("TRACE", msg, ...args); origTrace(msg, ...args); }) as typeof log.trace;
+    log.info = ((msg: string, ...args: unknown[]) => {
+      writeLog("INFO", msg, ...args);
+      origInfo(msg, ...args);
+    }) as typeof log.info;
+    log.warn = ((msg: string, ...args: unknown[]) => {
+      writeLog("WARN", msg, ...args);
+      origWarn(msg, ...args);
+    }) as typeof log.warn;
+    log.error = ((msg: string, ...args: unknown[]) => {
+      writeLog("ERROR", msg, ...args);
+      origError(msg, ...args);
+    }) as typeof log.error;
+    log.debug = ((msg: string, ...args: unknown[]) => {
+      writeLog("DEBUG", msg, ...args);
+      origDebug(msg, ...args);
+    }) as typeof log.debug;
+    log.trace = ((msg: string, ...args: unknown[]) => {
+      writeLog("TRACE", msg, ...args);
+      origTrace(msg, ...args);
+    }) as typeof log.trace;
   }
   writeTimingMarker("activation_start", Date.now());
 
   log.info("Verter extension activating");
 
   const startupProbeConfig = readStartupProbeConfig();
-  const startupProbe = startupProbeConfig
-    ? new StartupProbe(startupProbeConfig, log)
-    : undefined;
+  const startupProbe = startupProbeConfig ? new StartupProbe(startupProbeConfig, log) : undefined;
   if (startupProbe) {
     context.subscriptions.push(startupProbe);
   }
 
   let server:
-    | (Awaited<
-        ReturnType<typeof activateVueLanguageServer>
-      > & { restart(showMsg: boolean): Promise<void> })
+    | (Awaited<ReturnType<typeof activateVueLanguageServer>> & {
+        restart(showMsg: boolean): Promise<void>;
+      })
     | undefined;
   let serverPromise:
     | Promise<
-        Awaited<
-          ReturnType<typeof activateVueLanguageServer>
-        > & { restart(showMsg: boolean): Promise<void> }
+        Awaited<ReturnType<typeof activateVueLanguageServer>> & {
+          restart(showMsg: boolean): Promise<void>;
+        }
       >
     | undefined;
   let clientListenersRegistered = false;
@@ -141,9 +162,7 @@ async function activateExtension(context: ExtensionContext) {
     return server.getClient();
   };
 
-  const compiledCodeContentProvider = new CompiledCodeContentProvider(
-    getStartedClient,
-  );
+  const compiledCodeContentProvider = new CompiledCodeContentProvider(getStartedClient);
   context.subscriptions.push(
     workspace.registerTextDocumentContentProvider(
       CompiledCodeContentProvider.scheme,
@@ -180,10 +199,7 @@ async function activateExtension(context: ExtensionContext) {
     return pluginConfig;
   };
 
-  const ensureTypeScriptPluginConfigured = (
-    document?: TextDocument,
-    force = false,
-  ) => {
+  const ensureTypeScriptPluginConfigured = (document?: TextDocument, force = false) => {
     if (
       tsPluginConfigured ||
       tsPluginPromise ||
@@ -268,9 +284,7 @@ async function activateExtension(context: ExtensionContext) {
     void ensureLanguageServerStarted();
   };
 
-  const ensureTypeScriptPluginConfiguredForDocument = (
-    document?: TextDocument,
-  ) => {
+  const ensureTypeScriptPluginConfiguredForDocument = (document?: TextDocument) => {
     void ensureTypeScriptPluginConfigured(document);
   };
 
@@ -316,14 +330,10 @@ async function activateExtension(context: ExtensionContext) {
 
   addCompilePreviewCommand(context, ensureLanguageServerStarted);
   addWriteVirtualFilesCommand(context, ensureLanguageServerStarted);
-  addShowStatisticsCommand(
-    context,
-    log,
-    ensureLanguageServerStarted,
-    getStartedClient,
-  );
+  addShowStatisticsCommand(context, log, ensureLanguageServerStarted, getStartedClient);
 
   context.subscriptions.push(
+    commands.registerCommand("verter.showOutputChannel", () => log.show()),
     commands.registerCommand("verter.restartLanguageServer", async () => {
       if (!server) {
         await ensureLanguageServerStarted();
@@ -333,7 +343,7 @@ async function activateExtension(context: ExtensionContext) {
       await server.restart(true);
     }),
     commands.registerCommand("verter.setupMcpForClaudeCode", () =>
-      setupMcpForClaudeCode(context, log)
+      setupMcpForClaudeCode(context, log),
     ),
   );
 
@@ -446,11 +456,8 @@ export async function activateVueLanguageServer(
   };
   const cssDiagnostics = languages.createDiagnosticCollection("verter-css");
   context.subscriptions.push(cssDiagnostics);
-  const hasStyleBlockAtPosition = (
-    source: string,
-    line: number,
-    character: number,
-  ) => findStyleBlockAt(scanStyleBlocks(source), source, line, character) !== undefined;
+  const hasStyleBlockAtPosition = (source: string, line: number, character: number) =>
+    findStyleBlockAt(scanStyleBlocks(source), source, line, character) !== undefined;
   const hasStyleBlocks = (source: string) => scanStyleBlocks(source).length > 0;
 
   // Options to control the language client
@@ -485,7 +492,9 @@ export async function activateVueLanguageServer(
       },
       viteConfig: {
         enabled: workspace.getConfiguration("verter").get<boolean>("viteConfig.enabled", true),
-        trustedFiles: workspace.getConfiguration("verter").get<string[]>("viteConfig.trustedFiles", []),
+        trustedFiles: workspace
+          .getConfiguration("verter")
+          .get<string[]>("viteConfig.trustedFiles", []),
       },
       inlayHints: {
         enabled: workspace.getConfiguration("verter").get<boolean>("inlayHints.enabled", true),
@@ -521,8 +530,8 @@ export async function activateVueLanguageServer(
         if (!lspResult) return converted;
 
         // Merge: CSS items first, then LSP items (Vue-specific: template classes, v-bind)
-        const cssItems = Array.isArray(converted) ? converted : converted?.items ?? [];
-        const lspItems = Array.isArray(lspResult) ? lspResult : lspResult?.items ?? [];
+        const cssItems = Array.isArray(converted) ? converted : (converted?.items ?? []);
+        const lspItems = Array.isArray(lspResult) ? lspResult : (lspResult?.items ?? []);
 
         // Deduplicate by label
         const seen = new Set(cssItems.map((i) => i.label.toString()));
@@ -601,11 +610,7 @@ export async function activateVueLanguageServer(
 
         const source = context.document.getText();
         if (
-          !hasStyleBlockAtPosition(
-            source,
-            context.range.start.line,
-            context.range.start.character,
-          )
+          !hasStyleBlockAtPosition(source, context.range.start.line, context.range.start.character)
         ) {
           return next(color, context, token);
         }
@@ -640,7 +645,13 @@ export async function activateVueLanguageServer(
         const cssService = getCssService();
         const uri = document.uri.toString();
         const [cssResult, lspResult] = await Promise.all([
-          cssService.findDocumentHighlights(uri, source, document.version, position.line, position.character),
+          cssService.findDocumentHighlights(
+            uri,
+            source,
+            document.version,
+            position.line,
+            position.character,
+          ),
           next(document, position, token),
         ]);
 
@@ -674,12 +685,9 @@ export async function activateVueLanguageServer(
       },
     );
     // Legacy notification — only sent when TSGO is actually active
-    lc.onNotification(
-      NotificationType.TsgoStarted,
-      (params: { pid: number }) => {
-        typeProviderPid = params.pid;
-      },
-    );
+    lc.onNotification(NotificationType.TsgoStarted, (params: { pid: number }) => {
+      typeProviderPid = params.pid;
+    });
   }
   function killTrackedTypeProvider() {
     if (typeProviderPid != null) {
@@ -700,37 +708,34 @@ export async function activateVueLanguageServer(
   // and update .mcp.json for Claude Code CLI.
   let mcpProviderDisposable: Disposable | undefined;
   function registerMcpListener(lc: LanguageClient) {
-    lc.onNotification(
-      NotificationType.McpReady,
-      (params: { port: number }) => {
-        log.info(`MCP HTTP server ready on port ${params.port}`);
+    lc.onNotification(NotificationType.McpReady, (params: { port: number }) => {
+      log.info(`MCP HTTP server ready on port ${params.port}`);
 
-        // Register with VS Code's MCP provider API (Copilot Chat auto-discovery)
-        try {
-          mcpProviderDisposable?.dispose();
-          mcpProviderDisposable = lm.registerMcpServerDefinitionProvider("verter", {
-            provideMcpServerDefinitions() {
-              return [
-                new McpHttpServerDefinition(
-                  "Verter Vue Analysis",
-                  Uri.parse(`http://localhost:${params.port}/mcp`),
-                ),
-              ];
-            },
-          });
-          context.subscriptions.push(mcpProviderDisposable);
-          log.info("Registered MCP server with VS Code MCP provider API");
-        } catch (e) {
-          log.warn(`Failed to register MCP server with VS Code: ${e}`);
-        }
+      // Register with VS Code's MCP provider API (Copilot Chat auto-discovery)
+      try {
+        mcpProviderDisposable?.dispose();
+        mcpProviderDisposable = lm.registerMcpServerDefinitionProvider("verter", {
+          provideMcpServerDefinitions() {
+            return [
+              new McpHttpServerDefinition(
+                "Verter Vue Analysis",
+                Uri.parse(`http://localhost:${params.port}/mcp`),
+              ),
+            ];
+          },
+        });
+        context.subscriptions.push(mcpProviderDisposable);
+        log.info("Registered MCP server with VS Code MCP provider API");
+      } catch (e) {
+        log.warn(`Failed to register MCP server with VS Code: ${e}`);
+      }
 
-        // Update .mcp.json for Claude Code CLI
-        const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (wsRoot) {
-          updateMcpPort(wsRoot, params.port, log);
-        }
-      },
-    );
+      // Update .mcp.json for Claude Code CLI
+      const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (wsRoot) {
+        updateMcpPort(wsRoot, params.port, log);
+      }
+    });
   }
   registerMcpListener(client);
 
@@ -778,6 +783,59 @@ export async function activateVueLanguageServer(
   }
   registerViteConfigTrustHandler(client);
 
+  // ── Type provider status bar ────────────────────────────────────
+  // Shows which type provider is active. Warning state when none is available.
+  const typeProviderStatusBar: StatusBarItem = window.createStatusBarItem(
+    StatusBarAlignment.Right,
+    98,
+  );
+  typeProviderStatusBar.command = "verter.showOutputChannel";
+  typeProviderStatusBar.text = "$(sync~spin) Verter";
+  typeProviderStatusBar.tooltip = "Verter: waiting for type provider status...";
+  typeProviderStatusBar.show();
+  context.subscriptions.push(typeProviderStatusBar);
+
+  function registerTypeProviderStatusHandler(lc: LanguageClient) {
+    lc.onNotification(
+      NotificationType.TypeProviderStatus,
+      (params: NotificationParams[typeof NotificationType.TypeProviderStatus]) => {
+        const state = computeStatusBarState(params);
+        typeProviderStatusBar.text = state.text;
+        typeProviderStatusBar.tooltip = state.tooltip;
+        typeProviderStatusBar.backgroundColor = state.warning
+          ? new ThemeColor("statusBarItem.warningBackground")
+          : undefined;
+        log.info(
+          `Type provider status: ${params.kind}${params.reason ? ` (${params.reason})` : ""}`,
+        );
+      },
+    );
+  }
+  registerTypeProviderStatusHandler(client);
+
+  // ── TSGO limitation handler ─────────────────────────────────────
+  // When the LSP sends $/verter/tsgoLimitation, show a warning with an option
+  // to switch to tsserver.
+  function registerTsgoLimitationHandler(lc: LanguageClient) {
+    lc.onNotification(
+      NotificationType.TsgoLimitation,
+      async (params: NotificationParams[typeof NotificationType.TsgoLimitation]) => {
+        const action = await window.showWarningMessage(
+          `Verter: ${params.message}`,
+          "Switch to tsserver",
+          "Dismiss",
+        );
+        if (action === "Switch to tsserver") {
+          await workspace
+            .getConfiguration("verter")
+            .update("typeProvider", "tsserver", ConfigurationTarget.Workspace);
+          await restartLS(false);
+        }
+      },
+    );
+  }
+  registerTsgoLimitationHandler(client);
+
   // ── Heartbeat watchdog ──────────────────────────────────────────
   // The Rust server sends $/verter/heartbeat every 5 seconds. If we don't
   // receive one for 30 seconds, the server is likely frozen (e.g., tokio
@@ -796,7 +854,9 @@ export async function activateVueLanguageServer(
     const timeout = heartbeatInitialized ? HEARTBEAT_TIMEOUT_MS : HEARTBEAT_INITIAL_TIMEOUT_MS;
     heartbeatInitialized = true; // After first reset from heartbeat, use normal timeout
     heartbeatTimer = setTimeout(async () => {
-      log.error(`No heartbeat from Verter LSP for ${timeout / 1000}s — server appears frozen, restarting...`);
+      log.error(
+        `No heartbeat from Verter LSP for ${timeout / 1000}s — server appears frozen, restarting...`,
+      );
       await restartLS(false);
     }, timeout);
   }
@@ -807,7 +867,9 @@ export async function activateVueLanguageServer(
     heartbeatInitialized = false;
     if (heartbeatTimer) clearTimeout(heartbeatTimer);
     heartbeatTimer = setTimeout(async () => {
-      log.error(`No heartbeat from Verter LSP for ${HEARTBEAT_INITIAL_TIMEOUT_MS / 1000}s — server appears frozen, restarting...`);
+      log.error(
+        `No heartbeat from Verter LSP for ${HEARTBEAT_INITIAL_TIMEOUT_MS / 1000}s — server appears frozen, restarting...`,
+      );
       await restartLS(false);
     }, HEARTBEAT_INITIAL_TIMEOUT_MS);
     lc.onNotification(NotificationType.Heartbeat, () => {
@@ -933,6 +995,8 @@ export async function activateVueLanguageServer(
           registerHeartbeatMonitor(client);
           registerMcpListener(client);
           registerViteConfigTrustHandler(client);
+          registerTypeProviderStatusHandler(client);
+          registerTsgoLimitationHandler(client);
           await client.start();
         },
         killTrackedTypeProvider,
@@ -973,7 +1037,8 @@ function buildServerOptions(
   const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
   const verterConfig = workspace.getConfiguration("verter");
   // E2E tests can override the type provider via environment variable
-  const typeProvider = process.env.VERTER_E2E_TYPE_PROVIDER || verterConfig.get<string>("typeProvider", "auto");
+  const typeProvider =
+    process.env.VERTER_E2E_TYPE_PROVIDER || verterConfig.get<string>("typeProvider", "auto");
   const userTsdk = verterConfig.get<string>("typescript.tsdk", "");
   // Always pass --tsdk: user setting → bundled TypeScript (fallback for pnpm strict mode etc.)
   const bundledTsdk = join(extensionPath, "node_modules", "typescript", "lib");
@@ -992,7 +1057,9 @@ function buildServerOptions(
   }
   if (rootPath) args.push(rootPath);
 
-  log?.info(`[buildServerOptions] typeProvider=${typeProvider}, tsdk=${tsdk}${userTsdk ? "" : " (bundled)"}, args=${JSON.stringify(args)}`);
+  log?.info(
+    `[buildServerOptions] typeProvider=${typeProvider}, tsdk=${tsdk}${userTsdk ? "" : " (bundled)"}, args=${JSON.stringify(args)}`,
+  );
 
   return {
     run: {
@@ -1043,10 +1110,7 @@ function addDidChangeTextDocumentListener(getClient: GetClient): Disposable {
   return workspace.onDidChangeTextDocument((e) => {
     // Only forward TS/JS changes — .vue changes are handled by the LSP's own did_change.
     // Sending .vue here would cause redundant notifications and TSGO flooding.
-    if (
-      e.document.languageId !== "typescript" &&
-      e.document.languageId !== "javascript"
-    ) {
+    if (e.document.languageId !== "typescript" && e.document.languageId !== "javascript") {
       return;
     }
     const client = getClient();
@@ -1236,7 +1300,11 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     contentProvider,
   );
 
-  const virtualFilesProvider = new UnifiedVirtualFilesProvider(getClient, contentProvider, getLastVueUri);
+  const virtualFilesProvider = new UnifiedVirtualFilesProvider(
+    getClient,
+    contentProvider,
+    getLastVueUri,
+  );
   const componentTreeProvider = new ComponentTreeProvider(getClient, getLastVueUri);
   const routeTreeProvider = new RouteTreeProvider(getClient, getLastVueUri);
   const analysisProvider = new AnalysisTreeProvider(getClient, getLastVueUri);
@@ -1303,9 +1371,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
       }
 
       // Get source code from the open document or fall back to reading from disk
-      const vueDoc = workspace.textDocuments.find(
-        (d) => d.uri.toString() === sourceUri,
-      );
+      const vueDoc = workspace.textDocuments.find((d) => d.uri.toString() === sourceUri);
       const sourceCode = vueDoc?.getText() ?? "";
 
       // Use cached items from the tree provider (already fetched)
@@ -1326,9 +1392,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
           return;
         }
 
-        const vueDoc = workspace.textDocuments.find(
-          (d) => d.uri.toString() === sourceUri,
-        );
+        const vueDoc = workspace.textDocuments.find((d) => d.uri.toString() === sourceUri);
         const sourceCode = vueDoc?.getText() ?? "";
 
         const items = virtualFilesProvider.getCachedItems();

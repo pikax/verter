@@ -196,6 +196,25 @@ pub struct TsgoNoTsconfigParams {
     pub message: String,
 }
 
+/// Server → client notification: type provider status.
+/// Sent during `initialized()` to inform the extension which type provider is active
+/// (or that none could be started, with a reason).
+pub enum TypeProviderStatus {}
+
+impl tower_lsp_server::ls_types::notification::Notification for TypeProviderStatus {
+    type Params = TypeProviderStatusParams;
+    const METHOD: &'static str = "$/verter/typeProviderStatus";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TypeProviderStatusParams {
+    /// Which type provider is active: "tsgo", "tsserver", or "none".
+    pub kind: String,
+    /// Why no type provider is available (only set when kind is "none").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Params for `$/onDidChangeTsOrJsFile` notification.
 #[derive(Debug, Deserialize)]
 pub struct OnDidChangeTsOrJsFileParams {
@@ -526,6 +545,14 @@ pub struct VerterLanguageServer {
     init_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Actual MCP HTTP port (already bound). Sent to the extension during `initialized()`.
     mcp_port: Option<u16>,
+    /// Why no type provider could be started. Sent via `$/verter/typeProviderStatus`.
+    type_provider_none_reason: Option<String>,
+    /// Tracks unique file URIs that hit "no project found" errors from TSGO.
+    /// After 3+ unique files hit this error, sends a `$/verter/tsgoLimitation`
+    /// notification suggesting the user check their tsconfig or switch to tsserver.
+    no_project_found_uris: DashSet<String>,
+    /// Whether the "no project found" limitation notification has already been sent.
+    no_project_found_notified: std::sync::atomic::AtomicBool,
 }
 
 impl VerterLanguageServer {
@@ -597,12 +624,57 @@ impl VerterLanguageServer {
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mcp_port: config.mcp_port,
+            type_provider_none_reason: config.type_provider_none_reason,
+            no_project_found_uris: DashSet::new(),
+            no_project_found_notified: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// Compute verter diagnostics (host errors + lint rules + component usage) for a document.
     /// Caches results per document version to avoid redundant re-computation when both
     /// push (didChange) and pull (textDocument/diagnostic) paths request diagnostics.
+    /// Track a type provider error and detect "no project found" patterns.
+    /// After 3+ unique files hit this error, sends a `$/verter/tsgoLimitation`
+    /// notification once, suggesting the user check tsconfig or switch to tsserver.
+    fn track_type_provider_error(&self, file_path: &str, error_msg: &str) {
+        if !error_msg.contains("no project found") {
+            return;
+        }
+        if self
+            .no_project_found_notified
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        // Cap tracking at 10 entries to bound memory
+        if self.no_project_found_uris.len() < 10 {
+            self.no_project_found_uris.insert(file_path.to_string());
+        }
+        if self.no_project_found_uris.len() >= 3
+            && self
+                .no_project_found_notified
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_notification::<TsgoNoTsconfig>(TsgoNoTsconfigParams {
+                        message: "Multiple .vue files are not covered by any tsconfig.json. \
+                                  Check your tsconfig.json \"include\" patterns, or switch to \
+                                  tsserver (which handles inferred projects)."
+                            .into(),
+                    })
+                    .await;
+            });
+        }
+    }
+
     fn compute_verter_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
         compute_verter_diagnostics_for(
             &self.documents,
@@ -4379,6 +4451,39 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
+        // Send type provider status notification — tells the extension which
+        // provider is active (or why none could be started) for the status bar.
+        {
+            let kind = self.type_provider_kind.to_string().to_lowercase();
+            let reason = if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
+                self.type_provider_none_reason.clone()
+            } else {
+                None
+            };
+            self.client
+                .send_notification::<TypeProviderStatus>(TypeProviderStatusParams {
+                    kind,
+                    reason: reason.clone(),
+                })
+                .await;
+            // When no type provider is available, also show a warning message
+            if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
+                let msg = if let Some(ref r) = reason {
+                    format!(
+                        "Verter: No TypeScript type provider available ({r}). \
+                         Hover, completions, and go-to-definition will be limited to \
+                         Verter's built-in analysis."
+                    )
+                } else {
+                    "Verter: No TypeScript type provider available. \
+                     Hover, completions, and go-to-definition will be limited to \
+                     Verter's built-in analysis."
+                        .into()
+                };
+                self.client.show_message(MessageType::WARNING, msg).await;
+            }
+        }
+
         // Suggest switching to TSGO if auto mode chose tsserver
         if self.suggest_tsgo {
             self.client
@@ -5046,13 +5151,8 @@ impl LanguageServer for VerterLanguageServer {
                             after.replace('\n', "↵"),
                         );
                     }
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(500),
-                        tp.get_hover(&ctx.tsx_path, tsx_offset),
-                    )
-                    .await
-                    {
-                        Ok(Ok(hover)) => {
+                    match tp.get_hover(&ctx.tsx_path, tsx_offset).await {
+                        Ok(hover) => {
                             tracing::info!(
                                 "hover type provider result: {}",
                                 if hover.is_some() {
@@ -5066,12 +5166,9 @@ impl LanguageServer for VerterLanguageServer {
                             );
                             hover
                         }
-                        Ok(Err(e)) => {
+                        Err(e) => {
                             tracing::warn!("hover type provider error: {}", e);
-                            None
-                        }
-                        Err(_) => {
-                            tracing::warn!("hover: type provider timed out");
+                            self.track_type_provider_error(&ctx.tsx_path, &e.to_string());
                             None
                         }
                     }
@@ -5122,11 +5219,8 @@ impl LanguageServer for VerterLanguageServer {
                                         "hover: redirecting merged class/style from vue offset {} to {} (tsx offset {})",
                                         vue_offset, redirect_offset, redirect_tsx
                                     );
-                                    if let Ok(Ok(redirect_hover)) = tokio::time::timeout(
-                                        std::time::Duration::from_millis(500),
-                                        tp.get_hover(&ctx.tsx_path, redirect_tsx),
-                                    )
-                                    .await
+                                    if let Ok(redirect_hover) =
+                                        tp.get_hover(&ctx.tsx_path, redirect_tsx).await
                                     {
                                         return Ok(merge::merge_hover(
                                             verter_result,
@@ -5471,13 +5565,11 @@ impl LanguageServer for VerterLanguageServer {
                     // native completions and cause tsserver errors if forwarded.
                     let tp_trigger = trigger_character
                         .filter(|t| matches!(*t, "." | "\"" | "'" | "`" | "/" | "<"));
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(500),
-                        tp.get_completions(&ctx.tsx_path, tsx_offset, tp_trigger),
-                    )
-                    .await
+                    match tp
+                        .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
+                        .await
                     {
-                        Ok(Ok(mut type_result)) => {
+                        Ok(mut type_result) => {
                             tracing::debug!(
                                 "completion: type provider returned {} items (incomplete={})",
                                 type_result.items.len(),
@@ -5526,19 +5618,9 @@ impl LanguageServer for VerterLanguageServer {
                                 }))
                             });
                         }
-                        Ok(Err(e)) => {
+                        Err(e) => {
                             tracing::warn!("completion: type provider error: {e}");
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                "completion: type provider timed out after 500ms, returning verter-only results"
-                            );
-                            return Ok(verter_items.map(|items| {
-                                CompletionResponse::List(CompletionList {
-                                    is_incomplete: true,
-                                    items,
-                                })
-                            }));
+                            self.track_type_provider_error(&ctx.tsx_path, &e.to_string());
                         }
                     }
                 }
@@ -5860,6 +5942,7 @@ impl LanguageServer for VerterLanguageServer {
                         }
                         Err(e) => {
                             tracing::warn!("definition: type provider error: {e}");
+                            self.track_type_provider_error(&ctx.tsx_path, &e.to_string());
                         }
                     }
                 } else {
@@ -7237,6 +7320,7 @@ mod tests {
                     type_provider_kind: crate::TypeProviderKind::Tsserver,
                     suggest_tsgo: false,
                     mcp_port: None,
+                    type_provider_none_reason: None,
                 },
             )
         });
@@ -7567,6 +7651,7 @@ mod tests {
                     type_provider_kind: crate::TypeProviderKind::Tsserver,
                     suggest_tsgo: false,
                     mcp_port: None,
+                    type_provider_none_reason: None,
                 },
             )
         });
@@ -8133,6 +8218,7 @@ mod tests {
                     type_provider_kind: crate::TypeProviderKind::Tsserver,
                     suggest_tsgo: false,
                     mcp_port: None,
+                    type_provider_none_reason: None,
                 },
             )
         });
@@ -8661,6 +8747,7 @@ mod tests {
                     type_provider_kind: crate::TypeProviderKind::Tsserver,
                     suggest_tsgo: false,
                     mcp_port: None,
+                    type_provider_none_reason: None,
                 },
             )
         });

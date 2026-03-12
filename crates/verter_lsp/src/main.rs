@@ -80,7 +80,7 @@ async fn main() {
     let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
 
     // Provider selection: auto → detect TS version, pick provider
-    let (type_provider, provider_kind, suggest_tsgo) =
+    let (type_provider, provider_kind, suggest_tsgo, type_provider_none_reason) =
         create_type_provider(&args, &client_cell).await;
 
     let config = LspConfig {
@@ -90,6 +90,7 @@ async fn main() {
         type_provider_kind: provider_kind,
         suggest_tsgo,
         mcp_port: mcp_actual_port,
+        type_provider_none_reason,
     };
 
     let client_cell_for_build = Arc::clone(&client_cell);
@@ -198,10 +199,18 @@ impl CliArgs {
 ///
 /// Auto mode: if TypeScript 5.x is installed in node_modules, use tsserver
 /// and recommend switching to TSGO. If no TypeScript is found, try TSGO.
+///
+/// Returns `(provider, kind, suggest_tsgo, none_reason)` where `none_reason`
+/// explains why no provider could be started (only set when provider is None).
 async fn create_type_provider(
     args: &CliArgs,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
-) -> (Option<Arc<dyn TypeProvider>>, TypeProviderKind, bool) {
+) -> (
+    Option<Arc<dyn TypeProvider>>,
+    TypeProviderKind,
+    bool,
+    Option<String>,
+) {
     tracing::info!(
         "create_type_provider: type_provider={:?}, tsdk={:?}, workspace_root={:?}",
         args.type_provider,
@@ -222,25 +231,40 @@ async fn create_type_provider(
     match args.type_provider.as_str() {
         "off" => {
             tracing::info!("type provider: disabled by --type-provider=off");
-            (None, TypeProviderKind::None, false)
+            (
+                None,
+                TypeProviderKind::None,
+                false,
+                Some("Disabled by configuration (--type-provider=off)".into()),
+            )
         }
         "tsgo" => {
             // TSGO only — no fallback
             match try_spawn_tsgo(&ws_canonical, client_cell).await {
-                Some(tp) => (Some(tp), TypeProviderKind::Tsgo, false),
+                Some(tp) => (Some(tp), TypeProviderKind::Tsgo, false, None),
                 None => {
                     tracing::warn!("TSGO unavailable — running in verter-only mode");
-                    (None, TypeProviderKind::None, false)
+                    (
+                        None,
+                        TypeProviderKind::None,
+                        false,
+                        Some("Could not start tsgo — binary not found or failed to spawn".into()),
+                    )
                 }
             }
         }
         "tsserver" => {
             // tsserver only — no fallback
             match try_spawn_tsserver(args, &ws_canonical, client_cell).await {
-                Some(tp) => (Some(tp), TypeProviderKind::Tsserver, false),
+                Some(tp) => (Some(tp), TypeProviderKind::Tsserver, false, None),
                 None => {
+                    let reason = if verter_lsp::tsserver::find_node().is_none() {
+                        "Node.js not found on PATH or standard locations"
+                    } else {
+                        "TypeScript not installed in workspace"
+                    };
                     tracing::warn!("tsserver unavailable — running in verter-only mode");
-                    (None, TypeProviderKind::None, false)
+                    (None, TypeProviderKind::None, false, Some(reason.into()))
                 }
             }
         }
@@ -274,7 +298,7 @@ async fn create_type_provider(
 
                 if prefer_tsserver {
                     if let Some(tp) = try_spawn_tsserver(args, &ws_canonical, client_cell).await {
-                        return (Some(tp), TypeProviderKind::Tsserver, false);
+                        return (Some(tp), TypeProviderKind::Tsserver, false, None);
                     }
                 }
             } else if has_composite {
@@ -286,16 +310,25 @@ async fn create_type_provider(
                      attempting tsserver anyway"
                 );
                 if let Some(tp) = try_spawn_tsserver(args, &ws_canonical, client_cell).await {
-                    return (Some(tp), TypeProviderKind::Tsserver, false);
+                    return (Some(tp), TypeProviderKind::Tsserver, false, None);
                 }
             }
 
             // No tsserver available or not preferred — try TSGO
             if let Some(tp) = try_spawn_tsgo(&ws_canonical, client_cell).await {
-                return (Some(tp), TypeProviderKind::Tsgo, false);
+                return (Some(tp), TypeProviderKind::Tsgo, false, None);
             }
-            tracing::info!("no type provider available — running in verter-only mode");
-            (None, TypeProviderKind::None, false)
+
+            // Determine why no provider could be started
+            let reason = if verter_lsp::tsserver::find_node().is_none() {
+                "Node.js not found on PATH or standard locations"
+            } else if tsserver_path.is_none() {
+                "TypeScript not installed in workspace"
+            } else {
+                "Could not start tsgo or tsserver"
+            };
+            tracing::info!("no type provider available — running in verter-only mode ({reason})");
+            (None, TypeProviderKind::None, false, Some(reason.into()))
         }
     }
 }

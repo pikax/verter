@@ -42,6 +42,8 @@ export enum NotificationType {
   Ready = "$/verter/ready",
   McpReady = "$/verter/mcpReady",
   ViteConfigTrustRequired = "$/verter/viteConfigTrustRequired",
+  TypeProviderStatus = "$/verter/typeProviderStatus",
+  TsgoLimitation = "$/verter/tsgoLimitation",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -87,5 +89,12 @@ export type NotificationParams = {
     configPath: string;
     workspaceRoot: string;
     reason: string;
+  };
+  [NotificationType.TypeProviderStatus]: {
+    kind: "tsgo" | "tsserver" | "none";
+    reason?: string;
+  };
+  [NotificationType.TsgoLimitation]: {
+    message: string;
   };
 };
