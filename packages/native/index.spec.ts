@@ -162,6 +162,50 @@ const view = import('./Foo.vue')
     ).toEqual(["src/widget.ts"]);
   });
 
+  it("should not produce DuplicateAttribute for style + :style and same-name shorthand", () => {
+    const source = `<script setup lang="ts">
+// Verter — UTF-8 multibyte: «»
+import { ref } from 'vue'
+const stickyTop = ref(true)
+const height = ref('100px')
+</script>
+<template>
+  <div
+    style="overflow: auto"
+    :style="{ height }"
+    :sticky-top
+  >
+    content
+  </div>
+</template>`;
+
+    for (const input of [source, Buffer.from(source, "utf-8")]) {
+      const host = new VerterHost();
+      const result = host.upsert({
+        inputId: "DupAttrRegression.vue",
+        source: input,
+      });
+
+      const parseDup = (result.diagnostics?.diagnostics ?? []).filter(
+        (d: any) => d.code === "DuplicateAttribute",
+      );
+      expect(parseDup, "upsert should not produce DuplicateAttribute").toEqual([]);
+
+      const mainFile = host.getVirtualFile({
+        canonicalId: result.canonicalId,
+        nodeKind: { kind: "main" },
+        compileProfile: { target: "ide" },
+      });
+
+      expect(mainFile.code).toBeTruthy();
+      const compileDup = (mainFile.diagnostics?.diagnostics ?? []).filter(
+        (d: any) => d.code === "DuplicateAttribute",
+      );
+      expect(compileDup, "compile should not produce DuplicateAttribute").toEqual([]);
+      expect(mainFile.diagnostics?.hasErrors).toBe(false);
+    }
+  });
+
   it("returns a testing-mode public API that exposes script setup bindings", () => {
     const host = new VerterHost();
     host.upsert({

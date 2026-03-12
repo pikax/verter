@@ -7,6 +7,7 @@ use crate::{
     CompileErrorPolicy, CompileProfile, FileKind, HostConfig, HostDiagnostic, HostError,
     HostSeverity, PublicApiMode, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
+use verter_core::compile::CompileTarget;
 
 fn strict_host() -> VerterHost {
     VerterHost::new(HostConfig {
@@ -1373,5 +1374,82 @@ defineEmits<DrawerEmits>()
     assert!(
         !response.code.contains("XInvalidMacroType"),
         "output must not contain XInvalidMacroType errors"
+    );
+}
+
+/// Regression: a real-world SFC with `style="..."` + `:style="{...}"` and Vue 3.4
+/// same-name shorthand bindings must NOT produce a false-positive `DuplicateAttribute`
+/// diagnostic through the host pipeline. The parser correctly distinguishes static
+/// attributes from v-bind directives; this test guards against stale-binary regressions.
+#[test]
+fn duplicate_attribute_regression_does_not_appear_through_host_pipeline() {
+    let host = strict_host();
+    // Key traits: UTF-8 multibyte comment, static style + dynamic :style, same-name shorthand
+    let source = r#"<script setup lang="ts">
+// Verter — UTF-8 multibyte: «»
+import { ref } from 'vue'
+const stickyTop = ref(true)
+const height = ref('100px')
+</script>
+<template>
+  <div
+    style="overflow: auto"
+    :style="{ height }"
+    :sticky-top
+  >
+    content
+  </div>
+</template>"#;
+
+    let upsert_result = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/Regression.vue".to_string(),
+            source: Arc::from(source),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .expect("upsert should succeed");
+
+    // No DuplicateAttribute in parse-phase diagnostics
+    let dup_parse: Vec<_> = upsert_result
+        .diagnostics
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "DuplicateAttribute")
+        .collect();
+    assert!(
+        dup_parse.is_empty(),
+        "upsert should not produce DuplicateAttribute parse diagnostics, got: {dup_parse:?}"
+    );
+
+    // Compile through IDE target (closest to the original reproduction path)
+    let ide_profile = CompileProfile {
+        target: CompileTarget::IDE,
+        ..profile()
+    };
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Regression.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: ide_profile,
+        })
+        .expect("IDE compile should succeed for this SFC");
+
+    // No DuplicateAttribute in compile-phase diagnostics
+    let dup_compile: Vec<_> = response
+        .diagnostics
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "DuplicateAttribute")
+        .collect();
+    assert!(
+        dup_compile.is_empty(),
+        "compile should not produce DuplicateAttribute diagnostics, got: {dup_compile:?}"
+    );
+    assert!(
+        !response.diagnostics.has_errors,
+        "compile should have no errors at all"
     );
 }

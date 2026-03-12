@@ -145,6 +145,71 @@ fn no_error_duplicate_attribute_on_valid() {
 }
 
 #[test]
+fn no_error_duplicate_attribute_style_and_v_bind_style() {
+    // style (static) + :style (directive) should not be treated as duplicates
+    let src = r#"<template><div style="position: relative" :style="{ height: '100px' }">hello</div></template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "DuplicateAttribute");
+}
+
+#[test]
+fn no_error_duplicate_attribute_nexus_virtualizer_pattern() {
+    // Reproduces the Virtualizer.vue template pattern from nexus-ui
+    let src = r#"<script setup lang="ts" generic="T extends Record<string, any>">
+import { ref } from 'vue'
+const stickyTop = ref(0)
+const groupHeight = ref(40)
+const freeze = false
+</script>
+<template>
+  <div
+    ref="containerElm"
+    style="position: absolute; position: relative; width: 100%"
+    :style="{
+      height: '100px',
+    }"
+  >
+    <template v-if="true">
+      <div
+        ref="stickyGroupElm"
+        key="sticky-group"
+        :sticky-top
+        :group-height
+        data-sticky
+      >
+        content
+      </div>
+      <div
+        v-for="i in 5"
+        :key="i"
+        :group-height
+        :index="i"
+      >
+        <template v-if="true" #item="args">
+          <slot v-bind="args" :loop-index="i - 1">
+            {{ i }}
+          </slot>
+        </template>
+        <template v-if="true" #group="args">
+          <slot name="group" v-bind="args" :loop-index="i - 1">
+            {{ i }}
+          </slot>
+        </template>
+      </div>
+    </template>
+  </div>
+</template>"#;
+    let result = compile_sfc(src);
+    let dup_errors: Vec<_> = result.errors.iter().filter(|e| e.code == "DuplicateAttribute").collect();
+    assert!(
+        dup_errors.is_empty(),
+        "Should have no DuplicateAttribute errors but got {}: {:?}",
+        dup_errors.len(),
+        dup_errors.iter().map(|e| format!("offset={:?}", e.span)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn error_end_tag_with_attributes() {
     let src = r#"<template><div></div foo="bar"></template>"#;
     let result = compile_sfc(src);
