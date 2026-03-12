@@ -6,6 +6,7 @@
 /// <reference lib="webworker" />
 
 import type ts from "typescript";
+import { resolveVueModulePath } from "./vueModuleResolver";
 
 // TypeScript will be loaded dynamically via importScripts or import()
 declare const self: DedicatedWorkerGlobalScope;
@@ -29,9 +30,21 @@ const VUE_TYPE_PACKAGES = [
   { pkg: "vue", file: "dist/vue.d.ts", path: "/node_modules/vue/index.d.ts" },
   { pkg: "vue", file: "jsx.d.ts", path: "/node_modules/vue/jsx.d.ts" },
   { pkg: "vue", file: "jsx-runtime/index.d.ts", path: "/node_modules/vue/jsx-runtime/index.d.ts" },
-  { pkg: "@vue/runtime-dom", file: "dist/runtime-dom.d.ts", path: "/node_modules/@vue/runtime-dom/index.d.ts" },
-  { pkg: "@vue/runtime-core", file: "dist/runtime-core.d.ts", path: "/node_modules/@vue/runtime-core/index.d.ts" },
-  { pkg: "@vue/reactivity", file: "dist/reactivity.d.ts", path: "/node_modules/@vue/reactivity/index.d.ts" },
+  {
+    pkg: "@vue/runtime-dom",
+    file: "dist/runtime-dom.d.ts",
+    path: "/node_modules/@vue/runtime-dom/index.d.ts",
+  },
+  {
+    pkg: "@vue/runtime-core",
+    file: "dist/runtime-core.d.ts",
+    path: "/node_modules/@vue/runtime-core/index.d.ts",
+  },
+  {
+    pkg: "@vue/reactivity",
+    file: "dist/reactivity.d.ts",
+    path: "/node_modules/@vue/reactivity/index.d.ts",
+  },
   { pkg: "@vue/shared", file: "dist/shared.d.ts", path: "/node_modules/@vue/shared/index.d.ts" },
 ];
 
@@ -170,19 +183,21 @@ function createLanguageServiceHost(): ts.LanguageServiceHost {
     },
     resolveModuleNames(moduleNames: string[], containingFile: string) {
       return moduleNames.map((moduleName) => {
-        // Handle relative .vue imports: ./Comp.vue → /Comp.vue.d.ts
-        if (moduleName.startsWith("./") && moduleName.endsWith(".vue")) {
-          const dtsPath = "/" + moduleName.slice(2) + ".d.ts";
-          if (files.has(dtsPath)) {
-            return {
-              resolvedFileName: dtsPath,
-              extension: ts.Extension.Dts,
-            } as ts.ResolvedModule;
-          }
+        // Handle relative .vue/.vue.ts imports → /X.vue.d.ts
+        const dtsPath = resolveVueModulePath(moduleName, containingFile, (p) => files.has(p));
+        if (dtsPath) {
+          return {
+            resolvedFileName: dtsPath,
+            extension: ts.Extension.Dts,
+          } as ts.ResolvedModule;
         }
         // Fall back to TypeScript's default resolution for everything else (vue, @verter/types, etc.)
-        return ts.resolveModuleName(moduleName, containingFile, compilerOptions, moduleResolutionHost)
-          .resolvedModule;
+        return ts.resolveModuleName(
+          moduleName,
+          containingFile,
+          compilerOptions,
+          moduleResolutionHost,
+        ).resolvedModule;
       });
     },
   };
