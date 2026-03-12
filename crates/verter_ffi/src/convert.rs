@@ -678,10 +678,11 @@ pub fn lint_rule_to_ffi_metadata(rule: &dyn verter_diagnostics::LintRule) -> Ffi
         name: rule.name().to_string(),
         category: rule.category().as_str().to_string(),
         default_severity: match rule.default_severity() {
-            verter_diagnostics::Severity::Error => "error".to_string(),
-            verter_diagnostics::Severity::Warning => "warning".to_string(),
-            verter_diagnostics::Severity::Info => "info".to_string(),
-            verter_diagnostics::Severity::Hint => "hint".to_string(),
+            Some(verter_diagnostics::Severity::Error) => "error".to_string(),
+            Some(verter_diagnostics::Severity::Warning) => "warning".to_string(),
+            Some(verter_diagnostics::Severity::Info) => "info".to_string(),
+            Some(verter_diagnostics::Severity::Hint) => "hint".to_string(),
+            None => "off".to_string(),
         },
     }
 }

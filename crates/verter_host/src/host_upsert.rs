@@ -382,6 +382,19 @@ impl VerterHost {
             }
         }
 
+        // Update style_langs to "css" for overridden styles.
+        // After preprocessing (SCSS/SASS/Less → CSS), the virtual file URL
+        // must use lang.css so Vite's CSS pipeline doesn't re-preprocess.
+        for &idx in by_index.keys() {
+            if idx < entry.meta.style_langs.len() {
+                if let Some(ref lang) = entry.meta.style_langs[idx] {
+                    if lang != "css" {
+                        entry.meta.style_langs[idx] = Some("css".to_string());
+                    }
+                }
+            }
+        }
+
         entry.style_overrides.insert(
             profile_hash,
             StyleOverrideLayer {

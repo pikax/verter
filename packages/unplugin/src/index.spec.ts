@@ -189,6 +189,38 @@ describe("vite style virtual modules", () => {
     return plugin;
   }
 
+  it("preprocessed style block uses lang.css in script sub-request (prevents Vite double-preprocessing)", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "SassLang.vue").replace(/\\/g, "/");
+    // SASS indented syntax: Vite would fail to re-preprocess compiled CSS as SASS
+    const sfc = `<template><div>hello</div></template>
+<style lang="sass">
+$color: red
+.sass-lang
+  color: $color
+</style>`;
+
+    try {
+      await plugin.transform(sfc, file);
+
+      // The script sub-request contains the assembled main module with style imports.
+      // After preprocessing, the style URL should use lang.css, NOT lang.sass.
+      const script = await plugin.load(`${file}?vue&type=script&lang.js`);
+      expect(script).toBeDefined();
+      expect(script.code).toContain("lang.css");
+      expect(script.code).not.toContain("lang.sass");
+
+      // The style virtual file should contain compiled CSS (not raw SASS)
+      const style = await plugin.load(`${file}?vue&type=style&index=0&lang.css`);
+      expect(style).toBeDefined();
+      expect(style.code).toContain(".sass-lang");
+      expect(style.code).toContain("red");
+      expect(style.code).not.toContain("$color");
+    } finally {
+      await plugin.closeBundle();
+    }
+  });
+
   it("loads compiled CSS for a scoped scss style virtual module", async () => {
     const plugin = await createVitePlugin();
     const file = join(tempDir, "ScopedStyle.vue").replace(/\\/g, "/");

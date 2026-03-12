@@ -2139,6 +2139,60 @@ mod tests {
         );
     }
 
+    /// After style preprocessing, virtual IDs should use lang.css
+    /// instead of the original preprocessor lang (e.g. lang.sass).
+    /// Without this, Vite would try to re-preprocess compiled CSS
+    /// as SASS indented syntax, causing build failures.
+    #[test]
+    fn style_override_changes_virtual_id_lang_to_css() {
+        let host = VerterHost::new(HostConfig::default());
+        let sfc = "<template><div>hello</div></template>\n<style lang=\"sass\">.a\n  color: red\n</style>";
+        let upsert = upsert_vue(&host, "test.vue", sfc);
+        // Before override, the URL should have the original lang
+        assert!(
+            upsert
+                .changed_virtual_ids
+                .iter()
+                .any(|id| id.contains("lang.sass")),
+            "before override, should have lang.sass in virtual IDs: {:?}",
+            upsert.changed_virtual_ids
+        );
+
+        let profile = CompileProfile::default();
+        let _ = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: "test.vue".to_string(),
+                compile_profile: profile.clone(),
+                overrides: vec![BlockOverrideEntry {
+                    block_type: PreprocessorBlockType::Style,
+                    index: 0,
+                    code: Arc::from(".a { color: red; }"),
+                    source_map: None,
+                }],
+            })
+            .expect("apply_block_overrides should succeed");
+
+        // The main module assembly should use lang.css after override
+        let main = host
+            .get_virtual_file(VirtualQuery {
+                raw_id: Some("test.vue".to_string()),
+                canonical_id: None,
+                node_kind: None,
+                compile_profile: profile,
+            })
+            .expect("should get main virtual file");
+        assert!(
+            main.code.contains("lang.css"),
+            "main module should import style with lang.css, got:\n{}",
+            main.code
+        );
+        assert!(
+            !main.code.contains("lang.sass"),
+            "main module should NOT import style with lang.sass, got:\n{}",
+            main.code
+        );
+    }
+
     /// @ai-generated - upsert returns preprocessor_requests for pug template
     #[test]
     fn upsert_returns_preprocessor_requests() {
