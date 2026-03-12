@@ -443,6 +443,136 @@ describe("snapshotToMeta", () => {
       // Negative: bindings should not be undefined
       expect(meta.slots[0].bindings).not.toBeUndefined();
     });
+
+    it("resolves binding types from defineSlots slotFields bindings", () => {
+      const snapshot = makeCompositionSnapshot(
+        [],
+        [],
+        {
+          definedSlots: [{ name: "default", hasBindings: true, bindingNames: ["item", "index"] }],
+        },
+        [
+          {
+            kind: "DefineSlots",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            slotFields: [
+              {
+                name: "default",
+                isRequired: true,
+                spanStart: 0,
+                spanEnd: 0,
+                bindings: [
+                  { name: "item", typeAnnotation: "string" },
+                  { name: "index", typeAnnotation: "number" },
+                ],
+              },
+            ],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+      );
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.slots[0].bindings).toHaveLength(2);
+      expect(meta.slots[0].bindings[0].name).toBe("item");
+      expect(meta.slots[0].bindings[0].rawType).toBe("string");
+      // Negative: type kind should NOT be "unknown" when type info is available
+      expect(meta.slots[0].bindings[0].type.kind).not.toBe("unknown");
+      expect(meta.slots[0].bindings[1].name).toBe("index");
+      expect(meta.slots[0].bindings[1].rawType).toBe("number");
+      expect(meta.slots[0].bindings[1].type.kind).not.toBe("unknown");
+    });
+
+    it("falls back to script bindings for slot binding types", () => {
+      const snapshot = makeCompositionSnapshot(
+        [],
+        [],
+        {
+          definedSlots: [
+            {
+              name: "default",
+              hasBindings: true,
+              bindingNames: ["row"],
+              bindingExpressions: ["row"],
+            },
+          ],
+        },
+        [],
+      );
+      // Add script bindings with type annotations
+      (snapshot as Record<string, unknown>).bindings = [
+        { name: "row", kind: "Const", typeAnnotation: "MyRowType" },
+      ];
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.slots[0].bindings[0].name).toBe("row");
+      expect(meta.slots[0].bindings[0].rawType).toBe("MyRowType");
+      // Negative: should not be unknown
+      expect(meta.slots[0].bindings[0].type.kind).not.toBe("unknown");
+    });
+
+    it("prefers defineSlots bindings over script binding fallback", () => {
+      const snapshot = makeCompositionSnapshot(
+        [],
+        [],
+        {
+          definedSlots: [
+            {
+              name: "default",
+              hasBindings: true,
+              bindingNames: ["item"],
+              bindingExpressions: ["item"],
+            },
+          ],
+        },
+        [
+          {
+            kind: "DefineSlots",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            slotFields: [
+              {
+                name: "default",
+                isRequired: true,
+                spanStart: 0,
+                spanEnd: 0,
+                bindings: [{ name: "item", typeAnnotation: "string" }],
+              },
+            ],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+      );
+      // Script binding has a different type
+      (snapshot as Record<string, unknown>).bindings = [
+        { name: "item", kind: "Const", typeAnnotation: "DifferentType" },
+      ];
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      // defineSlots type should win
+      expect(meta.slots[0].bindings[0].rawType).toBe("string");
+      // Negative: should NOT use the script binding type
+      expect(meta.slots[0].bindings[0].rawType).not.toBe("DifferentType");
+    });
+
+    it("keeps unknown type when no type info available", () => {
+      const snapshot = makeCompositionSnapshot([], [], {
+        definedSlots: [{ name: "default", hasBindings: true, bindingNames: ["item"] }],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.slots[0].bindings[0].name).toBe("item");
+      expect(meta.slots[0].bindings[0].type.kind).toBe("unknown");
+      // Negative: rawType should be undefined when no info
+      expect(meta.slots[0].bindings[0].rawType).toBeUndefined();
+    });
   });
 
   describe("models", () => {

@@ -847,6 +847,21 @@ pub struct AnalyzedSlotField {
     pub is_required: bool,
     /// SFC-absolute byte span of the slot name in the declaration.
     pub span: Span,
+    /// Binding properties from the slot function's first parameter type.
+    /// E.g., `default(props: { item: string })` → `[{name: "item", type_annotation: Some("string")}]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<AnalyzedSlotFieldBinding>,
+}
+
+/// A single binding property from a slot function parameter type.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedSlotFieldBinding {
+    /// Binding name (e.g., `"item"`, `"index"`).
+    pub name: String,
+    /// Type annotation text extracted from source (e.g., `"string"`, `"MyItem"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
 }
 
 // ── Options API Analysis Types ──

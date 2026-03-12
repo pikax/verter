@@ -75,6 +75,7 @@ interface RawMacro {
 interface RawSlotField {
   name: string;
   isRequired: boolean;
+  bindings?: Array<{ name: string; typeAnnotation?: string | null }>;
 }
 
 interface RawPropField {
@@ -272,13 +273,13 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
   if (optionsApi && !hasCompositionMacros(raw)) {
     props = extractOptionsProps(raw.optionsApi);
     events = extractOptionsEmits(raw.optionsApi, raw.template);
-    slots = extractSlots(raw.template, raw.macros);
+    slots = extractSlots(raw.template, raw.macros, raw.bindings);
     models = [];
     exposed = extractOptionsExpose(raw.optionsApi);
   } else {
     props = extractCompositionProps(raw.macros, raw.template);
     events = extractCompositionEmits(raw.macros, raw.template);
-    slots = extractSlots(raw.template, raw.macros);
+    slots = extractSlots(raw.template, raw.macros, raw.bindings);
     models = extractModels(raw.macros);
     exposed = extractExpose(raw.macros, raw.bindings);
   }
@@ -389,27 +390,68 @@ function extractCompositionEmits(macros: RawMacro[], template: RawTemplate | nul
   });
 }
 
-function extractSlots(template: RawTemplate | null, macros: RawMacro[]): SlotMeta[] {
+function extractSlots(
+  template: RawTemplate | null,
+  macros: RawMacro[],
+  scriptBindings?: RawBinding[],
+): SlotMeta[] {
   if (!template?.definedSlots) return [];
 
-  // Build a map of slot name → isRequired from defineSlots macro
+  // Build maps from defineSlots macro: isRequired + binding types per slot
   const requiredMap = new Map<string, boolean>();
+  const slotBindingMap = new Map<string, Map<string, string>>();
   for (const m of macros) {
     if (m.kind === "DefineSlots" && m.slotFields) {
       for (const sf of m.slotFields) {
         requiredMap.set(sf.name, sf.isRequired);
+        if (sf.bindings && sf.bindings.length > 0) {
+          const bindingTypeMap = new Map<string, string>();
+          for (const b of sf.bindings) {
+            if (b.typeAnnotation) {
+              bindingTypeMap.set(b.name, b.typeAnnotation);
+            }
+          }
+          if (bindingTypeMap.size > 0) {
+            slotBindingMap.set(sf.name, bindingTypeMap);
+          }
+        }
+      }
+    }
+  }
+
+  // Build a lookup from script bindings for fallback type resolution
+  const scriptBindingTypes = new Map<string, string>();
+  if (scriptBindings) {
+    for (const b of scriptBindings) {
+      if (b.typeAnnotation) {
+        scriptBindingTypes.set(b.name, b.typeAnnotation);
       }
     }
   }
 
   return template.definedSlots.map((slot): SlotMeta => {
-    const bindings: SlotBinding[] = (slot.bindingNames ?? []).map(
-      (name, i): SlotBinding => ({
+    const slotTypeMap = slotBindingMap.get(slot.name);
+
+    const bindings: SlotBinding[] = (slot.bindingNames ?? []).map((name, i): SlotBinding => {
+      const expression = slot.bindingExpressions?.[i] ?? undefined;
+
+      // 1. Primary: defineSlots slotFields bindings
+      let rawType: string | undefined = slotTypeMap?.get(name);
+
+      // 2. Fallback: cross-reference expression with script bindings
+      if (!rawType && expression) {
+        rawType = scriptBindingTypes.get(expression) ?? undefined;
+      }
+
+      const type = rawType ? parseType(rawType) : unknown("unknown");
+
+      return {
         name,
-        type: unknown("unknown"),
-        ...(slot.bindingExpressions?.[i] != null && { expression: slot.bindingExpressions[i] }),
-      }),
-    );
+        type,
+        ...(expression != null && { expression }),
+        ...(rawType && { rawType }),
+      };
+    });
 
     return {
       name: slot.name,

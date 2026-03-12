@@ -102,6 +102,8 @@ export interface SlotBinding {
   type: TypeDescriptor;
   /** The expression text (e.g. `"row"`, `"i"`) — may differ from `name`. */
   expression?: string;
+  /** Original TS type annotation string (e.g. `"string"`, `"MyItem"`). */
+  rawType?: string;
 }
 
 /** Metadata for a `defineModel` declaration. */

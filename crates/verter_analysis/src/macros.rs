@@ -3,6 +3,7 @@ use oxc_span::GetSpan;
 
 use crate::types::{
     AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
+    AnalyzedSlotFieldBinding,
 };
 
 /// Classify a callee name as a Vue compiler macro.
@@ -311,7 +312,7 @@ fn try_extract_macro(
             };
 
             let slot_fields = if kind == AnalyzedMacroKind::DefineSlots {
-                extract_slot_fields(call)
+                extract_slot_fields(call, source)
             } else {
                 Vec::new()
             };
@@ -569,15 +570,15 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
     }
 }
 
-/// Extract individual slot field names, required status, and spans from a `defineSlots` call.
+/// Extract individual slot field names, required status, bindings, and spans from a `defineSlots` call.
 ///
 /// Handles:
-/// - Type-based: `defineSlots<{ default(props: {}): any; header?(props: {}): any }>()`
+/// - Type-based: `defineSlots<{ default(props: { item: string }): any; header?(props: {}): any }>()`
 /// - Empty / no type params → empty vec
-fn extract_slot_fields(call: &CallExpression<'_>) -> Vec<AnalyzedSlotField> {
+fn extract_slot_fields(call: &CallExpression<'_>, source: &str) -> Vec<AnalyzedSlotField> {
     if let Some(ref type_args) = call.type_arguments {
         if let Some(first) = type_args.params.first() {
-            return extract_slot_fields_from_type(first);
+            return extract_slot_fields_from_type(first, source);
         }
     }
     Vec::new()
@@ -586,10 +587,10 @@ fn extract_slot_fields(call: &CallExpression<'_>) -> Vec<AnalyzedSlotField> {
 /// Extract slot fields from a TypeScript type parameter.
 ///
 /// Handles:
-/// - `TSPropertySignature`: `default: (props: {}) => any` or `header?: (props: {}) => any`
-/// - `TSMethodSignature`: `default(props: {}): any` or `header?(props: {}): any`
+/// - `TSPropertySignature`: `default: (props: { row: MyItem }) => any`
+/// - `TSMethodSignature`: `default(props: { item: string }): any`
 /// - `TSIntersectionType`: merges fields from all branches
-fn extract_slot_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedSlotField> {
+fn extract_slot_fields_from_type(ts_type: &TSType<'_>, source: &str) -> Vec<AnalyzedSlotField> {
     match ts_type {
         TSType::TSTypeLiteral(literal) => literal
             .members
@@ -601,10 +602,17 @@ fn extract_slot_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedSlotField>
                         PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                         _ => None,
                     };
+                    // For property signatures, extract bindings from function type annotation
+                    let bindings = prop
+                        .type_annotation
+                        .as_ref()
+                        .map(|ta| extract_slot_bindings_from_fn_type(&ta.type_annotation, source))
+                        .unwrap_or_default();
                     key_name.map(|name| AnalyzedSlotField {
                         name,
                         is_required: !prop.optional,
                         span: prop.key.span().into(),
+                        bindings,
                     })
                 }
                 TSSignature::TSMethodSignature(method) => {
@@ -613,10 +621,12 @@ fn extract_slot_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedSlotField>
                         PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                         _ => None,
                     };
+                    let bindings = extract_slot_bindings_from_params(&method.params, source);
                     key_name.map(|name| AnalyzedSlotField {
                         name,
                         is_required: !method.optional,
                         span: method.key.span().into(),
+                        bindings,
                     })
                 }
                 _ => None,
@@ -626,10 +636,84 @@ fn extract_slot_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedSlotField>
         TSType::TSIntersectionType(intersection) => intersection
             .types
             .iter()
-            .flat_map(|t| extract_slot_fields_from_type(t))
+            .flat_map(|t| extract_slot_fields_from_type(t, source))
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Extract binding types from a `TSFunctionType` annotation on a property signature.
+///
+/// Handles: `default: (props: { row: MyItem }) => any`
+fn extract_slot_bindings_from_fn_type(
+    ts_type: &TSType<'_>,
+    source: &str,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    if let TSType::TSFunctionType(fn_type) = ts_type {
+        extract_slot_bindings_from_params(&fn_type.params, source)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Extract slot binding names and types from a function's first parameter type annotation.
+///
+/// Given `(props: { item: string, index: number })`, extracts:
+/// `[{name: "item", type_annotation: Some("string")}, {name: "index", type_annotation: Some("number")}]`
+fn extract_slot_bindings_from_params(
+    params: &FormalParameters<'_>,
+    source: &str,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    let Some(first_param) = params.items.first() else {
+        return Vec::new();
+    };
+    let Some(ref ta) = first_param.type_annotation else {
+        return Vec::new();
+    };
+    extract_slot_bindings_from_type_literal(&ta.type_annotation, source)
+}
+
+/// Extract binding names and types from a `TSTypeLiteral` (object type).
+fn extract_slot_bindings_from_type_literal(
+    ts_type: &TSType<'_>,
+    source: &str,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    let TSType::TSTypeLiteral(literal) = ts_type else {
+        return Vec::new();
+    };
+    literal
+        .members
+        .iter()
+        .filter_map(|member| {
+            if let TSSignature::TSPropertySignature(prop) = member {
+                let key_name = match &prop.key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                    _ => None,
+                };
+                let type_annotation = prop.type_annotation.as_ref().and_then(|ta| {
+                    let start = ta.type_annotation.span().start as usize;
+                    let end = ta.type_annotation.span().end as usize;
+                    if end <= source.len() {
+                        let text = source[start..end].trim();
+                        if !text.is_empty() {
+                            Some(text.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+                key_name.map(|name| AnalyzedSlotFieldBinding {
+                    name,
+                    type_annotation,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Check if a `defineOptions()` call has `inheritAttrs: false` in its first object argument.
@@ -1339,5 +1423,147 @@ defineExpose({ props })
                 field.name
             );
         }
+    }
+
+    // =========================================================================
+    // Slot field binding extraction tests
+    // =========================================================================
+
+    #[test]
+    fn slot_fields_method_bindings() {
+        let code = "defineSlots<{ default(props: { item: string, index: number }): any }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(fields.len(), 1);
+        let bindings = &fields[0].bindings;
+        assert_eq!(
+            bindings.len(),
+            2,
+            "should extract 2 bindings: {:?}",
+            bindings
+        );
+        assert_eq!(bindings[0].name, "item");
+        assert_eq!(bindings[0].type_annotation.as_deref(), Some("string"));
+        assert_eq!(bindings[1].name, "index");
+        assert_eq!(bindings[1].type_annotation.as_deref(), Some("number"));
+        // Negative: no binding named "props" (that's the param name, not a binding)
+        assert!(
+            !bindings.iter().any(|b| b.name == "props"),
+            "should not include 'props' as a binding name"
+        );
+    }
+
+    #[test]
+    fn slot_fields_property_fn_bindings() {
+        let code = "defineSlots<{ default: (props: { row: MyItem }) => any }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(fields.len(), 1);
+        let bindings = &fields[0].bindings;
+        assert_eq!(
+            bindings.len(),
+            1,
+            "should extract 1 binding: {:?}",
+            bindings
+        );
+        assert_eq!(bindings[0].name, "row");
+        // Negative: type_annotation must NOT be None
+        assert!(
+            bindings[0].type_annotation.is_some(),
+            "type_annotation should be present, not None"
+        );
+        assert_eq!(bindings[0].type_annotation.as_deref(), Some("MyItem"));
+    }
+
+    #[test]
+    fn slot_fields_no_params_empty_bindings() {
+        let code = "defineSlots<{ header(): any }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(fields.len(), 1);
+        assert!(
+            fields[0].bindings.is_empty(),
+            "slot with no params should have empty bindings"
+        );
+    }
+
+    #[test]
+    fn slot_fields_complex_type_bindings() {
+        let code =
+            "defineSlots<{ default(props: { items: string[], active: boolean | null }): any }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(fields.len(), 1);
+        let bindings = &fields[0].bindings;
+        assert_eq!(
+            bindings.len(),
+            2,
+            "should extract 2 bindings: {:?}",
+            bindings
+        );
+        assert_eq!(bindings[0].name, "items");
+        assert_eq!(bindings[0].type_annotation.as_deref(), Some("string[]"));
+        assert_eq!(bindings[1].name, "active");
+        assert_eq!(
+            bindings[1].type_annotation.as_deref(),
+            Some("boolean | null")
+        );
+    }
+
+    #[test]
+    fn slot_fields_multiple_slots_bindings() {
+        let code = "defineSlots<{ default(props: { item: string }): any; header(props: { title: number }): any }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(fields.len(), 2);
+        // First slot
+        assert_eq!(fields[0].bindings.len(), 1);
+        assert_eq!(fields[0].bindings[0].name, "item");
+        assert_eq!(
+            fields[0].bindings[0].type_annotation.as_deref(),
+            Some("string")
+        );
+        // Second slot
+        assert_eq!(fields[1].bindings.len(), 1);
+        assert_eq!(fields[1].bindings[0].name, "title");
+        assert_eq!(
+            fields[1].bindings[0].type_annotation.as_deref(),
+            Some("number")
+        );
+        // Negative: no cross-contamination
+        assert!(
+            !fields[0].bindings.iter().any(|b| b.name == "title"),
+            "default slot should not have header's bindings"
+        );
+        assert!(
+            !fields[1].bindings.iter().any(|b| b.name == "item"),
+            "header slot should not have default's bindings"
+        );
+    }
+
+    #[test]
+    fn slot_fields_intersection_bindings() {
+        let code =
+            "defineSlots<{ default(p: { a: string }): any } & { footer(p: { b: number }): any }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "default");
+        assert_eq!(fields[0].bindings.len(), 1);
+        assert_eq!(fields[0].bindings[0].name, "a");
+        assert_eq!(
+            fields[0].bindings[0].type_annotation.as_deref(),
+            Some("string")
+        );
+        assert_eq!(fields[1].name, "footer");
+        assert_eq!(fields[1].bindings.len(), 1);
+        assert_eq!(fields[1].bindings[0].name, "b");
+        assert_eq!(
+            fields[1].bindings[0].type_annotation.as_deref(),
+            Some("number")
+        );
     }
 }
