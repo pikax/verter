@@ -19,14 +19,14 @@ Verter started as a Vue LSP and SFC-to-TSX transformation tool for VS Code, aimi
 
 - **Full TypeScript Support**: Converts `.vue` files to typed TSX representations, enabling complete TypeScript type inference
 - **Vue 3 Support**: Optimized for Vue 3 with Composition API and Script Setup
-- **Options API Support**: While Script Setup receives more attention, Options API is fully supported
+- **Options API Support**: While Script Setup receives more attention, Options API is supported
 - **Strict Type Safety**: Built with a "strict first" approach to type safety
 - **JSX/TSX Interoperability**: SFCs can be seamlessly used in JSX/TSX projects
 - **Generic Component Handling**: Full support for generic Vue components with proper constructor typing
 - **Automatic Event Handler Type Inference**: Infers parameter types for functions used as template event handlers
 - **Fully Typed Vue Directives**: Complete type safety for directives with strict modifier, argument, and value validation
 - **Rust-Powered Template Compilation**: High-performance template-to-render-function compilation via native bindings or WASM
-- **Built-in Linting**: ~164 lint rules across 11 categories (Vue, a11y, CSS, performance, security, and more) — runs natively in Rust, no ESLint needed
+- **Built-in Linting**: ~169 lint rules across 11 categories (Vue, a11y, CSS, performance, security, and more) — runs natively in Rust, no ESLint needed
 - **MCP Server**: Built-in Model Context Protocol server with 36+ Vue analysis tools for AI agents
 - **TypeScript Type Provider**: Delegates type checking to TSGO (fast Go binary) or tsserver (workspace TS version)
 
@@ -214,7 +214,7 @@ verter/
 │   ├── verter_core/               # Core template compiler (pure Rust)
 │   ├── verter_analysis/           # Static analysis: imports, exports, bindings, type resolution
 │   ├── verter_host/               # In-memory file host: caching, dependency tracking
-│   ├── verter_diagnostics/        # Diagnostic engine: ~164 lint rules, visitor, DiagnosticSet
+│   ├── verter_diagnostics/        # Diagnostic engine: ~169 lint rules, visitor, DiagnosticSet
 │   ├── verter_actions/            # Code actions: quick fixes, refactoring
 │   ├── verter_lsp/                # Rust LSP server binary (stdio)
 │   ├── verter_mcp/                # MCP server binary (stdio + HTTP)
@@ -437,7 +437,7 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 | `verter_core`        | Core template compiler                           |
 | `verter_analysis`    | Static analysis: imports, exports, bindings       |
 | `verter_host`        | In-memory file host: caching, dependency tracking |
-| `verter_diagnostics` | Diagnostic engine: ~164 lint rules                |
+| `verter_diagnostics` | Diagnostic engine: ~169 lint rules                |
 | `verter_actions`     | Code actions: quick fixes, refactoring            |
 | `verter_lsp`         | Rust LSP server binary (stdio)                   |
 | `verter_mcp`         | MCP server binary (stdio + HTTP)                 |

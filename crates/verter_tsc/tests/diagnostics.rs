@@ -346,6 +346,28 @@ fn verter_tsc_diagnostics_e2e() {
     assert_has_error(&diags, "ComposableErrors.vue", 2322);
     assert_min_errors(&diags, "ComposableErrors.vue", 2);
 
+    // GenericInstanceErrors.vue — TS2322 for assigning narrowed generic to number
+    assert_has_error(&diags, "GenericInstanceErrors.vue", 2322);
+    assert_error_at(&diags, "GenericInstanceErrors.vue", 5, 2322);
+
+    // DirectiveErrors.vue — directive usage produces errors (slot instance typing)
+    assert_min_errors(&diags, "DirectiveErrors.vue", 2);
+
+    // OptionsApiErrors.vue — TS2322 in methods (string → number)
+    assert_has_error(&diags, "OptionsApiErrors.vue", 2322);
+    assert_error_at(&diags, "OptionsApiErrors.vue", 18, 2322);
+
+    // OptionsApiAdvanced.vue — computed getter/setter, lifecycle hooks, methods
+    // TS2322 in badAssign() (number → string)
+    assert_has_error(&diags, "OptionsApiAdvanced.vue", 2322);
+    assert_error_at(&diags, "OptionsApiAdvanced.vue", 22, 2322);
+
+    // OptionsApiConsumer.vue — cross-component Options API prop checking
+    // NOTE: verter-tsc uses the Rust IDE path; cross-component Options API
+    // prop type checking requires the TS ComponentInstancePlugin (bundler path).
+    // No errors expected here until Rust IDE codegen supports Options API exports.
+    // assert_has_error(&diags, "OptionsApiConsumer.vue", 2322);
+
     // ── Source map / span mapping validation ────────────────────────
 
     // No diagnostic should point to a .tsx temp file
@@ -443,8 +465,7 @@ fn verter_tsc_diagnostics_e2e() {
     eprintln!("  .ts files:  {ts_diags}");
 
     // Print per-file breakdown
-    let mut file_counts: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
+    let mut file_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for d in &diags {
         *file_counts.entry(&d.file).or_insert(0) += 1;
     }

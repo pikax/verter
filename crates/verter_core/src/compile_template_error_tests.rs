@@ -200,12 +200,19 @@ const freeze = false
   </div>
 </template>"#;
     let result = compile_sfc(src);
-    let dup_errors: Vec<_> = result.errors.iter().filter(|e| e.code == "DuplicateAttribute").collect();
+    let dup_errors: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| e.code == "DuplicateAttribute")
+        .collect();
     assert!(
         dup_errors.is_empty(),
         "Should have no DuplicateAttribute errors but got {}: {:?}",
         dup_errors.len(),
-        dup_errors.iter().map(|e| format!("offset={:?}", e.span)).collect::<Vec<_>>()
+        dup_errors
+            .iter()
+            .map(|e| format!("offset={:?}", e.span))
+            .collect::<Vec<_>>()
     );
 }
 

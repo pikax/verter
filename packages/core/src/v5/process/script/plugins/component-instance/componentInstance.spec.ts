@@ -235,30 +235,54 @@ describe("process ComponentInstancePlugin", () => {
       return _parse(content, "");
     }
 
-    it("logs warning for non-setup components", () => {
-      // Spy on console.warn
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      parse(`export default { props: { foo: String } }`);
-
-      expect(warnSpy).toHaveBeenCalledWith(
-        "Setup is not supported yet for ComponentInstancePlugin",
+    it("generates Instance type for options API", () => {
+      const { result } = parse(
+        `export default defineComponent({ props: { foo: String } })`,
       );
 
-      warnSpy.mockRestore();
+      // Should export Instance type using InstanceType of default_Component
+      expect(result).toContain(`export type ___VERTER___Instance`);
+      expect(result).toContain(`InstanceType<typeof ___VERTER___default_Component>`);
     });
 
-    it("does not generate instance exports for non-setup", () => {
-      // Suppress the warning for this test
-      vi.spyOn(console, "warn").mockImplementation(() => {});
+    it("generates Component constructor for options API", () => {
+      const { result } = parse(
+        `export default defineComponent({ props: { foo: String } })`,
+      );
 
+      // Should export Component with constructor
+      expect(result).toContain(`export declare const ___VERTER___Component:`);
+      expect(result).toContain(`___VERTER___OmitConstructorSignature<typeof ___VERTER___default_Component>`);
+      expect(result).toMatch(
+        /new\(props\?:\s*___VERTER___Instance\['\$props'\]\):\s*___VERTER___Prettify<___VERTER___Instance>/,
+      );
+    });
+
+    it("does not include PublicInstanceFromMacro for options API", () => {
+      const { result } = parse(
+        `export default defineComponent({ props: { foo: String } })`,
+      );
+
+      // Options API should NOT use macro-based instance type
+      expect(result).not.toContain(`PublicInstanceFromMacro`);
+    });
+
+    it("handles bare object export (no defineComponent wrapper)", () => {
       const { result } = parse(`export default { props: { foo: String } }`);
 
-      // Should NOT contain instance type exports
-      expect(result).not.toContain(`export type ___VERTER___Instance`);
-      expect(result).not.toContain(`export const ___VERTER___Component=`);
+      // ScriptDefaultPlugin wraps with defineComponent, so Instance should still work
+      expect(result).toContain(`export type ___VERTER___Instance`);
+      expect(result).toContain(`InstanceType<typeof ___VERTER___default_Component>`);
+    });
 
-      vi.restoreAllMocks();
+    it("does not generate generic declarations for options API", () => {
+      const { result } = parse(
+        `export default defineComponent({ props: { foo: String } })`,
+      );
+
+      // No generic parameters in Instance or Component types
+      expect(result).not.toMatch(/___VERTER___Instance</);
+      expect(result).not.toMatch(/___VERTER___Component.*<[A-Z]/);
     });
   });
 });
