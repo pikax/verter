@@ -22,7 +22,7 @@ pub mod directives;
 pub mod props;
 
 use oxc_allocator::Allocator;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast::types::{
     AstNodeKind, CommentNode, ElementNode, ElementNodeConditionKind, InterpolationNode, TagType,
@@ -48,6 +48,8 @@ struct IdeTemplateCtx<'a, 'alloc> {
     alloc: &'alloc Allocator,
     resolver: &'a BindingResolver<'alloc>,
     options: &'a IdeTemplateOptions<'a>,
+    /// TS directive comments to inject inside `<component :is>` IIFE (before `return`).
+    ts_directives_for_component_is: Vec<String>,
 }
 
 /// Generate TSX template (JSX) from the template AST.
@@ -104,6 +106,7 @@ pub fn generate_ide_template<'alloc>(
         alloc,
         resolver: &resolver,
         options,
+        ts_directives_for_component_is: Vec::new(),
     };
     walk_children_with_iife_tracking(children, &mut ctx, &[]);
 
@@ -277,7 +280,14 @@ fn walk_element<'a, 'alloc>(
             // Handle `<component is="...">` / `<component :is="...">`.
             // Dynamic `:is` wraps the element in an IIFE — needs closing after element end.
             if tag_name == "component"
-                && rewrite_component_is(el, oxc_el, ctx.source, ctx.out, ctx.resolver)
+                && rewrite_component_is(
+                    el,
+                    oxc_el,
+                    ctx.source,
+                    ctx.out,
+                    ctx.resolver,
+                    &ctx.ts_directives_for_component_is,
+                )
             {
                 needs_component_is_iife_close = true;
             }
@@ -698,20 +708,33 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
 ) {
     let mut pending_iife_close_pos: Option<u32> = None;
 
-    // Pre-scan: identify comment children that immediately precede v-if elements.
-    // These will be removed from their original position and re-emitted inside the IIFE
-    // so that @ts-expect-error / @ts-ignore directives apply to the conditional content.
-    let comment_reposition_set = if ctx.options.comments {
-        find_comments_before_v_if(children, ctx.ast, ctx.source)
+    // Pre-scan: categorize comments that need repositioning inside structural wrappers.
+    // - v-if: ALL preceding comments are repositioned inside the IIFE
+    // - v-for: TS directive comments are repositioned inside the .map() callback
+    // - <component :is>: TS directive comments are injected inside the IIFE before `return`
+    let analysis = if ctx.options.comments {
+        analyze_child_comments(children, ctx.ast, ctx.source)
     } else {
-        rustc_hash::FxHashSet::default()
+        ChildCommentAnalysis {
+            v_if_repositioned: FxHashSet::default(),
+            v_for_repositioned: FxHashMap::default(),
+            component_is_comments: FxHashMap::default(),
+        }
     };
+
+    // Build a combined set of all comment indices that will be repositioned
+    let mut all_repositioned = analysis.v_if_repositioned.clone();
+    for indices in analysis.v_for_repositioned.values() {
+        for &idx in indices {
+            all_repositioned.insert(idx);
+        }
+    }
 
     for (idx, &child_id) in children.iter().enumerate() {
         let child_node = &ctx.ast.nodes[child_id.0];
 
-        // Skip comments that will be repositioned inside IIFE
-        if comment_reposition_set.contains(&idx) {
+        // Skip comments that will be repositioned
+        if all_repositioned.contains(&idx) {
             if let AstNodeKind::Comment(c) = &child_node.kind {
                 ctx.out.overwrite(c.start, c.end, "");
             }
@@ -777,40 +800,48 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
             }
         }
 
+        // Before walking: set up component :is TS directives so rewrite_component_is can use them
+        if let Some(comments) = analysis.component_is_comments.get(&idx) {
+            ctx.ts_directives_for_component_is = comments.clone();
+        }
+
         walk_node(child_id, ctx, parent_condition_scopes);
 
-        // After walking a v-if element, inject repositioned comments inside the IIFE.
-        // Skip when the element also has a dynamic `<component :is>` — that generates
-        // a nested IIFE with `return`, and a JSX comment between `return` and the element
-        // would be parsed as `return {}` (object literal), breaking the syntax.
+        // Clear the component :is directives after walking
+        ctx.ts_directives_for_component_is.clear();
+
+        // After walking: inject repositioned comments for v-if and v-for elements.
         if let AstNodeKind::Element(child_el) = &ctx.ast.nodes[child_id.0].kind {
-            let has_dynamic_is = child_el.tag_type == TagType::Component
-                && &ctx.source
-                    [child_el.tag_open.start as usize + 1..child_el.tag_open.name_end as usize]
-                    == "component"
-                && child_el.props.iter().any(|p| {
-                    p.is_directive
-                        && directive_name(p, ctx.source) == "bind"
-                        && p.arg_start
-                            .zip(p.arg_end)
-                            .map(|(a, b)| &ctx.source[a as usize..b as usize] == "is")
-                            .unwrap_or(false)
-                });
+            // v-if: inject ALL repositioned comments inside the IIFE (existing behavior).
+            // Skip when element also has dynamic <component :is> — those are handled separately.
+            let has_dynamic_is = is_dynamic_component_is(child_el, ctx.source);
             if matches!(
                 child_el.v_condition.as_ref().map(|c| &c.kind),
                 Some(ElementNodeConditionKind::If)
-            ) && !comment_reposition_set.is_empty()
+            ) && !analysis.v_if_repositioned.is_empty()
                 && !has_dynamic_is
             {
                 inject_repositioned_comments(
                     idx,
                     children,
-                    &comment_reposition_set,
+                    &analysis.v_if_repositioned,
                     ctx.ast,
                     ctx.source,
                     ctx.out,
                     child_el,
                     ctx.alloc,
+                );
+            }
+
+            // v-for: inject TS directive comments inside the .map() callback
+            if let Some(comment_indices) = analysis.v_for_repositioned.get(&idx) {
+                inject_ts_directive_comments_for_v_for(
+                    comment_indices,
+                    children,
+                    ctx.ast,
+                    ctx.source,
+                    ctx.out,
+                    child_el,
                 );
             }
         }
@@ -855,46 +886,136 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
     }
 }
 
-/// Pre-scan children to find comment indices that immediately precede v-if elements.
-/// Returns a set of child indices whose comments should be repositioned inside the IIFE.
-/// Only consecutive comments (with optional whitespace text between) are collected;
-/// any non-comment/non-whitespace node resets the collection.
-fn find_comments_before_v_if(
+/// Check if a comment node contains a TypeScript directive (`@ts-expect-error`, `@ts-ignore`, `@ts-nocheck`).
+fn is_ts_directive_comment(source: &str, comment: &CommentNode) -> bool {
+    let content = source[comment.content_start as usize..comment.content_end as usize].trim();
+    content.starts_with("@ts-expect-error")
+        || content.starts_with("@ts-ignore")
+        || content.starts_with("@ts-nocheck")
+}
+
+/// Result of pre-scanning children for comments that need repositioning.
+struct ChildCommentAnalysis {
+    /// Comment indices to reposition inside v-if IIFEs (ALL comments, existing behavior).
+    v_if_repositioned: FxHashSet<usize>,
+    /// TS directive comment indices to reposition inside v-for `.map()` callbacks.
+    /// Key: element child index, Value: comment child indices (forward order).
+    v_for_repositioned: FxHashMap<usize, Vec<usize>>,
+    /// TS directive comment text to inject inside `<component :is>` IIFEs.
+    /// Key: element child index, Value: trimmed comment content strings.
+    component_is_comments: FxHashMap<usize, Vec<String>>,
+}
+
+/// Check if an element is a dynamic `<component :is="...">`.
+fn is_dynamic_component_is(el: &ElementNode, source: &str) -> bool {
+    el.tag_type == TagType::Component
+        && &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize] == "component"
+        && el.props.iter().any(|p| {
+            p.is_directive
+                && directive_name(p, source) == "bind"
+                && p.arg_start
+                    .zip(p.arg_end)
+                    .map(|(a, b)| &source[a as usize..b as usize] == "is")
+                    .unwrap_or(false)
+        })
+}
+
+/// Pre-scan children to categorize comments that need repositioning.
+///
+/// - **v-if elements** (no dynamic `:is`): ALL preceding comments → `v_if_repositioned`
+/// - **v-if + `<component :is>`**: TS directive comments → `component_is_comments`
+/// - **v-for elements** (no v-if): TS directive comments → `v_for_repositioned`
+/// - **v-for + v-if**: TS directive comments → `v_for_repositioned` (v-for is outermost)
+/// - **`<component :is>` (no v-if, no v-for)**: TS directive comments → `component_is_comments`
+fn analyze_child_comments(
     children: &[NodeId],
     ast: &crate::ast::types::TemplateAst,
     source: &str,
-) -> rustc_hash::FxHashSet<usize> {
-    let mut set = rustc_hash::FxHashSet::default();
+) -> ChildCommentAnalysis {
+    let mut analysis = ChildCommentAnalysis {
+        v_if_repositioned: FxHashSet::default(),
+        v_for_repositioned: FxHashMap::default(),
+        component_is_comments: FxHashMap::default(),
+    };
+
     for (i, &child_id) in children.iter().enumerate() {
         let node = &ast.nodes[child_id.0];
-        if let AstNodeKind::Element(el) = &node.kind {
-            if matches!(
-                el.v_condition.as_ref().map(|c| &c.kind),
-                Some(ElementNodeConditionKind::If)
-            ) {
-                // Walk backward to find consecutive comments
-                let mut j = i;
-                while j > 0 {
-                    j -= 1;
-                    let prev = &ast.nodes[children[j].0];
-                    match &prev.kind {
-                        AstNodeKind::Comment(_) => {
-                            set.insert(j);
-                        }
-                        AstNodeKind::Text(t) => {
-                            let text = &source[t.start as usize..t.end as usize];
-                            if text.trim().is_empty() {
-                                continue; // Skip whitespace-only text
-                            }
-                            break; // Non-whitespace text — stop
-                        }
-                        _ => break,
-                    }
+        let AstNodeKind::Element(el) = &node.kind else {
+            continue;
+        };
+
+        let has_v_if = el
+            .v_condition
+            .as_ref()
+            .is_some_and(|c| c.kind == ElementNodeConditionKind::If);
+        let has_v_for = el.v_for.is_some();
+        let has_dynamic_is = is_dynamic_component_is(el, source);
+
+        if has_v_if && !has_dynamic_is && !has_v_for {
+            // Pure v-if (no :is, no v-for): reposition ALL comments (existing behavior)
+            collect_preceding_comments(i, children, ast, source, |j, _| {
+                analysis.v_if_repositioned.insert(j);
+            });
+        } else if has_v_for {
+            // v-for (with or without v-if): reposition only TS directive comments
+            collect_preceding_comments(i, children, ast, source, |j, comment| {
+                if is_ts_directive_comment(source, comment) {
+                    analysis.v_for_repositioned.entry(i).or_default().push(j);
                 }
+            });
+            // Ensure forward order (collect walks backward)
+            if let Some(v) = analysis.v_for_repositioned.get_mut(&i) {
+                v.sort_unstable();
             }
+        } else if has_dynamic_is {
+            // <component :is> (with or without v-if): reposition TS directive comments
+            collect_preceding_comments(i, children, ast, source, |j, comment| {
+                if is_ts_directive_comment(source, comment) {
+                    let text = source[comment.content_start as usize..comment.content_end as usize]
+                        .trim()
+                        .to_string();
+                    analysis
+                        .component_is_comments
+                        .entry(i)
+                        .or_default()
+                        .push(text);
+                    // Also mark for removal from original position
+                    analysis.v_if_repositioned.insert(j);
+                }
+            });
         }
     }
-    set
+
+    analysis
+}
+
+/// Walk backward from `element_idx` collecting consecutive preceding comments.
+/// Calls `callback(child_index, comment_node)` for each comment found.
+fn collect_preceding_comments(
+    element_idx: usize,
+    children: &[NodeId],
+    ast: &crate::ast::types::TemplateAst,
+    source: &str,
+    mut callback: impl FnMut(usize, &CommentNode),
+) {
+    let mut j = element_idx;
+    while j > 0 {
+        j -= 1;
+        let prev = &ast.nodes[children[j].0];
+        match &prev.kind {
+            AstNodeKind::Comment(c) => {
+                callback(j, c);
+            }
+            AstNodeKind::Text(t) => {
+                let text = &source[t.start as usize..t.end as usize];
+                if text.trim().is_empty() {
+                    continue;
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
 }
 
 /// After walking a v-if element, emit repositioned comments inside the IIFE.
@@ -943,6 +1064,31 @@ fn inject_repositioned_comments<'alloc>(
         let prev = &ast.nodes[child_id.0];
         if let AstNodeKind::Comment(c) = &prev.kind {
             let text = &source[c.content_start as usize..c.content_end as usize];
+            let jsx_comment = format!("{{/*{}*/}}\n", text);
+            let len = jsx_comment.len() as u32;
+            out.prepend_alloc_mapped_with_offset(el.tag_open.start, 0, len, &jsx_comment);
+        }
+    }
+}
+
+/// After walking a v-for element, inject TS directive comments inside the `.map()` callback.
+///
+/// Comments are emitted at `el.tag_open.start` via `prepend_alloc_mapped_with_offset`.
+/// Because the v-for `.map()` open is also emitted at this position via earlier prepends,
+/// and `CodeGenOutput` uses stable sort order (later prepends appear after earlier ones at
+/// the same position), these comments land inside the callback body.
+fn inject_ts_directive_comments_for_v_for(
+    comment_indices: &[usize],
+    children: &[NodeId],
+    ast: &crate::ast::types::TemplateAst,
+    source: &str,
+    out: &mut CodeGenOutput<'_>,
+    el: &ElementNode,
+) {
+    for &j in comment_indices {
+        let prev = &ast.nodes[children[j].0];
+        if let AstNodeKind::Comment(c) = &prev.kind {
+            let text = source[c.content_start as usize..c.content_end as usize].trim();
             let jsx_comment = format!("{{/*{}*/}}\n", text);
             let len = jsx_comment.len() as u32;
             out.prepend_alloc_mapped_with_offset(el.tag_open.start, 0, len, &jsx_comment);
@@ -1051,12 +1197,16 @@ fn collect_sibling_negations<'alloc>(
 
 /// Rewrite `<component :is="expr">` to use `extractRenderComponent`.
 /// Returns `true` if the dynamic `:is` pattern was used (requires IIFE close after element).
+///
+/// `ts_directives`: TS directive comment texts (e.g., `"@ts-expect-error"`) to inject
+/// inside the IIFE before `return`, so they suppress errors on the resolved component.
 fn rewrite_component_is<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
+    ts_directives: &[String],
 ) -> bool {
     let static_is_prop = el.props.iter().find(|prop| {
         if prop.is_directive {
@@ -1150,7 +1300,21 @@ fn rewrite_component_is<'alloc>(
             temp_name
         )
     };
-    let content = format!("{}{}); return ", iife_prefix, resolved_expr);
+    // Insert TS directive comments (e.g., `/* @ts-expect-error */`) between `);` and `return`
+    // so they suppress errors on the resolved component element.
+    let ts_comment_text = if ts_directives.is_empty() {
+        String::new()
+    } else {
+        let mut buf = String::new();
+        for d in ts_directives {
+            buf.push_str(&format!(" /* {} */\n", d));
+        }
+        buf
+    };
+    let content = format!(
+        "{}{});{} return ",
+        iife_prefix, resolved_expr, ts_comment_text
+    );
     // Use mapped emission so the expression gets a source map token.
     // This allows TSGO to map hover positions back to the Vue template.
     out.prepend_alloc_mapped_with_offset(

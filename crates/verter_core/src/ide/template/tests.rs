@@ -4858,3 +4858,230 @@ const x = 1
     // The output should be valid TSX
     assert_valid_tsx(&code, "directive-accessor-preamble");
 }
+
+// ── @ts-expect-error / @ts-ignore in template comments ──────────────────────
+
+#[test]
+fn ts_expect_error_before_component() {
+    let result = gen_tsx_template(r#"<template><!-- @ts-expect-error --><MyComp/></template>"#);
+    // Comment should appear as JSX comment before the component
+    assert!(
+        result.contains("{/* @ts-expect-error */}"),
+        "should have TS directive comment, got:\n{}",
+        result
+    );
+    // Comment must appear before the component tag
+    let comment_pos = result.find("{/* @ts-expect-error */}").unwrap();
+    let comp_pos = result.find("<MyComp").unwrap();
+    assert!(
+        comment_pos < comp_pos,
+        "comment should appear before component, got:\n{}",
+        result
+    );
+    // No raw HTML comment markers in output
+    assert!(
+        !result.contains("<!--"),
+        "should not have raw HTML comment markers, got:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("-->"),
+        "should not have raw HTML comment close, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn ts_expect_error_before_v_for() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><!-- @ts-expect-error --><div v-for="x in xs">{{ x }}</div></template>"#,
+        &[("xs", BindingType::SetupRef)],
+    );
+    // v-for wraps in .map() — the comment must be INSIDE the map callback
+    assert!(
+        result.contains(".map("),
+        "should have .map() wrapper, got:\n{}",
+        result
+    );
+    let map_pos = result.find(".map(").unwrap();
+    // Comment must be present (as JSX comment with TS directive)
+    assert!(
+        result.contains("@ts-expect-error"),
+        "TS directive comment should be present, got:\n{}",
+        result
+    );
+    let comment_pos = result.find("@ts-expect-error").unwrap();
+    assert!(
+        comment_pos > map_pos,
+        "comment should be inside .map() callback, not before it, got:\n{}",
+        result
+    );
+    // No raw HTML comment markers
+    assert!(
+        !result.contains("<!--"),
+        "no raw HTML markers, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn ts_expect_error_before_component_is() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><!-- @ts-expect-error --><component :is="comp"/></template>"#,
+        &[("comp", BindingType::SetupRef)],
+    );
+    // <component :is> wraps in IIFE — comment must be inside the IIFE
+    assert!(
+        result.contains("extractRenderComponent"),
+        "should have extractRenderComponent IIFE, got:\n{}",
+        result
+    );
+    // Comment should be inside the IIFE (after the IIFE open)
+    let iife_pos = result.find("(() =>").unwrap();
+    // Check that a TS directive comment appears somewhere after the IIFE open
+    let after_iife = &result[iife_pos..];
+    assert!(
+        after_iife.contains("@ts-expect-error"),
+        "TS directive comment should be inside component :is IIFE, got:\n{}",
+        result
+    );
+    // No raw HTML comment markers
+    assert!(
+        !result.contains("<!--"),
+        "no raw HTML markers, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn ts_expect_error_v_if_component_is() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><!-- @ts-expect-error --><component :is="c" v-if="ok"/></template>"#,
+        &[("c", BindingType::SetupRef), ("ok", BindingType::SetupRef)],
+    );
+    // v-if wraps in IIFE, <component :is> creates nested IIFE
+    // The comment should end up inside the component :is IIFE (before `return`)
+    assert!(
+        result.contains("extractRenderComponent"),
+        "should have extractRenderComponent IIFE, got:\n{}",
+        result
+    );
+    // Comment should be somewhere in the output
+    assert!(
+        result.contains("@ts-expect-error"),
+        "TS directive comment should be present, got:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("<!--"),
+        "no raw HTML markers, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn ts_expect_error_v_for_v_if() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><!-- @ts-expect-error --><div v-for="x in xs" v-if="ok">{{ x }}</div></template>"#,
+        &[("xs", BindingType::SetupRef), ("ok", BindingType::SetupRef)],
+    );
+    // v-for + v-if: v-for is outer (.map), v-if uses ternary inside
+    assert!(
+        result.contains(".map("),
+        "should have .map() wrapper, got:\n{}",
+        result
+    );
+    let map_pos = result.find(".map(").unwrap();
+    assert!(
+        result.contains("@ts-expect-error"),
+        "TS directive comment should be present, got:\n{}",
+        result
+    );
+    let comment_pos = result.find("@ts-expect-error").unwrap();
+    assert!(
+        comment_pos > map_pos,
+        "comment should be inside .map() callback, got:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("<!--"),
+        "no raw HTML markers, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn ts_ignore_same_behavior() {
+    let result = gen_tsx_template(r#"<template><!-- @ts-ignore --><MyComp/></template>"#);
+    assert!(
+        result.contains("{/* @ts-ignore */}"),
+        "should have @ts-ignore comment, got:\n{}",
+        result
+    );
+    let comment_pos = result.find("{/* @ts-ignore */}").unwrap();
+    let comp_pos = result.find("<MyComp").unwrap();
+    assert!(
+        comment_pos < comp_pos,
+        "@ts-ignore should appear before component, got:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("<!--"),
+        "no raw HTML markers, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn regular_comment_not_repositioned_for_v_for() {
+    let result = gen_tsx_template(
+        r#"<template><!-- hello --><div v-for="x in xs">{{ x }}</div></template>"#,
+    );
+    // Regular (non-TS-directive) comment should NOT be repositioned inside .map()
+    assert!(
+        result.contains("{/* hello */}"),
+        "regular comment should be converted to JSX, got:\n{}",
+        result
+    );
+    // Comment should stay at its original position (before .map)
+    let comment_pos = result.find("{/* hello */}").unwrap();
+    let map_pos = result.find(".map(").unwrap();
+    assert!(
+        comment_pos < map_pos,
+        "regular comment should stay before .map(), not be repositioned inside, got:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("<!--"),
+        "no raw HTML markers, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn existing_v_if_comment_repositioning_not_regressed() {
+    // The existing v-if comment repositioning should still work
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><!-- @ts-expect-error --><div v-if="show">hello</div></template>"#,
+        &[("show", BindingType::SetupRef)],
+    );
+    assert!(
+        result.contains("if(show)"),
+        "should have IIFE condition, got:\n{}",
+        result
+    );
+    let iife_pos = result.find("{()=>{").expect("should have IIFE open");
+    let comment_pos = result
+        .find("{/* @ts-expect-error */}")
+        .expect("comment should be preserved");
+    assert!(
+        comment_pos > iife_pos,
+        "comment should appear AFTER IIFE open (inside), got:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("<!--"),
+        "no raw HTML markers, got:\n{}",
+        result
+    );
+}
