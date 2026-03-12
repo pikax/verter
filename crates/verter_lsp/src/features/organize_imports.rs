@@ -227,7 +227,7 @@ pub fn organize_imports_actions(
             document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
                 text_document: OptionalVersionedTextDocumentIdentifier {
                     // Sentinel: caller must replace with actual URI
-                    uri: "file:///placeholder".parse().unwrap(),
+                    uri: super::sentinel_uris::PLACEHOLDER_URI.clone(),
                     version: None,
                 },
                 edits: edits.into_iter().map(OneOf::Left).collect(),

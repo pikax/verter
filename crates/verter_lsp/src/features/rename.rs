@@ -13,9 +13,8 @@ use crate::features::references::{
     CssRefTarget,
 };
 
-/// Sentinel URI used when a rename edit is in the same file.
-/// The server replaces this with the actual document URI before returning to the client.
-pub const SAME_FILE_URI: &str = "verter-internal:same-file";
+pub use super::sentinel_uris::SAME_FILE_URI;
+pub use super::sentinel_uris::SAME_FILE_URI_STR;
 
 /// Check if the symbol at the given position can be renamed.
 ///
@@ -205,10 +204,9 @@ pub fn rename_at_position(
         return None;
     }
 
-    let uri: Uri = SAME_FILE_URI.parse().unwrap();
     #[allow(clippy::mutable_key_type)] // Uri has interior mutability but we only insert once
     let mut changes = HashMap::new();
-    changes.insert(uri, edits);
+    changes.insert(SAME_FILE_URI.clone(), edits);
 
     Some(WorkspaceEdit {
         changes: Some(changes),
@@ -245,10 +243,9 @@ fn rename_css(
         return None;
     }
 
-    let uri: Uri = SAME_FILE_URI.parse().unwrap();
     #[allow(clippy::mutable_key_type)]
     let mut changes = HashMap::new();
-    changes.insert(uri, edits);
+    changes.insert(SAME_FILE_URI.clone(), edits);
 
     Some(WorkspaceEdit {
         changes: Some(changes),

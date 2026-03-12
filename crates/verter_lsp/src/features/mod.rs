@@ -27,4 +27,5 @@ pub mod macro_codegen;
 pub mod organize_imports;
 pub mod references;
 pub mod rename;
+pub mod sentinel_uris;
 pub mod workspace_symbol;

@@ -46,6 +46,12 @@
     "profile:hotpath:full": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath",
     "profile:hotpath:full:alloc": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc",
     "profile:hotpath:full:mcp": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp"
+    "prepare": "husky",
+    "test:coverage": "vitest run --coverage"
+  "lint-staged": {
+    "*.rs": "cargo fmt --check --",
+    "*.{ts,js,mjs,cjs}": "oxfmt --check"
+  },
   },
   "dependencies": {
     "@vue/compiler-core": "3.6.0-beta.7",

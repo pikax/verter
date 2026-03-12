@@ -171,7 +171,7 @@ pub fn make_insert_action(
             changes: None,
             document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
                 text_document: OptionalVersionedTextDocumentIdentifier {
-                    uri: SAME_FILE_URI.parse().unwrap(),
+                    uri: PLACEHOLDER_URI.clone(),
                     version: None,
                 },
                 edits: vec![OneOf::Left(TextEdit {
@@ -189,9 +189,9 @@ pub fn make_insert_action(
     })
 }
 
-/// Placeholder URI used by code actions that edit the same file.
-/// Must be replaced with the actual document URI via [`fix_placeholder_uris`].
-pub const SAME_FILE_URI: &str = "file:///placeholder";
+/// Re-export for backwards compatibility.
+pub use super::sentinel_uris::PLACEHOLDER_URI_STR as SAME_FILE_URI;
+pub use super::sentinel_uris::{PLACEHOLDER_URI, PLACEHOLDER_URI_STR};
 
 /// A slot definition parsed from a `defineSlots<{ ... }>()` type literal.
 #[derive(Debug, Clone, PartialEq, Eq)]

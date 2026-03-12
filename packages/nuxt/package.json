@@ -16,6 +16,9 @@
   "author": "pikax",
   "homepage": "https://verterjs.dev/",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "main": "dist/module.js",
   "module": "dist/module.js",
   "types": "dist/module.d.ts",

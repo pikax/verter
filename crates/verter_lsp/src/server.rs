@@ -1124,23 +1124,21 @@ impl VerterLanguageServer {
             return None;
         }
         self.hydrate_vue_compile_blockers_for_canonical_id(canonical_id.as_deref()?);
-        let ide = self.documents.get_ide(uri);
-        if ide.is_none() {
+        let Some(ide) = self.documents.get_ide(uri) else {
             tracing::info!(
                 "ide_context: no IDE output for {} (canonical={})",
                 uri.as_str(),
                 canonical_id.as_deref().unwrap_or("?")
             );
             return None;
-        }
-        let ide = ide.unwrap();
-        let mapper = self.documents.get_position_mapper(uri);
-        if mapper.is_none() {
+        };
+
+        let Some(mapper) = self.documents.get_position_mapper(uri) else {
             tracing::info!("ide_context: no position mapper for {}", uri.as_str());
             return None;
-        }
+        };
         let ide_path = self.ide_path_for_uri(uri)?;
-        Some((ide_path, ide.code, mapper.unwrap()))
+        Some((ide_path, ide.code, mapper))
     }
 
     fn resolver_snapshot(&self) -> Option<ResolverSnapshot> {
@@ -5782,7 +5780,7 @@ impl LanguageServer for VerterLanguageServer {
 
             // Fix up sentinel URIs: if the definition is in the same file, use the document URI
             if let GotoDefinitionResponse::Scalar(ref mut loc) = def {
-                if loc.uri.as_str() == crate::features::definition::SAME_FILE_URI {
+                if loc.uri.as_str() == crate::features::definition::SAME_FILE_URI_STR {
                     loc.uri = uri.clone();
                 }
             }
@@ -6047,7 +6045,7 @@ impl LanguageServer for VerterLanguageServer {
 
             // Fix up sentinel URIs
             for loc in &mut locations {
-                if loc.uri.as_str() == crate::features::references::SAME_FILE_URI {
+                if loc.uri.as_str() == crate::features::references::SAME_FILE_URI_STR {
                     loc.uri = uri.clone();
                 }
             }
@@ -6166,7 +6164,7 @@ impl LanguageServer for VerterLanguageServer {
 
             // Fix up sentinel URIs in workspace edit
             if let Some(ref mut changes) = edit.changes {
-                let sentinel: Uri = crate::features::rename::SAME_FILE_URI.parse().unwrap();
+                let sentinel = crate::features::rename::SAME_FILE_URI.clone();
                 if let Some(edits) = changes.remove(&sentinel) {
                     changes.insert(uri.clone(), edits);
                 }

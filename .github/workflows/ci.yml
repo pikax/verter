@@ -180,7 +180,8 @@ jobs:
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Run tests
-        run: pnpm test
+      - name: Verify package tarballs
+        run: node scripts/verify-packages.mjs
 
   playground-test:
     name: Playground Unit Tests

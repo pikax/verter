@@ -1161,7 +1161,7 @@ fn test_path_alias_resolution_on_binding() {
         // Should point to import statement, not to a file
         assert_eq!(
             loc.uri.as_str(),
-            SAME_FILE_URI,
+            SAME_FILE_URI_STR,
             "without resolver should stay in same file"
         );
     }
@@ -1756,7 +1756,7 @@ fn test_go_to_definition_event_handler_click() {
     if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
         assert_eq!(
             loc.uri.as_str(),
-            SAME_FILE_URI,
+            SAME_FILE_URI_STR,
             "should navigate within same file"
         );
         let start_offset = line_index.position_to_offset(&loc.range.start).unwrap();

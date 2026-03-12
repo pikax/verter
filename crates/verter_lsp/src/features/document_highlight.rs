@@ -80,8 +80,7 @@ pub fn highlights_at_position(
         .as_ref()
         .is_some_and(|t| !t.binding_occurrences.is_empty());
 
-    if has_template_analysis {
-        let template = analysis.template.as_ref().unwrap();
+    if let Some(template) = analysis.template.as_ref().filter(|_| has_template_analysis) {
         for occ in &template.binding_occurrences {
             if occ.name == word {
                 let already_present = highlights.iter().any(|hl| {

@@ -658,7 +658,7 @@ pub fn merge_definitions(
     if let Some(ref vd) = verter_def {
         let is_cross_file = matches!(vd, GotoDefinitionResponse::Scalar(loc)
             if loc.uri != *document_uri
-            && loc.uri.as_str() != crate::features::definition::SAME_FILE_URI);
+            && loc.uri.as_str() != crate::features::definition::SAME_FILE_URI_STR);
         let is_same_file =
             matches!(vd, GotoDefinitionResponse::Scalar(loc) if loc.uri == *document_uri);
         if type_defs.is_empty() || is_cross_file || is_same_file {
@@ -2062,7 +2062,7 @@ mod tests {
 
         // Verter found the import statement (same file — uses SAME_FILE_URI sentinel)
         let verter_def = Some(GotoDefinitionResponse::Scalar(Location {
-            uri: crate::features::definition::SAME_FILE_URI.parse().unwrap(),
+            uri: crate::features::definition::SAME_FILE_URI.clone(),
             range: Range {
                 start: Position {
                     line: 1,
@@ -2105,7 +2105,7 @@ mod tests {
                 assert!(
                     !loc.uri
                         .as_str()
-                        .contains(crate::features::definition::SAME_FILE_URI),
+                        .contains(crate::features::definition::SAME_FILE_URI_STR),
                     "must not return same-file sentinel when TSGO has external target"
                 );
             }

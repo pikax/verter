@@ -16,6 +16,9 @@
     "LICENSE"
   ],
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "sideEffects": false,
   "main": "dist/index.js",
   "module": "dist/index.js",

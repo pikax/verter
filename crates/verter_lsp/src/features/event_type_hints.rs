@@ -146,7 +146,7 @@ fn make_event_type_action(
 
     let edit = action_utils::make_replace_edit(
         // Use placeholder URI; server will fix it
-        &action_utils::SAME_FILE_URI.parse().unwrap(),
+        &action_utils::PLACEHOLDER_URI,
         Range { start, end },
         new_text,
     );

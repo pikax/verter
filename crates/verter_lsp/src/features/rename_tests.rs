@@ -68,7 +68,7 @@ fn test_rename_binding_across_blocks() {
 
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
-    let uri: Uri = SAME_FILE_URI.parse().unwrap();
+    let uri: Uri = SAME_FILE_URI.clone();
     let edits = changes.get(&uri).unwrap();
 
     // Declaration + template usage = at least 2 edits
@@ -192,7 +192,7 @@ fn test_rename_css_class_across_template_and_style() {
     assert!(edit.is_some());
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
-    let uri: Uri = SAME_FILE_URI.parse().unwrap();
+    let uri: Uri = SAME_FILE_URI.clone();
     let edits = changes.get(&uri).unwrap();
     // Should have at least 2 edits: template class + style selector
     assert!(edits.len() >= 2, "expected >=2 edits, got {}", edits.len());
@@ -307,7 +307,7 @@ fn test_rename_css_id_across_template_and_style() {
     assert!(edit.is_some(), "should allow renaming CSS ID");
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
-    let uri: Uri = SAME_FILE_URI.parse().unwrap();
+    let uri: Uri = SAME_FILE_URI.clone();
     let edits = changes.get(&uri).unwrap();
     assert!(
         edits.len() >= 2,
@@ -359,7 +359,7 @@ fn test_rename_css_class_doesnt_affect_other_names() {
     assert!(edit.is_some());
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
-    let uri: Uri = SAME_FILE_URI.parse().unwrap();
+    let uri: Uri = SAME_FILE_URI.clone();
     let edits = changes.get(&uri).unwrap();
     // All rename edits should be "button", never "active"
     assert!(edits.iter().all(|e| e.new_text == "button"));
@@ -448,7 +448,7 @@ fn test_span_based_rename_no_false_positives() {
     assert!(edit.is_some());
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
-    let uri: Uri = SAME_FILE_URI.parse().unwrap();
+    let uri: Uri = SAME_FILE_URI.clone();
     let edits = changes.get(&uri).unwrap();
 
     // Should have exactly 2 edits: declaration + interpolation binding
@@ -530,7 +530,7 @@ fn test_rename_with_dual_script_blocks() {
 
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
-    let uri: Uri = SAME_FILE_URI.parse().unwrap();
+    let uri: Uri = SAME_FILE_URI.clone();
     let edits = changes.get(&uri).unwrap();
 
     // Should include declaration + template + script usage edits

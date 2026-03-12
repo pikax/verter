@@ -10,6 +10,9 @@
   },
   "author": "pikax",
   "homepage": "https://verterjs.dev/",
+  "engines": {
+    "node": ">=18"
+  },
   "files": [
     "dist",
     "wasm"

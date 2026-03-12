@@ -16,9 +16,8 @@ use verter_host::FileAnalysisSnapshot;
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
 
-/// Sentinel URI used when a definition is in the same file.
-/// The server replaces this with the actual document URI before returning to the client.
-pub const SAME_FILE_URI: &str = "verter-internal:same-file";
+pub use super::sentinel_uris::SAME_FILE_URI;
+pub use super::sentinel_uris::SAME_FILE_URI_STR;
 
 /// Attempt to provide go-to-definition at a given position.
 ///
@@ -461,7 +460,7 @@ fn span_definition(
     let start = line_index.offset_to_position(span_start)?;
     let end = line_index.offset_to_position(span_end)?;
     Some(GotoDefinitionResponse::Scalar(Location {
-        uri: SAME_FILE_URI.parse().unwrap(),
+        uri: SAME_FILE_URI.clone(),
         range: Range { start, end },
     }))
 }

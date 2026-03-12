@@ -7,9 +7,8 @@ use verter_host::FileAnalysisSnapshot;
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
 
-/// Sentinel URI used when a reference is in the same file.
-/// The server replaces this with the actual document URI before returning to the client.
-pub const SAME_FILE_URI: &str = "verter-internal:same-file";
+pub use super::sentinel_uris::SAME_FILE_URI;
+pub use super::sentinel_uris::SAME_FILE_URI_STR;
 
 /// Find all references to the symbol at the given position.
 ///
@@ -89,8 +88,7 @@ pub fn references_at_position(
         .as_ref()
         .is_some_and(|t| !t.binding_occurrences.is_empty());
 
-    if has_template_analysis {
-        let template = analysis.template.as_ref().unwrap();
+    if let Some(template) = analysis.template.as_ref().filter(|_| has_template_analysis) {
         for occ in &template.binding_occurrences {
             if occ.name == word {
                 // Skip if this overlaps a declaration we already added
@@ -135,7 +133,7 @@ pub fn references_at_position(
                 line_index.offset_to_position((abs_offset + word.len()) as u32),
             ) {
                 locations.push(Location {
-                    uri: SAME_FILE_URI.parse().unwrap(),
+                    uri: SAME_FILE_URI.clone(),
                     range: Range { start, end },
                 });
             }
@@ -510,7 +508,7 @@ pub(crate) fn span_to_location(
     let start = line_index.offset_to_position(span_start)?;
     let end = line_index.offset_to_position(span_end)?;
     Some(Location {
-        uri: SAME_FILE_URI.parse().unwrap(),
+        uri: SAME_FILE_URI.clone(),
         range: Range { start, end },
     })
 }
