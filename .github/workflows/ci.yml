@@ -307,24 +307,11 @@ jobs:
       - name: Test @verter/wasm
         run: pnpm --filter @verter/wasm test
 
-  vscode-e2e:
-    name: VS Code E2E (${{ matrix.fixture }})
+  build-vscode-e2e:
+    name: Build VS Code E2E
     needs: detect-changes
     if: needs.detect-changes.outputs.vscode == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        fixture:
-          - single-project
-          - barrel-exports
-          - path-aliases
-          - monorepo
-          - tsconfig-extends
-          - tsconfig-references
-          - composite-paths
-          - no-config
-          - single-file
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -345,12 +332,65 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build LSP binary
         run: cargo build -p verter_lsp
-      - name: Build extension dependencies
-        run: pnpm --filter @verter/language-shared build
-      - name: Build extension
-        run: pnpm --filter verter-vscode build:dev
-      - name: Compile E2E tests
-        run: pnpm --filter verter-vscode pretest:e2e
+      - name: Build extension deps + extension + E2E tests
+        run: |
+          pnpm --filter @verter/language-shared build
+          pnpm --filter verter-vscode build:dev
+          pnpm --filter verter-vscode pretest:e2e
+      - name: Upload LSP binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-binary-debug
+          path: target/debug/verter_lsp
+          retention-days: 1
+      - name: Upload built extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-e2e-build
+          path: |
+            packages/language-shared/dist/
+            packages/vue-vscode/dist/
+            packages/vue-vscode/out-test/
+          retention-days: 1
+
+  vscode-e2e:
+    name: VS Code E2E (${{ matrix.fixture }})
+    needs: [detect-changes, build-vscode-e2e]
+    if: needs.detect-changes.outputs.vscode == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture:
+          - single-project
+          - barrel-exports
+          - path-aliases
+          - monorepo
+          - tsconfig-extends
+          - tsconfig-references
+          - composite-paths
+          - no-config
+          - single-file
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download LSP binary
+        uses: actions/download-artifact@v4
+        with:
+          name: lsp-binary-debug
+          path: target/debug
+      - name: Make LSP binary executable
+        run: chmod +x target/debug/verter_lsp
+      - name: Download built extension
+        uses: actions/download-artifact@v4
+        with:
+          name: vscode-e2e-build
+          path: packages
       - name: Run E2E tests (${{ matrix.fixture }})
         run: xvfb-run -a pnpm --filter verter-vscode test:e2e
         env:

@@ -16,7 +16,9 @@ import {
 import { File } from "./types";
 import { combineSourceMaps, lookupGenerated, lookupSource, parseMappings } from "./sourcemap";
 
-async function generateRealTsxOutput(vueSource: string): Promise<{ code: string; sourceMap: string }> {
+async function generateRealTsxOutput(
+  vueSource: string,
+): Promise<{ code: string; sourceMap: string }> {
   const thisDir = dirname(fileURLToPath(import.meta.url));
   const wasmJs = resolve(thisDir, "../../../wasm/wasm/verter_wasm.js");
   const wasmBin = resolve(thisDir, "../../../wasm/wasm/verter_wasm_bg.wasm");
@@ -93,11 +95,17 @@ declare module "@verter/types" {
   export type ExtractRenderComponent<T> = T extends { new (): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
   export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
-  export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
+  export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
   export declare function extractArgumentsFromRenderSlot<T extends { $slots: { [K in N]: any } }, N extends string>(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
-  export declare function extractLoops<T extends Array<any>>(element: T): T extends Array<infer V> ? { key: number; value: V } : { key: number; value: unknown };
-  export declare function extractLoops<T extends Record<any, any>>(element: T): { [K in keyof T]: { key: K; value: T[K] } }[keyof T];
+  export type ExtractLeafElement<T> = T extends HTMLElement ? T : T extends { $el: infer E } ? ExtractLeafElement<E> : T extends { new (): infer I } ? ExtractLeafElement<I> : never;
+  export type ExtractDirectives<T> = { [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any> ? K extends \`v\${Capitalize<string>}\` ? K : never : never]: T[K]; };
+  export declare function runCustomDirective<TInstance, TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>>(instance: TInstance, directive: TDirective): ExtractLeafElement<TInstance> extends infer El extends HTMLElement ? TDirective extends import("vue").Directive<infer TElement, infer TValue, infer M extends string> ? El extends TElement ? (instance: TInstance, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : (instance: TElement, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : false : false;
+  export declare function retrieveSetupDirectives<T>(o: T): ExtractDirectives<T> extends infer D ? ExtractDirectives<Omit<import("vue").GlobalDirectives, keyof D>> & D : ExtractDirectives<import("vue").GlobalDirectives>;
+  export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+  export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
+  export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
+  export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
 }
 `;
 
@@ -166,9 +174,7 @@ describe("formatDiagnostics", () => {
   });
 
   it("formats severity and message", () => {
-    const result = formatDiagnostics([
-      { severity: "error", message: "unexpected token" } as any,
-    ]);
+    const result = formatDiagnostics([{ severity: "error", message: "unexpected token" } as any]);
     expect(result).toEqual(["[error] unexpected token"]);
   });
 
@@ -253,9 +259,9 @@ describe("resolveKnownModuleReferenceDependencies", () => {
       },
     ];
 
-    expect(
-      resolveKnownModuleReferenceDependencies("src/App.vue", moduleReferences, files),
-    ).toEqual(["src/exact.ts", "src/components/Foo.vue", "src/utils/index.ts"]);
+    expect(resolveKnownModuleReferenceDependencies("src/App.vue", moduleReferences, files)).toEqual(
+      ["src/exact.ts", "src/components/Foo.vue", "src/utils/index.ts"],
+    );
   });
 
   it("uses shared host resolver when the loaded wasm runtime supports it", async () => {
@@ -718,10 +724,7 @@ interface WasmHost {
     aliases: string[];
     compileProfile: Record<string, unknown>;
   }): WasmHostUpsertResult;
-  getVirtualFile(query: {
-    rawId: string;
-    compileProfile?: Record<string, unknown>;
-  }): VirtualFile;
+  getVirtualFile(query: { rawId: string; compileProfile?: Record<string, unknown> }): VirtualFile;
   listVirtualFiles(canonicalId: string): Array<{ kind: string; index?: number }>;
   setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void;
 }

@@ -359,7 +359,7 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
     return {
       name: field.name,
       type: isBoolean && type.kind === "unknown" ? primitive("boolean") : type,
-      required: templateDef?.isRequired ?? !templateDef?.hasDefault ?? true,
+      required: templateDef?.isRequired ?? !templateDef?.hasDefault,
       hasDefault: templateDef?.hasDefault ?? withDefaults != null,
       ...(rawType && { rawType }),
     };
