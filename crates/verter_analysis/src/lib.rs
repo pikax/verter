@@ -28,6 +28,7 @@ mod imports;
 mod macros;
 pub mod project_index;
 pub mod project_resolver;
+pub mod routes;
 pub mod scope;
 pub mod selector_match;
 pub mod style;
@@ -49,6 +50,14 @@ pub use macros::collect_type_references;
 pub use project_index::{
     ComponentEdge, ComponentUsageSummary, CssVarFlow, DynamicInjectEntry, FileInjectValidation,
     InjectValidation, InjectValidationEntry, ProjectIndex, ProjectStats, ProvideInjectSummary,
+};
+pub use routes::{
+    analyze_route_health, build_route_analysis, detect_routing_framework,
+    detect_routing_framework_from_json, discover_layouts, discover_router_configs,
+    extract_file_based_routes, extract_navigation_links, extract_programmatic_routes,
+    extract_route_guards, extract_router_views, flatten_routes, LayoutDefinition, NavigationLink,
+    NavigationTarget, RouteAnalysisSnapshot, RouteDefinition, RouteGuard, RouteGuardKind,
+    RouteHealthIssue, RouteHealthReport, RouterViewLocation, RoutingFramework,
 };
 pub use scope::AnalysisScope;
 pub use selector_match::{match_selector, MatchResult};

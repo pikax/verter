@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::file_usage::{FileUsageFlags, FileUsageInfoOwned};
+use crate::routes::{RouteAnalysisSnapshot, RouteDefinition};
 
 // =============================================================================
 // Project Index
@@ -69,6 +70,9 @@ pub struct ProjectIndex {
 
     /// Template `id` attribute value → files that define it
     template_id_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
+
+    /// Route analysis snapshot (populated by `set_route_snapshot`)
+    route_snapshot: Option<RouteAnalysisSnapshot>,
 }
 
 /// An edge in the component usage graph
@@ -260,6 +264,7 @@ impl ProjectIndex {
             emit_index: FxHashMap::default(),
             listener_index: FxHashMap::default(),
             template_id_index: FxHashMap::default(),
+            route_snapshot: None,
         }
     }
 
@@ -930,6 +935,37 @@ impl ProjectIndex {
         stats
     }
 
+    // ==================== Route Analysis ====================
+
+    /// Set the route analysis snapshot for this project.
+    pub fn set_route_snapshot(&mut self, snapshot: RouteAnalysisSnapshot) {
+        self.route_snapshot = Some(snapshot);
+    }
+
+    /// Get the route analysis snapshot.
+    pub fn route_snapshot(&self) -> Option<&RouteAnalysisSnapshot> {
+        self.route_snapshot.as_ref()
+    }
+
+    /// Find which routes render a given component file path.
+    pub fn routes_for_component(&self, path: &str) -> Vec<&RouteDefinition> {
+        let Some(snapshot) = &self.route_snapshot else {
+            return Vec::new();
+        };
+        let flat = crate::routes::flatten_routes(&snapshot.routes);
+        flat.into_iter()
+            .filter(|r| r.component_path.as_deref() == Some(path))
+            .collect()
+    }
+
+    /// Flatten all routes (including nested children) into a flat list.
+    pub fn flatten_routes(&self) -> Vec<&RouteDefinition> {
+        match &self.route_snapshot {
+            Some(snapshot) => crate::routes::flatten_routes(&snapshot.routes),
+            None => Vec::new(),
+        }
+    }
+
     /// Clear all indexed data
     pub fn clear(&mut self) {
         self.files.clear();
@@ -944,6 +980,7 @@ impl ProjectIndex {
         self.emit_index.clear();
         self.listener_index.clear();
         self.template_id_index.clear();
+        self.route_snapshot = None;
     }
 }
 

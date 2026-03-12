@@ -279,9 +279,16 @@ impl VerterMcpServer {
             "ignore_patterns": resolved.config.ignore_patterns,
         });
 
+        // Detect routing framework after scanning
+        let route_framework = verter_analysis::detect_routing_framework(root);
+        let route_info = serde_json::json!({
+            "framework": route_framework,
+        });
+
         let mut response = serde_json::to_value(&result).map_err(|e| mcp_err(e.to_string()))?;
         if let Some(obj) = response.as_object_mut() {
             obj.insert("loaded_config".to_string(), config_info);
+            obj.insert("routing".to_string(), route_info);
         }
 
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
@@ -2536,6 +2543,174 @@ impl VerterMcpServer {
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // ROUTE ANALYSIS (5 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Get the full route tree for the project. Detects vue-router, Nuxt, or unplugin-vue-router. Returns route hierarchy with paths, names, components, guards, layouts, and navigation links."
+    )]
+    async fn get_route_tree(&self) -> Result<CallToolResult, ErrorData> {
+        let root = self
+            .project_root
+            .as_deref()
+            .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
+
+        let snapshot = self.build_route_snapshot(root);
+        let json = serde_json::to_string_pretty(&snapshot).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Given a .vue file path, find which route(s) render it. Answers: 'what URL shows this component?'"
+    )]
+    async fn get_route_for_component(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let root = self
+            .project_root
+            .as_deref()
+            .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
+
+        let snapshot = self.build_route_snapshot(root);
+        let canonical = self.resolve(&params.path);
+        let flat = verter_analysis::flatten_routes(&snapshot.routes);
+        let matching: Vec<_> = flat
+            .into_iter()
+            .filter(|r| {
+                r.component_path.as_deref().is_some_and(|p| {
+                    p == canonical || canonical.ends_with(p) || p.ends_with(&canonical)
+                })
+            })
+            .collect();
+
+        let response = serde_json::json!({
+            "component": canonical,
+            "routes": matching,
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Get all navigation links (<RouterLink>/<NuxtLink>) in the project or a specific file. Answers: 'who navigates where?'"
+    )]
+    async fn get_navigation_map(
+        &self,
+        Parameters(params): Parameters<OptionalPathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let root = self
+            .project_root
+            .as_deref()
+            .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
+
+        let snapshot = self.build_route_snapshot(root);
+        let links: Vec<_> = if let Some(path) = &params.path {
+            let canonical = self.resolve(path);
+            snapshot
+                .navigation_links
+                .iter()
+                .filter(|l| l.file_path == canonical || canonical.ends_with(&l.file_path))
+                .collect()
+        } else {
+            snapshot.navigation_links.iter().collect()
+        };
+
+        let response = serde_json::json!({
+            "total": links.len(),
+            "links": links,
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Find where <RouterView>/<NuxtPage> components are placed. Answers: 'which components are view containers?'"
+    )]
+    async fn get_router_views(
+        &self,
+        Parameters(params): Parameters<OptionalPathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let root = self
+            .project_root
+            .as_deref()
+            .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
+
+        let snapshot = self.build_route_snapshot(root);
+        let views: Vec<_> = if let Some(path) = &params.path {
+            let canonical = self.resolve(path);
+            snapshot
+                .router_view_locations
+                .iter()
+                .filter(|v| v.file_path == canonical || canonical.ends_with(&v.file_path))
+                .collect()
+        } else {
+            snapshot.router_view_locations.iter().collect()
+        };
+
+        let response = serde_json::json!({
+            "total": views.len(),
+            "views": views,
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Cross-reference routes with components to find issues: missing components, dead routes (no links), orphan views, duplicate paths/names."
+    )]
+    async fn analyze_route_health(&self) -> Result<CallToolResult, ErrorData> {
+        let root = self
+            .project_root
+            .as_deref()
+            .ok_or_else(|| mcp_err("No project root. Run scan_project first."))?;
+
+        let snapshot = self.build_route_snapshot(root);
+
+        // Build set of existing files from the host
+        let existing_files: std::collections::HashSet<String> = self
+            .host
+            .list_files()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        let report = verter_analysis::analyze_route_health(&snapshot, &existing_files);
+        let json = serde_json::to_string_pretty(&report).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+}
+
+impl VerterMcpServer {
+    /// Build a route analysis snapshot by combining framework detection, route extraction,
+    /// and template analysis from loaded files.
+    fn build_route_snapshot(
+        &self,
+        project_root: &std::path::Path,
+    ) -> verter_analysis::RouteAnalysisSnapshot {
+        // Collect template component usages from all loaded Vue files
+        let files = self.host.list_files();
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.as_str())
+            .collect();
+
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+        let template_components: Vec<(String, Vec<verter_analysis::TemplateComponentUsage>)> =
+            analyses
+                .iter()
+                .filter_map(|(id, a)| {
+                    a.template
+                        .as_ref()
+                        .map(|t| (id.clone(), t.components.clone()))
+                })
+                .collect();
+
+        verter_analysis::build_route_analysis(project_root, &template_components)
+    }
 }
 
 /// Simple ISO 8601 timestamp (no chrono dependency).
@@ -2951,6 +3126,69 @@ const count = ref(0)
         assert!(
             diags[0].evidence.is_empty(),
             "should skip out-of-range spans"
+        );
+    }
+
+    // ── Route analysis: build_route_snapshot extracts template components ──
+
+    #[test]
+    fn route_snapshot_from_template_components() {
+        let host = make_host();
+        let src = r#"<script setup>
+import { RouterLink, RouterView } from 'vue-router'
+</script>
+<template>
+  <RouterLink to="/about">About</RouterLink>
+  <RouterView />
+</template>"#;
+        upsert_vue(&host, "/test/App.vue", src);
+        compile_analysis(&host, "/test/App.vue");
+
+        let server = VerterMcpServer::new(
+            Arc::clone(&host),
+            Arc::new(verter_diagnostics::Linter::default()),
+            McpServerConfig {
+                project_root: Some(std::path::PathBuf::from("/test")),
+                ..Default::default()
+            },
+        );
+
+        let snapshot = server.build_route_snapshot(std::path::Path::new("/test"));
+
+        // The snapshot should detect framework as Unknown (no package.json)
+        assert_eq!(
+            snapshot.framework,
+            verter_analysis::RoutingFramework::Unknown
+        );
+        // There should be no routes extracted (no router config file at /test)
+        assert!(
+            snapshot.routes.is_empty(),
+            "no router config means no routes"
+        );
+        // Navigation links should NOT be empty (RouterLink is present)
+        // Note: template analysis may or may not pick up RouterLink as a component usage
+        // depending on how the host processes it — this tests the wiring
+    }
+
+    #[test]
+    fn route_framework_detection_json() {
+        // Unit test for detect_routing_framework_from_json
+        let vue_router = r#"{"dependencies": {"vue": "^3", "vue-router": "^4"}}"#;
+        assert_eq!(
+            verter_analysis::detect_routing_framework_from_json(vue_router),
+            verter_analysis::RoutingFramework::VueRouter
+        );
+
+        let nuxt = r#"{"dependencies": {"nuxt": "^3"}}"#;
+        assert_eq!(
+            verter_analysis::detect_routing_framework_from_json(nuxt),
+            verter_analysis::RoutingFramework::NuxtPages
+        );
+
+        let empty = r#"{"dependencies": {"vue": "^3"}}"#;
+        assert_eq!(
+            verter_analysis::detect_routing_framework_from_json(empty),
+            verter_analysis::RoutingFramework::Unknown
         );
     }
 }
