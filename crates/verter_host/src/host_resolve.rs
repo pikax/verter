@@ -1041,24 +1041,67 @@ impl VerterHost {
                 .collect::<Vec<_>>();
             // Also collect script imports from the file's analysis if available
             let files = read_lock(&self.files);
-            let all_imports: Vec<(String, String)> =
-                if let Some(entry) = files.get(&snapshot.canonical_id) {
-                    entry
-                        .script_analysis
-                        .imports
-                        .iter()
-                        .flat_map(|imp| {
-                            imp.bindings
-                                .iter()
-                                .map(|b| (b.name.clone(), imp.source.clone()))
-                        })
-                        .chain(script_imports)
-                        .collect()
-                } else {
-                    script_imports
-                };
+            let (all_imports, binding_class_unions, props_binding_name) = if let Some(entry) =
+                files.get(&snapshot.canonical_id)
+            {
+                let imports: Vec<(String, String)> = entry
+                    .script_analysis
+                    .imports
+                    .iter()
+                    .flat_map(|imp| {
+                        imp.bindings
+                            .iter()
+                            .map(|b| (b.name.clone(), imp.source.clone()))
+                    })
+                    .chain(script_imports)
+                    .collect();
+
+                // Build string literal union map from props + local bindings
+                let mut unions: Vec<(String, Vec<String>)> = Vec::new();
+
+                // Props from defineProps macro
+                let define_props = entry
+                    .script_analysis
+                    .macros
+                    .iter()
+                    .find(|m| m.kind == verter_analysis::AnalyzedMacroKind::DefineProps);
+                if let Some(dp) = define_props {
+                    for field in &dp.prop_fields {
+                        if let Some(type_ann) = &field.type_annotation {
+                            let classes = verter_analysis::parse_string_literal_union(type_ann);
+                            if !classes.is_empty() {
+                                unions.push((field.name.clone(), classes));
+                            }
+                        }
+                    }
+                }
+
+                // Local bindings with string literal union types
+                for binding in &entry.script_analysis.bindings {
+                    if let Some(type_ann) = &binding.type_annotation {
+                        let effective_type =
+                            verter_analysis::unwrap_reactive_type(type_ann).unwrap_or(type_ann);
+                        let classes = verter_analysis::parse_string_literal_union(effective_type);
+                        if !classes.is_empty() {
+                            unions.push((binding.name.clone(), classes));
+                        }
+                    }
+                }
+
+                // Extract props binding name (e.g., "props" from `const props = defineProps()`)
+                let props_name = define_props.and_then(|dp| dp.binding_name.clone());
+
+                (imports, unions, props_name)
+            } else {
+                (script_imports, Vec::new(), None)
+            };
             drop(files);
-            crate::template_convert::convert_raw_to_analysis(raw, &all_imports)
+            crate::template_convert::convert_raw_to_analysis(
+                raw,
+                &all_imports,
+                &binding_class_unions,
+                props_binding_name.as_deref(),
+            )
         });
 
         Ok((outputs, compile_diags, cached_tsx, template_analysis))

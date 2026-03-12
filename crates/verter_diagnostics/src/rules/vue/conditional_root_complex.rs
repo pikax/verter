@@ -213,6 +213,7 @@ mod tests {
                     .map(|n| AnalyzedPropField {
                         name: n.to_string(),
                         span: Span::new(0, 0),
+                        type_annotation: None,
                     })
                     .collect(),
                 emit_fields: vec![],

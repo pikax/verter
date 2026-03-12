@@ -18,9 +18,19 @@ use verter_core::compile::template_data::RawTemplateData;
 /// The `script_imports` map resolves component tag names to their import source
 /// paths for cross-file analysis. This is populated from the script analysis
 /// (e.g., `"Child"` → `"./Child.vue"`).
+///
+/// `binding_class_unions` maps binding names to their string literal union values
+/// (e.g., `[("variant", ["primary", "secondary"])]`). Used to resolve bare
+/// `:class="variant"` bindings to CSS class names.
+///
+/// `props_binding_name` is the variable name used for `defineProps` return value
+/// (e.g., `"props"` from `const props = defineProps<...>()`). Used to resolve
+/// `:class="props.variant"` patterns.
 pub fn convert_raw_to_analysis(
     raw: &RawTemplateData,
     script_imports: &[(String, String)], // (local_name, source_path)
+    binding_class_unions: &[(String, Vec<String>)], // (binding_name, class_names)
+    props_binding_name: Option<&str>,
 ) -> TemplateAnalysisSnapshot {
     let components = raw
         .components
@@ -60,11 +70,23 @@ pub fn convert_raw_to_analysis(
                 .collect();
 
             // Extract class names from :class object syntax
-            let dynamic_classes = c
+            let mut dynamic_classes = c
                 .dynamic_class_expr
                 .as_deref()
                 .map(verter_analysis::extract_dynamic_class_names)
                 .unwrap_or_default();
+
+            // If extract_dynamic_class_names found nothing, try resolving
+            // bare identifier bindings via string literal union types.
+            if dynamic_classes.is_empty() {
+                if let Some(expr) = c.dynamic_class_expr.as_deref() {
+                    if let Some(classes) =
+                        resolve_classes_from_binding(expr, binding_class_unions, props_binding_name)
+                    {
+                        dynamic_classes = classes.to_vec();
+                    }
+                }
+            }
 
             // Collect v-model directives that target this component
             let v_models: Vec<TemplateComponentVModel> = raw
@@ -279,13 +301,31 @@ pub fn convert_raw_to_analysis(
             });
 
             // Extract class names from :class object syntax (e.g., { 'foo': cond })
-            let dynamic_classes: Vec<String> = e
+            let mut dynamic_classes: Vec<String> = e
                 .attributes
                 .iter()
                 .filter(|a| a.is_dynamic && a.name == "class")
                 .filter_map(|a| a.value.as_deref())
                 .flat_map(verter_analysis::extract_dynamic_class_names)
                 .collect();
+
+            // If no class names from object/array/ternary, try resolving
+            // bare identifier bindings via string literal union types.
+            if dynamic_classes.is_empty() {
+                for attr in &e.attributes {
+                    if attr.is_dynamic && attr.name == "class" {
+                        if let Some(expr) = attr.value.as_deref() {
+                            if let Some(classes) = resolve_classes_from_binding(
+                                expr,
+                                binding_class_unions,
+                                props_binding_name,
+                            ) {
+                                dynamic_classes.extend_from_slice(classes);
+                            }
+                        }
+                    }
+                }
+            }
 
             // Extract CSS variables from :style bindings (e.g., { '--color': val })
             let dynamic_style_vars: Vec<verter_analysis::template::DynamicStyleVar> = e
@@ -408,6 +448,59 @@ fn to_pascal_case(s: &str) -> String {
     result
 }
 
+/// Resolve a `:class` expression to class names via string literal union bindings.
+///
+/// Returns `Some(&[String])` if the expression is:
+/// - A bare identifier matching a name in `binding_class_unions`
+///   (e.g., `:class="variant"` where `variant: 'primary' | 'secondary'`)
+/// - A props member access matching `{props_binding_name}.{prop_name}`
+///   (e.g., `:class="props.variant"`)
+///
+/// Returns `None` otherwise.
+fn resolve_classes_from_binding<'a>(
+    expr: &str,
+    binding_class_unions: &'a [(String, Vec<String>)],
+    props_binding_name: Option<&str>,
+) -> Option<&'a [String]> {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Check bare identifier: `:class="variant"`
+    if is_simple_identifier(trimmed) {
+        if let Some((_, classes)) = binding_class_unions.iter().find(|(n, _)| n == trimmed) {
+            return Some(classes);
+        }
+    }
+
+    // Check props member access: `:class="props.variant"`
+    if let Some(props_name) = props_binding_name {
+        if let Some(rest) = trimmed.strip_prefix(props_name) {
+            if let Some(member) = rest.strip_prefix('.') {
+                let member = member.trim();
+                if is_simple_identifier(member) {
+                    if let Some((_, classes)) =
+                        binding_class_unions.iter().find(|(n, _)| n == member)
+                    {
+                        return Some(classes);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Check if a string is a valid JS identifier (no dots, brackets, parens, etc.).
+fn is_simple_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        && !s.chars().next().unwrap().is_ascii_digit()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,7 +511,7 @@ mod tests {
     #[test]
     fn empty_raw_converts_to_empty_snapshot() {
         let raw = RawTemplateData::default();
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
 
         assert!(result.components.is_empty());
         assert!(result.binding_occurrences.is_empty());
@@ -456,7 +549,7 @@ mod tests {
         };
 
         let imports = vec![("Child".to_string(), "./Child.vue".to_string())];
-        let result = convert_raw_to_analysis(&raw, &imports);
+        let result = convert_raw_to_analysis(&raw, &imports, &[], None);
 
         assert_eq!(result.components.len(), 1);
         assert_eq!(result.components[0].name, "Child");
@@ -489,7 +582,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
         assert!(result.components[0].import_source.is_none());
     }
 
@@ -512,7 +605,7 @@ mod tests {
         };
 
         let imports = vec![("MyHeader".to_string(), "./MyHeader.vue".to_string())];
-        let result = convert_raw_to_analysis(&raw, &imports);
+        let result = convert_raw_to_analysis(&raw, &imports, &[], None);
 
         assert_eq!(
             result.components[0].import_source.as_deref(),
@@ -542,7 +635,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
         assert_eq!(result.binding_occurrences.len(), 1);
         assert_eq!(result.binding_occurrences[0].name, "msg");
         assert_eq!(
@@ -608,7 +701,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
         let props = &result.components[0].props;
         assert_eq!(props[0].constness, PropValueConstness::Const); // static
         assert_eq!(props[1].constness, PropValueConstness::Const); // bound const
@@ -637,7 +730,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
         assert_eq!(result.template_refs.len(), 2);
         assert!(!result.template_refs[0].is_dynamic);
         assert!(result.template_refs[1].is_dynamic);
@@ -666,7 +759,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
         assert_eq!(result.event_handlers.len(), 2);
         assert_eq!(
             result.event_handlers[0].handler_binding.as_deref(),
@@ -698,7 +791,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
         assert_eq!(result.comment_directives.len(), 2);
         assert_eq!(
             result.comment_directives[0].kind,
@@ -725,7 +818,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
         assert_eq!(result.if_chains.len(), 1);
         assert_eq!(result.if_chains[0].conditions.len(), 3);
     }
@@ -738,7 +831,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
         assert_eq!(result.max_nesting_depth, 7);
     }
 
@@ -787,7 +880,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[]);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None);
         assert_eq!(
             result.binding_occurrences[0].usage_kind,
             BindingUsageKind::Interpolation
@@ -811,6 +904,152 @@ mod tests {
         assert_eq!(
             result.binding_occurrences[5].usage_kind,
             BindingUsageKind::IteratorSource
+        );
+    }
+
+    // =========================================================================
+    // Binding class union resolution tests
+    // =========================================================================
+
+    fn make_element_with_dynamic_class(expr: &str) -> RawElementData {
+        RawElementData {
+            tag: "div".to_string(),
+            is_component: false,
+            is_self_closing: false,
+            has_v_if: false,
+            has_v_else: false,
+            has_v_else_if: false,
+            v_if_condition: None,
+            has_v_show: false,
+            has_v_html: false,
+            has_v_text: false,
+            has_text_content: false,
+            has_bare_text: false,
+            has_element_children: false,
+            nesting_depth: 0,
+            parent_tag: None,
+            parent_index: None,
+            span: Span::new(0, 50),
+            tag_span_end: 30,
+            content_end: 45,
+            attributes: vec![RawAttributeData {
+                name: "class".to_string(),
+                value: Some(expr.to_string()),
+                is_dynamic: true,
+                span: Span::new(5, 20),
+                name_end: 10,
+                value_span: Some(Span::new(11, 19)),
+            }],
+            directives: vec![],
+            v_for_idx: None,
+            v_model_idx: None,
+            text_children: vec![],
+        }
+    }
+
+    #[test]
+    fn element_class_bare_identifier_resolved_from_union() {
+        let raw = RawTemplateData {
+            elements: vec![make_element_with_dynamic_class("variant")],
+            ..Default::default()
+        };
+
+        let unions = vec![(
+            "variant".to_string(),
+            vec!["primary".to_string(), "secondary".to_string()],
+        )];
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+
+        assert_eq!(result.elements.len(), 1);
+        assert_eq!(
+            result.elements[0].dynamic_classes,
+            vec!["primary", "secondary"],
+            "bare identifier :class should resolve to string literal union values"
+        );
+    }
+
+    #[test]
+    fn element_class_props_member_access_resolved() {
+        let raw = RawTemplateData {
+            elements: vec![make_element_with_dynamic_class("props.variant")],
+            ..Default::default()
+        };
+
+        let unions = vec![(
+            "variant".to_string(),
+            vec!["primary".to_string(), "secondary".to_string()],
+        )];
+        let result = convert_raw_to_analysis(&raw, &[], &unions, Some("props"));
+
+        assert_eq!(
+            result.elements[0].dynamic_classes,
+            vec!["primary", "secondary"],
+            "props.variant :class should resolve via props_binding_name"
+        );
+    }
+
+    #[test]
+    fn element_class_no_match_returns_empty() {
+        let raw = RawTemplateData {
+            elements: vec![make_element_with_dynamic_class("someVar")],
+            ..Default::default()
+        };
+
+        let unions = vec![("variant".to_string(), vec!["primary".to_string()])];
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+
+        assert!(
+            result.elements[0].dynamic_classes.is_empty(),
+            "unmatched binding should not produce dynamic classes"
+        );
+    }
+
+    #[test]
+    fn element_class_object_syntax_not_overridden_by_union() {
+        // When extract_dynamic_class_names succeeds, don't use union resolution
+        let raw = RawTemplateData {
+            elements: vec![make_element_with_dynamic_class("{ active: isActive }")],
+            ..Default::default()
+        };
+
+        // Even though "active" matches, object syntax should take precedence
+        let unions = vec![("active".to_string(), vec!["x".to_string()])];
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+
+        assert_eq!(
+            result.elements[0].dynamic_classes,
+            vec!["active"],
+            "object syntax should take precedence over union resolution"
+        );
+    }
+
+    #[test]
+    fn component_class_bare_identifier_resolved_from_union() {
+        let raw = RawTemplateData {
+            components: vec![RawComponentUsage {
+                tag_name: "MyComp".to_string(),
+                is_dynamic: false,
+                props: vec![],
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: true,
+                dynamic_class_expr: Some("variant".to_string()),
+                span: Span::new(0, 50),
+            }],
+            ..Default::default()
+        };
+
+        let unions = vec![(
+            "variant".to_string(),
+            vec!["primary".to_string(), "secondary".to_string()],
+        )];
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+
+        assert_eq!(
+            result.components[0].dynamic_classes,
+            vec!["primary", "secondary"],
+            "component :class bare identifier should resolve from unions"
         );
     }
 }

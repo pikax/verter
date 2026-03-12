@@ -2827,14 +2827,17 @@ const count = ref(0)
                     verter_analysis::types::AnalyzedPropField {
                         name: "a".into(),
                         span: verter_span::Span::new(0, 1),
+                        type_annotation: None,
                     },
                     verter_analysis::types::AnalyzedPropField {
                         name: "b".into(),
                         span: verter_span::Span::new(2, 3),
+                        type_annotation: None,
                     },
                     verter_analysis::types::AnalyzedPropField {
                         name: "c".into(),
                         span: verter_span::Span::new(4, 5),
+                        type_annotation: None,
                     },
                 ],
                 emit_fields: vec![],

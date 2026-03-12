@@ -421,6 +421,116 @@ impl TemplateElement {
     }
 }
 
+/// Parse a TypeScript string literal union type into constituent values.
+///
+/// Returns empty if the type contains non-literal members (open-ended types like `string`).
+///
+/// # Examples
+/// - `'primary' | 'secondary'` → `["primary", "secondary"]`
+/// - `'a'` → `["a"]` (single literal)
+/// - `'a' | string` → `[]` (open-ended, non-exhaustive)
+/// - `('a' | 'b')` → `["a", "b"]` (parenthesized)
+pub fn parse_string_literal_union(type_str: &str) -> Vec<String> {
+    let trimmed = type_str.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // Strip outer parentheses
+    let inner = if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        trimmed[1..trimmed.len() - 1].trim()
+    } else {
+        trimmed
+    };
+
+    // Split on `|` at depth 0 (not inside `<`, `(`, `{`, quotes)
+    let segments = split_union_at_depth_zero(inner);
+
+    let mut values = Vec::new();
+    for seg in &segments {
+        let seg = seg.trim();
+        if let Some(val) = extract_string_literal_value(seg) {
+            values.push(val);
+        } else {
+            // Non-literal member → type is open-ended, return empty
+            return Vec::new();
+        }
+    }
+    values
+}
+
+/// Extract the inner type from Vue reactive wrappers like `Ref<T>`, `ComputedRef<T>`.
+///
+/// Returns `Some(inner)` if the type matches a known wrapper pattern, `None` otherwise.
+pub fn unwrap_reactive_type(type_str: &str) -> Option<&str> {
+    let trimmed = type_str.trim();
+    for prefix in &[
+        "Ref<",
+        "ComputedRef<",
+        "WritableComputedRef<",
+        "ShallowRef<",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            if let Some(inner) = rest.strip_suffix('>') {
+                return Some(inner.trim());
+            }
+        }
+    }
+    None
+}
+
+/// Split a type string on `|` at nesting depth 0.
+fn split_union_at_depth_zero(s: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut depth = 0u32;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut last_split = 0;
+
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_single_quote {
+            if b == b'\'' {
+                in_single_quote = false;
+            }
+        } else if in_double_quote {
+            if b == b'"' {
+                in_double_quote = false;
+            }
+        } else {
+            match b {
+                b'\'' => in_single_quote = true,
+                b'"' => in_double_quote = true,
+                b'<' | b'(' | b'{' => depth += 1,
+                b'>' | b')' | b'}' => depth = depth.saturating_sub(1),
+                b'|' if depth == 0 => {
+                    segments.push(&s[last_split..i]);
+                    last_split = i + 1;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    segments.push(&s[last_split..]);
+    segments
+}
+
+/// Try to extract a string literal value from a type segment.
+/// Handles `'value'` and `"value"` forms.
+fn extract_string_literal_value(seg: &str) -> Option<String> {
+    let seg = seg.trim();
+    if seg.len() >= 2
+        && ((seg.starts_with('\'') && seg.ends_with('\''))
+            || (seg.starts_with('"') && seg.ends_with('"')))
+    {
+        return Some(seg[1..seg.len() - 1].to_string());
+    }
+    None
+}
+
 /// Extract class names from a `:class` binding expression (object syntax).
 ///
 /// Handles common patterns:
@@ -2686,5 +2796,88 @@ mod tests {
         assert_eq!(vars[0].value, "1");
         assert_eq!(vars[1].name, "--y");
         assert_eq!(vars[1].value, "2");
+    }
+
+    // =========================================================================
+    // parse_string_literal_union tests
+    // =========================================================================
+
+    #[test]
+    fn parse_string_literal_union_basic() {
+        let result = parse_string_literal_union("'primary' | 'secondary'");
+        assert_eq!(result, vec!["primary", "secondary"]);
+    }
+
+    #[test]
+    fn parse_string_literal_union_single() {
+        let result = parse_string_literal_union("'a'");
+        assert_eq!(result, vec!["a"]);
+    }
+
+    #[test]
+    fn parse_string_literal_union_open_ended() {
+        // Contains non-literal `string` → should return empty
+        let result = parse_string_literal_union("'a' | string");
+        assert!(result.is_empty(), "open-ended union should return empty");
+    }
+
+    #[test]
+    fn parse_string_literal_union_non_literal() {
+        assert!(parse_string_literal_union("string").is_empty());
+        assert!(parse_string_literal_union("number").is_empty());
+        assert!(parse_string_literal_union("MyType").is_empty());
+    }
+
+    #[test]
+    fn parse_string_literal_union_parenthesized() {
+        let result = parse_string_literal_union("('a' | 'b')");
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_string_literal_union_double_quotes() {
+        let result = parse_string_literal_union("\"a\" | \"b\"");
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_string_literal_union_empty() {
+        assert!(parse_string_literal_union("").is_empty());
+        assert!(parse_string_literal_union("   ").is_empty());
+    }
+
+    #[test]
+    fn parse_string_literal_union_three_values() {
+        let result = parse_string_literal_union("'sm' | 'md' | 'lg'");
+        assert_eq!(result, vec!["sm", "md", "lg"]);
+    }
+
+    // =========================================================================
+    // unwrap_reactive_type tests
+    // =========================================================================
+
+    #[test]
+    fn unwrap_reactive_ref() {
+        assert_eq!(unwrap_reactive_type("Ref<'a' | 'b'>"), Some("'a' | 'b'"));
+    }
+
+    #[test]
+    fn unwrap_reactive_computed_ref() {
+        assert_eq!(unwrap_reactive_type("ComputedRef<'x'>"), Some("'x'"));
+    }
+
+    #[test]
+    fn unwrap_reactive_shallow_ref() {
+        assert_eq!(
+            unwrap_reactive_type("ShallowRef<'a' | 'b'>"),
+            Some("'a' | 'b'")
+        );
+    }
+
+    #[test]
+    fn unwrap_reactive_not_reactive() {
+        assert_eq!(unwrap_reactive_type("string"), None);
+        assert_eq!(unwrap_reactive_type("'a' | 'b'"), None);
+        assert_eq!(unwrap_reactive_type("MyType"), None);
     }
 }

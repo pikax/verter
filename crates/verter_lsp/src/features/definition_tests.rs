@@ -2153,6 +2153,7 @@ fn definition_prop_field_type_based() {
             prop_fields: vec![AnalyzedPropField {
                 name: "count".to_string(),
                 span: verter_span::Span::new(type_count_offset as u32, type_count_end as u32),
+                type_annotation: None,
             }],
             emit_fields: vec![],
             span: verter_span::Span::new(
@@ -2223,6 +2224,7 @@ fn definition_prop_field_runtime() {
             prop_fields: vec![AnalyzedPropField {
                 name: "name".to_string(),
                 span: verter_span::Span::new(runtime_name_offset as u32, runtime_name_end as u32),
+                type_annotation: None,
             }],
             emit_fields: vec![],
             span: verter_span::Span::new(
@@ -2299,6 +2301,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
             prop_fields: vec![AnalyzedPropField {
                 name: "count".to_string(),
                 span: verter_span::Span::new(100, 105),
+                type_annotation: None,
             }],
             emit_fields: vec![],
             span: verter_span::Span::new(90, 140),

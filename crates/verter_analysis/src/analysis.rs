@@ -172,7 +172,7 @@ pub fn build_script_analysis_with_scope(
             }
 
             Statement::ExpressionStatement(expr_stmt) => {
-                try_extract_macro_from_expr(&expr_stmt.expression, &mut macros);
+                try_extract_macro_from_expr(&expr_stmt.expression, &mut macros, content);
                 // Detect Vue API call sites (e.g., onMounted(cb), watch(src, cb))
                 try_extract_vue_api_call(&expr_stmt.expression, &import_map, &mut vue_api_calls);
                 // Detect DOM query calls (e.g., document.querySelector('.foo'))
@@ -207,7 +207,7 @@ pub fn build_script_analysis_with_scope(
                 };
 
                 for decl in &var_decl.declarations {
-                    try_extract_macro_from_var_decl(decl, &mut macros);
+                    try_extract_macro_from_var_decl(decl, &mut macros, content);
 
                     let (initializer, is_reactive, mut reactivity_kind) =
                         if let Some(ref init) = decl.init {

@@ -767,6 +767,7 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                 .map(|name| AnalyzedPropField {
                     name: name.to_string(),
                     span: verter_span::Span::new(0, 0),
+                    type_annotation: None,
                 })
                 .collect(),
             emit_fields: vec![],
@@ -848,10 +849,12 @@ fn macro_fallback_with_defaults_pattern() {
                     AnalyzedPropField {
                         name: "msg".to_string(),
                         span: verter_span::Span::new(0, 0),
+                        type_annotation: None,
                     },
                     AnalyzedPropField {
                         name: "count".to_string(),
                         span: verter_span::Span::new(0, 0),
+                        type_annotation: None,
                     },
                 ],
                 emit_fields: vec![],

@@ -727,6 +727,11 @@ pub struct AnalyzedPropField {
     pub name: String,
     /// SFC-absolute byte span of the prop name in the declaration.
     pub span: Span,
+    /// TypeScript type annotation text (e.g., `"'primary' | 'secondary'"` from
+    /// `defineProps<{ variant: 'primary' | 'secondary' }>()`).
+    /// Only populated for type-based `defineProps` with inline type literals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
 }
 
 /// An individual emit field from `defineEmits`.

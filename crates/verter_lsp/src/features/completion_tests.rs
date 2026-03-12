@@ -2231,10 +2231,12 @@ fn test_component_prop_completions_from_macros() {
                     verter_analysis::AnalyzedPropField {
                         name: "foo".to_string(),
                         span: verter_span::Span::new(0, 3),
+                        type_annotation: None,
                     },
                     verter_analysis::AnalyzedPropField {
                         name: "barBaz".to_string(),
                         span: verter_span::Span::new(10, 16),
+                        type_annotation: None,
                     },
                 ],
                 emit_fields: vec![],

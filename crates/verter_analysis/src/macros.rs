@@ -181,17 +181,17 @@ fn collect_qualified_name_root(name: &TSQualifiedName<'_>, refs: &mut Vec<String
 /// Detect Vue macros from a parsed program's body.
 /// Returns analyzed macros with type reference information.
 #[cfg(test)]
-fn analyze_macros_from_program(program: &Program<'_>) -> Vec<AnalyzedMacro> {
+fn analyze_macros_from_program(program: &Program<'_>, source: &str) -> Vec<AnalyzedMacro> {
     let mut macros = Vec::new();
 
     for stmt in &program.body {
         match stmt {
             Statement::ExpressionStatement(expr_stmt) => {
-                try_extract_macro_from_expr(&expr_stmt.expression, &mut macros);
+                try_extract_macro_from_expr(&expr_stmt.expression, &mut macros, source);
             }
             Statement::VariableDeclaration(var_decl) => {
                 for decl in &var_decl.declarations {
-                    try_extract_macro_from_var_decl(decl, &mut macros);
+                    try_extract_macro_from_var_decl(decl, &mut macros, source);
                 }
             }
             _ => {}
@@ -206,10 +206,11 @@ fn analyze_macros_from_program(program: &Program<'_>) -> Vec<AnalyzedMacro> {
 pub(crate) fn try_extract_macro_from_expr(
     expression: &Expression<'_>,
     macros: &mut Vec<AnalyzedMacro>,
+    source: &str,
 ) {
-    if let Some(m) = try_extract_macro(expression, None) {
+    if let Some(m) = try_extract_macro(expression, None, source) {
         if m.kind == AnalyzedMacroKind::WithDefaults {
-            try_extract_inner_macro(expression, macros);
+            try_extract_inner_macro(expression, macros, source);
         }
         macros.push(m);
     }
@@ -220,6 +221,7 @@ pub(crate) fn try_extract_macro_from_expr(
 pub(crate) fn try_extract_macro_from_var_decl(
     decl: &VariableDeclarator<'_>,
     macros: &mut Vec<AnalyzedMacro>,
+    source: &str,
 ) {
     if let Some(ref init) = decl.init {
         let binding_name = if let BindingPattern::BindingIdentifier(id) = &decl.id {
@@ -227,9 +229,9 @@ pub(crate) fn try_extract_macro_from_var_decl(
         } else {
             None
         };
-        if let Some(m) = try_extract_macro(init, binding_name) {
+        if let Some(m) = try_extract_macro(init, binding_name, source) {
             if m.kind == AnalyzedMacroKind::WithDefaults {
-                try_extract_inner_macro(init, macros);
+                try_extract_inner_macro(init, macros, source);
             }
             macros.push(m);
         }
@@ -238,11 +240,11 @@ pub(crate) fn try_extract_macro_from_var_decl(
 
 /// For `withDefaults(defineProps<...>(), {...})`, extract the inner macro
 /// (e.g. `defineProps`) from the first argument.
-fn try_extract_inner_macro(expr: &Expression<'_>, macros: &mut Vec<AnalyzedMacro>) {
+fn try_extract_inner_macro(expr: &Expression<'_>, macros: &mut Vec<AnalyzedMacro>, source: &str) {
     if let Expression::CallExpression(call) = expr {
         if let Some(first_arg) = call.arguments.first() {
             if let Some(inner_expr) = first_arg.as_expression() {
-                if let Some(m) = try_extract_macro(inner_expr, None) {
+                if let Some(m) = try_extract_macro(inner_expr, None, source) {
                     macros.push(m);
                 }
             }
@@ -251,7 +253,11 @@ fn try_extract_inner_macro(expr: &Expression<'_>, macros: &mut Vec<AnalyzedMacro
 }
 
 /// Try to extract a macro call from an expression.
-fn try_extract_macro(expr: &Expression<'_>, binding_name: Option<String>) -> Option<AnalyzedMacro> {
+fn try_extract_macro(
+    expr: &Expression<'_>,
+    binding_name: Option<String>,
+    source: &str,
+) -> Option<AnalyzedMacro> {
     match expr {
         Expression::CallExpression(call) => {
             let callee_name = match &call.callee {
@@ -291,7 +297,7 @@ fn try_extract_macro(expr: &Expression<'_>, binding_name: Option<String>) -> Opt
                 kind == AnalyzedMacroKind::DefineOptions && has_inherit_attrs_false_in_args(call);
 
             let prop_fields = if kind == AnalyzedMacroKind::DefineProps {
-                extract_prop_fields(call)
+                extract_prop_fields(call, source)
             } else {
                 Vec::new()
             };
@@ -324,11 +330,11 @@ fn try_extract_macro(expr: &Expression<'_>, binding_name: Option<String>) -> Opt
 /// - Type-based: `defineProps<{ count: number, name: string }>()`
 /// - Runtime object: `defineProps({ count: { type: Number }, name: String })`
 /// - Runtime array: `defineProps(['count', 'name'])`
-fn extract_prop_fields(call: &CallExpression<'_>) -> Vec<AnalyzedPropField> {
+fn extract_prop_fields(call: &CallExpression<'_>, source: &str) -> Vec<AnalyzedPropField> {
     // Type-based: extract from type parameters
     if let Some(ref type_args) = call.type_arguments {
         if let Some(first) = type_args.params.first() {
-            return extract_prop_fields_from_type(first);
+            return extract_prop_fields_from_type(first, source);
         }
     }
 
@@ -343,7 +349,7 @@ fn extract_prop_fields(call: &CallExpression<'_>) -> Vec<AnalyzedPropField> {
 }
 
 /// Extract prop fields from a TypeScript type parameter (e.g., `{ count: number }`).
-fn extract_prop_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedPropField> {
+fn extract_prop_fields_from_type(ts_type: &TSType<'_>, source: &str) -> Vec<AnalyzedPropField> {
     match ts_type {
         TSType::TSTypeLiteral(literal) => literal
             .members
@@ -355,9 +361,25 @@ fn extract_prop_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedPropField>
                         PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                         _ => None,
                     };
+                    // Extract type annotation text from source span
+                    let type_annotation = prop.type_annotation.as_ref().and_then(|ta| {
+                        let start = ta.type_annotation.span().start as usize;
+                        let end = ta.type_annotation.span().end as usize;
+                        if end <= source.len() {
+                            let text = source[start..end].trim();
+                            if !text.is_empty() {
+                                Some(text.to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
                     key_name.map(|name| AnalyzedPropField {
                         name,
                         span: prop.key.span().into(),
+                        type_annotation,
                     })
                 } else {
                     None
@@ -373,7 +395,7 @@ fn extract_prop_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedPropField>
             intersection
                 .types
                 .iter()
-                .flat_map(|t| extract_prop_fields_from_type(t))
+                .flat_map(|t| extract_prop_fields_from_type(t, source))
                 .collect()
         }
         _ => Vec::new(),
@@ -396,6 +418,7 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropFi
                     key_name.map(|name| AnalyzedPropField {
                         name,
                         span: p.key.span().into(),
+                        type_annotation: None,
                     })
                 } else {
                     None
@@ -410,6 +433,7 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropFi
                     Some(AnalyzedPropField {
                         name: lit.value.to_string(),
                         span: lit.span.into(),
+                        type_annotation: None,
                     })
                 } else {
                     None
@@ -674,7 +698,7 @@ mod tests {
             Parser::new(&alloc, code, SourceType::ts()).with_options(ParseOptions::default());
         let result = parser.parse();
         assert!(!result.panicked, "failed to parse: {}", code);
-        analyze_macros_from_program(&result.program)
+        analyze_macros_from_program(&result.program, code)
     }
 
     /// @ai-generated - Detect defineProps with type param
@@ -1056,5 +1080,58 @@ defineExpose({ props })
         );
         assert_eq!(fields[0].name, "a");
         assert_eq!(fields[1].name, "b");
+    }
+
+    // =========================================================================
+    // Type annotation extraction tests
+    // =========================================================================
+
+    #[test]
+    fn prop_field_type_annotation_string_literal_union() {
+        let code = "defineProps<{ variant: 'primary' | 'secondary' }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let field = &macros[0].prop_fields[0];
+        assert_eq!(field.name, "variant");
+        assert_eq!(
+            field.type_annotation.as_deref(),
+            Some("'primary' | 'secondary'"),
+            "should capture string literal union type annotation"
+        );
+    }
+
+    #[test]
+    fn prop_field_type_annotation_primitive() {
+        let code = "defineProps<{ count: number }>()";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert_eq!(field.name, "count");
+        assert_eq!(
+            field.type_annotation.as_deref(),
+            Some("number"),
+            "should capture primitive type annotation"
+        );
+    }
+
+    #[test]
+    fn prop_field_type_annotation_runtime_is_none() {
+        let code = "defineProps({ count: Number })";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert_eq!(field.name, "count");
+        assert!(
+            field.type_annotation.is_none(),
+            "runtime props should not have type annotation"
+        );
+    }
+
+    #[test]
+    fn prop_field_type_annotation_multiple() {
+        let code = "defineProps<{ variant: 'a' | 'b', size: 'sm' | 'lg' }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].type_annotation.as_deref(), Some("'a' | 'b'"));
+        assert_eq!(fields[1].type_annotation.as_deref(), Some("'sm' | 'lg'"));
     }
 }
