@@ -341,7 +341,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lsp-binary-debug
-          path: target/debug/verter_lsp
+          path: target/debug/verter-lsp
           retention-days: 1
       - name: Upload built extension
         uses: actions/upload-artifact@v4
@@ -385,7 +385,7 @@ jobs:
           name: lsp-binary-debug
           path: target/debug
       - name: Make LSP binary executable
-        run: chmod +x target/debug/verter_lsp
+        run: chmod +x target/debug/verter-lsp
       - name: Download built extension
         uses: actions/download-artifact@v4
         with:
