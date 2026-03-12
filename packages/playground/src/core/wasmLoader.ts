@@ -20,7 +20,6 @@ export interface WasmModule {
   VerterHost?: new (config?: unknown) => {
     resolve: (rawId: string) => unknown;
     upsert: (request: unknown) => unknown;
-    applyStyleOverrides: (request: unknown) => unknown;
     getVirtualFile: (query: unknown) => unknown;
     listVirtualFiles: (canonicalId: string) => unknown;
     remove: (canonicalOrAlias: string) => unknown;

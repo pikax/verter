@@ -19,7 +19,7 @@ describe("loadHost", () => {
     expect(typeof host.upsert).toBe("function");
     expect(typeof host.resolve).toBe("function");
     expect(typeof host.getVirtualFile).toBe("function");
-    expect(typeof host.applyStyleOverrides).toBe("function");
+    expect(typeof host.applyBlockOverrides).toBe("function");
     expect(typeof host.listVirtualFiles).toBe("function");
     expect(typeof host.remove).toBe("function");
   });
@@ -399,12 +399,12 @@ describe("host: listVirtualFiles", () => {
   });
 });
 
-describe("host: applyStyleOverrides", () => {
+describe("host: applyBlockOverrides", () => {
   beforeEach(() => {
     resetHost();
   });
 
-  // @ai-generated - Style overrides replace style output without re-upsert
+  // @ai-generated - Block overrides replace style output without re-upsert
   it("overrides style content without re-upsert", () => {
     const host = loadHost();
     const sfc = [
@@ -426,10 +426,10 @@ describe("host: applyStyleOverrides", () => {
       compileProfile: profile,
     } as any);
 
-    host.applyStyleOverrides({
+    host.applyBlockOverrides({
       canonicalId: "/test/App.vue",
       compileProfile: profile,
-      overrides: [{ index: 0, code: ".a { color: green }" }],
+      overrides: [{ blockType: "style", index: 0, code: ".a { color: green }" }],
     } as any);
 
     const after = host.getVirtualFile({

@@ -1,7 +1,7 @@
 # @verter/native
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Native Node.js bindings via NAPI-RS. Provides high-performance SFC compilation for build tools and servers.
@@ -172,15 +172,15 @@ The IDE virtual filename used behind this API is internal. Consumers should rely
 
 **Returns:** `HostIdeResponse | null`
 
-#### `host.applyStyleOverrides(request)`
+#### `host.applyBlockOverrides(request)`
 
-Apply preprocessed CSS overrides to style blocks. Used when an external preprocessor (SCSS, Less, Stylus) has already transformed the CSS.
+Apply preprocessed block overrides (template, script, style, or custom blocks). Used after an external preprocessor (Pug, SCSS, Less, Stylus, etc.) has transformed block content.
 
 ```ts
-const result = host.applyStyleOverrides({
+const result = host.applyBlockOverrides({
   canonicalId: '/path/to/App.vue',
   overrides: [
-    { index: 0, code: processedCss }, // string or Buffer
+    { blockType: 'style', index: 0, code: processedCss },
   ],
 })
 ```

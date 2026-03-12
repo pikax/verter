@@ -161,7 +161,7 @@ fn default_known_dependency_extensions() -> Vec<String> {
 // VerterHost (in-memory virtual file host)
 //
 // API parity with NAPI (crates/verter_napi):
-// - Both: new, resolve, upsert, applyStyleOverrides, getVirtualFile,
+// - Both: new, resolve, upsert, applyBlockOverrides, getVirtualFile,
 //         listVirtualFiles, remove, setImportDependencies, getAnalysis
 // - NAPI-only: processStyle (requires Node.js)
 // =============================================================================
@@ -230,26 +230,6 @@ impl WasmVerterHost {
         let host_req = ffi_upsert_to_host(ffi_req).map_err(ffi_err)?;
         let result = catch_panic(|| self.inner.upsert(host_req))?.map_err(host_err)?;
         to_wasm_value(&host_update_to_ffi(result, Some(source_for_spans.as_str())))
-    }
-
-    /// Replaces one or more style blocks with preprocessed CSS and recompiles
-    /// affected virtual nodes.
-    ///
-    /// Used after running a CSS preprocessor on style blocks that have a
-    /// `lang` attribute. The host then applies scoping, CSS Modules, and
-    /// `v-bind()` replacement on the preprocessed CSS.
-    ///
-    /// Returns the same changeset structure as [`upsert`](Self::upsert).
-    ///
-    /// Throws if the canonical ID is unknown or the request is malformed.
-    #[wasm_bindgen(js_name = applyStyleOverrides)]
-    pub fn apply_style_overrides(&self, request: JsValue) -> Result<JsValue, JsValue> {
-        let ffi_req = parse_wasm_input::<FfiStyleOverrideRequest>(request)?;
-        let host_req = ffi_style_override_to_host(ffi_req).map_err(ffi_err)?;
-        let result =
-            catch_panic(|| self.inner.apply_style_overrides(host_req))?.map_err(host_err)?;
-        let source = self.inner.get_source(&result.canonical_id);
-        to_wasm_value(&host_update_to_ffi(result, source.as_deref()))
     }
 
     /// Replaces one or more blocks with preprocessed content (e.g. the output

@@ -50,45 +50,27 @@ switch (platform) {
   case "win32":
     switch (arch) {
       case "x64":
-        tryLoadAny([
-          "verter-native.win32-x64-msvc.node",
-          "verter.win32-x64-msvc.node",
-        ]);
+        tryLoadAny(["verter-native.win32-x64-msvc.node", "verter.win32-x64-msvc.node"]);
         break;
       case "ia32":
-        tryLoadAny([
-          "verter-native.win32-ia32-msvc.node",
-          "verter.win32-ia32-msvc.node",
-        ]);
+        tryLoadAny(["verter-native.win32-ia32-msvc.node", "verter.win32-ia32-msvc.node"]);
         break;
       case "arm64":
-        tryLoadAny([
-          "verter-native.win32-arm64-msvc.node",
-          "verter.win32-arm64-msvc.node",
-        ]);
+        tryLoadAny(["verter-native.win32-arm64-msvc.node", "verter.win32-arm64-msvc.node"]);
         break;
       default:
         throw new Error(`Unsupported architecture on Windows: ${arch}`);
     }
     break;
   case "darwin":
-    tryLoadAny([
-      "verter-native.darwin-universal.node",
-      "verter.darwin-universal.node",
-    ]);
+    tryLoadAny(["verter-native.darwin-universal.node", "verter.darwin-universal.node"]);
     if (!nativeBinding) {
       switch (arch) {
         case "x64":
-          tryLoadAny([
-            "verter-native.darwin-x64.node",
-            "verter.darwin-x64.node",
-          ]);
+          tryLoadAny(["verter-native.darwin-x64.node", "verter.darwin-x64.node"]);
           break;
         case "arm64":
-          tryLoadAny([
-            "verter-native.darwin-arm64.node",
-            "verter.darwin-arm64.node",
-          ]);
+          tryLoadAny(["verter-native.darwin-arm64.node", "verter.darwin-arm64.node"]);
           break;
         default:
           throw new Error(`Unsupported architecture on macOS: ${arch}`);
@@ -99,28 +81,16 @@ switch (platform) {
     switch (arch) {
       case "x64":
         if (isMusl()) {
-          tryLoadAny([
-            "verter-native.linux-x64-musl.node",
-            "verter.linux-x64-musl.node",
-          ]);
+          tryLoadAny(["verter-native.linux-x64-musl.node", "verter.linux-x64-musl.node"]);
         } else {
-          tryLoadAny([
-            "verter-native.linux-x64-gnu.node",
-            "verter.linux-x64-gnu.node",
-          ]);
+          tryLoadAny(["verter-native.linux-x64-gnu.node", "verter.linux-x64-gnu.node"]);
         }
         break;
       case "arm64":
         if (isMusl()) {
-          tryLoadAny([
-            "verter-native.linux-arm64-musl.node",
-            "verter.linux-arm64-musl.node",
-          ]);
+          tryLoadAny(["verter-native.linux-arm64-musl.node", "verter.linux-arm64-musl.node"]);
         } else {
-          tryLoadAny([
-            "verter-native.linux-arm64-gnu.node",
-            "verter.linux-arm64-gnu.node",
-          ]);
+          tryLoadAny(["verter-native.linux-arm64-gnu.node", "verter.linux-arm64-gnu.node"]);
         }
         break;
       default:
@@ -162,19 +132,6 @@ VerterHost.prototype.upsert = function (request) {
     request = { ...request, source: Buffer.from(request.source) };
   }
   return _upsert.call(this, request);
-};
-
-const _applyStyleOverrides = VerterHost.prototype.applyStyleOverrides;
-VerterHost.prototype.applyStyleOverrides = function (request) {
-  if (request.overrides && request.overrides.some((o) => typeof o.code === "string")) {
-    request = {
-      ...request,
-      overrides: request.overrides.map((o) =>
-        typeof o.code === "string" ? { ...o, code: Buffer.from(o.code) } : o,
-      ),
-    };
-  }
-  return _applyStyleOverrides.call(this, request);
 };
 
 const _applyBlockOverrides = VerterHost.prototype.applyBlockOverrides;

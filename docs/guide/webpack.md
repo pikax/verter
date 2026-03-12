@@ -1,7 +1,7 @@
 # webpack Integration
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter provides a webpack plugin through `@verter/unplugin`. It replaces `vue-loader` for compiling Vue Single File Components.

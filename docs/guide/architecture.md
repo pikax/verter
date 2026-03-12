@@ -1,7 +1,7 @@
 # Architecture
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter is a hybrid Rust + TypeScript monorepo. Rust crates handle template compilation (exposed via NAPI-RS native bindings and wasm-bindgen WASM) and the LSP server, while TypeScript packages handle the SFC-to-TSX transformation, IDE integration, and bundler plugins.

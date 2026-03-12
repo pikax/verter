@@ -290,21 +290,6 @@ pub struct NapiUpsertRequest {
 }
 
 #[napi(object)]
-pub struct NapiStyleOverrideEntry {
-    pub index: u32,
-    /// Preprocessed CSS as UTF-8 bytes.
-    pub code: Buffer,
-    pub sourceMap: Option<String>,
-}
-
-#[napi(object)]
-pub struct NapiStyleOverrideRequest {
-    pub canonicalId: String,
-    pub compileProfile: Option<NapiCompileProfile>,
-    pub overrides: Vec<NapiStyleOverrideEntry>,
-}
-
-#[napi(object)]
 pub struct NapiVirtualQuery {
     pub rawId: Option<String>,
     pub canonicalId: Option<String>,
@@ -672,7 +657,7 @@ pub struct NapiHostMetrics {
     pub virtualLoads: f64,
     /// Total `resolve()` calls.
     pub resolves: f64,
-    /// Total `applyStyleOverrides()` calls.
+    /// Total style override calls (legacy, reserved for metrics compatibility).
     pub styleOverrideCalls: f64,
     /// Cumulative parse/hash time across all upserts (microseconds).
     pub sliceHashTimeUsTotal: f64,
@@ -982,7 +967,7 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
 // VerterHost (in-memory virtual file host)
 //
 // API parity with WASM (crates/verter_wasm):
-// - Both: new, resolve, upsert, applyStyleOverrides, applyBlockOverrides,
+// - Both: new, resolve, upsert, applyBlockOverrides,
 //         getVirtualFile, listVirtualFiles, remove, setImportDependencies,
 //         getAnalysis, getTsx, lint, getCodeActions, getLintRuleMetadata,
 //         getDocumentSymbols, matchCssSelectors, computeCrossFileOptimizations
@@ -1056,49 +1041,6 @@ impl NapiVerterHost {
         catch_panic(std::panic::AssertUnwindSafe(|| self.inner.upsert(host_req)))?
             .map(|result| host_update_to_napi(result, Some(source_for_spans.as_str())))
             .map_err(host_error)
-    }
-
-    /// Replaces one or more style blocks with preprocessed CSS (e.g. the
-    /// output of SCSS/Less/Stylus) and recompiles affected virtual nodes.
-    ///
-    /// This is used by the Vite plugin after running a CSS preprocessor on
-    /// style blocks that have a `lang` attribute. The host then applies
-    /// scoping, CSS Modules, and `v-bind()` replacement on the preprocessed
-    /// CSS.
-    ///
-    /// Returns the same changeset structure as [`upsert`](Self::upsert).
-    ///
-    /// Returns an error if the canonical ID is unknown or the override code
-    /// is not valid UTF-8.
-    #[napi(js_name = "applyStyleOverrides")]
-    pub fn apply_style_overrides(
-        &self,
-        request: NapiStyleOverrideRequest,
-    ) -> Result<NapiUpdateResult> {
-        let canonical_for_source = request.canonicalId.clone();
-        let overrides = request
-            .overrides
-            .into_iter()
-            .map(|e| {
-                Ok(FfiStyleOverrideEntry {
-                    index: e.index,
-                    code: buffer_to_string(e.code)?,
-                    source_map: e.sourceMap,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let ffi_req = FfiStyleOverrideRequest {
-            canonical_id: request.canonicalId,
-            compile_profile: request.compileProfile.map(Into::into),
-            overrides,
-        };
-        let host_req = ffi_style_override_to_host(ffi_req).map_err(ffi_err)?;
-        let result = catch_panic(std::panic::AssertUnwindSafe(|| {
-            self.inner.apply_style_overrides(host_req)
-        }))?
-        .map_err(host_error)?;
-        let source = self.inner.get_source(&canonical_for_source);
-        Ok(host_update_to_napi(result, source.as_deref()))
     }
 
     /// Replaces one or more blocks with preprocessed content (e.g. the output

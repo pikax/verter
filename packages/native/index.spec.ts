@@ -251,7 +251,6 @@ describe("VerterHost type declarations in sync with native binary", () => {
     // to the `export declare class VerterHost` block in index.ts.
     const declaredMethods = [
       "applyBlockOverrides",
-      "applyStyleOverrides",
       "close",
       "collectResolvableModuleReferenceSpecifiers",
       "getAnalysis",

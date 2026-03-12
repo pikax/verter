@@ -120,17 +120,15 @@ export interface BatchResult {
  *
  * Equivalent to Vize's `compileSfcBatch` for fair benchmark comparison.
  */
-export declare function compileBatch(
-  files: BatchFile[],
-  options?: BatchOptions,
-): BatchResult[];
+export declare function compileBatch(files: BatchFile[], options?: BatchOptions): BatchResult[];
 
 // =============================================================================
 // VerterHost (in-memory virtual file host)
 //
 // Shared types re-exported from host-types.ts. Native-specific overrides
-// (Buffer support) for HostUpsertRequest, HostStyleOverrideEntry, and
-// HostStyleOverrideRequest are defined below.
+// (Buffer support) for HostUpsertRequest are defined below.
+// HostStyleOverrideEntry and HostStyleOverrideRequest are kept for
+// compatibility with @verter/wasm and host-types re-exports.
 // =============================================================================
 
 export type {
@@ -216,15 +214,18 @@ export declare class VerterHost {
   constructor(config?: import("./host-types").HostConfig);
   resolve(rawId: string): import("./host-types").HostResolvedId | null;
   upsert(request: HostUpsertRequest): import("./host-types").HostUpdateResult;
-  /** @deprecated Use `applyBlockOverrides` instead — unified API for all block types. */
-  applyStyleOverrides(request: HostStyleOverrideRequest): import("./host-types").HostUpdateResult;
   applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
   getPublicApi(
     canonicalId: string,
     mode?: HostPublicApiMode,
   ): { code: string; sourceMap?: string } | null;
-  getIde(canonicalId: string, profile?: import("./host-types").HostCompileProfile): import("./host-types").HostIdeResponse | null;
-  getVirtualFile(query: import("./host-types").HostVirtualQuery): import("./host-types").HostVirtualFileResponse | null;
+  getIde(
+    canonicalId: string,
+    profile?: import("./host-types").HostCompileProfile,
+  ): import("./host-types").HostIdeResponse | null;
+  getVirtualFile(
+    query: import("./host-types").HostVirtualQuery,
+  ): import("./host-types").HostVirtualFileResponse | null;
   listVirtualFiles(canonicalId: string): import("./host-types").HostVirtualNodeKind[];
   remove(canonicalOrAlias: string): import("./host-types").HostRemoveResult | null;
   /**
@@ -241,8 +242,13 @@ export declare class VerterHost {
    * Sets the resolved import dependencies for a file, enabling Tier 2/3
    * smart invalidation (cross-file change tracking).
    */
-  setImportDependencies(canonicalOrAlias: string, resolutions: import("./host-types").HostDependencyResolution[]): void;
-  collectResolvableModuleReferenceSpecifiers(moduleReferences: import("./host-types").HostModuleReference[]): string[];
+  setImportDependencies(
+    canonicalOrAlias: string,
+    resolutions: import("./host-types").HostDependencyResolution[],
+  ): void;
+  collectResolvableModuleReferenceSpecifiers(
+    moduleReferences: import("./host-types").HostModuleReference[],
+  ): string[];
   resolveKnownModuleReferenceDependencies(
     ownerCanonicalId: string,
     moduleReferences: import("./host-types").HostModuleReference[],

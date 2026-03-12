@@ -1,7 +1,7 @@
 # Features
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter provides full TypeScript type safety for Vue Single File Components by generating real TSX output. This page covers the key features that go beyond what standard Vue tooling offers.

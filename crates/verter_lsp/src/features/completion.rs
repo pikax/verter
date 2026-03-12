@@ -1233,8 +1233,7 @@ fn component_prop_completions(
     let child_template = child_analysis.template.as_deref();
     let has_prop_defs = child_template.is_some_and(|t| !t.prop_definitions.is_empty());
 
-    if has_prop_defs {
-        let child_template = child_template.unwrap();
+    if let (true, Some(child_template)) = (has_prop_defs, child_template) {
         for prop_def in &child_template.prop_definitions {
             if used_props.contains(&prop_def.name) {
                 continue;
@@ -1298,8 +1297,7 @@ fn component_prop_completions(
     // Try template.emit_definitions first, fall back to macro emit_fields.
     let has_emit_defs = child_template.is_some_and(|t| !t.emit_definitions.is_empty());
 
-    if has_emit_defs {
-        let child_template = child_template.unwrap();
+    if let (true, Some(child_template)) = (has_emit_defs, child_template) {
         for emit_def in &child_template.emit_definitions {
             let event_name = &emit_def.event_name;
             let label = format!("@{}", to_kebab_case(event_name));

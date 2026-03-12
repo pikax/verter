@@ -1,7 +1,7 @@
 # Diagnostics & Linting
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter includes a built-in diagnostic engine (`verter_diagnostics`) that provides **~164 lint rules** across **11 categories**. These rules run natively in Rust inside the LSP, providing instant diagnostics without external tooling. They analyze static analysis data from the compiler and do not require the full TypeScript type checker, so diagnostics are fast and available immediately as you type.

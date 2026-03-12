@@ -1,7 +1,7 @@
 # Getting Started
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 This guide walks you through adding Verter to an existing Vue project. Verter replaces `@vitejs/plugin-vue` (or your current Vue compiler plugin) with its own universal bundler plugin.

@@ -231,25 +231,6 @@ pub fn ffi_upsert_to_host(
     })
 }
 
-/// Convert FFI style override request to host style override request.
-pub fn ffi_style_override_to_host(
-    input: FfiStyleOverrideRequest,
-) -> Result<host::StyleOverrideRequest, FfiConversionError> {
-    Ok(host::StyleOverrideRequest {
-        canonical_id: input.canonical_id,
-        compile_profile: ffi_profile_to_host(input.compile_profile)?,
-        overrides: input
-            .overrides
-            .into_iter()
-            .map(|entry| host::StyleOverrideEntry {
-                index: entry.index as usize,
-                code: Arc::from(entry.code),
-                source_map: entry.source_map.map(Arc::from),
-            })
-            .collect(),
-    })
-}
-
 /// Parse a block type string to the host `PreprocessorBlockType` enum.
 fn ffi_block_type_to_host(s: &str) -> host::PreprocessorBlockType {
     match s {
@@ -1207,39 +1188,6 @@ mod tests {
             aliases: None,
         };
         assert!(ffi_upsert_to_host(ffi).is_err());
-    }
-
-    // ── Style override conversion ────────────────────────────────────
-
-    #[test]
-    fn style_override_basic() {
-        let ffi = FfiStyleOverrideRequest {
-            canonical_id: "/src/Comp.vue".to_string(),
-            compile_profile: None,
-            overrides: vec![
-                FfiStyleOverrideEntry {
-                    index: 0,
-                    code: ".red { color: red }".to_string(),
-                    source_map: Some("sourcemap-json".to_string()),
-                },
-                FfiStyleOverrideEntry {
-                    index: 1,
-                    code: ".blue { color: blue }".to_string(),
-                    source_map: None,
-                },
-            ],
-        };
-        let result = ffi_style_override_to_host(ffi).unwrap();
-        assert_eq!(result.canonical_id, "/src/Comp.vue");
-        assert_eq!(result.overrides.len(), 2);
-        assert_eq!(result.overrides[0].index, 0);
-        assert_eq!(&*result.overrides[0].code, ".red { color: red }");
-        assert_eq!(
-            result.overrides[0].source_map.as_deref(),
-            Some("sourcemap-json")
-        );
-        assert_eq!(result.overrides[1].index, 1);
-        assert!(result.overrides[1].source_map.is_none());
     }
 
     // ── Virtual query conversion ─────────────────────────────────────

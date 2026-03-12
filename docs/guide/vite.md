@@ -1,7 +1,7 @@
 # Vite Integration
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter provides a Vite plugin that serves as a drop-in replacement for `@vitejs/plugin-vue`. It registers itself as `vite:vue` so that downstream plugins (such as `unplugin-vue-macros` and `unplugin-vue-i18n`) that discover the Vue plugin by name continue to work.

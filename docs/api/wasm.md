@@ -1,7 +1,7 @@
 # @verter/wasm
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 WASM bindings for browser-based SFC compilation. Powers the online playground.
@@ -118,7 +118,7 @@ The `Host` class exposes the same methods as `@verter/native`'s `VerterHost`:
 |--------|---------|-------------|
 | `resolve(rawId)` | `HostResolvedId \| null` | Resolve raw ID to canonical ID |
 | `upsert(request)` | `HostUpdateResult` | Register/update a file |
-| `applyStyleOverrides(request)` | `HostUpdateResult` | Apply preprocessed CSS overrides |
+| `applyBlockOverrides(request)` | `HostUpdateResult` | Apply preprocessed block overrides |
 | `getIde(canonicalId, profile?)` | `HostIdeResponse \| null` | Get TSX or JSX for type checking |
 | `getVirtualFile(query)` | `HostVirtualFileResponse` | Get compiled virtual file |
 | `listVirtualFiles(canonicalId)` | `HostVirtualNodeKind[]` | List virtual nodes for a file |

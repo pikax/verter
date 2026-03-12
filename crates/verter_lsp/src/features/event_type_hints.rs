@@ -71,7 +71,9 @@ fn event_type(event_name: &str) -> Option<&'static str> {
 ///
 /// Vue convention: native elements are lowercase, components are PascalCase.
 fn is_native_element(tag: &str) -> bool {
-    !tag.is_empty() && tag.chars().next().unwrap().is_ascii_lowercase()
+    tag.as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_lowercase())
 }
 
 /// Generate event handler type hint code actions.

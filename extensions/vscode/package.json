@@ -36,11 +36,11 @@
     "update-all": "npx npm-check-updates -i"
   },
   "dependencies": {
-    "@vue/compiler-core": "^3.5.17",
-    "@vue/compiler-sfc": "^3.5.17",
-    "@vue/shared": "^3.5.17",
+    "@vue/compiler-core": "^3.5.30",
+    "@vue/compiler-sfc": "^3.5.30",
+    "@vue/shared": "^3.5.30",
     "oxc-parser": "^0.98.0",
-    "vue": "^3.5.17"
+    "vue": "^3.5.30"
   },
   "contributes": {
     "configuration": {

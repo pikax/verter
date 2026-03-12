@@ -33,7 +33,6 @@ const mockHostUpsert = vi.fn(() => ({
     },
   ],
 }));
-const mockHostApplyStyleOverrides = vi.fn(() => ({ changed: true }));
 const mockHostGetVirtualFile = vi.fn(() => ({ code: "virtual", diagnostics: { diagnostics: [] } }));
 const mockHostListVirtualFiles = vi.fn(() => []);
 const mockHostRemove = vi.fn(() => null);
@@ -47,7 +46,6 @@ class MockHost {
 
   resolve = mockHostResolve;
   upsert = mockHostUpsert;
-  applyStyleOverrides = mockHostApplyStyleOverrides;
   getVirtualFile = mockHostGetVirtualFile;
   listVirtualFiles = mockHostListVirtualFiles;
   remove = mockHostRemove;
@@ -72,7 +70,6 @@ beforeEach(async () => {
   mockHostCtor.mockClear();
   mockHostResolve.mockClear();
   mockHostUpsert.mockClear();
-  mockHostApplyStyleOverrides.mockClear();
   mockHostGetVirtualFile.mockClear();
   mockHostListVirtualFiles.mockClear();
   mockHostRemove.mockClear();
@@ -156,7 +153,6 @@ describe("Uint8Array input support", () => {
 
       host.resolve("Comp.vue");
       const upsert = host.upsert({ inputId: "Comp.vue", source: "<template/>", fileKind: "vue" });
-      host.applyStyleOverrides({ canonicalId: "Comp.vue", overrides: [] });
       host.getVirtualFile({ rawId: "Comp.vue" });
       host.listVirtualFiles("Comp.vue");
       host.remove("Comp.vue");
@@ -165,7 +161,6 @@ describe("Uint8Array input support", () => {
       expect(mockHostCtor).toHaveBeenCalledWith({ devMode: true });
       expect(mockHostResolve).toHaveBeenCalledWith("Comp.vue");
       expect(mockHostUpsert).toHaveBeenCalled();
-      expect(mockHostApplyStyleOverrides).toHaveBeenCalled();
       expect(mockHostGetVirtualFile).toHaveBeenCalled();
       expect(mockHostListVirtualFiles).toHaveBeenCalledWith("Comp.vue");
       expect(mockHostRemove).toHaveBeenCalledWith("Comp.vue");
@@ -188,9 +183,9 @@ describe("Uint8Array input support", () => {
         },
       ];
 
-      expect(
-        (host as any).collectResolvableModuleReferenceSpecifiers(moduleReferences),
-      ).toEqual(["./Foo.vue"]);
+      expect((host as any).collectResolvableModuleReferenceSpecifiers(moduleReferences)).toEqual([
+        "./Foo.vue",
+      ]);
       expect(
         (host as any).resolveKnownModuleReferenceDependencies(
           "src/App.vue",

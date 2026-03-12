@@ -1,7 +1,7 @@
 # @verter/core
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 TypeScript SFC parser and TSX transformer. Converts `.vue` files to valid typed TSX representations for IDE analysis. Used internally by the VS Code extension and TypeScript plugin.

@@ -1,7 +1,7 @@
 # LSP Features
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter includes a full Rust LSP server (`verter-lsp`) that communicates with editors over stdio. The server is launched automatically by the VS Code extension and implements a comprehensive set of Language Server Protocol features.

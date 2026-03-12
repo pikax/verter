@@ -1,7 +1,7 @@
 # Reactivity Classification
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter statically classifies every top-level binding in a Vue SFC's `<script setup>` block into a `ReactivityKind`. This classification drives LSP features (hover, completions, diagnostics) and template codegen optimizations without needing a full type checker.

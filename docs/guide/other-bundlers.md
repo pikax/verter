@@ -1,7 +1,7 @@
 # Other Bundlers
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter supports all major JavaScript bundlers through `@verter/unplugin`. This page covers Rollup, esbuild, rspack, Rolldown, and Farm. For Vite and webpack, see their dedicated guides:

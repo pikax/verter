@@ -1,7 +1,7 @@
 # Testing Guide
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter requires thorough testing for all changes. This guide covers testing patterns for both TypeScript and Rust code.

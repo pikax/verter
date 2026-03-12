@@ -104,7 +104,6 @@ import type {
   HostModuleReference,
   HostResolvedId,
   HostUpsertRequest,
-  HostStyleOverrideRequest,
   HostBlockOverrideRequest,
   HostUpdateResult,
   HostVirtualQuery,
@@ -130,14 +129,19 @@ type WasmCompileBytesFn = (input: Uint8Array, options?: CodegenOptions) => Codeg
 type WasmInitFn = () => Promise<unknown>;
 type WasmHostResolveFn = (rawId: string) => HostResolvedId | null;
 type WasmHostUpsertFn = (request: HostUpsertRequest) => HostUpdateResult;
-type WasmHostApplyOverridesFn = (request: HostStyleOverrideRequest) => HostUpdateResult;
 type WasmHostApplyBlockOverridesFn = (request: HostBlockOverrideRequest) => HostUpdateResult;
 type WasmHostGetVirtualFileFn = (query: HostVirtualQuery) => HostVirtualFileResponse;
 type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[];
 type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
-type WasmHostGetIdeFn = (canonicalId: string, profile?: HostCompileProfile) => HostIdeResponse | null;
+type WasmHostGetIdeFn = (
+  canonicalId: string,
+  profile?: HostCompileProfile,
+) => HostIdeResponse | null;
 type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
-type WasmHostSetImportDependenciesFn = (canonicalOrAlias: string, resolutions: HostDependencyResolution[]) => void;
+type WasmHostSetImportDependenciesFn = (
+  canonicalOrAlias: string,
+  resolutions: HostDependencyResolution[],
+) => void;
 type WasmHostCollectResolvableModuleReferenceSpecifiersFn = (
   moduleReferences: HostModuleReference[],
 ) => string[];
@@ -155,7 +159,6 @@ type WasmHostMatchCssSelectorsFn = (canonicalOrAlias: string) => HostSelectorMat
 interface WasmHostBinding {
   resolve: WasmHostResolveFn;
   upsert: WasmHostUpsertFn;
-  applyStyleOverrides: WasmHostApplyOverridesFn;
   applyBlockOverrides: WasmHostApplyBlockOverridesFn;
   getIde: WasmHostGetIdeFn;
   getVirtualFile: WasmHostGetVirtualFileFn;
@@ -286,11 +289,6 @@ export class Host {
 
   upsert(request: HostUpsertRequest): HostUpdateResult {
     return this.inner.upsert(request);
-  }
-
-  /** @deprecated Use `applyBlockOverrides` instead — unified API for all block types. */
-  applyStyleOverrides(request: HostStyleOverrideRequest): HostUpdateResult {
-    return this.inner.applyStyleOverrides(request);
   }
 
   applyBlockOverrides(request: HostBlockOverrideRequest): HostUpdateResult {

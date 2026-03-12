@@ -1,7 +1,7 @@
 # What is Verter?
 
-::: warning Experimental
-Verter is experimental software at v0.0.1-alpha.3. APIs may change without notice.
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
 Verter is a Vue compiler, Language Server Protocol (LSP) implementation, and build tool. It converts Vue Single File Components (SFCs) into valid TSX for type checking and optimized render functions for production -- providing a stricter, more complete TypeScript experience for Vue than existing tools.
@@ -25,7 +25,7 @@ Verter takes a different approach from existing tools:
 
 | | Verter | Volar |
 |---|---|---|
-| **Status** | Experimental (v0.0.1-alpha.3) | Production-ready |
+| **Status** | Pre-release (beta) | Production-ready |
 | **Approach** | SFC to real TSX | Virtual file mapping |
 | **Compiler** | Rust + TypeScript | TypeScript only |
 | **Type safety** | Strict (valid TSX output) | General Vue development |

@@ -5,6 +5,7 @@ use verter_host::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
+use crate::features::sentinel_uris::UNKNOWN_FILE_URI;
 
 /// Build document links from import source paths.
 ///
@@ -162,7 +163,7 @@ fn canonical_id_to_uri(canonical_id: &str) -> Uri {
     path.parse().unwrap_or_else(|_| {
         format!("file:///{canonical_id}")
             .parse()
-            .unwrap_or_else(|_| "file:///unknown".parse().unwrap())
+            .unwrap_or_else(|_| UNKNOWN_FILE_URI.clone())
     })
 }
 

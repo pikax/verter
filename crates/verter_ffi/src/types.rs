@@ -69,24 +69,6 @@ pub struct FfiUpsertRequest {
     pub aliases: Option<Vec<String>>,
 }
 
-/// A single preprocessed style block override.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiStyleOverrideEntry {
-    pub index: u32,
-    pub code: String,
-    pub source_map: Option<String>,
-}
-
-/// Request to apply preprocessed style overrides.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiStyleOverrideRequest {
-    pub canonical_id: String,
-    pub compile_profile: Option<FfiCompileProfile>,
-    pub overrides: Vec<FfiStyleOverrideEntry>,
-}
-
 /// A single preprocessed block override (template, script, style, or custom).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

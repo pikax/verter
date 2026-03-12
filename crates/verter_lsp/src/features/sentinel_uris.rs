@@ -28,3 +28,10 @@ pub static PLACEHOLDER_URI: LazyLock<Uri> = LazyLock::new(|| {
         .parse()
         .expect("PLACEHOLDER_URI_STR is a valid URI")
 });
+
+/// Fallback URI used when a canonical ID cannot be parsed into a valid `file://` URI.
+pub static UNKNOWN_FILE_URI: LazyLock<Uri> = LazyLock::new(|| {
+    "file:///unknown"
+        .parse()
+        .expect("file:///unknown is a valid URI")
+});

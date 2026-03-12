@@ -570,8 +570,11 @@ fn convert_analysis_spans_json(
     match value {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
-                if (key == "spanStart" || key == "spanEnd") && val.is_u64() {
-                    let byte_offset = val.as_u64().unwrap() as u32;
+                if let Some(byte_offset) = val
+                    .as_u64()
+                    .filter(|_| key == "spanStart" || key == "spanEnd")
+                {
+                    let byte_offset = byte_offset as u32;
                     let converted = convert_byte_offset(source, byte_offset, encoding);
                     *val = serde_json::Value::Number(serde_json::Number::from(converted));
                 } else {

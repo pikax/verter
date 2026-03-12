@@ -58,8 +58,8 @@
     "*.{ts,js,mjs,cjs}": "oxfmt --check"
   },
   "dependencies": {
-    "@vue/compiler-core": "3.6.0-beta.7",
-    "@vue/compiler-sfc": "3.6.0-beta.7",
+    "@vue/compiler-core": "^3.5.30",
+    "@vue/compiler-sfc": "^3.5.30",
     "oxfmt": "^0.38.0"
   },
   "devDependencies": {

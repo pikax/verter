@@ -1525,7 +1525,9 @@ impl TypeProvider for TsserverTypeProvider {
             });
             // Remove null paths (shouldn't happen but be safe)
             if options.get("paths").is_some_and(|v| v.is_null()) {
-                options.as_object_mut().unwrap().remove("paths");
+                if let Some(obj) = options.as_object_mut() {
+                    obj.remove("paths");
+                }
             }
             let _ = transport
                 .request(
