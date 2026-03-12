@@ -810,7 +810,12 @@ fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
             // Already absolute — just strip the "./" prefix
             format!("{quote}{after_dot}{quote}")
         } else {
-            let resolved = vue_dir.join(import_path);
+            // Strip leading "./" before joining to avoid "dir/./rest" in the result.
+            // Path::join does not normalize "." segments on all platforms.
+            let clean_rel = import_path
+                .strip_prefix("./")
+                .unwrap_or(import_path);
+            let resolved = vue_dir.join(clean_rel);
             let abs_path = resolved.to_string_lossy().replace('\\', "/");
             format!("{quote}{abs_path}{quote}")
         }
@@ -1531,8 +1536,12 @@ const props = defineProps<{ msg: string }>()
         let code = r#"import('./types').Props"#;
         let result = rewrite_relative_imports(code, Path::new("/project/src"));
         assert!(
-            result.contains("/project/src/./types"),
+            result.contains("/project/src/types"),
             "should resolve relative path: {result}"
+        );
+        assert!(
+            !result.contains("/./"),
+            "resolved path must not contain '/./' segment: {result}"
         );
         assert!(
             !result.contains("'./types'"),
@@ -1555,8 +1564,12 @@ const props = defineProps<{ msg: string }>()
         let code = r#"import type { Props } from './types'"#;
         let result = rewrite_relative_imports(code, Path::new("/project/src"));
         assert!(
-            result.contains("/project/src/./types"),
+            result.contains("/project/src/types"),
             "from keyword relative path should be rewritten: {result}"
+        );
+        assert!(
+            !result.contains("/./"),
+            "resolved path must not contain '/./' segment: {result}"
         );
         assert!(
             !result.contains("from './types'"),
@@ -1589,6 +1602,39 @@ const props = defineProps<{ msg: string }>()
         assert!(
             !result.contains("D:/project/src/./D:/"),
             "should not double the path: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_relative_imports_normalizes_dot_slash() {
+        // `import('./components/Foo.vue.ts')` with vue_dir = "D:/project/src"
+        // should produce "D:/project/src/components/Foo.vue.ts" — NOT "D:/project/src/./components/..."
+        let code = r#"import('./components/Foo.vue.ts')['default']"#;
+        let result = rewrite_relative_imports(code, Path::new("D:/project/src"));
+        // Positive: the resolved absolute path should be clean
+        assert!(
+            result.contains("'D:/project/src/components/Foo.vue.ts'"),
+            "dot-slash import should resolve to clean absolute path: {result}"
+        );
+        // Negative: must NOT contain "./" in the middle of the resolved path
+        assert!(
+            !result.contains("/./"),
+            "resolved path must not contain '/./' segment: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_relative_imports_normalizes_dot_slash_from_syntax() {
+        // `from './types'` with vue_dir = "D:/project/src"
+        let code = r#"import { Foo } from './types'"#;
+        let result = rewrite_relative_imports(code, Path::new("D:/project/src"));
+        assert!(
+            result.contains("'D:/project/src/types'"),
+            "from-syntax dot-slash import should resolve cleanly: {result}"
+        );
+        assert!(
+            !result.contains("/./"),
+            "resolved path must not contain '/./' segment: {result}"
         );
     }
 
