@@ -225,20 +225,14 @@ fn collect_expression_errors(oxc_ast: &OxcParsedAst<'_>, diagnostics: &mut Vec<D
                 if let Some(ref v_for) = el.v_for {
                     for err in &v_for.parsed.result.left_errors {
                         diagnostics.push(
-                            Diagnostic::error(
-                                "template",
-                                CompilerErrorCode::XInvalidExpression,
-                            )
-                            .with_message(err.message.to_string()),
+                            Diagnostic::error("template", CompilerErrorCode::XInvalidExpression)
+                                .with_message(err.message.to_string()),
                         );
                     }
                     for err in &v_for.parsed.result.right_errors {
                         diagnostics.push(
-                            Diagnostic::error(
-                                "template",
-                                CompilerErrorCode::XInvalidExpression,
-                            )
-                            .with_message(err.message.to_string()),
+                            Diagnostic::error("template", CompilerErrorCode::XInvalidExpression)
+                                .with_message(err.message.to_string()),
                         );
                     }
                 }

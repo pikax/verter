@@ -1471,11 +1471,8 @@ impl Syntax {
                         if let Some(prev_key) = find_key_value(prev_el, ctx.bytes) {
                             if my_key == prev_key {
                                 self.diagnostics.push(
-                                    Diagnostic::error(
-                                        "syntax",
-                                        CompilerErrorCode::XVIfSameKey,
-                                    )
-                                    .with_span(key_span),
+                                    Diagnostic::error("syntax", CompilerErrorCode::XVIfSameKey)
+                                        .with_span(key_span),
                                 );
                                 return;
                             }
@@ -1571,7 +1568,9 @@ impl Syntax {
             let slot_span = Span::new(v_slot.start, v_slot.name_end);
 
             // Check for duplicate
-            if let Some((_, first_span)) = seen_slot_names.iter().find(|(name, _)| *name == slot_name) {
+            if let Some((_, first_span)) =
+                seen_slot_names.iter().find(|(name, _)| *name == slot_name)
+            {
                 let _ = first_span; // first occurrence span available if needed
                 self.diagnostics.push(
                     Diagnostic::error("syntax", CompilerErrorCode::XVSlotDuplicateSlotNames)
