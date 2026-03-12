@@ -965,6 +965,73 @@ fn process_tsx_script_setup<'alloc>(
             options.is_jsx,
         );
 
+        // Emit self-referencing component declaration (#28).
+        // When a component's template uses its own name (e.g., <TreeNode /> inside
+        // TreeNode.vue), this const provides the binding so TypeScript resolves
+        // the JSX element. Only emitted when:
+        // 1. The name is not already in bindings (user hasn't imported same name)
+        // 2. The template actually references the component's own name as a tag
+        let self_name_pascal = kebab_to_pascal_case(options.component_name);
+        let template_uses_self = template_ast
+            .and_then(|tpl| tpl.root.content.as_ref())
+            .map(|c| {
+                let tpl_src = &source[c.start as usize..c.end as usize];
+                // Check for <PascalName or <kebab-name tag usage
+                tpl_src.contains(&format!("<{}", self_name_pascal))
+                    || tpl_src.contains(&format!("<{}", options.component_name))
+            })
+            .unwrap_or(false);
+        if template_uses_self
+            && !self_name_pascal.is_empty()
+            && !bindings.contains_key(self_name_pascal.as_str())
+        {
+            let alloc_self_name = alloc.alloc_str(&self_name_pascal);
+            bindings.insert(alloc_self_name, BindingType::SetupConst);
+            let basename = options
+                .filename
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(options.filename);
+            if options.is_jsx {
+                wrapper_end.push_str(&format!(
+                    "const {} = /** @type {{any}} */ ({{}});\n",
+                    self_name_pascal
+                ));
+            } else {
+                wrapper_end.push_str(&format!(
+                    "const {} = {{}} as typeof import('./{}').default;\n",
+                    self_name_pascal, basename
+                ));
+            }
+        }
+
+        // Emit CSS module declarations (#76).
+        // When <style module> exists, inject a typed $style binding so template
+        // expressions like `:class="$style.btn"` get type checking and completions.
+        for css_mod in &options.css_modules {
+            if !bindings.contains_key(css_mod.binding_name.as_str()) {
+                let alloc_name = alloc.alloc_str(&css_mod.binding_name);
+                bindings.insert(alloc_name, BindingType::SetupConst);
+                if options.is_jsx {
+                    wrapper_end.push_str(&format!(
+                        "const {} = /** @type {{Record<string, string>}} */ ({{}});\n",
+                        css_mod.binding_name
+                    ));
+                } else {
+                    let entries: String = css_mod
+                        .class_names
+                        .iter()
+                        .map(|name| format!("  readonly \"{}\": string;", name))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    wrapper_end.push_str(&format!(
+                        "const {} = {{}} as {{\n{}\n}};\n",
+                        css_mod.binding_name, entries
+                    ));
+                }
+            }
+        }
+
         if !setup_bindings.is_empty() {
             let entries: String = setup_bindings
                 .iter()
@@ -5085,9 +5152,20 @@ mod script_partial_tests;
 mod tests {
     use super::*;
     use crate::code_transform::CodeTransform;
+    use crate::ide::CssModuleInfo;
 
     /// Generate TSX script and return (code, bindings, type_constructs).
     fn gen_tsx_script_full(source: &str) -> (String, FxHashMap<String, BindingType>, String) {
+        gen_tsx_script_full_with_opts(source, "App", "App.vue", vec![])
+    }
+
+    /// Generate TSX script with custom component name and CSS modules.
+    fn gen_tsx_script_full_with_opts(
+        source: &str,
+        component_name: &str,
+        filename: &str,
+        css_modules: Vec<CssModuleInfo>,
+    ) -> (String, FxHashMap<String, BindingType>, String) {
         let alloc = Allocator::new();
         let mut ct = CodeTransform::new(source, &alloc);
 
@@ -5106,10 +5184,11 @@ mod tests {
             )
         });
 
+        let js_component_name = crate::ide::sanitize_js_identifier(filename);
         let options = IdeScriptOptions {
-            component_name: "App",
-            js_component_name: "App",
-            filename: "App.vue",
+            component_name,
+            js_component_name: &js_component_name,
+            filename,
             scope_id: "data-v-abc123",
             has_scoped_style: false,
             runtime_module_name: "vue",
@@ -5119,6 +5198,7 @@ mod tests {
             is_jsx: false,
             conditional_root_narrowing: false,
             style_v_bind_vars: vec![],
+            css_modules,
         };
 
         // Use unified CT mode: pass template_end so comp functions are emitted in code
@@ -5214,6 +5294,7 @@ mod tests {
             is_jsx: false,
             conditional_root_narrowing: true,
             style_v_bind_vars: vec![],
+            css_modules: vec![],
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -7338,6 +7419,7 @@ const el2 = ref<HTMLSpanElement>()
                 is_jsx: false,
                 conditional_root_narrowing: false,
                 style_v_bind_vars: vec![],
+                css_modules: vec![],
             },
         );
         assert!(
@@ -7923,6 +8005,7 @@ const props = defineProps<{ msg: string }>()
                 is_jsx: false,
                 conditional_root_narrowing: false,
                 style_v_bind_vars: vec![],
+                css_modules: vec![],
             },
         );
 
@@ -8946,6 +9029,7 @@ count.
             is_jsx: true,
             conditional_root_narrowing: false,
             style_v_bind_vars: vec![],
+            css_modules: vec![],
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -9407,6 +9491,7 @@ const props = defineProps<{ msg: string }>()
             is_jsx: false,
             conditional_root_narrowing: false,
             style_v_bind_vars: vec![],
+            css_modules: vec![],
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -9504,6 +9589,7 @@ function handleClick(event) {}
             is_jsx: false,
             conditional_root_narrowing: false,
             style_v_bind_vars: vec![],
+            css_modules: vec![],
         };
 
         let template_end = syntax.template_ast().map(|tpl| {
@@ -9933,6 +10019,7 @@ const color = ref('red')
                 is_jsx: false,
                 conditional_root_narrowing: false,
                 style_v_bind_vars: vec!["color".to_string()],
+                css_modules: vec![],
             },
         );
         // color is referenced in style v-bind, should get void()
@@ -10407,6 +10494,136 @@ export default {
             parsed.errors.is_empty(),
             "generated JSX should have no parse errors, got {}:\n{code}",
             parsed.errors.len()
+        );
+    }
+
+    // ── Recursive component self-reference (#28) ─────────────────
+
+    #[test]
+    fn recursive_component_self_reference_binding() {
+        let source = r#"<script setup lang="ts">
+const items = [1, 2, 3]
+</script>
+<template><div><TreeNode /></div></template>"#;
+        let (code, bindings, _) =
+            gen_tsx_script_full_with_opts(source, "TreeNode", "TreeNode.vue", vec![]);
+
+        assert!(
+            bindings.contains_key("TreeNode"),
+            "TreeNode must be in bindings for template resolution: {:?}",
+            bindings.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            code.contains("const TreeNode"),
+            "self-reference const declaration must be emitted:\n{code}"
+        );
+        assert!(
+            code.contains("import('./TreeNode.vue')"),
+            "self-reference must use self-import:\n{code}"
+        );
+    }
+
+    #[test]
+    fn recursive_component_self_ref_no_shadow() {
+        let source = r#"<script setup lang="ts">
+import TreeNode from './other/TreeNode.vue'
+</script>
+<template><div><TreeNode /></div></template>"#;
+        let (code, bindings, _) =
+            gen_tsx_script_full_with_opts(source, "TreeNode", "TreeNode.vue", vec![]);
+
+        assert!(
+            bindings.contains_key("TreeNode"),
+            "TreeNode must be in bindings (from import)"
+        );
+        assert!(
+            !code.contains("as typeof import('./TreeNode.vue').default"),
+            "must not emit self-reference when user imports same name:\n{code}"
+        );
+    }
+
+    #[test]
+    fn recursive_component_kebab_case_filename() {
+        let source = r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><div><TreeNode /></div></template>"#;
+        let (code, bindings, _) =
+            gen_tsx_script_full_with_opts(source, "tree-node", "tree-node.vue", vec![]);
+
+        assert!(
+            bindings.contains_key("TreeNode"),
+            "kebab-case filename must produce PascalCase binding: {:?}",
+            bindings.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            code.contains("const TreeNode"),
+            "self-reference const must use PascalCase name:\n{code}"
+        );
+    }
+
+    // ── CSS module support (#76) ────────────────────────────────
+
+    #[test]
+    fn css_module_emits_style_binding() {
+        let source = r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><div :class="$style.btn">click</div></template>"#;
+        let css_modules = vec![CssModuleInfo {
+            binding_name: "$style".to_string(),
+            class_names: vec!["btn".to_string(), "card".to_string()],
+        }];
+        let (code, bindings, _) =
+            gen_tsx_script_full_with_opts(source, "App", "App.vue", css_modules);
+
+        assert!(
+            bindings.contains_key("$style"),
+            "$style must be in bindings: {:?}",
+            bindings.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            code.contains("const $style"),
+            "$style const declaration must be emitted:\n{code}"
+        );
+        assert!(
+            code.contains("\"btn\": string"),
+            "btn class must be in $style type:\n{code}"
+        );
+        assert!(
+            code.contains("\"card\": string"),
+            "card class must be in $style type:\n{code}"
+        );
+        // Negative: must not contain hashed class names
+        assert!(
+            !code.contains("Record<string, string>"),
+            "should use typed object, not Record:\n{code}"
+        );
+    }
+
+    #[test]
+    fn css_module_no_shadow_existing_binding() {
+        // If user defines $style themselves, don't shadow it
+        let source = r#"<script setup lang="ts">
+const $style = useCssModule()
+</script>
+<template><div :class="$style.btn">click</div></template>"#;
+        let css_modules = vec![CssModuleInfo {
+            binding_name: "$style".to_string(),
+            class_names: vec!["btn".to_string()],
+        }];
+        let (code, bindings, _) =
+            gen_tsx_script_full_with_opts(source, "App", "App.vue", css_modules);
+
+        assert!(
+            bindings.contains_key("$style"),
+            "$style must be in bindings (from user code)"
+        );
+        // Should NOT emit our generated declaration since user already has $style
+        let count = code.matches("const $style").count();
+        assert!(
+            count <= 1,
+            "should not emit duplicate $style declarations: found {count} in:\n{code}"
         );
     }
 }

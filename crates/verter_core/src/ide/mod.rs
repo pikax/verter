@@ -71,6 +71,19 @@ pub struct IdeScriptOptions<'a> {
     /// Binding names referenced in style `v-bind()` expressions.
     /// Used to emit `void(name)` and prevent false unused diagnostics.
     pub style_v_bind_vars: Vec<String>,
+    /// CSS module info: `(module_name, class_names)` pairs.
+    /// `module_name` is `"$style"` for `<style module>` or the custom name
+    /// from `<style module="classes">`.
+    pub css_modules: Vec<CssModuleInfo>,
+}
+
+/// CSS module information for IDE codegen.
+#[derive(Debug, Clone)]
+pub struct CssModuleInfo {
+    /// Binding name (e.g., `"$style"` or `"classes"`)
+    pub binding_name: String,
+    /// CSS class names found in the module block.
+    pub class_names: Vec<String>,
 }
 
 /// Options for IDE template generation.
