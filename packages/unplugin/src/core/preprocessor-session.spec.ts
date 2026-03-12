@@ -152,6 +152,34 @@ describe("PreprocessorSession", () => {
     await expect(session.process(makeStyleRequest(longScss), file)).rejects.toThrow(/dead/i);
   }, 30_000);
 
+  it("handles vite config with non-serializable cssOptions (e.g., browserslist functions)", async () => {
+    // Vite's resolved config can contain functions, class instances, etc.
+    // that cannot be cloned via IPC. The session must not crash.
+    session = new PreprocessorSession({
+      root: tempDir,
+      cssOptions: {
+        preprocessorOptions: {
+          scss: { additionalData: "" },
+        },
+        // Simulate a non-serializable function (like browserslist's `info()`)
+        modules: { scopeBehaviour: "local" },
+        devSourcemap: false,
+        transformer: "postcss",
+      } as Record<string, unknown>,
+    });
+    const file = join(tempDir, "NonSerializable.vue").replace(/\\/g, "/");
+    const result = await session.process(
+      makeStyleRequest("$color: green;\n.non-serial { color: $color; }\n"),
+      file,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result?.code).toContain(".non-serial");
+    expect(result?.code).toContain("green");
+    expect(result?.code).not.toContain("$color");
+    expect(session.isAlive()).toBe(true);
+  }, 30_000);
+
   it("close is idempotent and a later style request respawns the child", async () => {
     session = new PreprocessorSession({ root: tempDir });
     const file = join(tempDir, "Respawn.vue").replace(/\\/g, "/");

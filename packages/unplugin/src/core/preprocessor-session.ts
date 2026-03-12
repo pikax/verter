@@ -303,11 +303,24 @@ export class PreprocessorSession {
         }
       });
 
+      // Only send serializable fields. The resolved Vite config often contains
+      // non-cloneable objects (e.g., browserslist functions). The worker will
+      // reload the full config from configFile if available. When configFile
+      // is not set, extract only preprocessorOptions which is what the worker
+      // actually uses for sass/less/stylus compilation.
+      const cssOptions = this.viteConfig?.cssOptions;
+      let serializableCss: Record<string, unknown> | undefined;
+      if (cssOptions && !this.viteConfig?.configFile) {
+        const pp = (cssOptions as any).preprocessorOptions;
+        if (pp && typeof pp === "object") {
+          serializableCss = { preprocessorOptions: pp };
+        }
+      }
       child.send({
         type: "init",
         configFile: this.viteConfig?.configFile,
         root: this.viteConfig?.root,
-        cssOptions: this.viteConfig?.cssOptions,
+        cssOptions: serializableCss,
       });
     });
   }

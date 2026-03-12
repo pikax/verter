@@ -20,49 +20,73 @@
   "files": [
     "dist"
   ],
-  "main": "dist/index.js",
+  "main": "dist/index.cjs",
   "module": "dist/index.mjs",
-  "types": "dist/index.d.ts",
+  "types": "dist/index.d.mts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": {
+        "import": "./dist/index.d.mts",
+        "require": "./dist/index.d.cts"
+      },
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "require": "./dist/index.cjs"
     },
     "./vite": {
-      "types": "./dist/vite.d.ts",
+      "types": {
+        "import": "./dist/vite.d.mts",
+        "require": "./dist/vite.d.cts"
+      },
       "import": "./dist/vite.mjs",
-      "require": "./dist/vite.js"
+      "require": "./dist/vite.cjs"
     },
     "./rollup": {
-      "types": "./dist/rollup.d.ts",
+      "types": {
+        "import": "./dist/rollup.d.mts",
+        "require": "./dist/rollup.d.cts"
+      },
       "import": "./dist/rollup.mjs",
-      "require": "./dist/rollup.js"
+      "require": "./dist/rollup.cjs"
     },
     "./webpack": {
-      "types": "./dist/webpack.d.ts",
+      "types": {
+        "import": "./dist/webpack.d.mts",
+        "require": "./dist/webpack.d.cts"
+      },
       "import": "./dist/webpack.mjs",
-      "require": "./dist/webpack.js"
+      "require": "./dist/webpack.cjs"
     },
     "./esbuild": {
-      "types": "./dist/esbuild.d.ts",
+      "types": {
+        "import": "./dist/esbuild.d.mts",
+        "require": "./dist/esbuild.d.cts"
+      },
       "import": "./dist/esbuild.mjs",
-      "require": "./dist/esbuild.js"
+      "require": "./dist/esbuild.cjs"
     },
     "./rspack": {
-      "types": "./dist/rspack.d.ts",
+      "types": {
+        "import": "./dist/rspack.d.mts",
+        "require": "./dist/rspack.d.cts"
+      },
       "import": "./dist/rspack.mjs",
-      "require": "./dist/rspack.js"
+      "require": "./dist/rspack.cjs"
     },
     "./rolldown": {
-      "types": "./dist/rolldown.d.ts",
+      "types": {
+        "import": "./dist/rolldown.d.mts",
+        "require": "./dist/rolldown.d.cts"
+      },
       "import": "./dist/rolldown.mjs",
-      "require": "./dist/rolldown.js"
+      "require": "./dist/rolldown.cjs"
     },
     "./farm": {
-      "types": "./dist/farm.d.ts",
+      "types": {
+        "import": "./dist/farm.d.mts",
+        "require": "./dist/farm.d.cts"
+      },
       "import": "./dist/farm.mjs",
-      "require": "./dist/farm.js"
+      "require": "./dist/farm.cjs"
     }
   },
   "scripts": {
@@ -81,7 +105,7 @@
   },
   "dependencies": {
     "@verter/native": "workspace:*",
-    "unplugin": "^3.0.0"
+    "unplugin": "^2.3.0 || ^3.0.0"
   },
   "devDependencies": {
     "@farmfe/cli": "^1.0.5",
