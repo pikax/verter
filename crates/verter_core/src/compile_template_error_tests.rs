@@ -390,14 +390,22 @@ fn no_error_x_v_for_malformed_expression_on_valid() {
     assert_no_error(&result, "XVForMalformedExpression");
 }
 
+// XVBindNoExpression — never emitted since Vue 3.4+ same-name shorthand
+// makes `:attr` and `v-bind:attr` without value always valid (expands to `:attr="attr"`).
 #[test]
-#[ignore = "Vue 3.4 same-name shorthand makes :attr without value valid"]
-fn error_x_v_bind_no_expression() {
-    // v-bind with a named arg but no value — in Vue 3.4+, this is same-name shorthand
+fn no_error_x_v_bind_same_name_shorthand() {
+    // v-bind with a named arg but no value — Vue 3.4+ same-name shorthand, NOT an error
     let src = r#"<template><div v-bind:class>hello</div></template>"#;
     let result = compile_sfc(src);
-    assert_has_error(&result, "XVBindNoExpression");
-    assert_error_severity(&result, "XVBindNoExpression");
+    assert_no_error(&result, "XVBindNoExpression");
+}
+
+#[test]
+fn no_error_x_v_bind_shorthand_colon() {
+    // :class without value — Vue 3.4+ same-name shorthand
+    let src = r#"<template><div :class>hello</div></template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "XVBindNoExpression");
 }
 
 #[test]
@@ -415,19 +423,36 @@ fn no_error_x_v_bind_spread() {
     assert_no_error(&result, "XVBindNoExpression");
 }
 
+// XVOnNoExpression — never emitted in Vue 3. @click without a handler is a
+// no-op (legacy Vue 2 error code). Both bare @click and modifier-only
+// @click.prevent are valid.
 #[test]
-#[ignore = "Vue 3.4 same-name shorthand makes @event without value valid"]
-fn error_x_v_on_no_expression() {
-    // v-on with a named arg but no handler — in Vue 3.4+, this is same-name shorthand
+fn no_error_x_v_on_bare_event() {
+    // @click without handler is valid in Vue 3 (no-op)
     let src = r#"<template><div v-on:click>hello</div></template>"#;
     let result = compile_sfc(src);
-    assert_has_error(&result, "XVOnNoExpression");
-    assert_error_severity(&result, "XVOnNoExpression");
+    assert_no_error(&result, "XVOnNoExpression");
+}
+
+#[test]
+fn no_error_x_v_on_bare_event_shorthand() {
+    // @click shorthand without handler is valid
+    let src = r#"<template><div @click>hello</div></template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "XVOnNoExpression");
 }
 
 #[test]
 fn no_error_x_v_on_no_expression_on_valid() {
     let src = r#"<template><div v-on:click="handler">hello</div></template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "XVOnNoExpression");
+}
+
+#[test]
+fn no_error_x_v_on_modifier_only() {
+    // @click.prevent without handler — valid modifier-only usage
+    let src = r#"<template><div @click.prevent>hello</div></template>"#;
     let result = compile_sfc(src);
     assert_no_error(&result, "XVOnNoExpression");
 }

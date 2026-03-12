@@ -1231,6 +1231,8 @@ impl Syntax {
                             .expect("invariant: prop not yet taken in v-on branch");
                         if p.arg_start.is_some() {
                             builder.add_prop_flag(PropFlags::HasEventListener);
+                            // Note: @click without handler is valid in Vue 3 — it's a no-op.
+                            // XVOnNoExpression is not emitted (legacy Vue 2 error code).
                         } else {
                             // v-on with no arg = spread
                             builder.add_prop_flag(PropFlags::HasOnSpread);
