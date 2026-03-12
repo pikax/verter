@@ -31,7 +31,7 @@ interface AnalysisImport {
 }
 
 interface AnalysisModuleReference {
-  syntax: string;       // "StaticImport" | "ExportFrom" | "DynamicImport" | "RequireCall"
+  syntax: string; // "StaticImport" | "ExportFrom" | "DynamicImport" | "RequireCall"
   literalSpecifier?: string;
 }
 
@@ -57,6 +57,26 @@ function isRelativeImport(specifier: string): boolean {
   return specifier.startsWith(".");
 }
 
+/**
+ * Parse a bare package specifier into package name + sub-path.
+ * e.g. "echarts/types/dist/shared" → { pkgName: "echarts", subPath: "types/dist/shared" }
+ * e.g. "@scope/pkg/foo" → { pkgName: "@scope/pkg", subPath: "foo" }
+ * e.g. "lodash" → { pkgName: "lodash", subPath: null }
+ */
+function parseBareSpecifier(specifier: string): { pkgName: string; subPath: string | null } {
+  if (specifier.startsWith("@")) {
+    // Scoped package: @scope/name/sub/path
+    const parts = specifier.split("/");
+    if (parts.length < 2) return { pkgName: specifier, subPath: null };
+    const pkgName = parts[0] + "/" + parts[1];
+    const subPath = parts.length > 2 ? parts.slice(2).join("/") : null;
+    return { pkgName, subPath };
+  }
+  const slashIdx = specifier.indexOf("/");
+  if (slashIdx === -1) return { pkgName: specifier, subPath: null };
+  return { pkgName: specifier.slice(0, slashIdx), subPath: specifier.slice(slashIdx + 1) };
+}
+
 function resolvedIdFromHookResult(result: unknown): string | null {
   if (!result) return null;
   if (typeof result === "string") {
@@ -76,9 +96,7 @@ function resolvedIdFromHookResult(result: unknown): string | null {
  * checks (in order): `types`, `typings`, `exports["."].types`, sibling `.d.ts`,
  * package-root `index.d.ts`.
  */
-async function findPackageDeclarationEntry(
-  runtimeEntry: string,
-): Promise<string | null> {
+async function findPackageDeclarationEntry(runtimeEntry: string): Promise<string | null> {
   const fs = await import("fs");
   const path = await import("path");
 
@@ -147,10 +165,7 @@ async function findPackageDeclarationEntry(
  * Recursively search `exports` for a `types` condition.
  * Handles nested condition objects like `{ ".": { "types": "./dist/index.d.ts" } }`.
  */
-function findTypesInExports(
-  exports: Record<string, unknown>,
-  pkgDir: string,
-): string | null {
+function findTypesInExports(exports: Record<string, unknown>, pkgDir: string): string | null {
   const path = require("path") as typeof import("path");
 
   // Direct `types` condition
@@ -212,12 +227,101 @@ export async function hydrateMacroTypeDeps(
   // Collect unique specifiers from macro type deps.
   const specifiers = [...new Set(analysis.macroTypeDeps.map((dep) => dep.importSource))];
 
-  // Filter to bare (non-relative) specifiers — relative ones are already handled
-  // by resolveUpsertDependencies.
-  const bareSpecifiers = specifiers.filter((s) => !isRelativeImport(s));
-  if (bareSpecifiers.length === 0) return;
-
   const resolutions: HostDependencyResolution[] = [];
+
+  // Phase 1: Handle specifiers that resolve to .vue files.
+  // resolveUpsertDependencies records .vue resolutions but does NOT upsert the
+  // source — the assumption is the bundler will process the .vue file later.
+  // But macro type resolution needs the source NOW. Upsert .vue deps eagerly.
+  const remaining: string[] = [];
+  for (const specifier of specifiers) {
+    let resolvedPath: string | null = null;
+
+    // Try bundler resolve hook
+    if (resolveId) {
+      const result = resolvedIdFromHookResult(
+        await resolveId(specifier, filename, { skipSelf: true }),
+      );
+      if (result) resolvedPath = result;
+    }
+
+    // For relative specifiers without a resolve hook, try filesystem probing
+    if (!resolvedPath && isRelativeImport(specifier)) {
+      const absBase = path.resolve(path.dirname(filename), specifier);
+      const candidates = [absBase, absBase + ".vue", absBase + "/index.vue"];
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          resolvedPath = candidate;
+          break;
+        }
+      }
+    }
+
+    if (resolvedPath) {
+      const normalized = normalizePath(resolvedPath);
+      if (normalized.endsWith(".vue")) {
+        // Upsert the .vue file as SFC so the host can read its exported types
+        try {
+          const vueSrc = fs.readFileSync(resolvedPath);
+          host.upsert({ inputId: normalized, source: vueSrc });
+        } catch {
+          // Read failed — skip
+        }
+        resolutions.push({ specifier, resolvedCanonicalId: normalized });
+        continue;
+      }
+      // Non-.vue resolved file (.ts, .d.ts, etc.) — only handle relative specifiers.
+      // Bare specifiers (npm packages) should go to Phase 2 which properly finds
+      // the .d.ts declaration entry via package.json, not the .js runtime entry.
+      if (isRelativeImport(specifier)) {
+        try {
+          const depSrc = fs.readFileSync(resolvedPath);
+          host.upsert({ inputId: normalized, source: depSrc, fileKind: "non_sfc" });
+        } catch {
+          // Read failed — skip
+        }
+        resolutions.push({ specifier, resolvedCanonicalId: normalized });
+        continue;
+      }
+    }
+
+    // Relative specifier with no resolve hook hit — try filesystem probing
+    if (isRelativeImport(specifier)) {
+      const absBase = path.resolve(path.dirname(filename), specifier);
+      const probeCandidates = [
+        absBase + ".ts",
+        absBase + ".d.ts",
+        absBase + ".tsx",
+        absBase + "/index.ts",
+        absBase + "/index.d.ts",
+        absBase, // exact path
+      ];
+      let found = false;
+      for (const candidate of probeCandidates) {
+        if (fs.existsSync(candidate)) {
+          const normalized = normalizePath(candidate);
+          try {
+            const depSrc = fs.readFileSync(candidate);
+            host.upsert({ inputId: normalized, source: depSrc, fileKind: "non_sfc" });
+          } catch {
+            // skip
+          }
+          resolutions.push({ specifier, resolvedCanonicalId: normalized });
+          found = true;
+          break;
+        }
+      }
+      if (found) continue;
+    }
+
+    // Not resolved — collect for Phase 2 (bare package specifier handling)
+    if (!isRelativeImport(specifier)) {
+      remaining.push(specifier);
+    }
+  }
+
+  // Phase 2: Bare (non-relative) specifiers pointing to npm packages.
+  const bareSpecifiers = remaining;
   const visited = new Set<string>();
 
   for (const specifier of bareSpecifiers) {
@@ -237,18 +341,67 @@ export async function hydrateMacroTypeDeps(
         const require = createRequire(filename);
         runtimeEntry = require.resolve(specifier);
       } catch {
-        continue;
+        // Runtime resolution failed — may be a types-only sub-path (e.g. "echarts/types/dist/shared").
+        // Try to find the package directory and resolve the sub-path as .d.ts directly.
       }
     }
 
-    if (!runtimeEntry) continue;
+    let entryPath: string | null = null;
 
-    // Find the declaration entry from package.json, or fall back to the
-    // runtime entry itself if it's a .ts/.d.ts file (local project files).
-    let entryPath = await findPackageDeclarationEntry(runtimeEntry);
-    if (!entryPath && (runtimeEntry.endsWith(".ts") || runtimeEntry.endsWith(".d.ts"))) {
-      entryPath = runtimeEntry;
+    if (runtimeEntry) {
+      // Find the declaration entry from package.json, or fall back to the
+      // runtime entry itself if it's a .ts/.d.ts file (local project files).
+      entryPath = await findPackageDeclarationEntry(runtimeEntry);
+      if (!entryPath && (runtimeEntry.endsWith(".ts") || runtimeEntry.endsWith(".d.ts"))) {
+        entryPath = runtimeEntry;
+      }
     }
+
+    // Fallback: for sub-path specifiers where runtime resolution failed,
+    // find the package directory and probe for .d.ts files at the sub-path.
+    if (!entryPath) {
+      const { pkgName, subPath } = parseBareSpecifier(specifier);
+      if (subPath) {
+        let pkgDir: string | null = null;
+        try {
+          const { createRequire } = await import("module");
+          const req = createRequire(filename);
+          const pkgJsonPath = req.resolve(pkgName + "/package.json");
+          pkgDir = path.dirname(pkgJsonPath);
+        } catch {
+          // Try walking node_modules manually
+          let dir = path.dirname(filename);
+          const root = path.parse(dir).root;
+          while (dir !== root) {
+            const candidate = path.join(dir, "node_modules", pkgName);
+            if (fs.existsSync(path.join(candidate, "package.json"))) {
+              pkgDir = candidate;
+              break;
+            }
+            dir = path.dirname(dir);
+          }
+        }
+
+        if (pkgDir) {
+          const absBase = path.join(pkgDir, subPath);
+          const candidates = [
+            absBase + ".d.ts",
+            absBase + ".d.mts",
+            absBase + "/index.d.ts",
+            absBase + "/index.d.mts",
+            absBase + ".ts",
+            absBase,
+          ];
+          for (const candidate of candidates) {
+            if (fs.existsSync(candidate)) {
+              entryPath = normalizePath(candidate);
+              break;
+            }
+          }
+        }
+      }
+    }
+
     if (!entryPath) continue;
 
     // Upsert the entry file
@@ -291,10 +444,10 @@ export async function hydrateMacroTypeDeps(
       // Collect sources from imports and re-export signatures.
       // Export signatures are more precise than moduleReferences: they know exactly
       // which names are re-exported and from where.
-      const importSources = (depAnalysis.imports ?? []).map(imp => imp.source);
+      const importSources = (depAnalysis.imports ?? []).map((imp) => imp.source);
       const reexportSources = (depAnalysis.exportSignatures ?? [])
-        .filter(sig => sig.reexportSource)
-        .map(sig => sig.reexportSource!);
+        .filter((sig) => sig.reexportSource)
+        .map((sig) => sig.reexportSource!);
       const allSources = [...new Set([...importSources, ...reexportSources])];
 
       for (const source of allSources) {

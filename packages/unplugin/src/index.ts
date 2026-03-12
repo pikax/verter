@@ -3,17 +3,19 @@ import { createUnplugin } from "unplugin";
 import type { ResolvedConfig } from "vite";
 import type { VerterPluginOptions, HmrStrategy, BlockPreprocessor } from "./core/types";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
-import type { HostCompileProfile, HostUpdateResult, NativeBlockOverrideEntry, HostDependencyResolution } from "@verter/native";
+import type {
+  HostCompileProfile,
+  HostUpdateResult,
+  NativeBlockOverrideEntry,
+  HostDependencyResolution,
+} from "@verter/native";
 import type { VerterHost } from "@verter/native";
 import { loadHost, generateComponentId, processStyle, resetHost } from "./core/compiler";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
 import { hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
 import { preprocessBlock } from "./core/preprocessor";
-import {
-  isStylePreprocessorRequest,
-  PreprocessorSession,
-} from "./core/preprocessor-session";
+import { isStylePreprocessorRequest, PreprocessorSession } from "./core/preprocessor-session";
 import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
@@ -81,7 +83,6 @@ async function resolveUpsertDependencies(
     const fs = await import("fs");
     const path = await import("path");
     const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".d.ts", ".d.mts", ".d.cts"];
-
     for (const specifier of dependencySpecifiers) {
       // Try bundler resolve hook first (if available)
       if (resolveId) {
@@ -210,7 +211,9 @@ function getHmrStrategy(framework: string): HmrStrategy {
   }
 }
 
-function createFilter(include?: string | RegExp | (string | RegExp)[]): (filename: string) => boolean {
+function createFilter(
+  include?: string | RegExp | (string | RegExp)[],
+): (filename: string) => boolean {
   if (!include) {
     return (f) => f.endsWith(".vue");
   }
@@ -223,12 +226,7 @@ function detectNuxt(root: string): boolean {
   try {
     const fs = require("fs");
     const path = require("path");
-    const configFiles = [
-      "nuxt.config.ts",
-      "nuxt.config.js",
-      "nuxt.config.mts",
-      "nuxt.config.mjs",
-    ];
+    const configFiles = ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mts", "nuxt.config.mjs"];
     for (const f of configFiles) {
       if (fs.existsSync(path.join(root, f))) return true;
     }
@@ -260,7 +258,9 @@ function resolveNuxtAlias(id: string, root: string): string | null {
   if (aliasMap[id]) {
     try {
       if (fs.existsSync(aliasMap[id])) return aliasMap[id];
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   // Prefix match for #ui/*, #internal/*, etc.
@@ -273,7 +273,9 @@ function resolveNuxtAlias(id: string, root: string): string | null {
         const full = resolved + ext;
         try {
           if (fs.existsSync(full)) return full;
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     }
   }
@@ -371,17 +373,19 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       // Reuse the compile profile from transform() to ensure the same componentId
       // and other fields are used. Fall back to a basic profile if not cached.
       const cachedProfile = profileCache.get(filename);
-      const compileProfile: HostCompileProfile = cachedProfile ?? (() => {
-        const isProd = viteConfig
-          ? viteConfig.command === "build" && !viteConfig.build?.ssr
-          : process.env.NODE_ENV === "production";
-        const ssr = viteConfig ? Boolean(viteConfig.build?.ssr) : false;
-        return {
-          isProduction: isProd,
-          ssr,
-          hmrStrategy: (isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"],
-        };
-      })();
+      const compileProfile: HostCompileProfile =
+        cachedProfile ??
+        (() => {
+          const isProd = viteConfig
+            ? viteConfig.command === "build" && !viteConfig.build?.ssr
+            : process.env.NODE_ENV === "production";
+          const ssr = viteConfig ? Boolean(viteConfig.build?.ssr) : false;
+          return {
+            isProduction: isProd,
+            ssr,
+            hmrStrategy: (isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"],
+          };
+        })();
 
       try {
         const lt0 = timing ? performance.now() : 0;
@@ -409,7 +413,14 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       // Main .vue files for compilation
       if (filter(filename) && !query.vue) return true;
       // Style virtual files need one more pass for CSS scoping.
-      if (query.vue && query.type === "style" && query.lang && query.lang !== "css" && filter(filename)) return true;
+      if (
+        query.vue &&
+        query.type === "style" &&
+        query.lang &&
+        query.lang !== "css" &&
+        filter(filename)
+      )
+        return true;
       return false;
     },
 
@@ -466,7 +477,13 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 
         // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
         await applyPreprocessorRequests(
-          host, filename, upsertResult, profile, viteConfig, opts.customBlocks, session,
+          host,
+          filename,
+          upsertResult,
+          profile,
+          viteConfig,
+          opts.customBlocks,
+          session,
         );
 
         const main = host.getVirtualFile({
@@ -599,7 +616,13 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 
       // Preprocess non-native blocks (Pug, CoffeeScript, SCSS, custom)
       await applyPreprocessorRequests(
-        host, filename, upsertResult, profile, viteConfig, opts.customBlocks, session,
+        host,
+        filename,
+        upsertResult,
+        profile,
+        viteConfig,
+        opts.customBlocks,
+        session,
       );
       const t2 = timing ? performance.now() : 0;
 

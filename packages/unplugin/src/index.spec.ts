@@ -53,9 +53,7 @@ describe("unplugin hooks", () => {
 
   it("resolveId resolves vue virtual module IDs", () => {
     const plugin = createPlugin();
-    const result = plugin.resolveId(
-      "/path/to/App.vue?vue&type=style&index=0&lang=css",
-    );
+    const result = plugin.resolveId("/path/to/App.vue?vue&type=style&index=0&lang=css");
     expect(result).toBe("/path/to/App.vue?vue&type=style&index=0&lang=css");
   });
 
@@ -92,11 +90,7 @@ describe("unplugin hooks", () => {
 
   it("transformInclude returns false for vue virtual modules", () => {
     const plugin = createPlugin();
-    expect(
-      plugin.transformInclude(
-        "/path/to/App.vue?vue&type=style&index=0&lang=css",
-      ),
-    ).toBe(false);
+    expect(plugin.transformInclude("/path/to/App.vue?vue&type=style&index=0&lang=css")).toBe(false);
   });
 
   // @ai-generated - Tests include option for non-.vue files
@@ -342,7 +336,9 @@ describe("vite compat shim", () => {
     const result = mod.default({
       template: { compilerOptions: { isCustomElement: (tag: string) => tag === "x-foo" } },
     });
-    expect((result as any).api.options.template.compilerOptions.isCustomElement("x-foo")).toBe(true);
+    expect((result as any).api.options.template.compilerOptions.isCustomElement("x-foo")).toBe(
+      true,
+    );
   });
 });
 
@@ -439,8 +435,8 @@ const msg: string = 'hello'
       // BUG: forceJs=true does NOT strip inline type annotations
       // This means non-Vite bundlers still receive TS syntax in the output.
       // These assertions document the ACTUAL (buggy) behavior:
-      expect(code).toContain("ref<number>");    // NOT stripped
-      expect(code).toContain(": string");        // NOT stripped
+      expect(code).toContain("ref<number>"); // NOT stripped
+      expect(code).toContain(": string"); // NOT stripped
     });
   }
 
@@ -589,10 +585,7 @@ describe("bundler dependency delegation", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = join(
-      tmpdir(),
-      `verter-deps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    );
+    tempDir = join(tmpdir(), `verter-deps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
     mkdirSync(tempDir, { recursive: true });
     resetHost();
   });
@@ -689,8 +682,7 @@ import Child from './Child.vue'
     ]);
     expect(
       upsertSpy.mock.calls.some(
-        ([request]) =>
-          request?.inputId === childFile && request?.fileKind === "non_sfc",
+        ([request]) => request?.inputId === childFile && request?.fileKind === "non_sfc",
       ),
     ).toBe(false);
   });
@@ -760,7 +752,10 @@ describe("preCompile", () => {
   let tempDir: string;
 
   function createTempDir(): string {
-    const dir = join(tmpdir(), `verter-precompile-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const dir = join(
+      tmpdir(),
+      `verter-precompile-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
     mkdirSync(dir, { recursive: true });
     return dir;
   }
@@ -792,10 +787,10 @@ describe("preCompile", () => {
 
   // @ai-generated - preCompile option accepted by factory
   it("preCompile option accepted by factory", () => {
-    const plugin = unpluginFactory(
-      { preCompile: true },
-      { framework: "rollup", versions: { unplugin: "0.0.0", rollup: "0.0.0" } } as any,
-    ) as any;
+    const plugin = unpluginFactory({ preCompile: true }, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
     expect(plugin).toBeDefined();
     expect(plugin.name).toBe("unplugin-verter");
   });
@@ -932,7 +927,9 @@ describe("preCompile", () => {
     const elapsed = performance.now() - start;
 
     // Just log the timing — this is a baseline measurement, not a pass/fail assertion
-    console.log(`[benchmark] preCompile ${N} files: ${elapsed.toFixed(1)}ms (${(elapsed / N).toFixed(2)}ms/file)`);
+    console.log(
+      `[benchmark] preCompile ${N} files: ${elapsed.toFixed(1)}ms (${(elapsed / N).toFixed(2)}ms/file)`,
+    );
     expect(elapsed).toBeGreaterThan(0);
   });
 });
@@ -1064,10 +1061,7 @@ describe("macro type hydration", () => {
       join(pkgDir, "index.d.ts"),
       "export interface AnimationOptions { duration?: number; easing?: string; }\n",
     );
-    writeFileSync(
-      join(pkgDir, "index.js"),
-      "module.exports = {};\n",
-    );
+    writeFileSync(join(pkgDir, "index.js"), "module.exports = {};\n");
 
     // defineProps<AnimationOptions>() — the entire type is imported.
     // The host MUST resolve AnimationOptions from the package .d.ts
@@ -1089,11 +1083,7 @@ defineProps<AnimationOptions>()
       return null;
     });
 
-    const result = await plugin.transform.call(
-      { resolve: resolveSpy },
-      sfc,
-      filename,
-    );
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
     expect(result).toBeDefined();
     const code = result.code;
 
@@ -1126,11 +1116,7 @@ defineProps<MyProps>()
       return null;
     });
 
-    const result = await plugin.transform.call(
-      { resolve: resolveSpy },
-      sfc,
-      filename,
-    );
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
     expect(result).toBeDefined();
     const code = result.code;
 
@@ -1162,11 +1148,7 @@ defineEmits<Emits>()
     // Resolve hook returns null for ./type (Vite can't resolve .d.ts)
     const resolveSpy = vi.fn(async () => null);
 
-    const result = await plugin.transform.call(
-      { resolve: resolveSpy },
-      sfc,
-      filename,
-    );
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
     expect(result).toBeDefined();
     const code = result.code;
 
@@ -1182,10 +1164,7 @@ defineEmits<Emits>()
     const typeFile = join(tempDir, "types.ts").replace(/\\/g, "/");
     const baseFile = join(tempDir, "base.ts").replace(/\\/g, "/");
 
-    writeFileSync(
-      join(tempDir, "base.ts"),
-      "export interface BaseProps { id: string; }\n",
-    );
+    writeFileSync(join(tempDir, "base.ts"), "export interface BaseProps { id: string; }\n");
     writeFileSync(
       join(tempDir, "types.ts"),
       "import { BaseProps } from './base';\nexport interface MyProps extends BaseProps { name: string; }\n",
@@ -1204,11 +1183,7 @@ defineProps<MyProps>()
       return null;
     });
 
-    const result = await plugin.transform.call(
-      { resolve: resolveSpy },
-      sfc,
-      filename,
-    );
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
     expect(result).toBeDefined();
     const code = result.code;
 
@@ -1242,16 +1217,10 @@ defineProps<MyProps>()
     writeFileSync(join(pkgDir, "index.js"), "module.exports = {};\n");
 
     // Barrel entry: export * re-export
-    writeFileSync(
-      join(pkgDir, "index.d.ts"),
-      "export * from './components/Drawer'\n",
-    );
+    writeFileSync(join(pkgDir, "index.d.ts"), "export * from './components/Drawer'\n");
 
     // Drawer barrel: named re-export
-    writeFileSync(
-      join(drawerDir, "index.d.ts"),
-      "export type { DrawerEmits } from './types'\n",
-    );
+    writeFileSync(join(drawerDir, "index.d.ts"), "export type { DrawerEmits } from './types'\n");
 
     // Actual type definition
     writeFileSync(
@@ -1273,11 +1242,7 @@ defineEmits<DrawerEmits>()
       return null;
     });
 
-    const result = await plugin.transform.call(
-      { resolve: resolveSpy },
-      sfc,
-      filename,
-    );
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
     expect(result).toBeDefined();
     const code = result.code;
 
@@ -1303,15 +1268,30 @@ defineEmits<DrawerEmits>()
     mkdirSync(drawerSrcDir, { recursive: true });
 
     writeFileSync(join(baseDir, "index.ts"), "export * from './Drawer'\n");
-    writeFileSync(join(drawerDir, "index.ts"), "export type { DrawerEmits } from './src/index.vue'\n");
-    writeFileSync(join(drawerSrcDir, "index.vue"),
-      `<script setup lang="ts">\nexport interface DrawerEmits {\n  open: []\n  close: []\n  disposed: []\n}\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>drawer</div></template>\n`);
+    writeFileSync(
+      join(drawerDir, "index.ts"),
+      "export type { DrawerEmits } from './src/index.vue'\n",
+    );
+    writeFileSync(
+      join(drawerSrcDir, "index.vue"),
+      `<script setup lang="ts">\nexport interface DrawerEmits {\n  open: []\n  close: []\n  disposed: []\n}\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>drawer</div></template>\n`,
+    );
 
     // Upsert all files
-    host.upsert({ inputId: consumerPath, source: `<script setup lang="ts">\nimport type { DrawerEmits } from "@/components/base"\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>hello</div></template>\n` });
+    host.upsert({
+      inputId: consumerPath,
+      source: `<script setup lang="ts">\nimport type { DrawerEmits } from "@/components/base"\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>hello</div></template>\n`,
+    });
     host.upsert({ inputId: basePath, source: "export * from './Drawer'\n", fileKind: "non_sfc" });
-    host.upsert({ inputId: drawerPath, source: "export type { DrawerEmits } from './src/index.vue'\n", fileKind: "non_sfc" });
-    host.upsert({ inputId: vuePath, source: `<script setup lang="ts">\nexport interface DrawerEmits {\n  open: []\n  close: []\n  disposed: []\n}\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>drawer</div></template>\n` });
+    host.upsert({
+      inputId: drawerPath,
+      source: "export type { DrawerEmits } from './src/index.vue'\n",
+      fileKind: "non_sfc",
+    });
+    host.upsert({
+      inputId: vuePath,
+      source: `<script setup lang="ts">\nexport interface DrawerEmits {\n  open: []\n  close: []\n  disposed: []\n}\ndefineEmits<DrawerEmits>()\n</script>\n<template><div>drawer</div></template>\n`,
+    });
 
     // Wire up dependency chain (same as the Rust unit test)
     host.setImportDependencies(consumerPath, [
@@ -1358,10 +1338,7 @@ defineEmits<DrawerEmits>()
     const drawerSrcDir = join(drawerDir, "src");
     mkdirSync(drawerSrcDir, { recursive: true });
 
-    writeFileSync(
-      join(baseDir, "index.ts"),
-      "export * from './Drawer'\n",
-    );
+    writeFileSync(join(baseDir, "index.ts"), "export * from './Drawer'\n");
     writeFileSync(
       join(drawerDir, "index.ts"),
       "export type { DrawerEmits } from './src/index.vue'\n",
@@ -1390,15 +1367,12 @@ defineEmits<DrawerEmits>()
 
     // Resolve hook maps the alias to the absolute path (simulates Vite alias resolution)
     const resolveSpy = vi.fn(async (source: string) => {
-      if (source === "@/components/base") return { id: join(baseDir, "index.ts").replace(/\\/g, "/") };
+      if (source === "@/components/base")
+        return { id: join(baseDir, "index.ts").replace(/\\/g, "/") };
       return null;
     });
 
-    const result = await plugin.transform.call(
-      { resolve: resolveSpy },
-      sfc,
-      filename,
-    );
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
     expect(result).toBeDefined();
     const code = result.code;
 
@@ -1409,6 +1383,306 @@ defineEmits<DrawerEmits>()
     // Negative: no unresolved type errors
     expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
     expect(code).not.toContain("XInvalidMacroType");
+  });
+
+  it("relative .vue → .vue type import resolves defineProps type", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "Parent.vue").replace(/\\/g, "/");
+
+    // Create a child .vue file that exports a type via <script setup>
+    writeFileSync(
+      join(tempDir, "Child.vue"),
+      `<script setup lang="ts">
+export interface ChildProps {
+  label: string
+  count: number
+}
+defineProps<ChildProps>()
+</script>
+<template><div>child</div></template>
+`,
+    );
+
+    // Parent imports the type from the child .vue file and uses it in defineProps
+    const sfc = `<script setup lang="ts">
+import type { ChildProps } from "./Child.vue"
+defineProps<ChildProps>()
+</script>
+<template><div>parent</div></template>
+`;
+
+    // Resolve hook maps relative .vue imports
+    const childPath = join(tempDir, "Child.vue").replace(/\\/g, "/");
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "./Child.vue") return { id: childPath };
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: prop names from the child's exported interface
+    expect(code).toContain("label");
+    expect(code).toContain("count");
+    // Negative: no unresolved type errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("path alias .vue type import resolves defineEmits type", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "Consumer.vue").replace(/\\/g, "/");
+
+    // Create a .vue file that exports an emits type
+    const compDir = join(tempDir, "components");
+    mkdirSync(compDir, { recursive: true });
+    writeFileSync(
+      join(compDir, "Dialog.vue"),
+      `<script setup lang="ts">
+export interface DialogEmits {
+  confirm: []
+  cancel: []
+}
+defineEmits<DialogEmits>()
+</script>
+<template><div>dialog</div></template>
+`,
+    );
+
+    // Consumer imports via path alias (@/components/Dialog.vue)
+    const sfc = `<script setup lang="ts">
+import type { DialogEmits } from "@/components/Dialog.vue"
+defineEmits<DialogEmits>()
+</script>
+<template><div>consumer</div></template>
+`;
+
+    // Resolve hook maps the alias to the absolute path
+    const dialogPath = join(compDir, "Dialog.vue").replace(/\\/g, "/");
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "@/components/Dialog.vue") return { id: dialogPath };
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: emit names from the .vue file's exported interface
+    expect(code).toContain("confirm");
+    expect(code).toContain("cancel");
+    // Negative: no unresolved type errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("bare sub-path package specifier resolves types-only .d.ts via package directory probe", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // Create a package with a sub-path that only has .d.ts (no JS runtime entry).
+    // This simulates `echarts/types/dist/shared` where the sub-path is types-only.
+    const pkgDir = join(tempDir, "node_modules", "my-chart-lib");
+    const subDir = join(pkgDir, "types", "dist");
+    mkdirSync(subDir, { recursive: true });
+
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "my-chart-lib",
+        main: "./index.js",
+        types: "./index.d.ts",
+      }),
+    );
+    writeFileSync(join(pkgDir, "index.js"), "module.exports = {};\n");
+    writeFileSync(join(pkgDir, "index.d.ts"), "export declare function init(): void;\n");
+    // The sub-path types/dist/shared.d.ts — no corresponding .js file
+    writeFileSync(
+      join(subDir, "shared.d.ts"),
+      "export interface GridOption { left?: string; right?: string; top?: string; bottom?: string; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { GridOption } from "my-chart-lib/types/dist/shared"
+defineProps<GridOption>()
+</script>
+<template><div>chart</div></template>
+`;
+
+    // Bundler resolve returns null for types-only sub-path (no JS entry)
+    const resolveSpy = vi.fn(async (source: string) => {
+      // Only resolve the main package, not the sub-path
+      if (source === "my-chart-lib") {
+        return { id: join(pkgDir, "index.js").replace(/\\/g, "/") };
+      }
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: prop names from the sub-path .d.ts
+    expect(code).toContain("left");
+    expect(code).toContain("right");
+    expect(code).toContain("top");
+    expect(code).toContain("bottom");
+    // Negative: no unresolved type errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("scoped package sub-path resolves types-only .d.ts", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // Create a scoped package with a sub-path that only has .d.ts
+    const pkgDir = join(tempDir, "node_modules", "@myorg", "config");
+    const subDir = join(pkgDir, "shared");
+    mkdirSync(subDir, { recursive: true });
+
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "@myorg/config",
+        main: "./index.js",
+        types: "./index.d.ts",
+      }),
+    );
+    writeFileSync(join(pkgDir, "index.js"), "module.exports = {};\n");
+    writeFileSync(join(pkgDir, "index.d.ts"), "export declare const version: string;\n");
+    writeFileSync(
+      join(subDir, "theme.d.ts"),
+      "export interface ThemeConfig { primary: string; secondary: string; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { ThemeConfig } from "@myorg/config/shared/theme"
+defineProps<ThemeConfig>()
+</script>
+<template><div>themed</div></template>
+`;
+
+    const resolveSpy = vi.fn(async () => null);
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: prop names from the scoped package sub-path .d.ts
+    expect(code).toContain("primary");
+    expect(code).toContain("secondary");
+    // Negative: no unresolved type errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("relative extensionless import resolving to .ts (not .vue) resolves defineProps type", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "Parent.vue").replace(/\\/g, "/");
+
+    // Create a .ts type file alongside the SFC — simulates
+    // `import type { BacktopProps } from './backtop'` where ./backtop.ts exists
+    writeFileSync(
+      join(tempDir, "backtop.ts"),
+      "export interface BacktopProps { visibilityHeight: number; right: number; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { BacktopProps } from "./backtop"
+defineProps<BacktopProps>()
+</script>
+<template><div>parent</div></template>
+`;
+
+    // Resolve hook resolves ./backtop to the .ts file
+    const backtopPath = join(tempDir, "backtop.ts").replace(/\\/g, "/");
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "./backtop") return { id: backtopPath };
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: prop names from the .ts file
+    expect(code).toContain("visibilityHeight");
+    expect(code).toContain("right");
+    // Negative: no unresolved type errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("relative extensionless import with no resolve hook probes .ts files", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "Wrapper.vue").replace(/\\/g, "/");
+
+    // Create a .ts type file — no resolve hook to find it, must probe filesystem
+    writeFileSync(
+      join(tempDir, "options.ts"),
+      "export interface OptionProps { size: string; variant: string; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { OptionProps } from "./options"
+defineProps<OptionProps>()
+</script>
+<template><div>wrapper</div></template>
+`;
+
+    // Resolve hook returns null
+    const resolveSpy = vi.fn(async () => null);
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: prop names from the probed .ts file
+    expect(code).toContain("size");
+    expect(code).toContain("variant");
+    // Negative: no unresolved type errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("extensionless relative import resolving to .vue resolves defineProps type", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "Wrapper.vue").replace(/\\/g, "/");
+
+    // Create a .vue file at ./backtop.vue
+    writeFileSync(
+      join(tempDir, "backtop.vue"),
+      `<script setup lang="ts">
+export interface BacktopProps {
+  visibilityHeight: number
+  right: number
+}
+defineProps<BacktopProps>()
+</script>
+<template><div>backtop</div></template>
+`,
+    );
+
+    // Wrapper imports via extensionless specifier
+    const sfc = `<script setup lang="ts">
+import type { BacktopProps } from "./backtop"
+defineProps<BacktopProps>()
+</script>
+<template><div>wrapper</div></template>
+`;
+
+    // Resolve hook maps extensionless to .vue file
+    const backtopPath = join(tempDir, "backtop.vue").replace(/\\/g, "/");
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "./backtop") return { id: backtopPath };
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: prop names from backtop's exported interface
+    expect(code).toContain("visibilityHeight");
+    expect(code).toContain("right");
+    // Negative: no unresolved type errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
   });
 });
 
@@ -1430,17 +1704,13 @@ describe("barrel file export signatures", () => {
     expect(result.exportSignatures).toBeDefined();
     expect(result.exportSignatures.length).toBeGreaterThanOrEqual(2);
 
-    const button = result.exportSignatures.find(
-      (s: any) => s.name === "Button",
-    );
+    const button = result.exportSignatures.find((s: any) => s.name === "Button");
     expect(button).toBeDefined();
     expect(button!.isType).toBe(false);
     expect(button!.reexportSource).toBe("./Button.vue");
     expect(button!.reexportLocal).toBe("default");
 
-    const props = result.exportSignatures.find(
-      (s: any) => s.name === "Props",
-    );
+    const props = result.exportSignatures.find((s: any) => s.name === "Props");
     expect(props).toBeDefined();
     expect(props!.isType).toBe(true);
     expect(props!.reexportSource).toBe("./types");
@@ -1456,17 +1726,13 @@ describe("barrel file export signatures", () => {
 
     expect(result.exportSignatures).toBeDefined();
 
-    const greet = result.exportSignatures.find(
-      (s: any) => s.name === "greet",
-    );
+    const greet = result.exportSignatures.find((s: any) => s.name === "greet");
     expect(greet).toBeDefined();
     // Negative: local exports must not have reexport fields
     expect(greet!.reexportSource).toBeUndefined();
     expect(greet!.reexportLocal).toBeUndefined();
 
-    const color = result.exportSignatures.find(
-      (s: any) => s.name === "Color",
-    );
+    const color = result.exportSignatures.find((s: any) => s.name === "Color");
     expect(color).toBeDefined();
     expect(color!.isType).toBe(true);
   });
@@ -1483,8 +1749,7 @@ describe("barrel file export signatures", () => {
 
     host.upsert({
       inputId: "/src/mid.ts",
-      source:
-        "export { SECRET } from './deep';\nexport type { DeepType } from './deep';",
+      source: "export { SECRET } from './deep';\nexport type { DeepType } from './deep';",
       fileKind: "non_sfc",
     });
     host.setImportDependencies("/src/mid.ts", [
@@ -1493,8 +1758,7 @@ describe("barrel file export signatures", () => {
 
     host.upsert({
       inputId: "/src/top.ts",
-      source:
-        "export { SECRET } from './mid';\nexport type { DeepType } from './mid';",
+      source: "export { SECRET } from './mid';\nexport type { DeepType } from './mid';",
       fileKind: "non_sfc",
     });
     host.setImportDependencies("/src/top.ts", [
@@ -1520,8 +1784,7 @@ describe("barrel file export signatures", () => {
     const host = loadHost();
     host.upsert({
       inputId: "/src/barrel.ts",
-      source:
-        "export { default as Dialog } from './Dialog.vue';\nexport const VERSION = '1.0';",
+      source: "export { default as Dialog } from './Dialog.vue';\nexport const VERSION = '1.0';",
       fileKind: "non_sfc",
     });
 
@@ -1532,15 +1795,11 @@ describe("barrel file export signatures", () => {
     expect(analysis.exportSignatures).toBeDefined();
     expect(analysis.exportSignatures.length).toBeGreaterThanOrEqual(2);
 
-    const dialog = analysis.exportSignatures.find(
-      (s: any) => s.name === "Dialog",
-    );
+    const dialog = analysis.exportSignatures.find((s: any) => s.name === "Dialog");
     expect(dialog).toBeDefined();
     expect(dialog.reexportSource).toBe("./Dialog.vue");
 
-    const version = analysis.exportSignatures.find(
-      (s: any) => s.name === "VERSION",
-    );
+    const version = analysis.exportSignatures.find((s: any) => s.name === "VERSION");
     expect(version).toBeDefined();
     // Negative: local export must not have reexportSource
     expect(version.reexportSource).toBeUndefined();
