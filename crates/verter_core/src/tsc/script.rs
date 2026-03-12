@@ -669,6 +669,15 @@ pub fn generate_tsc_output_with_options(
     tokenize_sfc(bytes, |e| syntax.handle(&e, &ctx));
 
     let Some(setup) = syntax.script_setup() else {
+        // No <script setup> — check for Options API <script> block.
+        // If present, pass through its content so defineComponent() props
+        // are preserved for cross-component type checking.
+        if let Some(script) = syntax.script() {
+            if let Some(content) = script.content {
+                let content_str = &sfc_source[content.start as usize..content.end as usize];
+                return generate_options_api_stub(component_name, content_str);
+            }
+        }
         return generate_empty_stub(component_name);
     };
     let Some(content_span) = setup.content else {
@@ -1748,6 +1757,22 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
 }
 
 // ── Step 6: generate code ─────────────────────────────────────────────────────
+
+/// Generate a stub for Options API `<script>` blocks that preserves the
+/// original script content (including `defineComponent()` props/emits/etc.)
+/// so that cross-component type checking works.
+fn generate_options_api_stub(_component_name: &str, script_content: &str) -> TscOutput {
+    let source_map = minimal_source_map();
+    let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
+    // Emit the original script body. The `export default defineComponent({...})`
+    // is kept intact so TypeScript infers the full component type.
+    let code = format!(
+        "{content}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
+        content = script_content.trim(),
+        map = encoded,
+    );
+    TscOutput { code, source_map }
+}
 
 fn generate_empty_stub(component_name: &str) -> TscOutput {
     let name = sanitize_tsc_component_name(component_name);

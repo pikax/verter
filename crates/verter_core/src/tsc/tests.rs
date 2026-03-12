@@ -352,6 +352,40 @@ fn tsc_codegen_no_script_setup_returns_stub() {
     assert!(r.contains("sourceMappingURL"), "stub has sourceMappingURL");
 }
 
+// ── Options API stub preserves defineComponent props ───────────────────────
+
+#[test]
+fn tsc_codegen_options_api_preserves_props() {
+    let r = gen_tsc(
+        r#"<script lang="ts">
+import { defineComponent } from 'vue'
+export default defineComponent({
+  props: {
+    count: { type: Number, required: true },
+    label: String
+  }
+})
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+
+    assert!(r.contains("defineComponent"), "stub has defineComponent");
+    assert!(r.contains("export default"), "stub has export default");
+    // The stub must preserve the actual props so cross-component type checking works
+    assert!(
+        r.contains("count"),
+        "stub must preserve prop 'count' for cross-component type checking:\n{r}"
+    );
+    assert!(
+        r.contains("Number"),
+        "stub must preserve prop type 'Number':\n{r}"
+    );
+    assert!(
+        !r.contains("defineComponent({})"),
+        "stub must NOT be the empty defineComponent({{}}) placeholder:\n{r}"
+    );
+}
+
 // ── PropType<X> extraction ──────────────────────────────────────────────────
 
 #[test]

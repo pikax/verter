@@ -22,7 +22,8 @@ export const TemplateBindingPlugin = definePlugin({
     const name = ctx.prefix("TemplateBinding");
 
     if (!ctx.isSetup) {
-      const declaration = `function ${name}FN(){return {}}`;
+      const defaultOptionsName = ctx.prefix("default_Component");
+      const declaration = `function ${name}FN(){return {} as InstanceType<typeof ${defaultOptionsName}>}`;
 
       const typeStr = generateTypeString(
         name,

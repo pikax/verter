@@ -54,7 +54,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, BindingPattern, CallExpression, Declaration, ExportDefaultDeclarationKind,
-    Expression, ForStatementInit, Function, ObjectPropertyKind, Statement,
+    Expression, ForStatementInit, Function, ObjectPropertyKind, Program, PropertyKey, Statement,
 };
 use oxc_ast::{Comment, CommentContent};
 use oxc_parser::Parser;
@@ -2744,6 +2744,11 @@ fn process_tsx_script_only<'alloc>(
         bindings.insert(alloc_name, *bt);
     }
 
+    // Extract component aliases from `components: { Alias: ImportedComp }`.
+    // For each alias where key != value, emit `const Alias = ImportedComp;`
+    // so the template JSX `<Alias />` resolves to the imported component.
+    let component_aliases = extract_component_aliases(&parser_ret.program, content_str);
+
     // Remove script tags, emit wrapper + content
     // The Options API wraps the script content in a TemplateBindingFN for type construct parity.
     let hoist_pos = script.tag_open.start;
@@ -2752,6 +2757,10 @@ fn process_tsx_script_only<'alloc>(
         // Append export default at end
         let mut close = String::with_capacity(128);
         close.push_str("\nexport default __sfc__;\n");
+        // Emit component alias declarations
+        for (alias, value) in &component_aliases {
+            close.push_str(&format!("const {alias} = {value};\n"));
+        }
         // Ambient instance declaration for template property access.
         close.push_str(&instance_declaration_ambient(
             options.filename,
@@ -2783,6 +2792,82 @@ fn process_tsx_script_only<'alloc>(
         false, // no getCurrentInstance detection for Options API
         true,  // emit attributes type
     );
+}
+
+// ── Options API Component Alias Extraction ──────────────────────────
+
+/// Extract `components: { Alias: Value }` entries from the default export.
+///
+/// Returns `(alias_name, value_name)` pairs for entries where the key
+/// differs from the value identifier name (i.e., actual aliases).
+/// Shorthand `{ SomeComp }` is skipped since `SomeComp` is already in scope.
+fn extract_component_aliases<'a>(
+    program: &Program<'a>,
+    _content_str: &str,
+) -> Vec<(String, String)> {
+    let mut aliases = Vec::new();
+    for stmt in &program.body {
+        let Statement::ExportDefaultDeclaration(export) = stmt else {
+            continue;
+        };
+        let Some(expr) = export.declaration.as_expression() else {
+            continue;
+        };
+        // Unwrap defineComponent() to get the inner object
+        let obj = match expr {
+            Expression::ObjectExpression(obj) => Some(obj.as_ref()),
+            Expression::CallExpression(call) => call
+                .arguments
+                .first()
+                .and_then(|a| a.as_expression())
+                .and_then(|e| {
+                    if let Expression::ObjectExpression(obj) = e {
+                        Some(obj.as_ref())
+                    } else {
+                        None
+                    }
+                }),
+            _ => None,
+        };
+        let Some(obj) = obj else { continue };
+        for prop in &obj.properties {
+            let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                continue;
+            };
+            let key_name = match &p.key {
+                PropertyKey::StaticIdentifier(id) => id.name.as_str(),
+                _ => continue,
+            };
+            if key_name != "components" {
+                continue;
+            }
+            let Expression::ObjectExpression(comp_obj) = &p.value else {
+                continue;
+            };
+            for comp_prop in &comp_obj.properties {
+                let ObjectPropertyKind::ObjectProperty(cp) = comp_prop else {
+                    continue;
+                };
+                // Skip shorthand: `{ SomeComp }` — key and value are the same identifier
+                if cp.shorthand {
+                    continue;
+                }
+                let alias = match &cp.key {
+                    PropertyKey::StaticIdentifier(id) => id.name.to_string(),
+                    PropertyKey::StringLiteral(s) => s.value.to_string(),
+                    _ => continue,
+                };
+                let value = match &cp.value {
+                    Expression::Identifier(id) => id.name.to_string(),
+                    _ => continue,
+                };
+                if alias != value {
+                    aliases.push((alias, value));
+                }
+            }
+        }
+    }
+    aliases
 }
 
 // ── Macro Boxing ──────────────────────────────────────────────────

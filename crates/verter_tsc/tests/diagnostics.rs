@@ -363,10 +363,8 @@ fn verter_tsc_diagnostics_e2e() {
     assert_error_at(&diags, "OptionsApiAdvanced.vue", 22, 2322);
 
     // OptionsApiConsumer.vue — cross-component Options API prop checking
-    // NOTE: verter-tsc uses the Rust IDE path; cross-component Options API
-    // prop type checking requires the TS ComponentInstancePlugin (bundler path).
-    // No errors expected here until Rust IDE codegen supports Options API exports.
-    // assert_has_error(&diags, "OptionsApiConsumer.vue", 2322);
+    // The IDE path generates defineComponent() exports that TS resolves prop types from.
+    assert_has_error(&diags, "OptionsApiConsumer.vue", 2322);
 
     // ── Source map / span mapping validation ────────────────────────
 

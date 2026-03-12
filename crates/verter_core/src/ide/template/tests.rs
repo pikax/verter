@@ -5769,3 +5769,93 @@ fn strict_slots_v_slot_component_var() {
         result
     );
 }
+
+// ── Options API component alias resolution ────────────────────────────────
+
+#[test]
+fn options_api_component_alias_emits_binding() {
+    let source = r#"<script lang="ts">
+import { defineComponent } from 'vue'
+import SomeComp from './SomeComp.vue'
+
+export default defineComponent({
+  components: { MyAlias: SomeComp },
+  setup() { return {} }
+})
+</script>
+<template>
+  <MyAlias />
+</template>"#;
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("Test.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+
+    // Template should use <MyAlias> and MyAlias must be in scope
+    assert!(
+        tsx.code.contains("<MyAlias"),
+        "template should contain <MyAlias> JSX tag:\n{}",
+        tsx.code
+    );
+    // There must be a const alias that assigns SomeComp to MyAlias
+    assert!(
+        tsx.code.contains("const MyAlias = SomeComp"),
+        "should emit 'const MyAlias = SomeComp' for the component alias:\n{}",
+        tsx.code
+    );
+    // Must be valid TSX
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "TSX should have no parse errors. Got {} errors:\n{}",
+        parsed.errors.len(),
+        tsx.code
+    );
+}
+
+#[test]
+fn options_api_component_shorthand_no_alias_needed() {
+    // Shorthand: components: { SomeComp } — SomeComp is already imported, no alias needed
+    let source = r#"<script lang="ts">
+import { defineComponent } from 'vue'
+import SomeComp from './SomeComp.vue'
+
+export default defineComponent({
+  components: { SomeComp },
+  setup() { return {} }
+})
+</script>
+<template>
+  <SomeComp />
+</template>"#;
+    let alloc = Allocator::new();
+    let options = crate::compile::CodegenOptions {
+        filename: Some("Test.vue".to_string()),
+        target: crate::compile::CompileTarget::TSX,
+        ..Default::default()
+    };
+    let verter_opts = crate::compile::VerterCompileOptions::default();
+    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let tsx = result.tsx.as_ref().expect("TSX should be generated");
+
+    // SomeComp is already imported — no extra alias declaration needed
+    // (it shouldn't break if one IS emitted, but it's unnecessary)
+    assert!(
+        tsx.code.contains("<SomeComp"),
+        "template should contain <SomeComp> JSX tag:\n{}",
+        tsx.code
+    );
+    // Must be valid TSX
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "TSX should have no parse errors. Got {} errors:\n{}",
+        parsed.errors.len(),
+        tsx.code
+    );
+}
