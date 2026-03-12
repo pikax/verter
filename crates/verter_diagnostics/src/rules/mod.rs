@@ -274,6 +274,7 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(vue::RequireDefineSlots));
     registry.register(Box::new(vue::NoDuplicateModelModifiers));
     registry.register(Box::new(vue::DefineModelTypeRequired));
+    registry.register(Box::new(vue::NoInvalidHtmlNesting));
     // Accessibility
     registry.register(Box::new(a11y::AltText));
     registry.register(Box::new(a11y::AnchorHasContent));
