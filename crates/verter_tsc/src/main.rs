@@ -51,6 +51,15 @@ struct Cli {
     #[arg(short = 'p', long = "project", value_name = "PATH")]
     project: Option<PathBuf>,
 
+    /// Build mode — type-check a solution-style tsconfig (tsc -b compat).
+    /// Accepts optional tsconfig paths as positional arguments.
+    #[arg(short = 'b', long = "build")]
+    build: bool,
+
+    /// Positional tsconfig paths for build mode (e.g., `verter-tsc -b tsconfig.app.json`)
+    #[arg(value_name = "TSCONFIG", trailing_var_arg = true)]
+    build_projects: Vec<PathBuf>,
+
     /// Type check only — do not emit output [default when no emit flags are specified]
     #[arg(long = "noEmit")]
     no_emit: bool,
@@ -100,10 +109,14 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    let mut tsconfig_path = cli
-        .project
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("tsconfig.json"));
+    // Resolve project path: -p takes precedence, then -b positional, then default
+    let mut tsconfig_path = if let Some(ref p) = cli.project {
+        p.clone()
+    } else if !cli.build_projects.is_empty() {
+        cli.build_projects[0].clone()
+    } else {
+        PathBuf::from("tsconfig.json")
+    };
 
     // tsc compatibility: if given a directory, auto-append tsconfig.json
     if tsconfig_path.is_dir() {
@@ -259,6 +272,46 @@ mod tests {
             !cli.use_tsc,
             "use_tsc should default to false (prefer tsgo)"
         );
+    }
+
+    #[test]
+    fn cli_accepts_build_flag_bare() {
+        // `verter-tsc -b` should work like `verter-tsc` (use default tsconfig.json)
+        let cli = Cli::try_parse_from(["verter-tsc", "-b"]);
+        assert!(cli.is_ok(), "should accept bare -b: {:?}", cli.err());
+        let cli = cli.unwrap();
+        assert!(cli.build, "-b should set build to true");
+        assert!(cli.project.is_none(), "-b alone should not set project");
+    }
+
+    #[test]
+    fn cli_accepts_build_flag_with_path() {
+        // `verter-tsc -b tsconfig.app.json` should treat the argument as the project path
+        let cli = Cli::try_parse_from(["verter-tsc", "-b", "tsconfig.app.json"]);
+        assert!(cli.is_ok(), "should accept -b with path: {:?}", cli.err());
+        let cli = cli.unwrap();
+        assert!(cli.build, "-b should set build to true");
+    }
+
+    #[test]
+    fn cli_accepts_build_long_form() {
+        let cli = Cli::try_parse_from(["verter-tsc", "--build"]);
+        assert!(cli.is_ok(), "should accept --build: {:?}", cli.err());
+        assert!(cli.unwrap().build);
+    }
+
+    #[test]
+    fn cli_build_overrides_project_with_positional() {
+        // `verter-tsc -b tsconfig.app.json` — the positional should be used as project
+        let cli =
+            Cli::try_parse_from(["verter-tsc", "-b", "tsconfig.app.json"]).expect("should parse");
+        assert!(cli.build);
+        // The positional path from -b should be available as build_projects
+        assert!(
+            !cli.build_projects.is_empty(),
+            "build_projects should contain the positional path"
+        );
+        assert_eq!(cli.build_projects[0].to_str().unwrap(), "tsconfig.app.json");
     }
 
     #[test]
