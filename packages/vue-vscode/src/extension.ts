@@ -40,6 +40,7 @@ import { VirtualFileContentProvider } from "./VirtualFileManager";
 import { UnifiedVirtualFilesProvider } from "./UnifiedVirtualFilesProvider";
 import type { UnifiedVirtualFileItem } from "./UnifiedVirtualFilesProvider";
 import { ComponentTreeProvider } from "./ComponentTreeProvider";
+import { RouteTreeProvider } from "./RouteTreeProvider";
 import { AnalysisTreeProvider } from "./AnalysisTreeProvider";
 import { VueApiDecorationProvider } from "./VueApiDecorationProvider";
 import { BindingColorDecorationProvider } from "./BindingColorDecorationProvider";
@@ -1237,6 +1238,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
 
   const virtualFilesProvider = new UnifiedVirtualFilesProvider(getClient, contentProvider, getLastVueUri);
   const componentTreeProvider = new ComponentTreeProvider(getClient, getLastVueUri);
+  const routeTreeProvider = new RouteTreeProvider(getClient, getLastVueUri);
   const analysisProvider = new AnalysisTreeProvider(getClient, getLastVueUri);
   const decorationProvider = new VueApiDecorationProvider(getClient);
   const bindingColorProvider = new BindingColorDecorationProvider(getClient);
@@ -1265,6 +1267,9 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     window.createTreeView("verterAnalysis", {
       treeDataProvider: analysisProvider,
     }),
+    window.createTreeView("verterRoutes", {
+      treeDataProvider: routeTreeProvider,
+    }),
   );
 
   // Register commands
@@ -1278,6 +1283,17 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     commands.registerCommand("verter.refreshAnalysis", () => {
       analysisProvider.refresh();
       componentTreeProvider.refresh();
+    }),
+    commands.registerCommand("verter.refreshRoutes", () => {
+      routeTreeProvider.refresh();
+    }),
+    commands.registerCommand("verter.openRouteComponent", async (filePath: string) => {
+      try {
+        const doc = await workspace.openTextDocument(Uri.file(filePath));
+        await window.showTextDocument(doc);
+      } catch {
+        // File might not exist
+      }
     }),
     commands.registerCommand("verter.showSourceMapVisualization", async () => {
       const sourceUri = getLastVueUri();

@@ -408,6 +408,11 @@
           "id": "verterAnalysis",
           "name": "Analysis",
           "when": "verter.analysisEnabled"
+        },
+        {
+          "id": "verterRoutes",
+          "name": "Routes",
+          "when": "verter.analysisEnabled"
         }
       ]
     },
@@ -567,6 +572,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "verter.refreshRoutes",
+        "title": "Verter: Refresh Routes",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "verter.showSourceMapVisualization",
         "title": "Verter: Show Source Map Visualization",
         "icon": "$(split-horizontal)"
@@ -608,6 +618,11 @@
         {
           "command": "verter.refreshAnalysis",
           "when": "view == verterAnalysis",
+          "group": "navigation"
+        },
+        {
+          "command": "verter.refreshRoutes",
+          "when": "view == verterRoutes",
           "group": "navigation"
         }
       ]

@@ -1,5 +1,6 @@
 import type { StatisticsRequestParams, StatisticsSnapshot } from "./statistics";
 import type { ComponentParentsResponse, FileAnalysisSnapshot, ProjectOverview, VirtualFilesResponse } from "./analysis";
+import type { RouteAnalysisSnapshot } from "./routes";
 
 // fluff
 export type RequestTyped = {
@@ -27,6 +28,7 @@ export enum RequestType {
   GetBindingTypes = "$/verter/getBindingTypes",
   GetComponentParents = "$/verter/getComponentParents",
   ApplyStyleOverrides = "$/verter/applyStyleOverrides",
+  GetRouteTree = "$/verter/getRouteTree",
 }
 
 export interface StyleOverrideParam {
@@ -47,6 +49,7 @@ export type RequestParams = {
     uri: string;
     overrides: StyleOverrideParam[];
   };
+  [RequestType.GetRouteTree]: Record<string, never>;
 };
 
 export type RequestResponse = {
@@ -62,4 +65,5 @@ export type RequestResponse = {
   [RequestType.GetBindingTypes]: Record<string, string | null>;
   [RequestType.GetComponentParents]: ComponentParentsResponse;
   [RequestType.ApplyStyleOverrides]: { success: boolean };
+  [RequestType.GetRouteTree]: RouteAnalysisSnapshot;
 };

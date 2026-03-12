@@ -780,7 +780,10 @@ export default router
         "Home should have children, got {}",
         home.children.len()
     );
-    let dashboard = home.children.iter().find(|r| r.name.as_deref() == Some("Dashboard"));
+    let dashboard = home
+        .children
+        .iter()
+        .find(|r| r.name.as_deref() == Some("Dashboard"));
     assert!(dashboard.is_some(), "should have Dashboard child route");
     let dashboard = dashboard.unwrap();
     assert_eq!(dashboard.full_path, "/dashboard");
@@ -837,4 +840,188 @@ fn test_route_definition_round_trip() {
     assert_eq!(deserialized.path, "/users/:id");
     assert_eq!(deserialized.name.as_deref(), Some("user-detail"));
     assert!(deserialized.is_lazy);
+}
+
+// =============================================================================
+// Route Health: Missing Layouts
+// =============================================================================
+
+#[test]
+fn test_health_missing_layout_detected() {
+    let snapshot = RouteAnalysisSnapshot {
+        framework: RoutingFramework::NuxtPages,
+        routes: vec![RouteDefinition {
+            path: "/admin".to_string(),
+            full_path: "/admin".to_string(),
+            name: None,
+            component_path: Some("pages/admin.vue".to_string()),
+            is_lazy: false,
+            redirect: None,
+            meta: vec![("layout".to_string(), "admin".to_string())],
+            children: Vec::new(),
+            guards: Vec::new(),
+            source_span: None,
+        }],
+        navigation_links: Vec::new(),
+        layouts: vec![LayoutDefinition {
+            name: "default".to_string(),
+            file_path: "layouts/default.vue".to_string(),
+            is_default: true,
+        }],
+        router_view_locations: Vec::new(),
+        global_guards: Vec::new(),
+    };
+
+    let existing = std::collections::HashSet::from(["pages/admin.vue".to_string()]);
+    let report = analyze_route_health(&snapshot, &existing);
+
+    assert!(
+        report.missing_layouts.contains(&"admin".to_string()),
+        "should detect 'admin' layout as missing, got: {:?}",
+        report.missing_layouts
+    );
+    assert!(
+        !report.missing_layouts.contains(&"default".to_string()),
+        "should not report 'default' as missing since it exists"
+    );
+}
+
+#[test]
+fn test_health_matching_layout_not_reported() {
+    let snapshot = RouteAnalysisSnapshot {
+        framework: RoutingFramework::NuxtPages,
+        routes: vec![RouteDefinition {
+            path: "/".to_string(),
+            full_path: "/".to_string(),
+            name: None,
+            component_path: Some("pages/index.vue".to_string()),
+            is_lazy: false,
+            redirect: None,
+            meta: vec![("layout".to_string(), "default".to_string())],
+            children: Vec::new(),
+            guards: Vec::new(),
+            source_span: None,
+        }],
+        navigation_links: Vec::new(),
+        layouts: vec![LayoutDefinition {
+            name: "default".to_string(),
+            file_path: "layouts/default.vue".to_string(),
+            is_default: true,
+        }],
+        router_view_locations: Vec::new(),
+        global_guards: Vec::new(),
+    };
+
+    let existing = std::collections::HashSet::from(["pages/index.vue".to_string()]);
+    let report = analyze_route_health(&snapshot, &existing);
+
+    assert!(
+        report.missing_layouts.is_empty(),
+        "should have no missing layouts, got: {:?}",
+        report.missing_layouts
+    );
+}
+
+// =============================================================================
+// Route Health: Guard Coverage
+// =============================================================================
+
+#[test]
+fn test_health_guard_coverage() {
+    let snapshot = RouteAnalysisSnapshot {
+        framework: RoutingFramework::VueRouter,
+        routes: vec![
+            RouteDefinition {
+                path: "/".to_string(),
+                full_path: "/".to_string(),
+                name: None,
+                component_path: None,
+                is_lazy: false,
+                redirect: None,
+                meta: Vec::new(),
+                children: Vec::new(),
+                guards: Vec::new(),
+                source_span: None,
+            },
+            RouteDefinition {
+                path: "/admin".to_string(),
+                full_path: "/admin".to_string(),
+                name: None,
+                component_path: None,
+                is_lazy: false,
+                redirect: None,
+                meta: Vec::new(),
+                children: Vec::new(),
+                guards: vec![RouteGuard {
+                    kind: RouteGuardKind::BeforeEnter,
+                    file_path: "router.ts".to_string(),
+                    span: Span::new(0, 10),
+                }],
+                source_span: None,
+            },
+            RouteDefinition {
+                path: "/profile".to_string(),
+                full_path: "/profile".to_string(),
+                name: None,
+                component_path: None,
+                is_lazy: false,
+                redirect: None,
+                meta: Vec::new(),
+                children: Vec::new(),
+                guards: Vec::new(),
+                source_span: None,
+            },
+        ],
+        navigation_links: Vec::new(),
+        layouts: Vec::new(),
+        router_view_locations: Vec::new(),
+        global_guards: vec![RouteGuard {
+            kind: RouteGuardKind::NavigationGuard,
+            file_path: "router.ts".to_string(),
+            span: Span::new(100, 200),
+        }],
+    };
+
+    let existing = std::collections::HashSet::new();
+    let report = analyze_route_health(&snapshot, &existing);
+
+    let gc = report
+        .guard_coverage
+        .expect("should have guard coverage stats");
+    assert_eq!(gc.total_routes, 3, "should count all 3 routes");
+    assert_eq!(gc.routes_with_guards, 1, "only /admin has per-route guards");
+    assert!(gc.has_global_guard, "has global beforeEach guard");
+}
+
+#[test]
+fn test_health_guard_coverage_no_guards() {
+    let snapshot = RouteAnalysisSnapshot {
+        framework: RoutingFramework::VueRouter,
+        routes: vec![RouteDefinition {
+            path: "/".to_string(),
+            full_path: "/".to_string(),
+            name: None,
+            component_path: None,
+            is_lazy: false,
+            redirect: None,
+            meta: Vec::new(),
+            children: Vec::new(),
+            guards: Vec::new(),
+            source_span: None,
+        }],
+        navigation_links: Vec::new(),
+        layouts: Vec::new(),
+        router_view_locations: Vec::new(),
+        global_guards: Vec::new(),
+    };
+
+    let existing = std::collections::HashSet::new();
+    let report = analyze_route_health(&snapshot, &existing);
+
+    let gc = report
+        .guard_coverage
+        .expect("should have guard coverage stats");
+    assert_eq!(gc.total_routes, 1);
+    assert_eq!(gc.routes_with_guards, 0);
+    assert!(!gc.has_global_guard);
 }

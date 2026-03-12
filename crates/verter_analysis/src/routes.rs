@@ -163,6 +163,20 @@ pub struct RouteHealthReport {
     pub duplicate_paths: Vec<String>,
     /// Duplicate route names
     pub duplicate_names: Vec<String>,
+    /// Guard coverage statistics
+    pub guard_coverage: Option<GuardCoverage>,
+}
+
+/// Statistics about route guard coverage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardCoverage {
+    /// Total number of routes (flattened)
+    pub total_routes: usize,
+    /// Number of routes with per-route guards (e.g. beforeEnter)
+    pub routes_with_guards: usize,
+    /// Whether any global navigation guard exists (beforeEach/afterEach/beforeResolve)
+    pub has_global_guard: bool,
 }
 
 /// A single route health issue.
@@ -1042,6 +1056,31 @@ pub fn analyze_route_health(
             report.duplicate_names.push(name.to_string());
         }
     }
+
+    // Check for missing layouts: route meta `layout` keys that don't match any known layout
+    let layout_names: std::collections::HashSet<&str> =
+        snapshot.layouts.iter().map(|l| l.name.as_str()).collect();
+
+    for route in &all_routes {
+        for (key, value) in &route.meta {
+            if key == "layout"
+                && !layout_names.contains(value.as_str())
+                && !report.missing_layouts.contains(value)
+            {
+                report.missing_layouts.push(value.clone());
+            }
+        }
+    }
+
+    // Guard coverage statistics
+    let routes_with_guards = all_routes.iter().filter(|r| !r.guards.is_empty()).count();
+    let has_global_guard = !snapshot.global_guards.is_empty();
+
+    report.guard_coverage = Some(GuardCoverage {
+        total_routes: all_routes.len(),
+        routes_with_guards,
+        has_global_guard,
+    });
 
     report
 }

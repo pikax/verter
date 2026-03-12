@@ -133,6 +133,10 @@ async fn main() {
         "$/verter/applyStyleOverrides",
         VerterLanguageServer::apply_style_overrides,
     )
+    .custom_method(
+        "$/verter/getRouteTree",
+        VerterLanguageServer::get_route_tree,
+    )
     .finish();
 
     Server::new(stdin, stdout, socket).serve(service).await;

@@ -2454,6 +2454,41 @@ impl VerterLanguageServer {
         })
     }
 
+    /// Handle `$/verter/getRouteTree` request.
+    ///
+    /// Returns a complete route analysis snapshot for the first workspace root.
+    pub async fn get_route_tree(&self, _params: serde_json::Value) -> Result<serde_json::Value> {
+        tracing::debug!("$/verter/getRouteTree");
+
+        let roots = self.workspace_roots.lock().await.clone();
+        let Some(root) = roots.first() else {
+            return Ok(serde_json::to_value(
+                verter_analysis::routes::RouteAnalysisSnapshot::default(),
+            )
+            .unwrap_or_default());
+        };
+
+        // Collect template components from all Vue SFC analyses
+        let file_list = self.documents.host.list_files();
+        let mut template_components = Vec::new();
+        for (canonical_id, file_kind) in &file_list {
+            if *file_kind == verter_host::FileKind::VueSfc {
+                if let Some(analysis) = self.documents.host.get_analysis(canonical_id) {
+                    if let Some(template) = &analysis.template {
+                        template_components
+                            .push((canonical_id.clone(), template.components.clone()));
+                    }
+                }
+            }
+        }
+
+        let project_root = std::path::Path::new(root);
+        let snapshot =
+            verter_analysis::routes::build_route_analysis(project_root, &template_components);
+
+        Ok(serde_json::to_value(snapshot).unwrap_or_default())
+    }
+
     /// Handle `$/verter/getBindingTypes` request.
     ///
     /// For each binding in the file's analysis, queries TSGO for its TypeScript type.
