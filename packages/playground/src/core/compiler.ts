@@ -1,4 +1,11 @@
-import type { File, CompilerOptions, CompileTiming, FileAnalysis, LintDiagnostic, HostDiagnostic } from "./types";
+import type {
+  File,
+  CompilerOptions,
+  CompileTiming,
+  FileAnalysis,
+  LintDiagnostic,
+  HostDiagnostic,
+} from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
 import { combineSourceMaps } from "./sourcemap";
@@ -59,6 +66,7 @@ interface HostCompileProfile {
   forceJs?: boolean;
   sourceMap?: boolean;
   target?: "bundler" | "ide" | "analysis" | "full";
+  strictSlots?: boolean;
 }
 
 interface HostVirtualNodeKind {
@@ -163,6 +171,7 @@ function toHostProfile(file: File, options?: CompilerOptions): HostCompileProfil
     forceJs: true,
     sourceMap: true,
     target: "full",
+    strictSlots: options?.strictSlots ?? false,
   };
 }
 
@@ -496,7 +505,8 @@ export function relintFile(file: File, disabledRules?: ReadonlySet<string>): num
   if (!wasmHost || typeof wasmHost.lint !== "function") return null;
   try {
     const t0 = performance.now();
-    file.compiled.lintDiagnostics = wasmHost.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
+    file.compiled.lintDiagnostics =
+      wasmHost.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
     return performance.now() - t0;
   } catch {
     file.compiled.lintDiagnostics = [];
@@ -529,7 +539,9 @@ function compileVueWithHost(
 
   const nodes = wasmHost!.listVirtualFiles(file.filename);
   const nodeKinds = new Set(nodes.map((node) => node.kind));
-  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [upsertResult.diagnostics];
+  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [
+    upsertResult.diagnostics,
+  ];
 
   let assembledJs = "";
   let scriptCode = "";
@@ -627,7 +639,8 @@ function compileVueWithHost(
   if (typeof wasmHost!.lint === "function") {
     try {
       const t0 = performance.now();
-      file.compiled.lintDiagnostics = wasmHost!.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
+      file.compiled.lintDiagnostics =
+        wasmHost!.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
       lintMs = performance.now() - t0;
     } catch {
       file.compiled.lintDiagnostics = [];
@@ -746,7 +759,9 @@ function compileTsWithHost(
     syncKnownModuleReferenceDependencies(vueFilename, upsertResult.moduleReferences, knownFiles);
   }
 
-  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [upsertResult.diagnostics];
+  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [
+    upsertResult.diagnostics,
+  ];
 
   const script = wasmHost!.getVirtualFile({
     rawId: `${vueFilename}?vue&type=script`,
@@ -773,7 +788,8 @@ function compileTsWithHost(
   // Run linter
   if (typeof wasmHost!.lint === "function") {
     try {
-      file.compiled.lintDiagnostics = wasmHost!.lint(vueFilename, buildLintConfig(disabledRules)) ?? [];
+      file.compiled.lintDiagnostics =
+        wasmHost!.lint(vueFilename, buildLintConfig(disabledRules)) ?? [];
     } catch {
       file.compiled.lintDiagnostics = [];
     }
@@ -827,7 +843,16 @@ export async function compileFile(
   knownFiles?: KnownFiles,
 ): Promise<CompileTiming> {
   await initCompilers();
-  const timing: CompileTiming = { verterNewJs: null, parseDurationMs: null, scriptMs: null, templateMs: null, styleMs: null, tsxMs: null, tscMs: null, lintMs: null };
+  const timing: CompileTiming = {
+    verterNewJs: null,
+    parseDurationMs: null,
+    scriptMs: null,
+    templateMs: null,
+    styleMs: null,
+    tsxMs: null,
+    tscMs: null,
+    lintMs: null,
+  };
 
   if (file.filename.endsWith(".vue")) {
     if (!wasmHost) {

@@ -15,12 +15,10 @@ import {
 import { debounce } from "lodash";
 import { LanguageClient } from "vscode-languageclient/node";
 import { RequestType, type PatchClient } from "@verter/language-shared";
-import type {
-  FileAnalysisSnapshot,
-  ProjectOverview,
-} from "@verter/language-shared";
+import type { FileAnalysisSnapshot, ProjectOverview } from "@verter/language-shared";
 import { basename } from "path";
 import { utf16OffsetToPosition } from "./utils";
+import { computeSsrReadiness } from "./ssrReadiness";
 
 export type AnalysisItem = CategoryItem | LeafItem;
 
@@ -83,12 +81,9 @@ interface ParsedImport {
   line: number;
 }
 
-export class AnalysisTreeProvider
-  implements TreeDataProvider<AnalysisItem>, Disposable
-{
+export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Disposable {
   private _onDidChangeTreeData = new EventEmitter<AnalysisItem | undefined>();
-  readonly onDidChangeTreeData: Event<AnalysisItem | undefined> =
-    this._onDidChangeTreeData.event;
+  readonly onDidChangeTreeData: Event<AnalysisItem | undefined> = this._onDidChangeTreeData.event;
 
   private cachedCategories: CategoryItem[] = [];
   private cachedProjectOverview: CategoryItem[] = [];
@@ -126,10 +121,7 @@ export class AnalysisTreeProvider
 
   getTreeItem(element: AnalysisItem): TreeItem {
     if (element.type === "category") {
-      const item = new TreeItem(
-        element.label,
-        TreeItemCollapsibleState.Collapsed,
-      );
+      const item = new TreeItem(element.label, TreeItemCollapsibleState.Collapsed);
       item.description = `(${element.children.length})`;
       return item;
     }
@@ -207,9 +199,7 @@ export class AnalysisTreeProvider
 
       // Get the source text for byte offset -> Position conversion
       let sourceText: string | undefined;
-      const vueDoc = workspace.textDocuments.find(
-        (d) => d.uri.toString() === sourceUri,
-      );
+      const vueDoc = workspace.textDocuments.find((d) => d.uri.toString() === sourceUri);
       if (vueDoc) {
         sourceText = vueDoc.getText();
       }
@@ -227,9 +217,7 @@ export class AnalysisTreeProvider
     }
   }
 
-  private getTsJsAnalysis(
-    editor: import("vscode").TextEditor,
-  ): AnalysisItem[] {
+  private getTsJsAnalysis(editor: import("vscode").TextEditor): AnalysisItem[] {
     const text = editor.document.getText();
     const sourceUri = editor.document.uri.toString();
     const categories: CategoryItem[] = [];
@@ -352,10 +340,7 @@ export class AnalysisTreeProvider
     return imports;
   }
 
-  private toPosition(
-    source: string | undefined,
-    offset: number | undefined,
-  ): Position | undefined {
+  private toPosition(source: string | undefined, offset: number | undefined): Position | undefined {
     if (offset === undefined || !source) return undefined;
     return utf16OffsetToPosition(source, offset);
   }
@@ -385,9 +370,7 @@ export class AnalysisTreeProvider
               `Source: ${imp.source}`,
               `Type-only: ${imp.isTypeOnly}`,
               bindingNames ? `Bindings: ${bindingNames}` : "",
-              imp.resolvedCanonicalId
-                ? `Resolved: ${imp.resolvedCanonicalId}`
-                : "",
+              imp.resolvedCanonicalId ? `Resolved: ${imp.resolvedCanonicalId}` : "",
             ]
               .filter(Boolean)
               .join("\n"),
@@ -401,12 +384,9 @@ export class AnalysisTreeProvider
     }
 
     // Type Information (from TSGO) — shown prominently when available
-    const hasBindingTypes =
-      bindingTypes != null && Object.keys(bindingTypes).length > 0;
+    const hasBindingTypes = bindingTypes != null && Object.keys(bindingTypes).length > 0;
     if (hasBindingTypes) {
-      const entries = Object.entries(bindingTypes!).filter(
-        ([, v]) => v != null,
-      );
+      const entries = Object.entries(bindingTypes!).filter(([, v]) => v != null);
       if (entries.length > 0) {
         categories.push({
           type: "category",
@@ -429,14 +409,9 @@ export class AnalysisTreeProvider
         type: "category",
         label: hasBindingTypes ? "Bindings (static)" : "Bindings",
         children: analysis.bindings.map((b) => {
-          const reactivity =
-            b.reactivityKind !== "None" ? b.reactivityKind.toLowerCase() : "";
+          const reactivity = b.reactivityKind !== "None" ? b.reactivityKind.toLowerCase() : "";
           const tsgoType = bindingTypes?.[b.name] ?? null;
-          const descParts = [
-            b.kind.toLowerCase(),
-            reactivity,
-            tsgoType,
-          ].filter(Boolean);
+          const descParts = [b.kind.toLowerCase(), reactivity, tsgoType].filter(Boolean);
           return {
             type: "leaf" as const,
             label: b.name,
@@ -451,9 +426,7 @@ export class AnalysisTreeProvider
             ]
               .filter(Boolean)
               .join("\n"),
-            icon: b.isReactive
-              ? new ThemeIcon("symbol-variable")
-              : new ThemeIcon("symbol-field"),
+            icon: b.isReactive ? new ThemeIcon("symbol-variable") : new ThemeIcon("symbol-field"),
             startPosition: this.toPosition(sourceText, b.spanStart),
             endPosition: this.toPosition(sourceText, b.spanEnd),
             sourceUri,
@@ -475,9 +448,7 @@ export class AnalysisTreeProvider
             `Kind: ${m.kind}`,
             `Type-based: ${m.isTypeBased}`,
             m.bindingName ? `Binding: ${m.bindingName}` : "",
-            m.typeReferences?.length
-              ? `Types: ${m.typeReferences.join(", ")}`
-              : "",
+            m.typeReferences?.length ? `Types: ${m.typeReferences.join(", ")}` : "",
           ]
             .filter(Boolean)
             .join("\n"),
@@ -497,9 +468,7 @@ export class AnalysisTreeProvider
         children: analysis.template.components.map((comp) => ({
           type: "leaf" as const,
           label: comp.name,
-          description: comp.importSource
-            ? `from "${comp.importSource}"`
-            : "(global)",
+          description: comp.importSource ? `from "${comp.importSource}"` : "(global)",
           tooltip: [
             `Component: ${comp.name}`,
             comp.importSource ? `Import: ${comp.importSource}` : "Global",
@@ -520,10 +489,7 @@ export class AnalysisTreeProvider
     // Lifecycle Hooks (extracted from imports with Vue API classification)
     const lifecycleImports = (analysis.imports ?? []).flatMap((imp) =>
       (imp.bindings ?? []).filter(
-        (b) =>
-          b.vueApi &&
-          typeof b.vueApi === "string" &&
-          b.vueApi.startsWith("On"),
+        (b) => b.vueApi && typeof b.vueApi === "string" && b.vueApi.startsWith("On"),
       ),
     );
     if (lifecycleImports.length > 0) {
@@ -549,11 +515,7 @@ export class AnalysisTreeProvider
         type: "category",
         label: "Styles",
         children: analysis.styles.map((style, i) => {
-          const attrs = [
-            style.scoped ? "scoped" : "",
-            style.isModule ? "module" : "",
-            style.lang,
-          ]
+          const attrs = [style.scoped ? "scoped" : "", style.isModule ? "module" : "", style.lang]
             .filter(Boolean)
             .join(", ");
 
@@ -571,8 +533,7 @@ export class AnalysisTreeProvider
             type: "leaf" as const,
             label: `Style [${i}] (${attrs})`,
             description: children.length
-              ? children.slice(0, 5).join(", ") +
-                (children.length > 5 ? "..." : "")
+              ? children.slice(0, 5).join(", ") + (children.length > 5 ? "..." : "")
               : "",
             tooltip: [
               `Style block ${i}`,
@@ -580,7 +541,9 @@ export class AnalysisTreeProvider
               `Scoped: ${style.scoped}`,
               `Module: ${style.isModule}${style.moduleName ? ` (${style.moduleName})` : ""}`,
               style.css ? `Selectors: ${(style.css.selectors ?? []).length}` : "",
-              style.css ? `Classes: ${(style.css.classes ?? []).map((c) => c.name).join(", ")}` : "",
+              style.css
+                ? `Classes: ${(style.css.classes ?? []).map((c) => c.name).join(", ")}`
+                : "",
               style.vBinds?.length
                 ? `v-bind: ${style.vBinds.map((v) => v.expression).join(", ")}`
                 : "",
@@ -600,7 +563,10 @@ export class AnalysisTreeProvider
       const grouped = new Map<string, Map<string, number>>();
       for (const occ of bindingOccs) {
         let kindMap = grouped.get(occ.name);
-        if (!kindMap) { kindMap = new Map(); grouped.set(occ.name, kindMap); }
+        if (!kindMap) {
+          kindMap = new Map();
+          grouped.set(occ.name, kindMap);
+        }
         kindMap.set(occ.usageKind, (kindMap.get(occ.usageKind) ?? 0) + 1);
       }
       categories.push({
@@ -672,9 +638,10 @@ export class AnalysisTreeProvider
         children: slots.map((s) => ({
           type: "leaf" as const,
           label: `#${s.name}`,
-          description: s.hasBindings && s.bindingNames?.length
-            ? `scoped: ${s.bindingNames.join(", ")}`
-            : "no bindings",
+          description:
+            s.hasBindings && s.bindingNames?.length
+              ? `scoped: ${s.bindingNames.join(", ")}`
+              : "no bindings",
           tooltip: [
             `Slot: ${s.name}`,
             s.hasBindings ? `Bindings: ${(s.bindingNames ?? []).join(", ")}` : "No bindings",
@@ -719,7 +686,9 @@ export class AnalysisTreeProvider
             p.typeAnnotation ?? "",
             p.isRequired ? "required" : "optional",
             p.hasDefault ? "has default" : "",
-          ].filter(Boolean).join(" · "),
+          ]
+            .filter(Boolean)
+            .join(" · "),
           tooltip: [
             `Prop: ${p.name}`,
             p.typeAnnotation ? `Type: ${p.typeAnnotation}` : "",
@@ -727,7 +696,9 @@ export class AnalysisTreeProvider
             `Has default: ${p.hasDefault}`,
             `Used in template: ${p.usedInTemplate}`,
             `Used in script: ${p.usedInScript}`,
-          ].filter(Boolean).join("\n"),
+          ]
+            .filter(Boolean)
+            .join("\n"),
           icon: new ThemeIcon("symbol-property"),
           startPosition: this.toPosition(sourceText, p.spanStart),
           endPosition: this.toPosition(sourceText, p.spanEnd),
@@ -749,13 +720,17 @@ export class AnalysisTreeProvider
             e.isDeclared ? "declared" : "",
             e.hasValidator ? "has validator" : "",
             e.emitLocations?.length ? `${e.emitLocations.length} emit sites` : "",
-          ].filter(Boolean).join(" · "),
+          ]
+            .filter(Boolean)
+            .join(" · "),
           tooltip: [
             `Event: ${e.eventName}`,
             `Declared: ${e.isDeclared}`,
             `Has validator: ${e.hasValidator}`,
             e.emitLocations?.length ? `Emit locations: ${e.emitLocations.length}` : "",
-          ].filter(Boolean).join("\n"),
+          ]
+            .filter(Boolean)
+            .join("\n"),
           icon: new ThemeIcon("symbol-event"),
           startPosition: this.toPosition(sourceText, e.spanStart),
           endPosition: this.toPosition(sourceText, e.spanEnd),
@@ -816,7 +791,9 @@ export class AnalysisTreeProvider
             `API: ${c.api}`,
             c.argValue ? `Argument: "${c.argValue}"` : "",
             c.isAsyncCallback ? "Async callback" : "",
-          ].filter(Boolean).join("\n"),
+          ]
+            .filter(Boolean)
+            .join("\n"),
           icon: new ThemeIcon("symbol-method"),
           startPosition: this.toPosition(sourceText, c.spanStart),
           endPosition: this.toPosition(sourceText, c.spanEnd),
@@ -824,6 +801,36 @@ export class AnalysisTreeProvider
         })),
       });
     }
+
+    // SSR Readiness
+    const ssrResult = computeSsrReadiness(analysis);
+    const ssrChildren: LeafItem[] = [
+      {
+        type: "leaf",
+        label: `Score: ${ssrResult.score}/100`,
+        description: ssrResult.score >= 80 ? "Good" : ssrResult.score >= 50 ? "Needs work" : "Poor",
+        tooltip: `SSR readiness score: ${ssrResult.score}/100`,
+        icon: new ThemeIcon(
+          ssrResult.score >= 80 ? "pass" : ssrResult.score >= 50 ? "warning" : "error",
+        ),
+        sourceUri,
+      },
+      ...ssrResult.issues.map((issue) => ({
+        type: "leaf" as const,
+        label: issue.type,
+        description: issue.detail,
+        tooltip: `[${issue.severity}] ${issue.detail}`,
+        icon: new ThemeIcon(
+          issue.severity === "error" ? "error" : issue.severity === "warning" ? "warning" : "info",
+        ),
+        sourceUri,
+      })),
+    ];
+    categories.push({
+      type: "category",
+      label: "SSR Readiness",
+      children: ssrChildren,
+    });
 
     return categories;
   }

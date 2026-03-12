@@ -100,6 +100,16 @@ pub struct CompileFileParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GenerateTsxParams {
+    #[schemars(description = "File path to a .vue file")]
+    pub path: String,
+    #[schemars(
+        description = "Enable strict slot type checking (overrides server-level --strict-slots flag)"
+    )]
+    pub strict_slots: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MatchCssSelectorParams {
     #[schemars(description = "File path of the Vue component")]
     pub path: String,
@@ -970,13 +980,16 @@ impl VerterMcpServer {
     )]
     async fn generate_tsx(
         &self,
-        Parameters(params): Parameters<FilePathParams>,
+        Parameters(params): Parameters<GenerateTsxParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let canonical = self.resolve(&params.path);
         ensure_loaded(&self.host, &canonical)?;
 
+        let strict_slots = params.strict_slots.unwrap_or(self.config.strict_slots);
+
         let profile = verter_host::CompileProfile {
             target: verter_host::CompileTarget::IDE,
+            strict_slots,
             ..Default::default()
         };
 

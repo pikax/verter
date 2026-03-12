@@ -46,6 +46,14 @@ function verterTimingTitle(): string {
       </button>
       <button
         class="toggle-btn"
+        :class="{ active: store.compilerOptions.strictSlots }"
+        @click="store.toggleStrictSlots"
+        title="Toggle strict slot type checking"
+      >
+        Slots {{ store.compilerOptions.strictSlots ? "STRICT" : "OFF" }}
+      </button>
+      <button
+        class="toggle-btn"
         :class="{ active: store.autoSave }"
         @click="store.toggleAutoSave"
         :title="store.autoSave ? 'Auto-save enabled' : 'Manual save (Ctrl+S)'"

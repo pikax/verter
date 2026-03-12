@@ -5,6 +5,7 @@ import {
   type FileAnalysis,
   type AnalysisBinding,
   type AnalysisTemplateBindingOccurrence,
+  AnalysisFlags,
   AnalysisFlagLabels,
 } from "../core/types";
 
@@ -60,6 +61,51 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
   if ("Literal" in init) return init.Literal.kind;
   if ("Reference" in init) return init.Reference.name;
   return "";
+}
+
+// SSR readiness scoring (matches MCP compute_ssr_readiness logic)
+const CLIENT_ONLY_HOOKS = new Set(["onMounted", "onUpdated", "onBeforeMount", "onBeforeUnmount", "onActivated", "onDeactivated"]);
+
+const ssrReadiness = computed(() => {
+  if (!analysis.value) return null;
+  let score = 100;
+  const issues: Array<{ severity: string; type: string; detail: string }> = [];
+
+  for (const call of analysis.value.vueApiCalls ?? []) {
+    if (CLIENT_ONLY_HOOKS.has(call.api)) {
+      score -= 15;
+      issues.push({ severity: "error", type: "client-only-lifecycle", detail: `\`${call.api}\` never fires during SSR` });
+    }
+  }
+  for (const q of analysis.value.domQueryCalls ?? []) {
+    score -= 20;
+    issues.push({ severity: "error", type: "dom-query", detail: `\`${q.kind}\` has no DOM on server` });
+  }
+  for (const m of analysis.value.cssVarManipulations ?? []) {
+    score -= 10;
+    issues.push({ severity: "warning", type: "css-var-manipulation", detail: `\`${m.kind}\` requires DOM access` });
+  }
+  const hasAsyncSetup = (analysis.value.scriptFlags & AnalysisFlags.ASYNC_SETUP) !== 0;
+  const hasServerPrefetch = (analysis.value.vueApiCalls ?? []).some(c => c.api === "onServerPrefetch");
+  if (hasAsyncSetup && !hasServerPrefetch) {
+    score -= 5;
+    issues.push({ severity: "info", type: "missing-server-prefetch", detail: "Async setup without `onServerPrefetch`" });
+  }
+  for (const call of analysis.value.vueApiCalls ?? []) {
+    if (call.api === "useTemplateRef") {
+      score -= 5;
+      issues.push({ severity: "warning", type: "template-ref", detail: "Template refs are `null` during SSR" });
+    }
+  }
+  if (hasServerPrefetch) score += 5;
+  score = Math.max(0, Math.min(100, score));
+  return { score, issues };
+});
+
+function ssrScoreClass(score: number): string {
+  if (score >= 80) return "badge-vue";
+  if (score >= 50) return "badge-warning";
+  return "badge-reactive";
 }
 </script>
 
@@ -403,6 +449,53 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
             <code class="binding-name">{{ m.kind }}</code>
             <code class="style-tag">{{ m.varName }}</code>
             <span v-if="m.valueExpr" class="binding-init">= {{ m.valueExpr }}</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- SSR Readiness -->
+      <details v-if="ssrReadiness" class="analysis-section">
+        <summary class="section-title">
+          SSR Readiness
+          <span :class="['badge', ssrScoreClass(ssrReadiness.score)]" style="margin-left: 6px;">
+            {{ ssrReadiness.score }}/100
+          </span>
+        </summary>
+        <div class="import-list">
+          <div v-if="ssrReadiness.issues.length === 0" class="binding-item">
+            <span class="badge badge-vue">No issues detected</span>
+          </div>
+          <div v-for="(issue, i) in ssrReadiness.issues" :key="i" class="binding-item">
+            <span :class="['badge', issue.severity === 'error' ? 'badge-warning' : issue.severity === 'warning' ? 'badge-reactive' : 'badge-kind']">
+              {{ issue.severity }}
+            </span>
+            <span class="binding-init">{{ issue.detail }}</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- Store Usages -->
+      <details v-if="analysis.storeUsages?.length" class="analysis-section">
+        <summary class="section-title">Store Usages ({{ analysis.storeUsages.length }})</summary>
+        <div class="import-list">
+          <div v-for="(s, i) in analysis.storeUsages" :key="i" class="binding-item">
+            <code class="binding-name">{{ s.bindingName }}</code>
+            <span class="macro-binding">&rarr;</span>
+            <code>{{ s.callee }}</code>
+            <span class="badge badge-kind">{{ s.storeApi }}</span>
+            <span v-if="s.importSource" class="binding-init">from {{ s.importSource }}</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- Store Definitions -->
+      <details v-if="analysis.storeDefinitions?.length" class="analysis-section">
+        <summary class="section-title">Store Definitions ({{ analysis.storeDefinitions.length }})</summary>
+        <div class="import-list">
+          <div v-for="(d, i) in analysis.storeDefinitions" :key="i" class="binding-item">
+            <code class="binding-name">{{ d.exportName }}</code>
+            <span v-if="d.storeId" class="badge badge-vue">"{{ d.storeId }}"</span>
+            <span class="badge badge-kind">{{ d.storeApi }}</span>
           </div>
         </div>
       </details>

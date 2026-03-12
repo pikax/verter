@@ -108,6 +108,7 @@ export interface TsDiagnosticEntry {
 export interface CompilerOptions {
   isProduction: boolean;
   ssr: boolean;
+  strictSlots: boolean;
 }
 
 export interface CompileTiming {
@@ -156,6 +157,8 @@ export interface FileAnalysis {
   vueApiCalls?: AnalysisVueApiCallSite[];
   domQueryCalls?: AnalysisDomQueryCallSite[];
   cssVarManipulations?: AnalysisCssVarManipulation[];
+  storeUsages?: AnalysisStoreUsage[];
+  storeDefinitions?: AnalysisStoreDefinition[];
 }
 
 export interface AnalysisImport {
@@ -569,6 +572,25 @@ export interface LintDiagnostic {
 export interface LintFix {
   description: string;
   replacement: string;
+  spanStart: number;
+  spanEnd: number;
+}
+
+// ── Store Analysis Types ──
+
+export interface AnalysisStoreUsage {
+  bindingName: string;
+  callee: string;
+  importSource: string;
+  storeApi: string;
+  spanStart: number;
+  spanEnd: number;
+}
+
+export interface AnalysisStoreDefinition {
+  storeId?: string;
+  exportName: string;
+  storeApi: string;
   spanStart: number;
   spanEnd: number;
 }

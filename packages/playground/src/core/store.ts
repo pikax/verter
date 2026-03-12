@@ -66,6 +66,7 @@ export interface Store extends StoreState {
   toggleAutoSave(): void;
   toggleProduction(): void;
   toggleSSR(): void;
+  toggleStrictSlots(): void;
   setTypeChecker(mode: TypeCheckerMode): void;
   setTypeCheckerStatus(status: TypeCheckerStatus): void;
   disabledRules: Set<string>;
@@ -102,6 +103,7 @@ export function useStore(): Store {
   const compilerOptions = reactive<CompilerOptions>({
     isProduction: false,
     ssr: false,
+    strictSlots: false,
   });
   const compileTiming = reactive<CompileTiming>({
     verterNewJs: null,
@@ -155,7 +157,12 @@ export function useStore(): Store {
       }
       if (savedState.outputMode) {
         // Redirect removed tabs from old URLs
-        if (savedState.outputMode === "js" || savedState.outputMode === "css" || savedState.outputMode === "tsc" || savedState.outputMode === "types") {
+        if (
+          savedState.outputMode === "js" ||
+          savedState.outputMode === "css" ||
+          savedState.outputMode === "tsc" ||
+          savedState.outputMode === "types"
+        ) {
           outputMode.value = "files";
         } else {
           outputMode.value = savedState.outputMode;
@@ -213,7 +220,12 @@ export function useStore(): Store {
       async () => {
         if (activeFilename.value === IMPORT_MAP_FILENAME) return;
         if (autoSave.value && activeFile.value) {
-          const timing = await compileFile(activeFile.value, compilerOptions, undefined, files.value);
+          const timing = await compileFile(
+            activeFile.value,
+            compilerOptions,
+            undefined,
+            files.value,
+          );
           Object.assign(compileTiming, timing);
           errors.value = activeFile.value.compiled.errors;
           clearTsxOverride();
@@ -341,6 +353,11 @@ export function useStore(): Store {
     recompile();
   }
 
+  function toggleStrictSlots() {
+    compilerOptions.strictSlots = !compilerOptions.strictSlots;
+    recompile();
+  }
+
   function setTypeChecker(mode: TypeCheckerMode) {
     typeChecker.value = mode;
   }
@@ -398,7 +415,10 @@ export function useStore(): Store {
     }
 
     // Restore state
-    if (state.activeFile && (files.value[state.activeFile] || state.activeFile === IMPORT_MAP_FILENAME)) {
+    if (
+      state.activeFile &&
+      (files.value[state.activeFile] || state.activeFile === IMPORT_MAP_FILENAME)
+    ) {
       activeFilename.value = state.activeFile;
     } else {
       activeFilename.value = mainFile.value;
@@ -520,6 +540,7 @@ export function useStore(): Store {
     toggleAutoSave,
     toggleProduction,
     toggleSSR,
+    toggleStrictSlots,
     typeChecker,
     typeCheckerStatus,
     setTypeChecker,
