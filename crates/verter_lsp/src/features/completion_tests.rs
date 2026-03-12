@@ -52,6 +52,7 @@ fn test_template_completions_include_bindings() {
         None,
         None,
         None,
+        false,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -95,6 +96,7 @@ fn test_script_completions_include_imports() {
         None,
         None,
         None,
+        false,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -138,6 +140,7 @@ fn test_filters_internal_symbols() {
         None,
         None,
         None,
+        false,
     );
     assert!(result.is_some());
     assert!(result.unwrap().items.is_empty());
@@ -164,6 +167,7 @@ fn test_style_returns_css_completions() {
         None,
         None,
         None,
+        false,
     );
     // Style blocks now delegate to CSS completions
     if let Some(cr) = result {
@@ -210,6 +214,7 @@ fn test_template_excludes_type_only_imports() {
         None,
         None,
         None,
+        false,
     );
     assert!(result.is_some());
     // Type-only imports should not appear in template completions
@@ -251,6 +256,7 @@ fn test_class_completions_in_static_class() {
         None,
         None,
         None,
+        false,
     );
     assert!(result.is_some());
     let cr = result.unwrap();
@@ -303,6 +309,7 @@ fn test_no_class_completions_outside_class_attr() {
         None,
         None,
         None,
+        false,
     );
     // Should NOT be class completions (id attribute), so is_incomplete should be false
     if let Some(cr) = result {
@@ -338,6 +345,7 @@ fn test_class_completions_no_style_block() {
         None,
         None,
         None,
+        false,
     );
     // No styles = no CSS classes to offer. Should still return a result but with empty items.
     if let Some(cr) = result {
@@ -483,6 +491,7 @@ fn test_class_completions_in_dynamic_class() {
         None,
         None,
         None,
+        false,
     );
     assert!(
         result.is_some(),
@@ -547,6 +556,7 @@ fn test_no_class_completions_outside_dynamic_string() {
         None,
         None,
         None,
+        false,
     );
     // Should NOT offer CSS class completions when cursor is not inside a string
     if let Some(cr) = result {
@@ -584,6 +594,7 @@ fn test_event_modifier_completions_click() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(result.is_some(), "should return completions after @click.");
@@ -629,6 +640,7 @@ fn test_event_modifier_completions_keyup() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(result.is_some(), "should return completions after @keyup.");
@@ -669,6 +681,7 @@ fn test_event_modifier_completions_mouse() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(result.is_some());
@@ -705,6 +718,7 @@ fn test_no_event_modifier_in_text() {
         None,
         None,
         None,
+        false,
     );
 
     // Should not return event modifier completions for regular text
@@ -735,6 +749,7 @@ fn test_event_modifier_completions_chained() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(
@@ -948,8 +963,17 @@ fn test_root_completions_empty_file() {
         line: 0,
         character: 0,
     };
-    let result =
-        completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        None,
+        false,
+    );
     assert!(result.is_some(), "should provide completions at root level");
     let items = result.unwrap().items;
 
@@ -983,8 +1007,17 @@ fn test_root_completions_with_existing_blocks() {
     let pos = line_index
         .offset_to_position(blocks[0].close_tag_end)
         .unwrap();
-    let result =
-        completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        None,
+        false,
+    );
     assert!(result.is_some());
     let items = result.unwrap().items;
 
@@ -1014,8 +1047,17 @@ fn test_attribute_completions_script() {
 
     // Position inside opening tag (on the space after "script")
     let pos = line_index.offset_to_position(8).unwrap(); // after "<script " before ">"
-    let result =
-        completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        None,
+        false,
+    );
     assert!(result.is_some());
     let items = result.unwrap().items;
 
@@ -1039,8 +1081,17 @@ fn test_attribute_completions_script_existing_attrs_filtered() {
 
     // Position inside opening tag
     let pos = line_index.offset_to_position(22).unwrap(); // before ">"
-    let result =
-        completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        None,
+        false,
+    );
     assert!(result.is_some());
     let items = result.unwrap().items;
 
@@ -1068,8 +1119,17 @@ fn test_attribute_completions_style() {
     let line_index = LineIndex::new_utf16(source);
 
     let pos = line_index.offset_to_position(7).unwrap(); // space before ">"
-    let result =
-        completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        None,
+        false,
+    );
     assert!(result.is_some());
     let items = result.unwrap().items;
 
@@ -1094,8 +1154,17 @@ fn test_no_completions_on_closing_tag() {
     let pos = line_index
         .offset_to_position(blocks[0].close_tag_start + 2)
         .unwrap();
-    let result =
-        completions_at_position(&pos, source, &blocks, None, &line_index, None, None, None);
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        None,
+        false,
+    );
     assert!(
         result.is_none(),
         "should not offer completions on closing tag"
@@ -1158,6 +1227,7 @@ fn test_tag_name_no_script_bindings() {
         None,
         None,
         None,
+        false,
     );
 
     // Should return completions (tag names) but NOT include `count`
@@ -1190,6 +1260,7 @@ fn test_tag_name_includes_html_elements() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(result.is_some(), "should return completions for tag names");
@@ -1244,6 +1315,7 @@ fn test_tag_name_includes_components() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(result.is_some(), "should return completions for tag names");
@@ -1274,6 +1346,7 @@ fn test_tag_name_includes_vue_builtins() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(result.is_some());
@@ -1340,6 +1413,7 @@ fn test_attr_name_no_script_bindings() {
         None,
         None,
         None,
+        false,
     );
 
     if let Some(cr) = result {
@@ -1371,6 +1445,7 @@ fn test_attr_name_includes_directives() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(
@@ -1436,6 +1511,7 @@ fn test_text_content_no_bindings() {
         None,
         None,
         None,
+        false,
     );
 
     // Text content should return None (no completions)
@@ -1482,6 +1558,7 @@ fn test_mustache_shows_bindings() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(result.is_some(), "should return completions in mustache");
@@ -1568,6 +1645,7 @@ fn test_attr_value_shows_bindings() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(result.is_some(), "should return completions in attr value");
@@ -1600,6 +1678,7 @@ fn test_vmodel_modifier_completions() {
         None,
         None,
         None,
+        false,
     );
 
     assert!(result.is_some(), "should return completions after v-model.");
@@ -1651,6 +1730,7 @@ const msg = ref('hello')
         None,
         None,
         None,
+        false,
     );
 
     // Positive: should return None (delegate to TypeProvider)
@@ -1686,6 +1766,7 @@ const msg = ref('hello')
         None,
         None,
         None,
+        false,
     );
 
     // Positive: should return None (delegate to TypeProvider)
@@ -1721,6 +1802,7 @@ const msg = ref('hello')
         None,
         None,
         None,
+        false,
     );
 
     // Positive: should return completions (not suppressed)
@@ -1777,6 +1859,7 @@ fn test_script_completions_have_sort_text() {
         None,
         None,
         None,
+        false,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -2283,6 +2366,7 @@ fn test_component_prop_completions_from_macros() {
         Some(&*resolve),
         None,
         None,
+        false,
     );
 
     assert!(result.is_some(), "should return component prop completions");

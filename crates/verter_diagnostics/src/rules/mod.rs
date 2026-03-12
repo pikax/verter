@@ -11,6 +11,7 @@ pub mod performance;
 pub mod reactivity;
 pub mod script;
 pub mod security;
+pub mod ssr;
 pub mod store;
 pub mod vapor;
 pub mod vue;
@@ -61,6 +62,8 @@ pub enum RuleCategory {
     Security,
     /// Vapor mode compatibility.
     Vapor,
+    /// SSR safety and best practices.
+    Ssr,
     /// Cross-file validation.
     CrossFile,
 }
@@ -79,6 +82,7 @@ impl RuleCategory {
             Self::Performance => "performance",
             Self::Security => "security",
             Self::Vapor => "vapor",
+            Self::Ssr => "ssr",
             Self::CrossFile => "cross-file",
         }
     }
@@ -347,6 +351,17 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(vapor::NoVueLifecycleEvents));
     registry.register(Box::new(vapor::NoInlineTemplate));
     registry.register(Box::new(vapor::NoNonVaporComponents));
+    // SSR (only active when ssr_mode is enabled in config)
+    registry.register(Box::new(ssr::NoClientOnlyLifecycleInSetup));
+    registry.register(Box::new(ssr::NoDomQueryInSetup));
+    registry.register(Box::new(ssr::NoBrowserGlobalsInSetup));
+    registry.register(Box::new(ssr::NoSideEffectsInSetupForSsr));
+    registry.register(Box::new(ssr::NoCssVarManipulationInSetup));
+    registry.register(Box::new(ssr::NoNondeterministicInTemplate));
+    registry.register(Box::new(ssr::NoVShowPreferVIf));
+    registry.register(Box::new(ssr::RequireClientOnlyWrapper));
+    registry.register(Box::new(ssr::PreferServerPrefetch));
+    registry.register(Box::new(ssr::NoTemplateRefInSetup));
     // CSS
     registry.register(Box::new(css::UnusedCssSelector));
     registry.register(Box::new(css::ScopedCssCascade));
@@ -370,6 +385,7 @@ mod tests {
     fn rule_category_as_str() {
         assert_eq!(RuleCategory::VueEssential.as_str(), "vue-essential");
         assert_eq!(RuleCategory::Accessibility.as_str(), "accessibility");
+        assert_eq!(RuleCategory::Ssr.as_str(), "ssr");
         assert_eq!(RuleCategory::CrossFile.as_str(), "cross-file");
     }
 
@@ -382,6 +398,6 @@ mod tests {
     #[test]
     fn builtin_registry_has_rules() {
         let registry = RuleRegistry::builtin();
-        assert!(registry.rules().len() >= 138);
+        assert!(registry.rules().len() >= 148);
     }
 }

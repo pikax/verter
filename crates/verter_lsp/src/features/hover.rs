@@ -75,6 +75,7 @@ pub fn hover_at_position(
     blocks: &[SfcBlock],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
+    ssr_context: bool,
 ) -> Option<VerterHoverResult> {
     let offset = line_index.position_to_offset(position)?;
 
@@ -101,7 +102,7 @@ pub fn hover_at_position(
     })?;
 
     match block.tag_name.as_str() {
-        "script" => hover_in_script(offset, source, analysis),
+        "script" => hover_in_script(offset, source, analysis, ssr_context),
         "template" => hover_in_template(offset, source, analysis),
         "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index)
             .map(|h| h.into()),
@@ -411,9 +412,10 @@ fn hover_in_script(
     offset: usize,
     source: &str,
     analysis: &FileAnalysisSnapshot,
+    ssr_context: bool,
 ) -> Option<VerterHoverResult> {
     // Check if the cursor is on a Vue API call site — add context if so
-    if let Some(api_hover) = vue_api_hover_at_offset(offset as u32, analysis) {
+    if let Some(api_hover) = vue_api_hover_at_offset(offset as u32, analysis, ssr_context) {
         return Some(api_hover.into());
     }
 
@@ -869,7 +871,21 @@ fn find_component_usage_at_tag_offset<'a>(
 
 /// Check if the offset is on a Vue API call site name, and if so return a hover
 /// with Vue API context (category, sync requirement, description).
-fn vue_api_hover_at_offset(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
+/// Client-only lifecycle hooks that never fire during SSR.
+const CLIENT_ONLY_HOOKS: &[verter_analysis::VueApiClassification] = &[
+    verter_analysis::VueApiClassification::OnMounted,
+    verter_analysis::VueApiClassification::OnUpdated,
+    verter_analysis::VueApiClassification::OnActivated,
+    verter_analysis::VueApiClassification::OnDeactivated,
+    verter_analysis::VueApiClassification::OnBeforeUpdate,
+    verter_analysis::VueApiClassification::OnBeforeMount,
+];
+
+fn vue_api_hover_at_offset(
+    offset: u32,
+    analysis: &FileAnalysisSnapshot,
+    ssr_context: bool,
+) -> Option<Hover> {
     let call = analysis
         .vue_api_calls
         .iter()
@@ -916,6 +932,24 @@ fn vue_api_hover_at_offset(offset: u32, analysis: &FileAnalysisSnapshot) -> Opti
 
     if api.requires_sync_context() {
         lines.push("Must be called during synchronous `setup()` execution.".to_string());
+    }
+
+    // SSR warning for client-only hooks
+    if ssr_context && CLIENT_ONLY_HOOKS.contains(api) {
+        lines.push(
+            "**⚠ SSR Warning:** This hook does not fire during server-side rendering. \
+             Move DOM-dependent logic here, or use `onServerPrefetch()` for data fetching."
+                .to_string(),
+        );
+    }
+
+    // SSR note for useTemplateRef
+    if ssr_context && matches!(api, verter_analysis::VueApiClassification::UseTemplateRef) {
+        lines.push(
+            "**⚠ SSR Warning:** Template refs are `null` during SSR. \
+             Access `.value` inside `onMounted()` or guard with `import.meta.client`."
+                .to_string(),
+        );
     }
 
     Some(Hover {

@@ -17,6 +17,7 @@ mod rename_casing;
 mod replace_content;
 mod replace_directive;
 mod shorthand_directive;
+mod ssr_wrap;
 mod symbol_provide;
 mod toggle_negation;
 mod unwrap_binding;
@@ -39,6 +40,7 @@ pub use rename_casing::RenameCasing;
 pub use replace_content::ReplaceContent;
 pub use replace_directive::ReplaceDirective;
 pub use shorthand_directive::ShorthandDirective;
+pub use ssr_wrap::SsrWrap;
 pub use symbol_provide::SymbolProvide;
 pub use toggle_negation::ToggleNegation;
 pub use unwrap_binding::UnwrapBinding;
@@ -69,4 +71,5 @@ pub fn register_builtin_providers(engine: &mut ActionEngine) {
     engine.register(Box::new(RenameCasing));
     engine.register(Box::new(PreferScriptAttrs));
     engine.register(Box::new(ExtractBareText));
+    engine.register(Box::new(SsrWrap));
 }

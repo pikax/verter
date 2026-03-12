@@ -54,6 +54,34 @@ export interface VerterPluginOptions {
    * @example { i18n: (content, lang) => ({ code: JSON.stringify(yaml.load(content)) }) }
    */
   customBlocks?: Record<string, BlockPreprocessor>;
+  /**
+   * SSR configuration for server/client build splitting.
+   */
+  ssr?: {
+    /**
+     * Override SSR auto-detection. When not set, the plugin auto-detects
+     * SSR mode from `viteConfig.build.ssr`.
+     */
+    enabled?: boolean;
+    /**
+     * Component tag names to strip from SSR output.
+     * These are replaced with empty comment nodes in server builds.
+     * @example ["GoogleMap", "VideoPlayer"]
+     */
+    clientOnlyComponents?: string[];
+    /**
+     * Component tag names to strip from client output.
+     * These are replaced with empty comment nodes in client builds.
+     * @example ["ServerMetrics", "CrawlerHint"]
+     */
+    serverOnlyComponents?: string[];
+    /**
+     * Replace `import.meta.server` / `import.meta.client` / `import.meta.env.SSR`
+     * with boolean literals for dead-code elimination.
+     * @default true
+     */
+    deadCodeElimination?: boolean;
+  };
 }
 
 /**

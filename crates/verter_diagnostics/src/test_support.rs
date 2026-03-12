@@ -21,6 +21,18 @@ where
     ctx.into_diagnostics()
 }
 
+fn run_rule_with_config<R, F>(rule: R, config: LintConfig, visit: F) -> Vec<LintDiagnostic>
+where
+    R: LintRule + 'static,
+    F: FnOnce(&LintVisitor, &mut LintContext),
+{
+    let rules: Vec<Box<dyn LintRule>> = vec![Box::new(rule)];
+    let visitor = LintVisitor::new(&rules);
+    let mut ctx = LintContext::new(&config);
+    visit(&visitor, &mut ctx);
+    ctx.into_diagnostics()
+}
+
 pub(crate) fn run_template_rule<R>(
     rule: R,
     template: &TemplateAnalysisSnapshot,
@@ -74,4 +86,50 @@ where
     R: LintRule + 'static,
 {
     run_rule_with(rule, |visitor, ctx| visitor.visit_cross_file(snapshot, ctx))
+}
+
+/// Run a script rule with SSR mode enabled.
+pub(crate) fn run_script_rule_ssr<R>(
+    rule: R,
+    script: &ScriptAnalysisSnapshot,
+) -> Vec<LintDiagnostic>
+where
+    R: LintRule + 'static,
+{
+    let config = LintConfig {
+        ssr_mode: true,
+        ..Default::default()
+    };
+    run_rule_with_config(rule, config, |visitor, ctx| {
+        visitor.visit_script(script, ctx)
+    })
+}
+
+/// Run a template rule with SSR mode enabled.
+pub(crate) fn run_template_rule_ssr<R>(
+    rule: R,
+    template: &TemplateAnalysisSnapshot,
+) -> Vec<LintDiagnostic>
+where
+    R: LintRule + 'static,
+{
+    let config = LintConfig {
+        ssr_mode: true,
+        ..Default::default()
+    };
+    run_rule_with_config(rule, config, |visitor, ctx| {
+        visitor.visit_template(template, ctx)
+    })
+}
+
+/// Run a file rule with SSR mode enabled.
+pub(crate) fn run_file_rule_ssr<R>(rule: R, file: &FileContext<'_>) -> Vec<LintDiagnostic>
+where
+    R: LintRule + 'static,
+{
+    let config = LintConfig {
+        ssr_mode: true,
+        ..Default::default()
+    };
+    run_rule_with_config(rule, config, |visitor, ctx| visitor.visit_file(file, ctx))
 }

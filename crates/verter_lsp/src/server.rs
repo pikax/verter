@@ -4963,6 +4963,15 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
+        let ssr_context = {
+            let canonical_id = self.documents.get_canonical_id(uri);
+            let registry_guard = self.project_registry.read();
+            canonical_id
+                .as_deref()
+                .and_then(|cid| registry_guard.as_ref().map(|r| r.is_ssr_context(cid)))
+                .unwrap_or(false)
+        };
+
         let verter_full = (|| {
             let doc = self.documents.get(uri)?;
             let analysis = self.documents.get_analysis(uri);
@@ -4973,6 +4982,7 @@ impl LanguageServer for VerterLanguageServer {
                 &blocks,
                 analysis.as_ref(),
                 &doc.line_index,
+                ssr_context,
             )
         })();
         let vue_kind_label = verter_full.as_ref().and_then(|r| r.vue_kind_label.clone());
@@ -5228,6 +5238,15 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
+        let completion_ssr_context = {
+            let canonical_id = self.documents.get_canonical_id(uri);
+            let registry_guard = self.project_registry.read();
+            canonical_id
+                .as_deref()
+                .and_then(|cid| registry_guard.as_ref().map(|r| r.is_ssr_context(cid)))
+                .unwrap_or(false)
+        };
+
         let verter_result = (|| {
             let doc = self.documents.get(uri)?;
             let analysis = self.documents.get_analysis(uri);
@@ -5295,6 +5314,7 @@ impl LanguageServer for VerterLanguageServer {
                     Some(&ws_components)
                 },
                 Some(uri.as_str()),
+                completion_ssr_context,
             )
         })();
 

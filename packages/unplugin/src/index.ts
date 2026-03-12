@@ -14,6 +14,7 @@ import {
   isStylePreprocessorRequest,
   PreprocessorSession,
 } from "./core/preprocessor-session";
+import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
 
@@ -217,6 +218,79 @@ function createFilter(include?: string | RegExp | (string | RegExp)[]): (filenam
   return (f) => patterns.some((p) => (typeof p === "string" ? f.endsWith(p) : p.test(f)));
 }
 
+/** Detect if a project uses Nuxt by checking for nuxt.config.* or .nuxt/ directory. */
+function detectNuxt(root: string): boolean {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const configFiles = [
+      "nuxt.config.ts",
+      "nuxt.config.js",
+      "nuxt.config.mts",
+      "nuxt.config.mjs",
+    ];
+    for (const f of configFiles) {
+      if (fs.existsSync(path.join(root, f))) return true;
+    }
+    if (fs.existsSync(path.join(root, ".nuxt"))) return true;
+  } catch {
+    // fs/path not available
+  }
+  return false;
+}
+
+/**
+ * Resolve Nuxt-specific aliases (#imports, #components, #app, etc.)
+ * to their generated type stubs in the .nuxt/ directory.
+ */
+function resolveNuxtAlias(id: string, root: string): string | null {
+  const fs = require("fs");
+  const path = require("path");
+  const nuxtDir = path.join(root, ".nuxt");
+
+  const aliasMap: Record<string, string> = {
+    "#imports": path.join(nuxtDir, "imports.d.ts"),
+    "#components": path.join(nuxtDir, "components.d.ts"),
+    "#app": path.join(nuxtDir, "nuxt.d.ts"),
+    "#app/composables": path.join(nuxtDir, "imports.d.ts"),
+    "#build": nuxtDir,
+  };
+
+  // Direct match
+  if (aliasMap[id]) {
+    try {
+      if (fs.existsSync(aliasMap[id])) return aliasMap[id];
+    } catch { /* ignore */ }
+  }
+
+  // Prefix match for #ui/*, #internal/*, etc.
+  for (const [prefix, target] of Object.entries(aliasMap)) {
+    if (id.startsWith(prefix + "/")) {
+      const rest = id.slice(prefix.length + 1);
+      const resolved = path.join(path.dirname(target), rest);
+      // Try with extensions
+      for (const ext of ["", ".ts", ".d.ts", ".js", ".mjs"]) {
+        const full = resolved + ext;
+        try {
+          if (fs.existsSync(full)) return full;
+        } catch { /* ignore */ }
+      }
+    }
+  }
+
+  return null;
+}
+
+/** Check if a file is a Nuxt server component (*.server.vue). */
+function isServerComponent(filename: string): boolean {
+  return filename.endsWith(".server.vue");
+}
+
+/** Check if a file is a Nuxt client component (*.client.vue). */
+function isClientComponent(filename: string): boolean {
+  return filename.endsWith(".client.vue");
+}
+
 export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> = (
   options,
   meta,
@@ -226,6 +300,8 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
   let session: PreprocessorSession | null = null;
   const hmrStrategy = getHmrStrategy(meta.framework);
   const filter = createFilter(opts.include);
+  let isNuxt = false;
+  let projectRoot = "";
 
   // Store compile profiles from transform() so load() can reuse the same profile.
   // This ensures virtual file requests (style, template) use the same componentId
@@ -263,6 +339,11 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       const { query } = parseVueRequest(id);
       if (query.vue) {
         return id;
+      }
+      // Resolve Nuxt-specific aliases (#imports, #components, etc.)
+      if (isNuxt && projectRoot && id.startsWith("#")) {
+        const resolved = resolveNuxtAlias(id, projectRoot);
+        if (resolved) return resolved;
       }
     },
 
@@ -455,7 +536,14 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       const isProd = viteConfig
         ? viteConfig.command === "build" && !viteConfig.build?.ssr
         : process.env.NODE_ENV === "production";
-      const ssr = viteConfig ? Boolean(viteConfig.build?.ssr) : false;
+      let ssr = opts.ssr?.enabled ?? (viteConfig ? Boolean(viteConfig.build?.ssr) : false);
+
+      // Nuxt server/client component convention:
+      // *.server.vue → always SSR, *.client.vue → never SSR
+      if (isNuxt) {
+        if (isServerComponent(filename)) ssr = true;
+        if (isClientComponent(filename)) ssr = false;
+      }
 
       const componentIdFn = opts.componentId || generateComponentId;
       const componentId = componentIdFn(filename, code, isProd, viteConfig?.root);
@@ -532,6 +620,19 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       // Determine the effective language of the compiled output.
       const mainLang: string = main.lang ?? "ts";
 
+      // Apply SSR transforms (import.meta dead-code elimination, component stripping)
+      let compiledCode = main.code;
+      const ssrOpts = opts.ssr;
+      if (ssrOpts?.deadCodeElimination !== false) {
+        compiledCode = replaceImportMetaSsr(compiledCode, ssr);
+      }
+      if (ssr && ssrOpts?.clientOnlyComponents?.length) {
+        compiledCode = stripComponents(compiledCode, ssrOpts.clientOnlyComponents);
+      }
+      if (!ssr && ssrOpts?.serverOnlyComponents?.length) {
+        compiledCode = stripComponents(compiledCode, ssrOpts.serverOnlyComponents);
+      }
+
       if (viteConfig) {
         // In Vite mode, emit the compiled output as a script sub-request.
         // This matches @vitejs/plugin-vue's architecture where the main module
@@ -543,7 +644,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         // This ensures downstream plugins (vue-jsx, external-globals, etc.) receive
         // properly processed JavaScript, not raw TS/JSX.
         scriptCache.set(filename, {
-          code: main.code,
+          code: compiledCode,
           map: main.sourceMap ?? null,
         });
 
@@ -563,7 +664,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 
       // Non-Vite mode: inline everything (no sub-request support).
       // TS stripping is handled by the host via forceJs: true in the profile.
-      return { code: main.code, map: null };
+      return { code: compiledCode, map: null };
     },
 
     async closeBundle() {
@@ -606,6 +707,8 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
     vite: {
       configResolved(resolvedConfig) {
         viteConfig = resolvedConfig;
+        projectRoot = resolvedConfig.root;
+        isNuxt = detectNuxt(projectRoot);
         // Create the preprocessor session from resolved Vite config.
         // Style preprocessing runs in a child process to isolate leaked Sass workers.
         session = new PreprocessorSession({

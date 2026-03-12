@@ -8318,3 +8318,127 @@ function onClick2() {}
         code
     );
 }
+
+// ── SSR Scoped Style (scope ID injection) ──────────────────────
+
+#[test]
+fn test_ssr_scope_id_basic_element() {
+    let code = gen_ssr_template(
+        r#"<template><div class="foo">hello</div></template>
+<style scoped>.foo { color: red; }</style>"#,
+    );
+    // Positive: should have data-v-XXXXX attribute on the element
+    assert!(
+        code.contains("data-v-"),
+        "should inject scope ID attribute, got:\n{}",
+        code
+    );
+    // The scope ID should appear in the element's opening tag (after _ssrRenderAttrs)
+    assert!(
+        code.contains("data-v-"),
+        "scope ID should appear in element tag, got:\n{}",
+        code
+    );
+    // Negative: should NOT use runtime _scopeId parameter
+    assert!(
+        !code.contains("${_scopeId}"),
+        "should not use runtime _scopeId interpolation, got:\n{}",
+        code
+    );
+    // Negative: should NOT have 8-param signature
+    assert!(
+        !code.contains("$setup, $data, $options, _scopeId"),
+        "should not use 8-param signature, got:\n{}",
+        code
+    );
+    // Positive: should use 4-param signature
+    assert!(
+        code.contains("function ssrRender(_ctx, _push, _parent, _attrs)"),
+        "should use 4-param signature, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn test_ssr_scope_id_component() {
+    let code = gen_ssr_template(
+        r#"<template><MyComp /></template>
+<script setup>
+import MyComp from './MyComp.vue'
+</script>
+<style scoped>.foo { color: red; }</style>"#,
+    );
+    // Positive: should pass scope ID as string arg to _ssrRenderComponent
+    assert!(
+        code.contains(", \"data-v-"),
+        "should pass scope ID string to _ssrRenderComponent, got:\n{}",
+        code
+    );
+    // Negative: should NOT use runtime _scopeId variable
+    assert!(
+        !code.contains(", _scopeId"),
+        "should not pass _scopeId variable, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn test_ssr_scope_id_v_html() {
+    let code = gen_ssr_template(
+        r#"<template><div v-html="content"></div></template>
+<script setup>
+const content = '<b>bold</b>'
+</script>
+<style scoped>.foo { color: red; }</style>"#,
+    );
+    // Positive: v-html element should still get scope ID (after _ssrRenderAttrs)
+    assert!(
+        code.contains("data-v-"),
+        "v-html element should have scope ID, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn test_ssr_scope_id_void_element() {
+    let code = gen_ssr_template(
+        r#"<template><input type="text" /><br /></template>
+<style scoped>.foo { color: red; }</style>"#,
+    );
+    // Positive: void elements should get scope ID before self-closing
+    assert!(
+        code.contains("data-v-"),
+        "void elements should have scope ID, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn test_ssr_scope_id_multi_root() {
+    let code = gen_ssr_template(
+        r#"<template><div>a</div><span>b</span></template>
+<style scoped>.foo { color: red; }</style>"#,
+    );
+    // Positive: both root elements should get scope ID
+    let count = code.matches("data-v-").count();
+    assert!(
+        count >= 2,
+        "both root elements should have scope ID (found {} occurrences), got:\n{}",
+        count,
+        code
+    );
+}
+
+#[test]
+fn test_ssr_no_scope_id_without_scoped_style() {
+    let code = gen_ssr_template(
+        r#"<template><div class="foo">hello</div></template>
+<style>.foo { color: red; }</style>"#,
+    );
+    // Negative: without <style scoped>, no scope ID should appear
+    assert!(
+        !code.contains("data-v-"),
+        "should NOT have scope ID without scoped style, got:\n{}",
+        code
+    );
+}

@@ -810,6 +810,8 @@ pub struct ProjectConfig {
     /// Config file + helper deps for invalidation (canonical absolute paths).
     /// Always includes the config file itself. Only populated on fallback projects.
     pub vite_config_deps: Vec<String>,
+    /// Whether this project uses SSR (detected from Nuxt, `.verterrc.json`, or init options).
+    pub ssr_enabled: bool,
 }
 
 /// Result of building a project registry, including trust-required entries.
@@ -817,6 +819,43 @@ pub struct RegistryBuildResult {
     pub registry: ProjectRegistry,
     /// Configs that need user trust before their aliases can be used.
     pub trust_required: Vec<crate::vite_config::ViteConfigTrustInfo>,
+}
+
+/// Detect whether a project root is an SSR project.
+///
+/// Returns `true` if:
+/// - `nuxt.config.{ts,js,mjs,mts}` exists (Nuxt project)
+/// - `.nuxt/` directory exists
+/// - `.verterrc.json` has `"ssr": { "enabled": true }`
+fn detect_ssr_project(root: &std::path::Path, lint_config: &ResolvedLintConfig) -> bool {
+    // Check if the lint config already has ssr_mode set (from .verterrc.json parsing)
+    if lint_config.config.ssr_mode {
+        return true;
+    }
+
+    // Detect Nuxt: nuxt.config.{ts,js,mjs,mts}
+    for ext in &["ts", "js", "mjs", "mts"] {
+        if root.join(format!("nuxt.config.{ext}")).exists() {
+            return true;
+        }
+    }
+
+    // Detect Nuxt: .nuxt/ directory
+    if root.join(".nuxt").is_dir() {
+        return true;
+    }
+
+    false
+}
+
+/// Check if a file path indicates SSR context (e.g., `*.server.vue`).
+pub fn is_ssr_file(path: &str) -> bool {
+    path.ends_with(".server.vue")
+}
+
+/// Check if a file path indicates client-only context (e.g., `*.client.vue`).
+pub fn is_client_only_file(path: &str) -> bool {
+    path.ends_with(".client.vue")
 }
 
 impl ProjectConfig {
@@ -884,6 +923,7 @@ impl ProjectRegistry {
                 let workspace_aliases = Vec::new();
 
                 let lint = discover_lint_config(&project_root_path);
+                let ssr_enabled = detect_ssr_project(&project_root_path, &lint);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());
 
                 projects.push(ProjectConfig {
@@ -900,6 +940,7 @@ impl ProjectRegistry {
                     lint_explicitly_configured: lint.explicitly_configured,
                     vite_config_path: None,
                     vite_config_deps: Vec::new(),
+                    ssr_enabled,
                 });
             }
 
@@ -1013,6 +1054,7 @@ impl ProjectRegistry {
                 }
             }
 
+            let ssr_enabled = detect_ssr_project(&root_path, &lint);
             projects.push(ProjectConfig {
                 root: canonical,
                 workspace_root: crate::documents::uri_to_canonical_id_from_str(root_uri),
@@ -1027,6 +1069,7 @@ impl ProjectRegistry {
                 lint_explicitly_configured: lint.explicitly_configured,
                 vite_config_path: fallback_vite_config_path,
                 vite_config_deps: fallback_vite_config_deps,
+                ssr_enabled,
             });
         }
 
@@ -1059,6 +1102,7 @@ impl ProjectRegistry {
                 let compiler_options = load_compiler_options(&entry.config_path);
                 let references = load_project_references(&entry.config_path);
                 let lint = discover_lint_config(&project_root_path);
+                let ssr_enabled = detect_ssr_project(&project_root_path, &lint);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());
 
                 projects.push(ProjectConfig {
@@ -1075,10 +1119,12 @@ impl ProjectRegistry {
                     lint_explicitly_configured: lint.explicitly_configured,
                     vite_config_path: None,
                     vite_config_deps: Vec::new(),
+                    ssr_enabled,
                 });
             }
 
             let lint = discover_lint_config(&root_path);
+            let ssr_enabled = detect_ssr_project(&root_path, &lint);
             let linter = verter_diagnostics::Linter::new(lint.config.clone());
             projects.push(ProjectConfig {
                 root: root.to_string(),
@@ -1094,6 +1140,7 @@ impl ProjectRegistry {
                 lint_explicitly_configured: lint.explicitly_configured,
                 vite_config_path: None,
                 vite_config_deps: Vec::new(),
+                ssr_enabled,
             });
         }
 
@@ -1127,6 +1174,24 @@ impl ProjectRegistry {
     /// Get the lint config for a file's project.
     pub fn linter_for(&self, file_path: &str) -> Option<&ProjectConfig> {
         self.find_project(file_path)
+    }
+
+    /// Check whether a file is in an SSR context.
+    ///
+    /// Returns `true` if:
+    /// - The file is `*.server.vue` (always SSR regardless of project config)
+    /// - The project has `ssr_enabled: true` AND the file is NOT `*.client.vue`
+    pub fn is_ssr_context(&self, file_path: &str) -> bool {
+        // *.server.vue files are always SSR
+        if is_ssr_file(file_path) {
+            return true;
+        }
+        // *.client.vue files are never SSR
+        if is_client_only_file(file_path) {
+            return false;
+        }
+        // Otherwise, inherit from project config
+        self.find_project(file_path).is_some_and(|p| p.ssr_enabled)
     }
 
     /// Apply default lint config to projects that don't have explicit lint config.
@@ -2662,6 +2727,7 @@ export default defineConfig(({ mode }) => ({
                 lint_explicitly_configured: false,
                 vite_config_path: None,
                 vite_config_deps: Vec::new(),
+                ssr_enabled: false,
             }],
         };
 
@@ -2701,6 +2767,7 @@ export default defineConfig(({ mode }) => ({
                     lint_explicitly_configured: true,
                     vite_config_path: None,
                     vite_config_deps: Vec::new(),
+                    ssr_enabled: false,
                 },
                 ProjectConfig {
                     root: "/workspace/default/".to_string(),
@@ -2716,6 +2783,7 @@ export default defineConfig(({ mode }) => ({
                     lint_explicitly_configured: false,
                     vite_config_path: None,
                     vite_config_deps: Vec::new(),
+                    ssr_enabled: false,
                 },
             ],
         };
@@ -3005,5 +3073,133 @@ export default defineConfig(({ mode }) => ({
             !has_solution_style_tsconfig(dir.path()),
             "should not scan node_modules"
         );
+    }
+
+    // ── SSR Detection Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn detect_ssr_nuxt_config_ts() {
+        let tmp = std::env::temp_dir().join("verter_test_ssr_nuxt");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("nuxt.config.ts"), "export default {}").unwrap();
+        let lint = ResolvedLintConfig::default();
+        assert!(
+            detect_ssr_project(&tmp, &lint),
+            "should detect nuxt.config.ts"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_ssr_nuxt_config_js() {
+        let tmp = std::env::temp_dir().join("verter_test_ssr_nuxt_js");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("nuxt.config.js"), "export default {}").unwrap();
+        let lint = ResolvedLintConfig::default();
+        assert!(
+            detect_ssr_project(&tmp, &lint),
+            "should detect nuxt.config.js"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_ssr_nuxt_dir() {
+        let tmp = std::env::temp_dir().join("verter_test_ssr_nuxt_dir");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(tmp.join(".nuxt")).unwrap();
+        let lint = ResolvedLintConfig::default();
+        assert!(detect_ssr_project(&tmp, &lint), "should detect .nuxt dir");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_ssr_from_lint_config() {
+        let tmp = std::env::temp_dir().join("verter_test_ssr_lint");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let lint = ResolvedLintConfig {
+            config: verter_diagnostics::LintConfig {
+                ssr_mode: true,
+                ..Default::default()
+            },
+            explicitly_configured: true,
+        };
+        assert!(
+            detect_ssr_project(&tmp, &lint),
+            "should detect ssr_mode from lint config"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn no_ssr_for_plain_vite_project() {
+        let tmp = std::env::temp_dir().join("verter_test_no_ssr");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("vite.config.ts"), "export default {}").unwrap();
+        let lint = ResolvedLintConfig::default();
+        assert!(
+            !detect_ssr_project(&tmp, &lint),
+            "plain vite project should not be SSR"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn is_ssr_file_detection() {
+        assert!(is_ssr_file("MyComp.server.vue"));
+        assert!(is_ssr_file("/path/to/MyComp.server.vue"));
+        assert!(!is_ssr_file("MyComp.vue"));
+        assert!(!is_ssr_file("MyComp.client.vue"));
+    }
+
+    #[test]
+    fn is_client_only_file_detection() {
+        assert!(is_client_only_file("MyComp.client.vue"));
+        assert!(is_client_only_file("/path/to/MyComp.client.vue"));
+        assert!(!is_client_only_file("MyComp.vue"));
+        assert!(!is_client_only_file("MyComp.server.vue"));
+    }
+
+    #[test]
+    fn registry_is_ssr_context() {
+        let registry = ProjectRegistry {
+            projects: vec![ProjectConfig {
+                root: "/workspace/app".to_string(),
+                workspace_root: "/workspace".to_string(),
+                tsconfig_path: None,
+                membership: crate::project_resolver::ProjectMembership::MatchAll,
+                workspace_aliases: Vec::new(),
+                compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                references: Vec::new(),
+                path_resolver: TsConfigPathResolver::default(),
+                lint_config: ResolvedLintConfig::default(),
+                linter: verter_diagnostics::Linter::default(),
+                lint_explicitly_configured: false,
+                vite_config_path: None,
+                vite_config_deps: Vec::new(),
+                ssr_enabled: true,
+            }],
+        };
+
+        // Regular .vue in SSR project → SSR context
+        assert!(registry.is_ssr_context("/workspace/app/src/Comp.vue"));
+        // *.server.vue → always SSR
+        assert!(registry.is_ssr_context("/workspace/app/src/Comp.server.vue"));
+        // *.client.vue → never SSR even in SSR project
+        assert!(!registry.is_ssr_context("/workspace/app/src/Comp.client.vue"));
+        // File outside project → not SSR
+        assert!(!registry.is_ssr_context("/other/Comp.vue"));
+    }
+
+    #[test]
+    fn verterrc_ssr_config_roundtrip() {
+        let json = r#"{"lint":{"enabled":true},"ssr":{"enabled":true}}"#;
+        let config: verter_diagnostics::VerterProjectConfig = serde_json::from_str(json).unwrap();
+        assert!(config.ssr.unwrap().enabled.unwrap());
     }
 }

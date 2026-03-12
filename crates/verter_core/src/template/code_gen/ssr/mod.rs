@@ -111,10 +111,10 @@ pub struct SsrCodeGen<'ast, 'alloc> {
     /// Depth counter for nested component-slot contexts. When > 0, we are
     /// inside a component's slot content and should not treat children as roots.
     in_component_slots: u32,
-    /// Whether the SFC has `<style scoped>`. When true, the SSR output uses
-    /// an 8-param `ssrRender` signature with `_scopeId`, appends `${_scopeId}`
-    /// to element tags, and passes `_scopeId` to `_ssrRenderComponent` calls.
-    has_scope_id: bool,
+    /// Literal scope ID string (e.g., `"data-v-a1b2c3d4"`) when the SFC has
+    /// `<style scoped>`. SSR inlines this as a literal attribute on every
+    /// element and passes it as a string arg to `_ssrRenderComponent`.
+    scope_id: Option<String>,
     /// Whether we've opened an implicit `default: _withCtx(...)` wrapper for
     /// non-template children inside a ComponentWithSlots that has named slots.
     default_slot_open: bool,
@@ -183,9 +183,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             is_multi_root: false,
             needs_fragment: false,
             in_component_slots: 0,
-            // Disabled for now: Vue inlines literal scope IDs, not runtime _scopeId params.
-            // TODO: implement literal scope ID injection (e.g., `data-v-xxxxx`).
-            has_scope_id: false,
+            scope_id: if options.has_scoped_style && !options.scope_id.is_empty() {
+                Some(options.scope_id.clone())
+            } else {
+                None
+            },
             default_slot_open: false,
             saved_default_slot_open: Vec::new(),
             teleport_closing_args: Vec::new(),
@@ -204,24 +206,23 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
 
     // ── Scope ID helpers ─────────────────────────────────────────
 
-    /// Returns `${_scopeId}` when scoped styles are present, empty string otherwise.
+    /// Returns ` data-v-{hash}` literal when scoped styles are present, empty string otherwise.
+    /// Used to append the scope ID attribute to element opening tags.
     #[inline]
-    fn scope_id_suffix(&self) -> &'static str {
-        if self.has_scope_id {
-            "${_scopeId}"
-        } else {
-            ""
+    fn scope_id_suffix(&self) -> String {
+        match &self.scope_id {
+            Some(id) => format!(" {}", id),
+            None => String::new(),
         }
     }
 
-    /// Returns `, _scopeId` when scoped styles are present, empty string otherwise.
+    /// Returns `, "data-v-{hash}"` literal when scoped styles are present, empty string otherwise.
     /// Used as extra argument to `_ssrRenderComponent`.
     #[inline]
-    fn scope_id_arg(&self) -> &'static str {
-        if self.has_scope_id {
-            ", _scopeId"
-        } else {
-            ""
+    fn scope_id_arg(&self) -> String {
+        match &self.scope_id {
+            Some(id) => format!(", \"{}\"", id),
+            None => String::new(),
         }
     }
 
@@ -3966,12 +3967,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
 
         // Build function signature with hoisted component resolves
         self.buf.clear();
-        if self.has_scope_id {
-            self.buf.push_str("function ssrRender(_ctx, _push, _parent, _attrs, $setup, $data, $options, _scopeId) {\n");
-        } else {
-            self.buf
-                .push_str("function ssrRender(_ctx, _push, _parent, _attrs) {\n");
-        }
+        self.buf
+            .push_str("function ssrRender(_ctx, _push, _parent, _attrs) {\n");
         for resolve in &self.component_resolves {
             self.buf.push_str(resolve);
             self.buf.push('\n');

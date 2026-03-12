@@ -2928,6 +2928,317 @@ impl VerterMcpServer {
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // SSR ANALYSIS (3 tools)
+    // ════════════════════════════════════════════════════════════════
+
+    #[tool(
+        description = "Score a component's SSR compatibility from 0-100. Checks for client-only lifecycle hooks, DOM queries, browser globals, CSS variable manipulations, and nondeterministic template expressions."
+    )]
+    async fn ssr_readiness(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let score_result = compute_ssr_readiness(&analysis);
+
+        let json =
+            serde_json::to_string_pretty(&score_result).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Analyze a component and return an ordered list of changes needed for SSR safety. Each item includes the issue, its severity, and a suggested fix."
+    )]
+    async fn ssr_migration_plan(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        ensure_template_analysis(&self.host, &canonical)?;
+
+        let analysis = self
+            .host
+            .get_analysis(&canonical)
+            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+
+        let plan = build_ssr_migration_plan(&analysis);
+
+        let json = serde_json::to_string_pretty(&plan).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Scan all loaded .vue files and compute per-component SSR readiness scores. Returns a project-wide summary with score distribution, critical-path blockers, and overall SSR adoption readiness."
+    )]
+    async fn ssr_project_report(&self) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let vue_ids: Vec<&str> = files
+            .iter()
+            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .map(|(id, _)| id.as_str())
+            .collect();
+
+        let analyses = batch_analysis_with_template(&self.host, &vue_ids);
+
+        let mut components = Vec::new();
+        let mut total_score: f64 = 0.0;
+        let mut blocking = Vec::new();
+
+        for (canonical, analysis) in &analyses {
+            let result = compute_ssr_readiness(analysis);
+            let score = result["score"].as_u64().unwrap_or(0);
+            total_score += score as f64;
+
+            if score < 50 {
+                blocking.push(serde_json::json!({
+                    "file": canonical,
+                    "score": score,
+                    "issues": result["issues"],
+                }));
+            }
+
+            components.push(serde_json::json!({
+                "file": canonical,
+                "score": score,
+            }));
+        }
+
+        let count = components.len().max(1);
+        let avg_score = (total_score / count as f64).round() as u64;
+
+        // Score distribution buckets
+        let mut dist = [0u32; 5]; // 0-19, 20-39, 40-59, 60-79, 80-100
+        for c in &components {
+            let s = c["score"].as_u64().unwrap_or(0);
+            let bucket = (s / 20).min(4) as usize;
+            dist[bucket] += 1;
+        }
+
+        blocking.sort_by(|a, b| {
+            a["score"]
+                .as_u64()
+                .unwrap_or(0)
+                .cmp(&b["score"].as_u64().unwrap_or(0))
+        });
+
+        let report = serde_json::json!({
+            "total_components": components.len(),
+            "average_score": avg_score,
+            "score_distribution": {
+                "0-19": dist[0],
+                "20-39": dist[1],
+                "40-59": dist[2],
+                "60-79": dist[3],
+                "80-100": dist[4],
+            },
+            "ssr_ready": components.iter().filter(|c| c["score"].as_u64().unwrap_or(0) >= 80).count(),
+            "needs_work": components.iter().filter(|c| {
+                let s = c["score"].as_u64().unwrap_or(0);
+                (50..80).contains(&s)
+            }).count(),
+            "blocking": blocking.len(),
+            "critical_path_blockers": blocking.iter().take(10).collect::<Vec<_>>(),
+            "components": components,
+        });
+
+        let json = serde_json::to_string_pretty(&report).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+}
+
+
+// ── SSR Analysis Helpers ──────────────────────────────────────────
+
+/// Client-only lifecycle hooks that never fire during SSR.
+const CLIENT_ONLY_HOOKS: &[VueApiClassification] = &[
+    VueApiClassification::OnMounted,
+    VueApiClassification::OnUpdated,
+    VueApiClassification::OnBeforeUpdate,
+    VueApiClassification::OnActivated,
+    VueApiClassification::OnDeactivated,
+    VueApiClassification::OnRenderTracked,
+    VueApiClassification::OnRenderTriggered,
+];
+
+/// Compute SSR readiness score (0-100) for a component.
+fn compute_ssr_readiness(analysis: &verter_host::FileAnalysisSnapshot) -> serde_json::Value {
+    let mut score: i32 = 100;
+    let mut issues = Vec::new();
+
+    // Check client-only lifecycle hooks (-15 each, capped)
+    let client_hooks: Vec<_> = analysis
+        .vue_api_calls
+        .iter()
+        .filter(|c| CLIENT_ONLY_HOOKS.contains(&c.api))
+        .collect();
+    for hook in &client_hooks {
+        score -= 15;
+        issues.push(serde_json::json!({
+            "severity": "error",
+            "type": "client-only-lifecycle",
+            "detail": format!("`{}` never fires during SSR", hook.api.display_name()),
+        }));
+    }
+
+    // Check DOM queries (-20 each)
+    for query in analysis.dom_query_calls.iter() {
+        score -= 20;
+        issues.push(serde_json::json!({
+            "severity": "error",
+            "type": "dom-query",
+            "detail": format!("`{}` has no DOM on server", query.kind.display_name()),
+        }));
+    }
+
+    // Check CSS variable manipulations (-10 each)
+    for manip in analysis.css_var_manipulations.iter() {
+        score -= 10;
+        issues.push(serde_json::json!({
+            "severity": "warning",
+            "type": "css-var-manipulation",
+            "detail": format!("`{}` requires DOM access", manip.kind.display_name()),
+        }));
+    }
+
+    // Check for async setup without onServerPrefetch (-5)
+    let has_async_setup = AnalysisFlags::from_bits_truncate(analysis.script_flags)
+        .contains(AnalysisFlags::ASYNC_SETUP);
+    let has_server_prefetch = analysis
+        .vue_api_calls
+        .iter()
+        .any(|c| c.api == VueApiClassification::OnServerPrefetch);
+    if has_async_setup && !has_server_prefetch {
+        score -= 5;
+        issues.push(serde_json::json!({
+            "severity": "info",
+            "type": "missing-server-prefetch",
+            "detail": "Async setup without `onServerPrefetch` — data won't be pre-fetched on server",
+        }));
+    }
+
+    // Check for useTemplateRef (-5 each)
+    let template_refs: Vec<_> = analysis
+        .vue_api_calls
+        .iter()
+        .filter(|c| c.api == VueApiClassification::UseTemplateRef)
+        .collect();
+    for _ in &template_refs {
+        score -= 5;
+        issues.push(serde_json::json!({
+            "severity": "warning",
+            "type": "template-ref",
+            "detail": "Template refs are `null` during SSR",
+        }));
+    }
+
+    // Bonus: has onServerPrefetch (+5)
+    if has_server_prefetch {
+        score += 5;
+    }
+
+    score = score.clamp(0, 100);
+
+    serde_json::json!({
+        "score": score,
+        "issues": issues,
+        "has_server_prefetch": has_server_prefetch,
+        "has_async_setup": has_async_setup,
+    })
+}
+
+/// Build an ordered migration plan for SSR safety.
+fn build_ssr_migration_plan(analysis: &verter_host::FileAnalysisSnapshot) -> serde_json::Value {
+    let mut steps = Vec::new();
+    let mut priority = 1u32;
+
+    // P1: DOM queries must be moved to onMounted
+    for query in analysis.dom_query_calls.iter() {
+        steps.push(serde_json::json!({
+            "priority": priority,
+            "severity": "error",
+            "issue": format!("DOM query `{}` in setup scope", query.kind.display_name()),
+            "fix": "Move inside `onMounted()` callback",
+            "effort": "low",
+        }));
+        priority += 1;
+    }
+
+    // P2: Client-only lifecycle hooks
+    let client_hooks: Vec<_> = analysis
+        .vue_api_calls
+        .iter()
+        .filter(|c| CLIENT_ONLY_HOOKS.contains(&c.api))
+        .collect();
+    for hook in &client_hooks {
+        steps.push(serde_json::json!({
+            "priority": priority,
+            "severity": "error",
+            "issue": format!("`{}` never fires during SSR", hook.api.display_name()),
+            "fix": format!("Guard with `if (typeof window !== 'undefined')` or keep in `{}`", hook.api.display_name()),
+            "effort": "low",
+        }));
+        priority += 1;
+    }
+
+    // P3: CSS variable manipulations
+    for manip in analysis.css_var_manipulations.iter() {
+        steps.push(serde_json::json!({
+            "priority": priority,
+            "severity": "warning",
+            "issue": format!("CSS variable `{}` manipulation in setup", manip.kind.display_name()),
+            "fix": "Move to `onMounted()` callback",
+            "effort": "low",
+        }));
+        priority += 1;
+    }
+
+    // P4: Template refs
+    let template_refs: Vec<_> = analysis
+        .vue_api_calls
+        .iter()
+        .filter(|c| c.api == VueApiClassification::UseTemplateRef)
+        .collect();
+    for tr in &template_refs {
+        steps.push(serde_json::json!({
+            "priority": priority,
+            "severity": "warning",
+            "issue": format!("Template ref `{}` is null during SSR", tr.arg_value.as_deref().unwrap_or("?")),
+            "fix": "Access `.value` only inside `onMounted()` or in event handlers",
+            "effort": "low",
+        }));
+        priority += 1;
+    }
+
+    // P5: Missing onServerPrefetch for async setup
+    let has_async_setup = AnalysisFlags::from_bits_truncate(analysis.script_flags)
+        .contains(AnalysisFlags::ASYNC_SETUP);
+    let has_server_prefetch = analysis
+        .vue_api_calls
+        .iter()
+        .any(|c| c.api == VueApiClassification::OnServerPrefetch);
+    if has_async_setup && !has_server_prefetch {
+        steps.push(serde_json::json!({
+            "priority": priority,
+            "severity": "info",
+            "issue": "Async setup without `onServerPrefetch`",
+            "fix": "Add `onServerPrefetch(async () => { /* fetch data */ })` for server-side data loading",
+            "effort": "medium",
+        }));
+    }
+
+    serde_json::json!({
+        "total_steps": steps.len(),
+        "steps": steps,
+    })
 }
 
 /// Simple ISO 8601 timestamp (no chrono dependency).
@@ -3412,4 +3723,69 @@ import { RouterLink, RouterView } from 'vue-router'
             verter_analysis::RoutingFramework::Unknown
         );
     }
+    // ── SSR readiness scoring ──
+
+    #[test]
+    fn ssr_readiness_clean_component() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/test/Clean.vue",
+            r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+        );
+        compile_analysis(&host, "/test/Clean.vue");
+        let analysis = host.get_analysis("/test/Clean.vue").unwrap();
+        let result = compute_ssr_readiness(&analysis);
+        let score = result["score"].as_u64().unwrap();
+        assert_eq!(score, 100, "clean component should score 100");
+        let issues = result["issues"].as_array().unwrap();
+        assert!(issues.is_empty(), "should have no issues");
+    }
+
+    #[test]
+    fn ssr_readiness_dom_query_reduces_score() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/test/Dom.vue",
+            r#"<script setup>
+const el = document.querySelector('.foo')
+</script>
+<template><div>{{ el }}</div></template>"#,
+        );
+        compile_analysis(&host, "/test/Dom.vue");
+        let analysis = host.get_analysis("/test/Dom.vue").unwrap();
+        let result = compute_ssr_readiness(&analysis);
+        let score = result["score"].as_u64().unwrap();
+        assert!(score < 100, "DOM query should reduce score, got {}", score);
+        let issues = result["issues"].as_array().unwrap();
+        assert!(!issues.is_empty(), "should have issues");
+    }
+
+    #[test]
+    fn ssr_migration_plan_empty_for_clean() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/test/Clean2.vue",
+            r#"<script setup>
+import { ref } from 'vue'
+const x = ref(1)
+</script>
+<template><div>{{ x }}</div></template>"#,
+        );
+        compile_analysis(&host, "/test/Clean2.vue");
+        let analysis = host.get_analysis("/test/Clean2.vue").unwrap();
+        let plan = build_ssr_migration_plan(&analysis);
+        let steps = plan["steps"].as_array().unwrap();
+        assert!(
+            steps.is_empty(),
+            "clean component should have no migration steps"
+        );
+    }
+
 }

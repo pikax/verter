@@ -45,6 +45,7 @@ pub fn completions_at_position(
     resolve_component: Option<&dyn Fn(&str) -> Option<FileAnalysisSnapshot>>,
     workspace_components: Option<&[WorkspaceComponent]>,
     doc_uri: Option<&str>,
+    ssr_context: bool,
 ) -> Option<CompletionResult> {
     let offset = line_index.position_to_offset(position)?;
 
@@ -84,8 +85,12 @@ pub fn completions_at_position(
         CursorContext::BlockClosingTag => None,
         CursorContext::Script => {
             let analysis = analysis?;
+            let mut items = script_completions(analysis);
+            if ssr_context {
+                items.extend(ssr_script_completions());
+            }
             Some(CompletionResult {
-                items: script_completions(analysis),
+                items,
                 is_incomplete: false,
             })
         }
@@ -109,10 +114,16 @@ pub fn completions_at_position(
         CursorContext::Template(tc) => {
             let analysis = analysis?;
             match tc {
-                TemplateCursorContext::TagName { .. } => Some(CompletionResult {
-                    items: tag_name_completions(analysis, workspace_components, doc_uri),
-                    is_incomplete: false,
-                }),
+                TemplateCursorContext::TagName { .. } => {
+                    let mut items = tag_name_completions(analysis, workspace_components, doc_uri);
+                    if ssr_context {
+                        items.extend(ssr_tag_name_completions());
+                    }
+                    Some(CompletionResult {
+                        items,
+                        is_incomplete: false,
+                    })
+                }
                 TemplateCursorContext::ClosingTagName { .. } => None,
                 TemplateCursorContext::AttributeName {
                     tag_name: _,
@@ -837,6 +848,50 @@ fn script_completions(analysis: &FileAnalysisSnapshot) -> Vec<CompletionItem> {
         .retain(|item| !item.label.starts_with("___VERTER___") && !is_internal_dunder(&item.label));
 
     items
+}
+
+/// Extra completions for script context in SSR projects.
+///
+/// Boosts `onServerPrefetch` and `import.meta.server/client` patterns.
+fn ssr_script_completions() -> Vec<CompletionItem> {
+    vec![
+        CompletionItem {
+            label: "onServerPrefetch".to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("SSR data-fetching hook (from 'vue')".to_string()),
+            sort_text: Some("0onServerPrefetch".to_string()),
+            insert_text: Some("onServerPrefetch(async () => {\n\t$0\n})".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "import.meta.server".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("true during SSR, false on client".to_string()),
+            sort_text: Some("0import.meta.server".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "import.meta.client".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("true on client, false during SSR".to_string()),
+            sort_text: Some("0import.meta.client".to_string()),
+            ..Default::default()
+        },
+    ]
+}
+
+/// Extra tag name completions for template context in SSR projects.
+fn ssr_tag_name_completions() -> Vec<CompletionItem> {
+    vec![CompletionItem {
+        label: "ClientOnly".to_string(),
+        kind: Some(CompletionItemKind::CLASS),
+        detail: Some("Render children only on client side".to_string()),
+        sort_text: Some("0ClientOnly".to_string()),
+        insert_text: Some("ClientOnly>\n\t$0\n</ClientOnly>".to_string()),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        ..Default::default()
+    }]
 }
 
 /// Completions available in `<template>` context.

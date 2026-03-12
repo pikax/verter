@@ -206,6 +206,17 @@ pub struct VerterProjectConfig {
     pub lint: Option<ProjectLintConfig>,
     /// File patterns to ignore from linting.
     pub ignore: Option<Vec<String>>,
+    /// SSR configuration.
+    pub ssr: Option<ProjectSsrConfig>,
+}
+
+/// SSR section of `.verterrc.json`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSsrConfig {
+    /// Whether SSR mode is enabled. When `true`, SSR-specific lint rules fire
+    /// and the LSP shows SSR-aware warnings/completions.
+    pub enabled: Option<bool>,
 }
 
 /// Lint section of `.verterrc.json`.
@@ -281,6 +292,13 @@ fn load_verterrc(workspace_root: &std::path::Path) -> Option<ResolvedLintConfig>
     // Apply ignore patterns
     if let Some(ignore) = project_config.ignore {
         config.ignore_patterns = ignore;
+    }
+
+    // Apply SSR mode from config
+    if let Some(ssr) = &project_config.ssr {
+        if ssr.enabled.unwrap_or(false) {
+            config.ssr_mode = true;
+        }
     }
 
     let enabled = lint.enabled.unwrap_or(true);

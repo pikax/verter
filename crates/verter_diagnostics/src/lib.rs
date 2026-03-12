@@ -33,7 +33,8 @@ mod visitor;
 pub use comment_directives::parse_comment_directives;
 pub use config::{
     discover_lint_config, parse_rule_severity, strip_json_comments, strip_trailing_commas,
-    LintConfig, LintPreset, ProjectLintConfig, ResolvedLintConfig, VerterProjectConfig,
+    LintConfig, LintPreset, ProjectLintConfig, ProjectSsrConfig, ResolvedLintConfig,
+    VerterProjectConfig,
 };
 pub use context::LintContext;
 pub use cross_file::{

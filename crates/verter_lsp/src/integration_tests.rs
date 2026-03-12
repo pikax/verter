@@ -85,6 +85,7 @@ const count = ref(0)
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     );
 
     assert!(hover.is_some(), "Should get hover info for 'count' binding");
@@ -131,6 +132,7 @@ const msg = 'hello'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     );
     assert!(
         hover.is_some(),
@@ -174,6 +176,7 @@ const message = 'hello'
         None,
         None,
         None,
+        false,
     );
 
     assert!(items.is_some(), "Should get completion items in template");
@@ -215,6 +218,7 @@ const count = ref(0)
         None,
         None,
         None,
+        false,
     );
 
     // Script completions should include imports and bindings
@@ -2861,6 +2865,7 @@ const count = 42
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     );
 
     // Verter-only hover should exist but NOT contain TSGO type info
@@ -2968,6 +2973,7 @@ const count = 42
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     );
 
     // Positive: verter hover exists and has content
@@ -4247,6 +4253,7 @@ fn integration_hover_on_slot_tag_name() {
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     ));
 
     assert!(
@@ -4283,6 +4290,7 @@ fn integration_hover_on_slot_name_attr_value() {
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     ));
 
     assert!(
@@ -4315,6 +4323,7 @@ fn integration_hover_on_default_slot_outlet() {
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     ));
 
     assert!(
@@ -4348,6 +4357,7 @@ import MyComp from './MyComp.vue'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     ));
 
     assert!(
@@ -4385,6 +4395,7 @@ import MyComp from './MyComp.vue'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     ));
 
     assert!(
@@ -4418,6 +4429,7 @@ import MyComp from './MyComp.vue'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     ));
 
     assert!(
@@ -4503,6 +4515,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        false,
     )
     .map(|r| r.hover);
     assert!(

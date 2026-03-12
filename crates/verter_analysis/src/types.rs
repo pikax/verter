@@ -514,6 +514,18 @@ pub enum DomQueryKind {
     GetElementsByClassName,
 }
 
+impl DomQueryKind {
+    /// Get the JavaScript method name.
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::QuerySelector => "querySelector",
+            Self::QuerySelectorAll => "querySelectorAll",
+            Self::GetElementById => "getElementById",
+            Self::GetElementsByClassName => "getElementsByClassName",
+        }
+    }
+}
+
 impl VueApiClassification {
     /// Check if this API is a lifecycle hook.
     pub const fn is_lifecycle(&self) -> bool {
@@ -1344,4 +1356,15 @@ pub struct StoreDefinition {
     /// Canonical file ID where this store is defined (populated by host).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<String>,
+}
+
+impl CssVarManipulationKind {
+    /// Get the JavaScript method name.
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::SetProperty => "setProperty",
+            Self::GetPropertyValue => "getPropertyValue",
+            Self::RemoveProperty => "removeProperty",
+        }
+    }
 }
