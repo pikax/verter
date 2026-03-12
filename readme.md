@@ -2,8 +2,8 @@
 
 A Vue compiler, Language Server Protocol (LSP) implementation, and build tool — built as a hybrid Rust + TypeScript monorepo.
 
-> [!WARNING]
-> **This project is experimental and under active development.** APIs, architecture, and package boundaries may change without notice. Use at your own risk and please report any issues you find.
+> [!NOTE]
+> **Verter is in alpha** (`v0.0.1-alpha.3`). It is actively used in development and tested against real-world Vue projects (Element Plus, Naive UI, PrimeVue, Vuetify, and more). The core APIs are stabilizing but may still change between releases. Bug reports and feedback are very welcome — please [open an issue](https://github.com/pikax/verter/issues) if you run into anything.
 
 > [!IMPORTANT]
 > The generated TSX is syntactically valid TypeScript/TSX used for **type analysis only** — it's not meant to be executed or compiled as actual JSX/TSX code.
@@ -178,6 +178,10 @@ graph TB
         Unplugin["@verter/unplugin<br/>(Universal Bundler Plugin)"]
     end
 
+    subgraph "Metadata"
+        ComponentMeta["@verter/component-meta<br/>(Metadata Extraction + Type IR)"]
+    end
+
     subgraph "Web"
         Playground["@verter/playground<br/>(Online Playground)"]
     end
@@ -192,6 +196,8 @@ graph TB
     WASM --> RustCore
     Unplugin --> Native
     Playground --> WASM
+    ComponentMeta --> Native
+    ComponentMeta -.-> WASM
 ```
 
 ### Dual Compilation Pipeline
@@ -232,6 +238,7 @@ verter/
 │   ├── language-shared/           # @verter/language-shared — Shared protocol types
 │   ├── typescript-plugin/         # @verter/typescript-plugin — TS plugin
 │   ├── oxc-bindings/              # @verter/oxc-bindings — OXC parser helper
+│   ├── component-meta/            # @verter/component-meta — Component metadata extraction
 │   ├── playground/                # @verter/playground — Online playground
 │   ├── vue-vscode/                # verter-vscode — VS Code extension
 │   └── example/                   # Example project
@@ -263,6 +270,10 @@ verter-mcp (MCP server binary, stdio + HTTP)
 
 @verter/playground (Netlify-hosted)
 └── @verter/wasm (Rust template compiler, wasm-bindgen)
+
+@verter/component-meta (metadata extraction)
+├── @verter/native (NAPI host, Node.js)
+└── @verter/wasm (WASM host, browser, optional)
 ```
 
 ## Installation
@@ -428,6 +439,7 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 | `@verter/typescript-plugin` | [README](./packages/typescript-plugin/readme.md) | TypeScript plugin                 |
 | `@verter/oxc-bindings`      | [README](./packages/oxc-bindings/readme.md)      | OXC parser helper                 |
 | `verter-vscode`             | [README](./packages/vue-vscode/readme.md)        | VS Code extension                 |
+| `@verter/component-meta`    | [README](./packages/component-meta/README.md)    | Component metadata + Type IR      |
 | `@verter/playground`        | [README](./packages/playground/README.md)        | Online playground                 |
 
 ### Rust Crates

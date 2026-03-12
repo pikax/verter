@@ -28,6 +28,10 @@ verter-mcp (MCP server binary, stdio + HTTP)
 
 @verter/playground (Netlify-hosted)
 └── @verter/wasm (Rust template compiler, wasm-bindgen)
+
+@verter/component-meta (metadata extraction)
+├── @verter/native (NAPI host, Node.js)
+└── @verter/wasm (WASM host, browser, optional)
 ```
 
 ### Repository Structure
@@ -54,6 +58,7 @@ packages/
   language-shared/   # @verter/language-shared - Shared LSP protocol types
   typescript-plugin/ # @verter/typescript-plugin - TS language service plugin
   oxc-bindings/      # @verter/oxc-bindings - OXC parser binary helper
+  component-meta/    # @verter/component-meta - Component metadata extraction + Type IR + adapters
   playground/        # @verter/playground - Online playground (private, Netlify-hosted)
   vue-vscode/        # verter-vscode - VS Code extension
   example/           # Example project
@@ -428,6 +433,7 @@ Scopes:
   lsp      - language-server
   types    - @verter/types
   ts       - @verter/core (TypeScript)
+  meta     - @verter/component-meta
   ci       - CI/CD workflows
   *        - multiple areas
 

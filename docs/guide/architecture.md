@@ -30,6 +30,9 @@ graph TB
     subgraph "Build Tools"
         Unplugin["@verter/unplugin<br/>(Universal Bundler Plugin)"]
     end
+    subgraph "Metadata"
+        ComponentMeta["@verter/component-meta<br/>(Metadata Extraction + Type IR)"]
+    end
     subgraph "Web"
         Playground["@verter/playground<br/>(Online Playground)"]
     end
@@ -43,6 +46,8 @@ graph TB
     WASM --> RustCore
     Unplugin --> Native
     Playground --> WASM
+    ComponentMeta --> Native
+    ComponentMeta -.-> WASM
 ```
 
 ## Dual Compilation Pipeline
@@ -83,6 +88,7 @@ Both pipelines share the same Vue SFC input and produce consistent results -- th
 | `packages/native/` | `@verter/native` -- Native binding loader |
 | `packages/wasm/` | `@verter/wasm` -- WASM binding wrapper |
 | `packages/unplugin/` | `@verter/unplugin` -- Universal bundler plugin |
+| `packages/component-meta/` | `@verter/component-meta` -- Component metadata extraction + Type IR |
 | `packages/vue-vscode/` | VS Code extension |
 
 ## Rust Compilation Pipeline
