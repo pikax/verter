@@ -575,6 +575,7 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_core/src/ide/template/mod.rs` | IDE template codegen: Vue → JSX (used by LSP/TSGO) |
 | `crates/verter_core/src/ide/template/directives.rs` | IDE: v-if → ternary, v-for → .map(), v-show → style |
 | `crates/verter_core/src/ide/template/props.rs` | IDE: :prop → prop={}, @event → onEvent={} |
+| `crates/verter_core/src/ide/template/mod.rs` (`StrictSlotEntry`, `emit_strict_slot_checks`) | IDE: strict slot children type checking (`strictRenderSlot` calls) |
 | `crates/verter_core/src/css/` | CSS preprocessing and style transformation |
 | `crates/verter_core/src/code_transform/code_transform.rs` | Chunk-based deferred mutation engine |
 | `crates/verter_analysis/src/lib.rs` | Static analysis entry: imports, exports, bindings |
