@@ -217,7 +217,20 @@ pub fn run(
     // ── Phase A: Validation (TSX) ───────────────────────────────────
     // Generate full TSX output (script body + template) for type checking.
     // This catches type errors that the minimal macro-only .tsc.tsx would miss.
-    let validation_generated = generate_all_tsx(&config.vue_files, temp_dir.path());
+    let mut validation_generated = generate_all_tsx(&config.vue_files, temp_dir.path());
+
+    // ── Strip .vue.ts → .vue in generated TSX ────────────────────────
+    // The IDE codegen rewrites `.vue` imports to `.vue.ts` (for the LSP's
+    // virtual file system). In verter-tsc, `.vue.ts` files don't exist —
+    // the `*.vue` wildcard module declaration handles `.vue` imports instead.
+    // Strip the `.ts` suffix so the wildcard matches.
+    for (_, code, tsx_path) in &mut validation_generated {
+        let stripped = strip_vue_ts_suffix(code);
+        if stripped != *code {
+            *code = stripped;
+            let _ = fs::write(tsx_path, &*code);
+        }
+    }
 
     // ── Phase B: Declaration Generation (TSC) ────────────────────────
     // Only when --declaration is requested. Uses the minimal macro-only codegen.
@@ -812,9 +825,7 @@ fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
         } else {
             // Strip leading "./" before joining to avoid "dir/./rest" in the result.
             // Path::join does not normalize "." segments on all platforms.
-            let clean_rel = import_path
-                .strip_prefix("./")
-                .unwrap_or(import_path);
+            let clean_rel = import_path.strip_prefix("./").unwrap_or(import_path);
             let resolved = vue_dir.join(clean_rel);
             let abs_path = resolved.to_string_lossy().replace('\\', "/");
             format!("{quote}{abs_path}{quote}")
@@ -825,6 +836,44 @@ fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
 
     // consumed = opening quote + path + closing quote
     Some((result, path_end + 1))
+}
+
+/// Strip the `.ts` suffix from `.vue.ts` import paths, reverting them to `.vue`.
+///
+/// The IDE codegen rewrites `.vue` imports to `.vue.ts` (for the LSP's virtual
+/// file system where `.vue.ts` holds the public API output). In verter-tsc,
+/// these `.vue.ts` files don't exist — the `*.vue` wildcard module declaration
+/// in `vue-shims.d.ts` handles `.vue` imports instead. This function strips
+/// the `.ts` suffix so the wildcard matches.
+fn strip_vue_ts_suffix(code: &str) -> String {
+    // Fast path: no .vue.ts in the code at all
+    if !code.contains(".vue.ts") {
+        return code.to_string();
+    }
+
+    let mut result = String::with_capacity(code.len());
+    let mut rest = code;
+
+    while let Some(idx) = rest.find(".vue.ts") {
+        let after = idx + 7; // ".vue.ts" is 7 bytes
+
+        // Only strip when .vue.ts is inside a quoted string (import specifier).
+        // Check that the character after ".vue.ts" is a quote (end of specifier).
+        let is_in_string = after < rest.len() && matches!(rest.as_bytes()[after], b'\'' | b'"');
+
+        if is_in_string {
+            // Write everything up to ".vue" (strip the ".ts" part)
+            result.push_str(&rest[..idx + 4]); // include ".vue"
+            rest = &rest[after..]; // skip ".ts"
+        } else {
+            // Not a quoted import specifier — keep as-is
+            result.push_str(&rest[..after]);
+            rest = &rest[after..];
+        }
+    }
+
+    result.push_str(rest);
+    result
 }
 
 /// Sanitize a component name to be a valid JavaScript identifier.
@@ -1635,6 +1684,68 @@ const props = defineProps<{ msg: string }>()
         assert!(
             !result.contains("/./"),
             "resolved path must not contain '/./' segment: {result}"
+        );
+    }
+
+    // ── .vue.ts suffix stripping tests ──────────────────────────
+
+    #[test]
+    fn strip_vue_ts_suffix_rewrites_import_specifiers() {
+        let code = r#"import('D:/project/src/components/Foo.vue.ts')['default']
+import type { Props } from 'D:/project/src/components/Bar.vue.ts'"#;
+
+        let result = strip_vue_ts_suffix(code);
+
+        // Positive: .vue.ts imports should become .vue
+        assert!(
+            result.contains("'D:/project/src/components/Foo.vue'"),
+            "Foo.vue.ts should become Foo.vue: {result}"
+        );
+        assert!(
+            result.contains("'D:/project/src/components/Bar.vue'"),
+            "Bar.vue.ts should become Bar.vue: {result}"
+        );
+
+        // Negative: .vue.ts should NOT remain
+        assert!(
+            !result.contains(".vue.ts"),
+            "no .vue.ts should remain in output: {result}"
+        );
+    }
+
+    #[test]
+    fn strip_vue_ts_suffix_preserves_non_vue_imports() {
+        let code = r#"import { ref } from 'vue'
+import type { Foo } from './types'"#;
+
+        let result = strip_vue_ts_suffix(code);
+
+        // Non-.vue.ts imports should be untouched
+        assert_eq!(result, code, "non-vue.ts imports should be unchanged");
+    }
+
+    #[test]
+    fn strip_vue_ts_suffix_preserves_non_string_occurrences() {
+        // .vue.ts not inside quotes (e.g. in a comment) should not be stripped
+        let code = "// This references a .vue.ts file\nconst x = 1;";
+        let result = strip_vue_ts_suffix(code);
+        assert_eq!(
+            result, code,
+            "non-string .vue.ts should be unchanged: {result}"
+        );
+    }
+
+    #[test]
+    fn strip_vue_ts_suffix_handles_double_quotes() {
+        let code = r#"import Child from "D:/project/Child.vue.ts""#;
+        let result = strip_vue_ts_suffix(code);
+        assert!(
+            result.contains(r#""D:/project/Child.vue""#),
+            "double-quoted .vue.ts should become .vue: {result}"
+        );
+        assert!(
+            !result.contains(".vue.ts"),
+            "no .vue.ts should remain: {result}"
         );
     }
 
