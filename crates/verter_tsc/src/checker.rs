@@ -1,16 +1,22 @@
 //! Batch Vue SFC codegen and type checking.
 //!
-//! Two-phase pipeline:
+//! Three-phase pipeline:
+//!
+//! **Phase 0 — Public API Stubs:**
+//!   For each .vue file → `get_public_api()` → `.vue.ts` stub with real component types.
+//!   Enables cross-component prop/emit/slot type checking (imports resolve to actual types
+//!   instead of the generic `DefineComponent<{}, {}, any>` wildcard shim).
 //!
 //! **Phase A — Validation (TSX):**
 //!   For each .vue file → `compile()` with `CompileTarget::IDE` → full TSX with source map.
+//!   `.vue.ts` imports are rewritten to point to Phase 0 stubs.
 //!   Type-checks script body + template. Reports ALL type errors.
 //!
 //! **Phase B — Declaration Generation (TSC):**
 //!   For each .vue file → `generate_tsc_output()` → write `.tsc.tsx` to tempdir.
-//!   Only when `--declaration` is requested.
+//!   Only when `--declaration` is requested. Reuses the shared `VerterHost` from Phase 0.
 //!
-//! Both phases invoke `tsgo` (or `tsc`) as a subprocess and remap diagnostics
+//! All phases invoke `tsgo` (or `tsc`) as a subprocess and remap diagnostics
 //! via source maps back to `.vue` positions.
 
 use std::collections::HashMap;
@@ -56,6 +62,56 @@ pub struct CheckResult {
 struct CheckerInvocation {
     output: String,
     success: bool,
+}
+
+/// Phase 0: Generate `.vue.ts` public API stub files for cross-component type resolution.
+///
+/// For each `.vue` file, generates a `.vue.ts` stub containing the component's public API
+/// (props, emits, slots, exposed bindings) so that cross-component imports resolve to
+/// real types instead of the generic `DefineComponent<{}, {}, any>` wildcard shim.
+///
+/// Returns:
+/// - `vue_ts_paths`: list of generated `.vue.ts` file paths (for tsconfig `files`)
+/// - `vue_ts_map`: canonical `.vue` path → temp-dir `.vue.ts` path (for import rewriting)
+fn generate_public_api_stubs(
+    host: &VerterHost,
+    vue_files: &[PathBuf],
+    temp_dir: &Path,
+) -> (Vec<PathBuf>, HashMap<String, PathBuf>) {
+    let mut vue_ts_paths = Vec::new();
+    let mut vue_ts_map = HashMap::new();
+
+    for vue_path in vue_files {
+        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+
+        let tsc_response = match host.get_public_api(&canonical_id) {
+            Some(r) => r,
+            None => continue,
+        };
+
+        // Rewrite relative imports in the public API code to absolute paths
+        // (the stub will live in temp_dir, not the vue file's directory).
+        let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
+        let code = rewrite_relative_imports(&tsc_response.code, vue_dir);
+
+        let raw_name = vue_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Component");
+        let component_name = sanitize_component_name(raw_name);
+        let hash = simple_hash(canonical_id.as_bytes());
+        let stub_name = format!("{component_name}_{hash:016x}.vue.ts");
+        let stub_path = temp_dir.join(&stub_name);
+
+        if fs::write(&stub_path, &code).is_err() {
+            continue;
+        }
+
+        vue_ts_paths.push(stub_path.clone());
+        vue_ts_map.insert(canonical_id, stub_path);
+    }
+
+    (vue_ts_paths, vue_ts_map)
 }
 
 /// Phase A: Generate full TSX (script body + template) for every `.vue` file in parallel.
@@ -124,39 +180,26 @@ fn generate_all_tsx(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, Str
 /// Phase B: Generate minimal TSC declaration output for every `.vue` file in parallel.
 ///
 /// Uses the host-backed public API path so imported macro types resolve the same
-/// way they do in the IDE.
+/// way they do in the IDE. Accepts a shared `VerterHost` (files already upserted
+/// in Phase 0) to avoid duplicate work.
 /// Returns `(vue_path, tsc_code, tsc_tsx_path)` tuples written to `temp_dir`.
-fn generate_all_tsc(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, String, PathBuf)> {
-    let host = VerterHost::new(HostConfig::default());
-    let mut queued = Vec::new();
-
-    for vue_path in vue_files {
-        let source = match fs::read_to_string(vue_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
-        if host
-            .upsert(UpsertRequest {
-                canonical_id: Some(canonical_id.clone()),
-                input_id: canonical_id.clone(),
-                source: std::sync::Arc::<str>::from(source),
-                file_kind: FileKind::VueSfc,
-                aliases: Vec::new(),
-            })
-            .is_err()
-        {
-            continue;
-        }
-
-        let raw_name = vue_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Component");
-        let component_name = sanitize_component_name(raw_name);
-        queued.push((vue_path.clone(), canonical_id, component_name));
-    }
+fn generate_all_tsc(
+    host: &VerterHost,
+    vue_files: &[PathBuf],
+    temp_dir: &Path,
+) -> Vec<(PathBuf, String, PathBuf)> {
+    let queued: Vec<(PathBuf, String, String)> = vue_files
+        .iter()
+        .map(|vue_path| {
+            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+            let raw_name = vue_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Component");
+            let component_name = sanitize_component_name(raw_name);
+            (vue_path.clone(), canonical_id, component_name)
+        })
+        .collect();
 
     queued
         .into_iter()
@@ -214,31 +257,54 @@ pub fn run(
         }
     };
 
+    // ── Phase 0: Generate public API stubs ─────────────────────────
+    // Create a shared VerterHost, upsert all .vue files, and generate .vue.ts
+    // stubs containing real component types for cross-component type resolution.
+    let host = VerterHost::new(HostConfig::default());
+    for vue_path in &config.vue_files {
+        let source = match fs::read_to_string(vue_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.clone()),
+            input_id: canonical_id,
+            source: std::sync::Arc::<str>::from(source),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        });
+    }
+
+    let (vue_ts_paths, vue_ts_map) =
+        generate_public_api_stubs(&host, &config.vue_files, temp_dir.path());
+
     // ── Phase A: Validation (TSX) ───────────────────────────────────
     // Generate full TSX output (script body + template) for type checking.
     // This catches type errors that the minimal macro-only .tsc.tsx would miss.
     let mut validation_generated = generate_all_tsx(&config.vue_files, temp_dir.path());
 
-    // ── Strip .vue.ts → .vue in generated TSX ────────────────────────
+    // ── Rewrite .vue.ts imports ──────────────────────────────────────
     // The IDE codegen rewrites `.vue` imports to `.vue.ts` (for the LSP's
-    // virtual file system). In verter-tsc, `.vue.ts` files don't exist —
-    // the `*.vue` wildcard module declaration handles `.vue` imports instead.
-    // Strip the `.ts` suffix so the wildcard matches.
+    // virtual file system). Remap known .vue.ts paths to temp-dir stubs
+    // (for real cross-component type checking) and strip .ts from unknown
+    // paths (falling back to the wildcard shim).
     for (_, code, tsx_path) in &mut validation_generated {
-        let stripped = strip_vue_ts_suffix(code);
-        if stripped != *code {
-            *code = stripped;
+        let rewritten = rewrite_vue_ts_imports(code, &vue_ts_map);
+        if rewritten != *code {
+            *code = rewritten;
             let _ = fs::write(tsx_path, &*code);
         }
     }
 
     // ── Phase B: Declaration Generation (TSC) ────────────────────────
     // Only when --declaration is requested. Uses the minimal macro-only codegen.
+    // Reuses the shared VerterHost from Phase 0 (files already upserted).
     let declaration_generated = if opts.declaration {
         // Use a subdirectory to keep Phase A and Phase B files separate.
         let decl_dir = temp_dir.path().join("_tsc");
         let _ = fs::create_dir_all(&decl_dir);
-        Some(generate_all_tsc(&config.vue_files, &decl_dir))
+        Some(generate_all_tsc(&host, &config.vue_files, &decl_dir))
     } else {
         None
     };
@@ -279,9 +345,12 @@ pub fn run(
     let types_path = temp_dir.path().join("__verter_types.d.ts");
     let _ = fs::write(&types_path, verter_core::VERTER_TYPES_AMBIENT_MODULE);
 
-    // Build validation file list (Phase A TSX files).
+    // Build validation file list (Phase A TSX files + Phase 0 stubs).
     let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
     let mut validation_paths: Vec<PathBuf> = vec![shims_path.clone(), html_attrs_path, types_path];
+
+    // Add Phase 0 public API stubs so tsconfig includes them for type resolution.
+    validation_paths.extend(vue_ts_paths);
 
     for (vue_path, tsx_code, tsx_path) in &validation_generated {
         let canon = strip_unc_prefix(&tsx_path.canonicalize().unwrap_or_else(|_| tsx_path.clone()));
@@ -579,6 +648,9 @@ fn write_temp_tsconfig(
         // Without this, tsc computes rootDir from the common ancestor of all input
         // files, which is unpredictable when mixing temp-dir .tsc.tsx and source .ts.
         "rootDir": root_dir.to_string_lossy().replace('\\', "/"),
+        // Allow importing .vue.ts public API stubs (cross-component type resolution).
+        // Requires noEmit or emitDeclarationOnly (both true in our generated configs).
+        "allowImportingTsExtensions": true,
     });
     // Phase A (validation) uses TSX files that contain JSX syntax.
     // Standard Vue TSX config: `jsx: "preserve"` + `jsxImportSource: "vue"`.
@@ -838,14 +910,14 @@ fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
     Some((result, path_end + 1))
 }
 
-/// Strip the `.ts` suffix from `.vue.ts` import paths, reverting them to `.vue`.
+/// Rewrite `.vue.ts` import paths in generated TSX code.
 ///
-/// The IDE codegen rewrites `.vue` imports to `.vue.ts` (for the LSP's virtual
-/// file system where `.vue.ts` holds the public API output). In verter-tsc,
-/// these `.vue.ts` files don't exist — the `*.vue` wildcard module declaration
-/// in `vue-shims.d.ts` handles `.vue` imports instead. This function strips
-/// the `.ts` suffix so the wildcard matches.
-fn strip_vue_ts_suffix(code: &str) -> String {
+/// For known `.vue` files (present in `vue_ts_map`), rewrites the import to point
+/// to the temp-dir public API stub. For unknown `.vue.ts` paths (e.g., from
+/// node_modules), strips the `.ts` suffix so the `*.vue` wildcard shim matches.
+///
+/// Handles both `import('path.vue.ts')` and `from 'path.vue.ts'` patterns.
+fn rewrite_vue_ts_imports(code: &str, vue_ts_map: &HashMap<String, PathBuf>) -> String {
     // Fast path: no .vue.ts in the code at all
     if !code.contains(".vue.ts") {
         return code.to_string();
@@ -857,14 +929,36 @@ fn strip_vue_ts_suffix(code: &str) -> String {
     while let Some(idx) = rest.find(".vue.ts") {
         let after = idx + 7; // ".vue.ts" is 7 bytes
 
-        // Only strip when .vue.ts is inside a quoted string (import specifier).
+        // Only rewrite when .vue.ts is inside a quoted string (import specifier).
         // Check that the character after ".vue.ts" is a quote (end of specifier).
         let is_in_string = after < rest.len() && matches!(rest.as_bytes()[after], b'\'' | b'"');
 
         if is_in_string {
-            // Write everything up to ".vue" (strip the ".ts" part)
-            result.push_str(&rest[..idx + 4]); // include ".vue"
-            rest = &rest[after..]; // skip ".ts"
+            // Find the opening quote by scanning backwards from the .vue.ts position.
+            let quote_char = rest.as_bytes()[after] as char;
+            let path_end = idx + 4; // end of ".vue" (before ".ts")
+
+            // Find the start of the quoted string by scanning backwards.
+            if let Some(quote_start) = rest[..idx].rfind(quote_char) {
+                let vue_path = &rest[quote_start + 1..path_end]; // path without .ts suffix
+
+                // Look up in the map to see if this is a known .vue file.
+                if let Some(stub_path) = vue_ts_map.get(vue_path) {
+                    // Known .vue file — rewrite to temp-dir stub path.
+                    let stub_str = stub_path.to_string_lossy().replace('\\', "/");
+                    result.push_str(&rest[..quote_start + 1]); // up to and including opening quote
+                    result.push_str(&stub_str);
+                    rest = &rest[after..]; // skip past closing quote position
+                } else {
+                    // Unknown .vue.ts — strip .ts suffix for wildcard shim fallback.
+                    result.push_str(&rest[..path_end]); // include ".vue"
+                    rest = &rest[after..]; // skip ".ts"
+                }
+            } else {
+                // No opening quote found — keep as-is
+                result.push_str(&rest[..after]);
+                rest = &rest[after..];
+            }
         } else {
             // Not a quoted import specifier — keep as-is
             result.push_str(&rest[..after]);
@@ -1687,48 +1781,59 @@ const props = defineProps<{ msg: string }>()
         );
     }
 
-    // ── .vue.ts suffix stripping tests ──────────────────────────
+    // ── .vue.ts import rewriting tests ──────────────────────────
 
     #[test]
-    fn strip_vue_ts_suffix_rewrites_import_specifiers() {
+    fn rewrite_vue_ts_imports_rewrites_known_and_strips_unknown() {
+        let mut map = HashMap::new();
+        map.insert(
+            "D:/project/src/components/Foo.vue".to_string(),
+            PathBuf::from("C:/tmp/Foo_abc.vue.ts"),
+        );
+        // Bar.vue is NOT in the map — should fall back to stripping .ts
+
         let code = r#"import('D:/project/src/components/Foo.vue.ts')['default']
 import type { Props } from 'D:/project/src/components/Bar.vue.ts'"#;
 
-        let result = strip_vue_ts_suffix(code);
+        let result = rewrite_vue_ts_imports(code, &map);
 
-        // Positive: .vue.ts imports should become .vue
+        // Positive: known Foo.vue.ts should be rewritten to temp stub
         assert!(
-            result.contains("'D:/project/src/components/Foo.vue'"),
-            "Foo.vue.ts should become Foo.vue: {result}"
+            result.contains("'C:/tmp/Foo_abc.vue.ts'"),
+            "known Foo.vue.ts should become temp stub path: {result}"
         );
+
+        // Positive: unknown Bar.vue.ts should have .ts stripped (wildcard shim fallback)
         assert!(
             result.contains("'D:/project/src/components/Bar.vue'"),
-            "Bar.vue.ts should become Bar.vue: {result}"
+            "unknown Bar.vue.ts should become Bar.vue: {result}"
         );
 
-        // Negative: .vue.ts should NOT remain
+        // Negative: original Foo.vue.ts path should not remain
         assert!(
-            !result.contains(".vue.ts"),
-            "no .vue.ts should remain in output: {result}"
+            !result.contains("D:/project/src/components/Foo.vue.ts"),
+            "original Foo.vue.ts path should be replaced: {result}"
         );
     }
 
     #[test]
-    fn strip_vue_ts_suffix_preserves_non_vue_imports() {
+    fn rewrite_vue_ts_imports_preserves_non_vue_imports() {
+        let map = HashMap::new();
         let code = r#"import { ref } from 'vue'
 import type { Foo } from './types'"#;
 
-        let result = strip_vue_ts_suffix(code);
+        let result = rewrite_vue_ts_imports(code, &map);
 
         // Non-.vue.ts imports should be untouched
         assert_eq!(result, code, "non-vue.ts imports should be unchanged");
     }
 
     #[test]
-    fn strip_vue_ts_suffix_preserves_non_string_occurrences() {
-        // .vue.ts not inside quotes (e.g. in a comment) should not be stripped
+    fn rewrite_vue_ts_imports_preserves_non_string_occurrences() {
+        let map = HashMap::new();
+        // .vue.ts not inside quotes (e.g. in a comment) should not be changed
         let code = "// This references a .vue.ts file\nconst x = 1;";
-        let result = strip_vue_ts_suffix(code);
+        let result = rewrite_vue_ts_imports(code, &map);
         assert_eq!(
             result, code,
             "non-string .vue.ts should be unchanged: {result}"
@@ -1736,16 +1841,22 @@ import type { Foo } from './types'"#;
     }
 
     #[test]
-    fn strip_vue_ts_suffix_handles_double_quotes() {
+    fn rewrite_vue_ts_imports_handles_double_quotes() {
+        let mut map = HashMap::new();
+        map.insert(
+            "D:/project/Child.vue".to_string(),
+            PathBuf::from("C:/tmp/Child_xyz.vue.ts"),
+        );
+
         let code = r#"import Child from "D:/project/Child.vue.ts""#;
-        let result = strip_vue_ts_suffix(code);
+        let result = rewrite_vue_ts_imports(code, &map);
         assert!(
-            result.contains(r#""D:/project/Child.vue""#),
-            "double-quoted .vue.ts should become .vue: {result}"
+            result.contains(r#""C:/tmp/Child_xyz.vue.ts""#),
+            "double-quoted known .vue.ts should be rewritten: {result}"
         );
         assert!(
-            !result.contains(".vue.ts"),
-            "no .vue.ts should remain: {result}"
+            !result.contains("D:/project/Child.vue.ts"),
+            "original path should be replaced: {result}"
         );
     }
 
@@ -2411,6 +2522,185 @@ const props = defineProps<{ msg: string }>()
             "should postprocess .vue.d.ts even when tsc reports errors, found: {:?}",
             collect_dts_files(&decl_dir)
         );
+    }
+
+    // ── Cross-component type resolution tests ─────────────────────
+
+    #[test]
+    fn generate_public_api_stubs_creates_files() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let src_dir = temp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let child_vue = src_dir.join("Child.vue");
+        fs::write(
+            &child_vue,
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+        )
+        .unwrap();
+
+        let host = VerterHost::new(HostConfig::default());
+        let canonical_id = child_vue.to_string_lossy().replace('\\', "/");
+        let source = fs::read_to_string(&child_vue).unwrap();
+        host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.clone()),
+            input_id: canonical_id.clone(),
+            source: std::sync::Arc::<str>::from(source),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+        let out_dir = temp.path().join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let (vue_ts_paths, vue_ts_map) =
+            generate_public_api_stubs(&host, &[child_vue.clone()], &out_dir);
+
+        // Positive: should create at least one .vue.ts stub
+        assert_eq!(vue_ts_paths.len(), 1, "should generate one stub file");
+        assert!(vue_ts_paths[0].exists(), "stub file should exist on disk");
+        let stub_content = fs::read_to_string(&vue_ts_paths[0]).unwrap();
+        assert!(
+            stub_content.contains("export default"),
+            "stub should contain export default: {stub_content}"
+        );
+
+        // Positive: map entry should exist
+        let key = canonical_id;
+        assert!(
+            vue_ts_map.contains_key(&key),
+            "vue_ts_map should have entry for the .vue file"
+        );
+
+        // Negative: stub should not contain raw .vue.ts import paths
+        assert!(
+            !stub_content.contains(".vue.ts"),
+            "stub should not contain .vue.ts import paths: {stub_content}"
+        );
+    }
+
+    #[test]
+    fn rewrite_vue_ts_imports_maps_known_paths() {
+        let mut map = HashMap::new();
+        map.insert(
+            "D:/project/src/Child.vue".to_string(),
+            PathBuf::from("C:/tmp/out/Child_abc.vue.ts"),
+        );
+
+        let code = r#"import('D:/project/src/Child.vue.ts')['default']"#;
+        let result = rewrite_vue_ts_imports(code, &map);
+
+        // Positive: should rewrite to temp path
+        assert!(
+            result.contains("C:/tmp/out/Child_abc.vue.ts"),
+            "should rewrite to temp stub path: {result}"
+        );
+        // Negative: original .vue.ts path should be gone
+        assert!(
+            !result.contains("D:/project/src/Child.vue.ts"),
+            "original .vue.ts path should be replaced: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_vue_ts_imports_preserves_unknown() {
+        let map = HashMap::new(); // empty — no known paths
+
+        let code = r#"import('D:/node_modules/some-lib/Comp.vue.ts')['default']"#;
+        let result = rewrite_vue_ts_imports(code, &map);
+
+        // Unknown .vue.ts should be stripped to .vue (fallback to wildcard shim)
+        assert!(
+            result.contains("Comp.vue'"),
+            "unknown .vue.ts should have .ts stripped for wildcard shim fallback: {result}"
+        );
+        assert!(
+            !result.contains(".vue.ts"),
+            "unknown .vue.ts should not remain as-is: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_vue_ts_imports_handles_from_syntax() {
+        let mut map = HashMap::new();
+        map.insert(
+            "D:/project/src/Child.vue".to_string(),
+            PathBuf::from("C:/tmp/out/Child_abc.vue.ts"),
+        );
+
+        let code = r#"import type { Props } from 'D:/project/src/Child.vue.ts'"#;
+        let result = rewrite_vue_ts_imports(code, &map);
+
+        // Positive: should rewrite from-syntax imports too
+        assert!(
+            result.contains("C:/tmp/out/Child_abc.vue.ts"),
+            "from-syntax .vue.ts import should be rewritten: {result}"
+        );
+        // Negative: original path should be gone
+        assert!(
+            !result.contains("D:/project/src/Child.vue.ts"),
+            "original path should be replaced: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_vue_ts_imports_ignores_non_vue_ts() {
+        let map = HashMap::new();
+
+        let code = r#"import type { Foo } from 'D:/project/src/types.ts'"#;
+        let result = rewrite_vue_ts_imports(code, &map);
+
+        // Non-.vue.ts imports should remain unchanged
+        assert_eq!(
+            result, code,
+            "non-.vue.ts imports should be unchanged: {result}"
+        );
+    }
+
+    #[test]
+    fn generate_all_tsc_accepts_shared_host() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let vue_path = temp.path().join("Test.vue");
+        fs::write(
+            &vue_path,
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+        )
+        .unwrap();
+
+        let host = VerterHost::new(HostConfig::default());
+        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+        let source = fs::read_to_string(&vue_path).unwrap();
+        host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.clone()),
+            input_id: canonical_id,
+            source: std::sync::Arc::<str>::from(source),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+        let out_dir = temp.path().join("tsc_out");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let results = generate_all_tsc(&host, &[vue_path], &out_dir);
+
+        // Positive: should produce output
+        assert!(
+            !results.is_empty(),
+            "generate_all_tsc with shared host should produce output"
+        );
+        // Positive: generated file should exist
+        let (_, _, tsc_path) = &results[0];
+        assert!(tsc_path.exists(), "generated .tsc.tsx should exist on disk");
     }
 
     #[test]
