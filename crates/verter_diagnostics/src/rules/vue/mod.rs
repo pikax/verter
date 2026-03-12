@@ -102,6 +102,7 @@ mod define_model_type_required;
 mod no_duplicate_model_modifiers;
 mod no_invalid_html_nesting;
 mod require_define_slots;
+mod required_slot_has_default;
 
 pub use attribute_hyphenation::AttributeHyphenation;
 pub use attribute_order::AttributeOrder;
@@ -205,3 +206,4 @@ pub use define_model_type_required::DefineModelTypeRequired;
 pub use no_duplicate_model_modifiers::NoDuplicateModelModifiers;
 pub use no_invalid_html_nesting::NoInvalidHtmlNesting;
 pub use require_define_slots::RequireDefineSlots;
+pub use required_slot_has_default::RequiredSlotHasDefault;

@@ -2323,6 +2323,7 @@ fn test_component_prop_completions_from_macros() {
                     },
                 ],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: verter_span::Span::new(0, 0),
             },
             AnalyzedMacro {
@@ -2337,6 +2338,7 @@ fn test_component_prop_completions_from_macros() {
                     name: "custom".to_string(),
                     span: verter_span::Span::new(0, 6),
                 }],
+                slot_fields: vec![],
                 span: verter_span::Span::new(0, 0),
             },
         ]),

@@ -1,7 +1,9 @@
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
 
-use crate::types::{AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField};
+use crate::types::{
+    AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
+};
 
 /// Classify a callee name as a Vue compiler macro.
 fn classify_macro(name: &str) -> Option<AnalyzedMacroKind> {
@@ -308,6 +310,12 @@ fn try_extract_macro(
                 Vec::new()
             };
 
+            let slot_fields = if kind == AnalyzedMacroKind::DefineSlots {
+                extract_slot_fields(call)
+            } else {
+                Vec::new()
+            };
+
             Some(AnalyzedMacro {
                 kind,
                 is_type_based,
@@ -317,6 +325,7 @@ fn try_extract_macro(
                 has_inherit_attrs_false,
                 prop_fields,
                 emit_fields,
+                slot_fields,
                 span: call.span.into(),
             })
         }
@@ -555,6 +564,69 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     None
                 }
             })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Extract individual slot field names, required status, and spans from a `defineSlots` call.
+///
+/// Handles:
+/// - Type-based: `defineSlots<{ default(props: {}): any; header?(props: {}): any }>()`
+/// - Empty / no type params → empty vec
+fn extract_slot_fields(call: &CallExpression<'_>) -> Vec<AnalyzedSlotField> {
+    if let Some(ref type_args) = call.type_arguments {
+        if let Some(first) = type_args.params.first() {
+            return extract_slot_fields_from_type(first);
+        }
+    }
+    Vec::new()
+}
+
+/// Extract slot fields from a TypeScript type parameter.
+///
+/// Handles:
+/// - `TSPropertySignature`: `default: (props: {}) => any` or `header?: (props: {}) => any`
+/// - `TSMethodSignature`: `default(props: {}): any` or `header?(props: {}): any`
+/// - `TSIntersectionType`: merges fields from all branches
+fn extract_slot_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedSlotField> {
+    match ts_type {
+        TSType::TSTypeLiteral(literal) => literal
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                TSSignature::TSPropertySignature(prop) => {
+                    let key_name = match &prop.key {
+                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                        _ => None,
+                    };
+                    key_name.map(|name| AnalyzedSlotField {
+                        name,
+                        is_required: !prop.optional,
+                        span: prop.key.span().into(),
+                    })
+                }
+                TSSignature::TSMethodSignature(method) => {
+                    let key_name = match &method.key {
+                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                        _ => None,
+                    };
+                    key_name.map(|name| AnalyzedSlotField {
+                        name,
+                        is_required: !method.optional,
+                        span: method.key.span().into(),
+                    })
+                }
+                _ => None,
+            })
+            .collect(),
+        TSType::TSTypeReference(_) => Vec::new(),
+        TSType::TSIntersectionType(intersection) => intersection
+            .types
+            .iter()
+            .flat_map(|t| extract_slot_fields_from_type(t))
             .collect(),
         _ => Vec::new(),
     }
@@ -1133,5 +1205,139 @@ defineExpose({ props })
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].type_annotation.as_deref(), Some("'a' | 'b'"));
         assert_eq!(fields[1].type_annotation.as_deref(), Some("'sm' | 'lg'"));
+    }
+
+    // =========================================================================
+    // Slot field extraction tests
+    // =========================================================================
+
+    #[test]
+    fn slot_fields_property_signature() {
+        let code = "defineSlots<{ default(props: {}): any; header?(props: {}): any }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "should extract 2 slot fields: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "default");
+        assert!(fields[0].is_required, "default should be required (no ?)");
+        assert_eq!(fields[1].name, "header");
+        assert!(!fields[1].is_required, "header should be optional (has ?)");
+        // Negative: non-defineSlots macros should NOT have slot_fields
+        assert!(
+            macros[0].prop_fields.is_empty(),
+            "defineSlots should not have prop_fields"
+        );
+    }
+
+    #[test]
+    fn slot_fields_method_signature() {
+        // Method shorthand syntax: `default(props: {}): any` vs `default?(props: {}): any`
+        let code =
+            "defineSlots<{ default(props: { item: string }): any; footer?(props: {}): any }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "should extract 2 slot fields: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "default");
+        assert!(
+            fields[0].is_required,
+            "default (method, no ?) should be required"
+        );
+        assert_eq!(fields[1].name, "footer");
+        assert!(
+            !fields[1].is_required,
+            "footer? (method, ?) should be optional"
+        );
+    }
+
+    #[test]
+    fn slot_fields_intersection_type() {
+        let code = "defineSlots<{ default(p: {}): any } & { sidebar?(p: {}): any }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(
+            fields.len(),
+            2,
+            "intersection should merge slot fields: {:?}",
+            fields
+        );
+        assert_eq!(fields[0].name, "default");
+        assert!(fields[0].is_required);
+        assert_eq!(fields[1].name, "sidebar");
+        assert!(!fields[1].is_required);
+    }
+
+    #[test]
+    fn slot_fields_type_reference_empty() {
+        let code = "defineSlots<MySlots>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        assert!(
+            macros[0].slot_fields.is_empty(),
+            "type reference should yield empty slot fields"
+        );
+    }
+
+    #[test]
+    fn slot_fields_no_type_params() {
+        let code = "defineSlots()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        assert!(
+            macros[0].slot_fields.is_empty(),
+            "no type params should yield empty slot fields"
+        );
+    }
+
+    #[test]
+    fn slot_fields_not_on_other_macros() {
+        let code = "defineProps<{ count: number }>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        assert!(
+            macros[0].slot_fields.is_empty(),
+            "defineProps should not have slot_fields"
+        );
+    }
+
+    #[test]
+    fn slot_fields_all_required() {
+        let code = "defineSlots<{ default(p: {}): any; header(p: {}): any; footer(p: {}): any }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(fields.len(), 3);
+        for field in fields {
+            assert!(
+                field.is_required,
+                "slot '{}' should be required",
+                field.name
+            );
+        }
+    }
+
+    #[test]
+    fn slot_fields_all_optional() {
+        let code = "defineSlots<{ default?(p: {}): any; header?(p: {}): any }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].slot_fields;
+        assert_eq!(fields.len(), 2);
+        for field in fields {
+            assert!(
+                !field.is_required,
+                "slot '{}' should be optional",
+                field.name
+            );
+        }
     }
 }

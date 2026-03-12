@@ -252,6 +252,7 @@ fn test_go_to_macro_binding_from_template() {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             emit_fields: vec![],
+            slot_fields: vec![],
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );
@@ -1986,6 +1987,7 @@ fn test_go_to_definition_dollar_props() {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             emit_fields: vec![],
+            slot_fields: vec![],
             span: verter_span::Span::new(define_offset as u32, (define_offset + 30) as u32),
         }])
         .into(),
@@ -2045,6 +2047,7 @@ fn test_go_to_definition_dollar_emit() {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             emit_fields: vec![],
+            slot_fields: vec![],
             span: verter_span::Span::new(define_offset as u32, (define_offset + 22) as u32),
         }])
         .into(),
@@ -2156,6 +2159,7 @@ fn definition_prop_field_type_based() {
                 type_annotation: None,
             }],
             emit_fields: vec![],
+            slot_fields: vec![],
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 45) as u32,
@@ -2227,6 +2231,7 @@ fn definition_prop_field_runtime() {
                 type_annotation: None,
             }],
             emit_fields: vec![],
+            slot_fields: vec![],
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 28) as u32,
@@ -2304,6 +2309,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
                 type_annotation: None,
             }],
             emit_fields: vec![],
+            slot_fields: vec![],
             span: verter_span::Span::new(90, 140),
         }],
     );

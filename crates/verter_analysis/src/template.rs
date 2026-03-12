@@ -215,6 +215,8 @@ pub struct DefinedSlot {
     pub binding_expressions: Vec<String>,
     /// SFC-absolute spans of each binding's value expression (parallel to `binding_names`).
     pub binding_value_spans: Vec<Span>,
+    /// Whether the `<slot>` element has fallback (default) content children.
+    pub has_fallback_content: bool,
     /// Byte span in SFC source.
     pub span: Span,
 }
@@ -1535,6 +1537,9 @@ impl serde::Serialize for DefinedSlot {
             map.serialize_entry("bindingExpressions", &self.binding_expressions)?;
         }
         // binding_value_spans are SFC-absolute and not serialized (internal use only)
+        if self.has_fallback_content {
+            map.serialize_entry("hasFallbackContent", &self.has_fallback_content)?;
+        }
         map.serialize_entry("spanStart", &self.span.start)?;
         map.serialize_entry("spanEnd", &self.span.end)?;
         map.end()
@@ -1554,6 +1559,8 @@ impl<'de> serde::Deserialize<'de> for DefinedSlot {
             #[serde(default)]
             binding_expressions: Vec<String>,
             #[serde(default)]
+            has_fallback_content: bool,
+            #[serde(default)]
             span_start: u32,
             #[serde(default)]
             span_end: u32,
@@ -1565,6 +1572,7 @@ impl<'de> serde::Deserialize<'de> for DefinedSlot {
             binding_names: w.binding_names,
             binding_expressions: w.binding_expressions,
             binding_value_spans: vec![],
+            has_fallback_content: w.has_fallback_content,
             span: Span::new(w.span_start, w.span_end),
         })
     }
@@ -2346,6 +2354,7 @@ mod tests {
                 binding_names: vec![],
                 binding_expressions: vec![],
                 binding_value_spans: vec![],
+                has_fallback_content: false,
                 span: Span::new(0, 0),
             }],
             template_refs: vec![TemplateRef {

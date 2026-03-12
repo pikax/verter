@@ -151,6 +151,20 @@ export declare function slotToRender<T>(slot: T): SlotToRender<T>;
  *
  * @see {@link file://packages/core/src/v5/process/script/plugins/component-type/component-type.ts} - Component type plugin that uses this helper
  */
+/**
+ * Checks that all required slots of a component are provided by the parent.
+ * Emitted by the IDE codegen when `strict_slots` is enabled.
+ *
+ * TypeScript will error when `provided` is missing keys that are required in `T`.
+ *
+ * @param slots - The component's $slots type (cast via `{} as NonNullable<...>`)
+ * @param provided - Object with `true` for each slot name the parent provides
+ */
+export declare function checkRequiredSlots<T>(
+  slots: T,
+  provided: { [K in keyof T as undefined extends T[K] ? never : K]: true },
+): void;
+
 export declare function extractArgumentsFromRenderSlot<
   T extends { $slots: { [K in N]: any } },
   N extends string,

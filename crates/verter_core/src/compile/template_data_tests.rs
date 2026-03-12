@@ -190,6 +190,48 @@ fn slot_definition_shorthand_binding() {
     assert_eq!(&src[s0.start as usize..s0.end as usize], "item");
 }
 
+// ── Slot fallback content ──
+
+#[test]
+fn slot_fallback_content_with_children() {
+    let data = extract(r#"<template><slot>fallback text</slot></template>"#);
+    assert_eq!(data.slot_definitions.len(), 1);
+    assert!(
+        data.slot_definitions[0].has_fallback_content,
+        "slot with text children should have has_fallback_content=true"
+    );
+}
+
+#[test]
+fn slot_fallback_content_self_closing() {
+    let data = extract(r#"<template><slot /></template>"#);
+    assert_eq!(data.slot_definitions.len(), 1);
+    assert!(
+        !data.slot_definitions[0].has_fallback_content,
+        "self-closing slot should have has_fallback_content=false"
+    );
+}
+
+#[test]
+fn slot_fallback_content_empty_tag() {
+    let data = extract(r#"<template><slot></slot></template>"#);
+    assert_eq!(data.slot_definitions.len(), 1);
+    assert!(
+        !data.slot_definitions[0].has_fallback_content,
+        "empty slot tag should have has_fallback_content=false"
+    );
+}
+
+#[test]
+fn slot_fallback_content_with_element() {
+    let data = extract(r#"<template><slot><span>default</span></slot></template>"#);
+    assert_eq!(data.slot_definitions.len(), 1);
+    assert!(
+        data.slot_definitions[0].has_fallback_content,
+        "slot with element children should have has_fallback_content=true"
+    );
+}
+
 // ── Event handlers ──
 
 #[test]

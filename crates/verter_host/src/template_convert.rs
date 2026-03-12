@@ -164,6 +164,7 @@ pub fn convert_raw_to_analysis(
             binding_names: s.binding_names.clone(),
             binding_expressions: s.binding_expressions.clone(),
             binding_value_spans: s.binding_value_spans.clone(),
+            has_fallback_content: s.has_fallback_content,
             span: s.span,
         })
         .collect();

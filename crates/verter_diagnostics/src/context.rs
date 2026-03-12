@@ -23,9 +23,6 @@ pub struct LintContext<'a> {
     /// Each entry: `(rule_name, severity, start_offset, end_offset)`.
     /// `None` rule_name = all rules; `None` severity = suppress (off).
     severity_overrides: Vec<(Option<String>, Option<Severity>, u32, u32)>,
-    /// Rules that are off by default (opt-in). Only fired when explicitly
-    /// enabled in the config `rules` map or under the Strict preset.
-    default_off_rules: std::collections::HashSet<&'static str>,
 }
 
 impl<'a> LintContext<'a> {
@@ -36,23 +33,6 @@ impl<'a> LintContext<'a> {
             config,
             disabled_ranges: Vec::new(),
             severity_overrides: Vec::new(),
-            default_off_rules: std::collections::HashSet::new(),
-        }
-    }
-
-    /// Create a new lint context, populating default-off rules from the registry.
-    pub fn with_rules(config: &'a LintConfig, rules: &[Box<dyn crate::rules::LintRule>]) -> Self {
-        let default_off_rules = rules
-            .iter()
-            .filter(|r| r.is_default_off())
-            .map(|r| r.name())
-            .collect();
-        Self {
-            set: DiagnosticSet::new(),
-            config,
-            disabled_ranges: Vec::new(),
-            severity_overrides: Vec::new(),
-            default_off_rules,
         }
     }
 
@@ -73,12 +53,14 @@ impl<'a> LintContext<'a> {
             message,
             span_start,
             span_end,
-            Severity::Warning,
+            Some(Severity::Warning),
             span_kind,
         );
     }
 
     /// Report a diagnostic with a specific default severity.
+    ///
+    /// Pass `None` for opt-in rules that are off by default.
     #[allow(clippy::too_many_arguments)]
     pub fn report_with_severity(
         &mut self,
@@ -87,17 +69,13 @@ impl<'a> LintContext<'a> {
         message: String,
         span_start: u32,
         span_end: u32,
-        default_severity: Severity,
+        default_severity: Option<Severity>,
         span_kind: DiagnosticSpanKind,
     ) {
         if self.is_disabled(rule, span_start) {
             return;
         }
-        let severity = match self.config.effective_severity(
-            rule,
-            default_severity,
-            self.default_off_rules.contains(rule),
-        ) {
+        let severity = match self.config.effective_severity(rule, default_severity) {
             Some(s) => s,
             None => return, // Rule disabled via config
         };
@@ -137,7 +115,7 @@ impl<'a> LintContext<'a> {
             message,
             span_start,
             span_end,
-            Severity::Hint,
+            Some(Severity::Hint),
             span_kind,
         );
     }
@@ -151,18 +129,14 @@ impl<'a> LintContext<'a> {
         message: String,
         span_start: u32,
         span_end: u32,
-        default_severity: Severity,
+        default_severity: Option<Severity>,
         tags: Vec<DiagnosticTag>,
         span_kind: DiagnosticSpanKind,
     ) {
         if self.is_disabled(rule, span_start) {
             return;
         }
-        let severity = match self.config.effective_severity(
-            rule,
-            default_severity,
-            self.default_off_rules.contains(rule),
-        ) {
+        let severity = match self.config.effective_severity(rule, default_severity) {
             Some(s) => s,
             None => return,
         };
@@ -194,18 +168,14 @@ impl<'a> LintContext<'a> {
         message: String,
         span_start: u32,
         span_end: u32,
-        default_severity: Severity,
+        default_severity: Option<Severity>,
         span_kind: DiagnosticSpanKind,
         related_files: Vec<RelatedFile>,
     ) {
         if self.is_disabled(rule, span_start) {
             return;
         }
-        let severity = match self.config.effective_severity(
-            rule,
-            default_severity,
-            self.default_off_rules.contains(rule),
-        ) {
+        let severity = match self.config.effective_severity(rule, default_severity) {
             Some(s) => s,
             None => return,
         };

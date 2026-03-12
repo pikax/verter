@@ -88,6 +88,10 @@ export interface SlotMeta {
   isScoped: boolean;
   /** Scoped slot bindings (empty for non-scoped slots). */
   bindings: SlotBinding[];
+  /** Whether the slot is required (no `?` in `defineSlots` type param). */
+  isRequired?: boolean;
+  /** Whether the `<slot>` element has fallback content. */
+  hasFallbackContent?: boolean;
 }
 
 /** A single binding exposed by a scoped slot. */

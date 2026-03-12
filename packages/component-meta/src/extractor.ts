@@ -67,8 +67,14 @@ interface RawMacro {
   hasInheritAttrsFalse: boolean;
   propFields?: RawPropField[];
   emitFields?: RawEmitField[];
+  slotFields?: RawSlotField[];
   spanStart: number;
   spanEnd: number;
+}
+
+interface RawSlotField {
+  name: string;
+  isRequired: boolean;
 }
 
 interface RawPropField {
@@ -151,6 +157,7 @@ interface RawDefinedSlot {
   hasBindings: boolean;
   bindingNames?: string[];
   bindingExpressions?: string[];
+  hasFallbackContent?: boolean;
 }
 
 interface RawOptionsApi {
@@ -265,13 +272,13 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
   if (optionsApi && !hasCompositionMacros(raw)) {
     props = extractOptionsProps(raw.optionsApi);
     events = extractOptionsEmits(raw.optionsApi, raw.template);
-    slots = extractSlots(raw.template);
+    slots = extractSlots(raw.template, raw.macros);
     models = [];
     exposed = extractOptionsExpose(raw.optionsApi);
   } else {
     props = extractCompositionProps(raw.macros, raw.template);
     events = extractCompositionEmits(raw.macros, raw.template);
-    slots = extractSlots(raw.template);
+    slots = extractSlots(raw.template, raw.macros);
     models = extractModels(raw.macros);
     exposed = extractExpose(raw.macros, raw.bindings);
   }
@@ -382,8 +389,18 @@ function extractCompositionEmits(macros: RawMacro[], template: RawTemplate | nul
   });
 }
 
-function extractSlots(template: RawTemplate | null): SlotMeta[] {
+function extractSlots(template: RawTemplate | null, macros: RawMacro[]): SlotMeta[] {
   if (!template?.definedSlots) return [];
+
+  // Build a map of slot name → isRequired from defineSlots macro
+  const requiredMap = new Map<string, boolean>();
+  for (const m of macros) {
+    if (m.kind === "DefineSlots" && m.slotFields) {
+      for (const sf of m.slotFields) {
+        requiredMap.set(sf.name, sf.isRequired);
+      }
+    }
+  }
 
   return template.definedSlots.map((slot): SlotMeta => {
     const bindings: SlotBinding[] = (slot.bindingNames ?? []).map(
@@ -398,6 +415,8 @@ function extractSlots(template: RawTemplate | null): SlotMeta[] {
       name: slot.name,
       isScoped: slot.hasBindings,
       bindings,
+      ...(requiredMap.has(slot.name) && { isRequired: requiredMap.get(slot.name) }),
+      ...(slot.hasFallbackContent && { hasFallbackContent: true }),
     };
   });
 }

@@ -276,6 +276,78 @@ pub fn find_unknown_models(
     results
 }
 
+/// Information about a missing required slot on a component usage.
+pub struct MissingRequiredSlotInfo {
+    pub component_name: String,
+    pub slot_name: String,
+    pub import_source: String,
+    pub span: verter_span::Span,
+}
+
+/// Get required slot names from a child component's defineSlots.
+fn child_required_slot_names(child: &FileAnalysisSnapshot) -> HashSet<String> {
+    child
+        .macros
+        .iter()
+        .filter(|m| m.kind == AnalyzedMacroKind::DefineSlots)
+        .flat_map(|m| {
+            m.slot_fields
+                .iter()
+                .filter(|f| f.is_required)
+                .map(|f| f.name.clone())
+        })
+        .collect()
+}
+
+/// Find missing required slots across all component usages.
+pub fn find_missing_required_slots(
+    analysis: &FileAnalysisSnapshot,
+    resolve_child: &dyn Fn(&str) -> Option<FileAnalysisSnapshot>,
+) -> Vec<MissingRequiredSlotInfo> {
+    let template = match &analysis.template {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+
+    for comp in &template.components {
+        if comp.is_dynamic {
+            continue;
+        }
+
+        let import_source = match &comp.import_source {
+            Some(s) => s.as_str(),
+            None => continue,
+        };
+
+        let child = match resolve_child(import_source) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let required = child_required_slot_names(&child);
+        if required.is_empty() {
+            continue;
+        }
+
+        let provided: HashSet<&str> = comp.slots_used.iter().map(|s| s.as_str()).collect();
+
+        for slot_name in &required {
+            if !provided.contains(slot_name.as_str()) {
+                results.push(MissingRequiredSlotInfo {
+                    component_name: comp.name.clone(),
+                    slot_name: slot_name.clone(),
+                    import_source: import_source.to_string(),
+                    span: comp.span,
+                });
+            }
+        }
+    }
+
+    results
+}
+
 /// Generate LSP diagnostics for unknown props and v-models on component usages.
 pub fn component_usage_diagnostics(
     analysis: &FileAnalysisSnapshot,
@@ -330,6 +402,34 @@ pub fn component_usage_diagnostics(
             message: format!(
                 "Unknown v-model '{}' on component <{}>",
                 info.model_name, info.component_name
+            ),
+            ..Default::default()
+        });
+    }
+
+    // Missing required slot diagnostics
+    let missing_slots = find_missing_required_slots(analysis, resolve_child);
+    for info in &missing_slots {
+        let start = line_index
+            .offset_to_position(info.span.start)
+            .unwrap_or(Position {
+                line: 0,
+                character: 0,
+            });
+        let end = line_index
+            .offset_to_position(info.span.end)
+            .unwrap_or(start);
+
+        diagnostics.push(Diagnostic {
+            range: Range { start, end },
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String(
+                "verter/missing-required-slot".into(),
+            )),
+            source: Some("verter".into()),
+            message: format!(
+                "Required slot '{}' is not provided on component <{}>",
+                info.slot_name, info.component_name
             ),
             ..Default::default()
         });

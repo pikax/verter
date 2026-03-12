@@ -83,7 +83,7 @@ impl Linter {
         cross_file: Option<&CrossFileSnapshot>,
     ) -> DiagnosticSet {
         let rules = self.registry.rules();
-        let mut ctx = LintContext::with_rules(&self.config, rules);
+        let mut ctx = LintContext::new(&self.config);
         let visitor = LintVisitor::new(rules);
 
         // Process comment directives from template first

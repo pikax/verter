@@ -169,6 +169,8 @@ pub struct RawSlotDef {
     pub binding_expressions: Vec<String>,
     /// SFC-absolute spans of each binding's value expression (parallel to `binding_names`).
     pub binding_value_spans: Vec<Span>,
+    /// Whether the `<slot>` element has fallback (default) content children.
+    pub has_fallback_content: bool,
     pub span: Span,
 }
 
@@ -1096,12 +1098,19 @@ fn extract_slot_def(
         }
     }
 
+    let has_fallback_content = el
+        .content
+        .as_ref()
+        .map(|c| !c.children.is_empty())
+        .unwrap_or(false);
+
     data.slot_definitions.push(RawSlotDef {
         name,
         has_bindings,
         binding_names,
         binding_expressions,
         binding_value_spans,
+        has_fallback_content,
         span: Span::new(span_start, span_end),
     });
 }

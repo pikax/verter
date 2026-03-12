@@ -71,6 +71,7 @@ mod tests {
             binding_names: vec![],
             binding_expressions: vec![],
             binding_value_spans: vec![],
+            has_fallback_content: false,
             span: Span::new(10, 30),
         }
     }

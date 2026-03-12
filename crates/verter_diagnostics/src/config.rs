@@ -68,13 +68,12 @@ impl LintConfig {
     /// Returns the effective severity for a rule, considering the preset and overrides.
     /// Returns `None` if the rule is disabled.
     ///
-    /// If `default_off` is true, the rule is opt-in: it is disabled unless
-    /// explicitly enabled in the config `rules` map or a Strict preset is active.
+    /// `default` is the rule's `default_severity()`: `Some(severity)` for rules
+    /// that are on by default, `None` for opt-in rules that require explicit config.
     pub fn effective_severity(
         &self,
         rule_name: &str,
-        default: Severity,
-        default_off: bool,
+        default: Option<Severity>,
     ) -> Option<Severity> {
         // Check per-rule overrides first
         if let Some(override_sev) = self.rules.get(rule_name) {
@@ -84,11 +83,8 @@ impl LintConfig {
         if self.preset == LintPreset::Strict {
             return Some(Severity::Error);
         }
-        // Opt-in rules are disabled unless explicitly enabled
-        if default_off {
-            return None;
-        }
-        Some(default)
+        // None default = opt-in rule, disabled unless explicitly enabled above
+        default
     }
 }
 

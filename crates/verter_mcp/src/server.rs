@@ -3543,6 +3543,7 @@ const count = ref(0)
                     },
                 ],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: verter_span::Span::new(0, 100),
             }],
             bindings: vec![],

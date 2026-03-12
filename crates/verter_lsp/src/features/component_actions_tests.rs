@@ -101,6 +101,7 @@ fn add_prop_to_type_based_define_props() {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             emit_fields: vec![],
+            slot_fields: vec![],
             span: verter_span::Span::new(24, 56),
         }])
         .into(),
@@ -234,6 +235,7 @@ fn no_action_for_runtime_based_define_props() {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             emit_fields: vec![],
+            slot_fields: vec![],
             span: verter_span::Span::new(15, 35),
         }])
         .into(),

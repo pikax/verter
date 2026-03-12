@@ -95,17 +95,11 @@ pub trait LintRule: Send + Sync {
     fn name(&self) -> &'static str;
     /// Rule category.
     fn category(&self) -> RuleCategory;
-    /// Default severity (used when the rule is enabled).
-    fn default_severity(&self) -> Severity;
-
-    /// Whether this rule is off by default (opt-in).
+    /// Default severity when no config override exists.
     ///
-    /// Opt-in rules are not run unless explicitly enabled via configuration
-    /// (e.g., in `.verterrc.json` `rules` map). Override this to return `true`
-    /// for rules that users must consciously opt into.
-    fn is_default_off(&self) -> bool {
-        false
-    }
+    /// Return `Some(severity)` for rules that are on by default, or `None`
+    /// for opt-in rules that must be explicitly enabled via `.verterrc.json`.
+    fn default_severity(&self) -> Option<Severity>;
 
     // ── Template hooks ──
 

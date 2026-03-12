@@ -1626,6 +1626,7 @@ mod tests {
                 })
                 .collect(),
             emit_fields: vec![],
+            slot_fields: vec![],
             span,
         }
     }
