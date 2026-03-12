@@ -1654,6 +1654,21 @@ fn has_v_for_separator(expr: &str) -> bool {
     false
 }
 
+/// Strip a trailing TypeScript `as Type` cast from an expression.
+/// e.g. `expanded as string[]` → `expanded`, `form.value as Record<string, any>` → `form.value`.
+/// Returns the original string if no `as` cast is found.
+fn strip_ts_as_suffix(expr: &str) -> &str {
+    // Find the last ` as ` with word boundary: preceded by identifier char, followed by type.
+    // Walk backwards to find the outermost `as` that isn't inside brackets.
+    if let Some(pos) = expr.rfind(" as ") {
+        let before = expr[..pos].trim();
+        if !before.is_empty() {
+            return before;
+        }
+    }
+    expr
+}
+
 /// Check if a string is a valid JavaScript member expression (for v-model).
 /// Valid: identifiers, member access (a.b), bracket access (a[b]), optional chaining (a?.b).
 /// Invalid: binary expressions (a + b), function calls (a()), assignments (a = b).
@@ -1662,6 +1677,8 @@ fn is_member_expression(expr: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
+    // Strip TypeScript `as Type` suffix: `expanded as string[]` → `expanded`
+    let trimmed = strip_ts_as_suffix(trimmed);
     // Simple heuristic: a member expression consists of identifiers, dots, brackets, and optional chaining
     // It should NOT contain operators like +, -, *, /, =, !, <, >, &, |, ^, ?, :, ,
     // (except ? in ?. optional chaining)

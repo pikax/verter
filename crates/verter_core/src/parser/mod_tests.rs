@@ -3365,3 +3365,23 @@ fn tokenizer_no_spurious_diagnostics_for_valid_template() {
         spurious
     );
 }
+
+#[test]
+fn is_member_expression_accepts_ts_as_cast() {
+    // v-model:expanded="expanded as string[]" should be valid.
+    // The `as Type` suffix is a TypeScript cast, not an operator.
+    assert!(super::is_member_expression("expanded as string[]"));
+    assert!(super::is_member_expression(
+        "form.value as Record<string, any>"
+    ));
+    assert!(super::is_member_expression("items as unknown"));
+    // Plain member expressions still work
+    assert!(super::is_member_expression("expanded"));
+    assert!(super::is_member_expression("form.value"));
+    assert!(super::is_member_expression("obj['key']"));
+    assert!(super::is_member_expression("obj?.nested"));
+    // Invalid expressions still fail
+    assert!(!super::is_member_expression("a + b"));
+    assert!(!super::is_member_expression("fn()"));
+    assert!(!super::is_member_expression(""));
+}
