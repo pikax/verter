@@ -1504,3 +1504,70 @@ fn script_usage_not_collected_without_scope_flag() {
         "BUILD scope should not collect script usages"
     );
 }
+
+// ── Nested macro call detection ──
+
+#[test]
+fn nested_define_props_in_function() {
+    let result = analyze("function setup() { const props = defineProps<{ msg: string }>() }");
+    assert_eq!(result.nested_macro_calls.len(), 1);
+    assert_eq!(result.nested_macro_calls[0].name, "defineProps");
+    // Top-level macros should not be detected
+    assert!(
+        result.macros.is_empty(),
+        "nested macros are not extracted as top-level"
+    );
+}
+
+#[test]
+fn nested_define_emits_in_arrow() {
+    let result = analyze("const fn = () => { const emit = defineEmits(['click']) }");
+    assert_eq!(result.nested_macro_calls.len(), 1);
+    assert_eq!(result.nested_macro_calls[0].name, "defineEmits");
+}
+
+#[test]
+fn nested_define_props_in_if() {
+    let result = analyze("if (true) { defineProps() }");
+    assert_eq!(result.nested_macro_calls.len(), 1);
+    assert_eq!(result.nested_macro_calls[0].name, "defineProps");
+}
+
+#[test]
+fn nested_define_props_in_try_catch() {
+    let result = analyze("try { defineProps() } catch(e) { defineEmits() }");
+    assert_eq!(result.nested_macro_calls.len(), 2);
+    assert_eq!(result.nested_macro_calls[0].name, "defineProps");
+    assert_eq!(result.nested_macro_calls[1].name, "defineEmits");
+}
+
+#[test]
+fn top_level_macros_not_detected_as_nested() {
+    let result = analyze(
+        "const props = defineProps<{ msg: string }>()\nconst emit = defineEmits(['click'])",
+    );
+    assert!(
+        result.nested_macro_calls.is_empty(),
+        "top-level macros should NOT appear in nested_macro_calls"
+    );
+    assert_eq!(
+        result.macros.len(),
+        2,
+        "top-level macros should be in macros vec"
+    );
+}
+
+#[test]
+fn nested_with_defaults_in_function() {
+    let result =
+        analyze("function setup() { withDefaults(defineProps<{ msg: string }>(), { msg: 'hi' }) }");
+    // withDefaults + defineProps both inside a function
+    assert!(result.nested_macro_calls.len() >= 2);
+    let names: Vec<&str> = result
+        .nested_macro_calls
+        .iter()
+        .map(|n| n.name.as_str())
+        .collect();
+    assert!(names.contains(&"withDefaults"));
+    assert!(names.contains(&"defineProps"));
+}
