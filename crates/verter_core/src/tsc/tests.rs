@@ -2883,23 +2883,22 @@ defineExpose({ foo, bar, baz })
 </script><template/>"#,
     );
 
-    // Positive: exposed names appear as properties in the return type
+    // Positive: shorthand props use typeof inference via ShallowUnwrapRef
     assert!(
-        r.contains("foo: any"),
-        "should have foo: any in return type: {r}"
+        r.contains("foo: typeof foo"),
+        "should have foo: typeof foo in return type: {r}"
     );
     assert!(
-        r.contains("bar: any"),
-        "should have bar: any in return type: {r}"
+        r.contains("bar: typeof bar"),
+        "should have bar: typeof bar in return type: {r}"
     );
     assert!(
-        r.contains("baz: any"),
-        "should have baz: any in return type: {r}"
+        r.contains("baz: typeof baz"),
+        "should have baz: typeof baz in return type: {r}"
     );
-    // Negative: defineExpose call should not appear in output
     assert!(
-        !r.contains("defineExpose("),
-        "defineExpose call should be removed from output: {r}"
+        r.contains("ShallowUnwrapRef"),
+        "should use ShallowUnwrapRef wrapper: {r}"
     );
 }
 
@@ -2971,13 +2970,10 @@ defineExpose({ greet })
 </script><template/>"#,
     );
 
+    // Shorthand property with function identifier — uses typeof
     assert!(
-        r.contains("greet: any"),
-        "should have greet: any in return type: {r}"
-    );
-    assert!(
-        !r.contains("defineExpose("),
-        "defineExpose call should be removed from output: {r}"
+        r.contains("greet: typeof greet"),
+        "should have greet: typeof greet in return type: {r}"
     );
 }
 
@@ -2989,10 +2985,173 @@ defineExpose({ foo, bar: computed(() => 1), baz: 'literal' })
 </script><template/>"#,
     );
 
-    // All named properties should appear
-    assert!(r.contains("foo: any"), "should have foo: any: {r}");
+    // foo is shorthand → typeof, others are complex → any
+    assert!(
+        r.contains("foo: typeof foo"),
+        "should have foo: typeof foo: {r}"
+    );
     assert!(r.contains("bar: any"), "should have bar: any: {r}");
     assert!(r.contains("baz: any"), "should have baz: any: {r}");
+}
+
+// ── defineExpose with typeof inference ────────────────────────────────────────
+
+#[test]
+fn tsc_define_expose_shorthand_uses_typeof() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { ref, computed } from 'vue'
+const foo = ref(1)
+const bar = computed(() => 'hello')
+defineExpose({ foo, bar })
+</script><template/>"#,
+    );
+
+    // Positive: typeof inference via ShallowUnwrapRef
+    assert!(
+        r.contains("typeof foo"),
+        "should use typeof for shorthand foo: {r}"
+    );
+    assert!(
+        r.contains("typeof bar"),
+        "should use typeof for shorthand bar: {r}"
+    );
+    assert!(
+        r.contains("ShallowUnwrapRef"),
+        "should use ShallowUnwrapRef wrapper: {r}"
+    );
+    // Negative: must NOT fall back to `any`
+    assert!(
+        !r.contains("foo: any"),
+        "should NOT use any for shorthand foo: {r}"
+    );
+    assert!(
+        !r.contains("bar: any"),
+        "should NOT use any for shorthand bar: {r}"
+    );
+}
+
+#[test]
+fn tsc_define_expose_non_shorthand_ident_uses_typeof() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const val = ref(42)
+defineExpose({ myVal: val })
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("myVal: typeof val"),
+        "should use typeof for identifier value: {r}"
+    );
+    assert!(
+        !r.contains("myVal: any"),
+        "should NOT use any for identifier value: {r}"
+    );
+}
+
+#[test]
+fn tsc_define_expose_method_shorthand_falls_back() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineExpose({ focus() {} })
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("focus: any"),
+        "method shorthand should fall back to any: {r}"
+    );
+}
+
+#[test]
+fn tsc_define_expose_complex_value_falls_back() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { computed } from 'vue'
+defineExpose({ bar: computed(() => 1) })
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("bar: any"),
+        "complex expression value should fall back to any: {r}"
+    );
+}
+
+#[test]
+fn tsc_define_expose_mixed_shorthand_and_complex() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { ref, computed } from 'vue'
+const x = ref(1)
+defineExpose({ x, y: computed(() => 2) })
+</script><template/>"#,
+    );
+
+    assert!(r.contains("typeof x"), "shorthand x should use typeof: {r}");
+    assert!(
+        r.contains("y: any"),
+        "complex y should fall back to any: {r}"
+    );
+}
+
+#[test]
+fn tsc_define_expose_type_param_unchanged() {
+    // Regression: type-param form must continue to use the intersection type
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+const foo = ref(1)
+defineExpose<{ foo: number }>({ foo })
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("{ foo: number }"),
+        "type-param form should use the type text directly: {r}"
+    );
+    assert!(
+        !r.contains("ShallowUnwrapRef"),
+        "type-param form should NOT use ShallowUnwrapRef: {r}"
+    );
+}
+
+#[test]
+fn tsc_define_expose_empty_unchanged() {
+    // Regression: empty defineExpose should not emit ShallowUnwrapRef
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineExpose()
+</script><template/>"#,
+    );
+
+    assert!(
+        !r.contains("ShallowUnwrapRef"),
+        "empty expose should NOT use ShallowUnwrapRef: {r}"
+    );
+}
+
+#[test]
+fn tsc_define_expose_includes_setup_content() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const foo = ref(1)
+defineExpose({ foo })
+</script><template/>"#,
+    );
+
+    // Script body must be present so typeof can resolve
+    assert!(
+        r.contains("const foo = ref(1)"),
+        "output should include the script setup body: {r}"
+    );
+    // Macro stubs must be present so defineExpose doesn't error
+    assert!(
+        r.contains("declare function defineExpose"),
+        "output should include macro stubs: {r}"
+    );
 }
 
 // ── Dual-script JS SFC (verter-tsc path) ────────────────────────

@@ -52,6 +52,21 @@ use crate::utils::oxc::vue::{
     ScriptMode,
 };
 
+/// Macro stub declarations shared between `generate_code` (when expose entries
+/// need the setup body) and `generate_testing_code`.
+const MACRO_STUBS: &str = "\
+declare function defineProps<TypeProps>(): TypeProps\n\
+declare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\n\
+declare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\n\
+declare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\n\
+declare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\n\
+declare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\n\
+declare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\n\
+declare function defineOptions(options: Record<string, unknown>): void\n\
+declare function defineSlots<Slots extends Record<string, any>>(): Slots\n\
+declare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\n\
+declare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\n";
+
 /// Output from the tsc codegen.
 pub struct TscOutput {
     /// The generated `.tsc.tsx` source with inline source map.
@@ -140,6 +155,16 @@ struct TestBindingEntry {
     name: String,
     binding_type: BindingType,
     map_span: Option<Span>,
+}
+
+/// An exposed property from `defineExpose({ ... })`.
+#[derive(Clone)]
+struct ExposeEntry {
+    /// The property name (key in the object literal).
+    name: String,
+    /// When `Some(ident)`, the codegen emits `name: typeof ident`.
+    /// When `None`, falls back to `name: any` (methods, complex expressions).
+    typeof_target: Option<String>,
 }
 
 struct LocalTypeDecl<'a> {
@@ -265,8 +290,8 @@ struct TscMacroState {
     // defineSlots — TypeScript type for $slots
     slots_ts: Option<String>,
 
-    // defineExpose — individual property names (from object arg)
-    expose_names: Vec<String>,
+    // defineExpose — individual property entries (from object arg)
+    expose_entries: Vec<ExposeEntry>,
     // defineExpose — TypeScript type text (from type param)
     expose_type_text: Option<String>,
 
@@ -548,6 +573,7 @@ pub fn generate_tsc_from_state(
             attrs_type,
             None, // narrowing not used in cache path
             root_element_tag,
+            &state.content_str,
         )
     }
 }
@@ -825,6 +851,7 @@ pub fn generate_tsc_output_with_options(
             attrs_type,
             narrowing.as_ref(),
             root_element_tag.as_deref(),
+            content_str,
         )
     }
 }
@@ -1663,10 +1690,29 @@ fn process_expose(
         type_usage_tracker.mark_type_text(type_text);
         return;
     }
-    // Fall back to extracting property names from object arg
+    // Fall back to extracting property entries from object arg
     if let Some(obj) = object_arg {
         for prop in &obj.properties {
-            state.expose_names.push(prop.name.to_string());
+            let typeof_target = if prop.is_method {
+                // Method shorthand: `focus() {}` — can't typeof
+                None
+            } else if prop.value_span.is_none() {
+                // Shorthand: `{ foo }` → typeof foo
+                Some(prop.name.to_string())
+            } else {
+                // Non-shorthand: `{ myVal: val }` — check if value is a simple identifier
+                let val_span = prop.value_span.unwrap();
+                let val_text = content_str[val_span.start as usize..val_span.end as usize].trim();
+                if is_simple_ident(val_text) {
+                    Some(val_text.to_string())
+                } else {
+                    None
+                }
+            };
+            state.expose_entries.push(ExposeEntry {
+                name: prop.name.to_string(),
+                typeof_target,
+            });
         }
     }
 }
@@ -1721,6 +1767,19 @@ fn is_testing_decl_ident(name: &str) -> bool {
         return false;
     }
     if crate::utils::oxc::bindings::keywords::is_keyword(name.as_bytes()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
+/// Returns true if the text is a simple JS identifier (no dots, calls, etc.).
+fn is_simple_ident(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let mut chars = text.chars();
+    let first = chars.next().unwrap();
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
         return false;
     }
     chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
@@ -1971,15 +2030,7 @@ fn generate_testing_code(
     out.push_str(
         "type __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\n",
     );
-    out.push_str(
-        "declare function defineProps<TypeProps>(): TypeProps\ndeclare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\ndeclare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\n",
-    );
-    out.push_str(
-        "declare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\ndeclare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\ndeclare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\n",
-    );
-    out.push_str(
-        "declare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\ndeclare function defineOptions(options: Record<string, unknown>): void\ndeclare function defineSlots<Slots extends Record<string, any>>(): Slots\ndeclare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\ndeclare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\n",
-    );
+    out.push_str(MACRO_STUBS);
 
     if let Some(gp) = generic_params {
         for name in extract_generic_param_names(gp) {
@@ -2149,8 +2200,10 @@ fn generate_code(
     attrs_type: Option<&str>,
     narrowing: Option<&TscNarrowingInfo>,
     root_element_tag: Option<&str>,
+    setup_content: &str,
 ) -> TscOutput {
-    let mut out = TscWriter::new(512);
+    let needs_setup_body = !state.expose_entries.is_empty();
+    let mut out = TscWriter::new(if needs_setup_body { 2048 } else { 512 });
 
     // ── Import ────────────────────────────────────────────────────────
     out.push_str("import { defineComponent } from \"vue\"\n");
@@ -2176,6 +2229,34 @@ fn generate_code(
         out.push('\n');
     }
     out.push('\n');
+
+    // ── Setup body (when expose_entries is non-empty) ────────────────
+    // Include macro stubs + script setup body so `typeof` can resolve
+    // exposed bindings to their inferred types.
+    if needs_setup_body {
+        // Emit utility types needed by macro stubs
+        out.push_str(
+            "type __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\n",
+        );
+        out.push_str(
+            "type __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\n",
+        );
+        out.push_str(MACRO_STUBS);
+        if let Some(gp) = generic_params {
+            for name in extract_generic_param_names(gp) {
+                if is_testing_decl_ident(&name) {
+                    out.push_str(&format!("type {} = any\n", name));
+                }
+            }
+        }
+        if !setup_content.trim().is_empty() {
+            out.push_str(setup_content);
+            if !setup_content.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+    }
 
     // ── const __comp = defineComponent({...}) ────────────────────────
     out.push_str("const __comp = defineComponent({\n");
@@ -2315,11 +2396,6 @@ fn generate_code(
     }
     out.push_str("    $refs: {},\n");
 
-    // Exposed bindings from defineExpose
-    for name in &state.expose_names {
-        out.push_str(&format!("    {}: any,\n", name));
-    }
-
     // $root — conditional type for narrowing
     if let Some(nr) = narrowing {
         out.push_str("    $root: ");
@@ -2360,7 +2436,26 @@ fn generate_code(
     }
 
     if let Some(ref expose_type) = state.expose_type_text {
+        // Type-param form: `defineExpose<{ foo: number }>()`
         out.push_str(&format!("  }} & {}\n", expose_type));
+    } else if !state.expose_entries.is_empty() {
+        // Runtime object form: `defineExpose({ foo, bar: val })`
+        // Build ShallowUnwrapRef intersection with typeof for each entry
+        out.push_str("  }\n    & import(\"vue\").ShallowUnwrapRef<{ ");
+        for (i, entry) in state.expose_entries.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            match &entry.typeof_target {
+                Some(target) => {
+                    out.push_str(&format!("{}: typeof {}", entry.name, target));
+                }
+                None => {
+                    out.push_str(&format!("{}: any", entry.name));
+                }
+            }
+        }
+        out.push_str(" }>\n");
     } else {
         out.push_str("  }\n");
     }
