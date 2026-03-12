@@ -1,11 +1,10 @@
 # Verter MCP Servers
 
-Verter exposes two MCP (Model Context Protocol) servers for AI agents:
+Verter exposes an MCP (Model Context Protocol) server for AI agents:
 
 | Server | Purpose | Transport | Port |
 |--------|---------|-----------|------|
 | **verter-mcp** | Analysis, diagnostics, compilation, scoring | stdio or HTTP | 6772 |
-| **verter-hotpath** | Hotpath profiling (timing + allocation) | HTTP | 6771 |
 
 ---
 
@@ -166,38 +165,6 @@ Options:
 
 ---
 
-## Hotpath Profiling MCP (`verter-hotpath`)
-
-Exposes hotpath profiling data (timing and allocation metrics) for performance analysis.
-
-### Quick Start
-
-```bash
-# AST-only pipeline (tokenize + parse + OXC expressions):
-pnpm run profile:hotpath:mcp
-
-# Full compile pipeline (tokenize + parse + style + script + template codegen):
-pnpm run profile:hotpath:full:mcp
-```
-
-Serves MCP at `http://localhost:6771/mcp`. Keep the process running while the agent is connected.
-
-### MCP Config
-
-Use `mcp/hotpath.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "verter-hotpath": {
-      "url": "http://localhost:6771/mcp"
-    }
-  }
-}
-```
-
----
-
 ## Agent/Client Wiring
 
 Most MCP-capable tools accept the `mcpServers` JSON shape. If your client doesn't support loading a file directly, copy the server entry into its local MCP config.
@@ -222,4 +189,4 @@ Point to the config file path, or set via `GH_AW_MCP_CONFIG` environment variabl
 
 ## Quick Verification
 
-If your agent can list MCP tools from `verter` (33 tools) or `verter-hotpath`, setup is complete. A browser request to the HTTP endpoint may return `Not Acceptable` — this is normal for MCP protocol endpoints.
+If your agent can list MCP tools from `verter` (33 tools), setup is complete. A browser request to the HTTP endpoint may return `Not Acceptable` — this is normal for MCP protocol endpoints.

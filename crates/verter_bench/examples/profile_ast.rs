@@ -17,12 +17,6 @@
 //!   # With memory allocation tracking:
 //!   cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc
 //!
-//!   # With MCP server for AI agent queries:
-//!   cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp
-//!
-//! The MCP server (when enabled) listens on http://localhost:6771/mcp
-//! and can be queried by AI agents for real-time profiling data.
-//!
 //! Set VERTER_TEST_REPOS env var to point to the repos directory, or it will
 //! check known fallback paths. Falls back to bench fixtures if no repos found.
 

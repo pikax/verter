@@ -12,7 +12,6 @@ description = "Benchmarks and examples for verter_core"
 [features]
 hotpath = ["verter_core/hotpath", "dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["verter_core/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
-hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 
 [dependencies]
 verter_core = { path = "../verter_core", features = ["bench"] }

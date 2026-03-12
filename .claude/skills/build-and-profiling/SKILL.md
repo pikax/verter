@@ -57,12 +57,10 @@ Use the real-world profiling example with hotpath instrumentation. Two pipeline 
 # AST-only pipeline (tokenize → parse → OXC expressions):
 pnpm run profile:hotpath          # Timing hotspots
 pnpm run profile:hotpath:alloc    # Timing + allocation hotspots
-pnpm run profile:hotpath:mcp      # Starts MCP endpoint at http://localhost:6771/mcp
 
 # Full compile pipeline (tokenize → parse → style → script → template codegen):
 pnpm run profile:hotpath:full          # Timing hotspots
 pnpm run profile:hotpath:full:alloc    # Timing + allocation hotspots
-pnpm run profile:hotpath:full:mcp      # Starts MCP endpoint at http://localhost:6771/mcp
 ```
 
 The full pipeline exercises all instrumented functions across the compilation flow:
@@ -70,15 +68,6 @@ compile, generate_script, process_script_setup, process_macro_item, generate_sty
 process_style, apply_scoped_normalized, parse_template_expressions, generate_template,
 walk_template, apply_to, batch_overwrite, batch_prepend_left_static, build_string,
 generate_map, generate_map_json, alloc_node, attach_to_parent.
-
-Agent MCP config template is checked in at:
-
-```text
-mcp/hotpath.mcp.json
-```
-
-Point your MCP-capable agent to that file (or copy its `mcpServers` entry into your local MCP config).
-For client-specific setup examples, see [mcp/README.md](mcp/README.md).
 
 ## Analysis MCP Server (`verter_mcp`)
 
