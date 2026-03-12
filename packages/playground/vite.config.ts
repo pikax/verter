@@ -56,9 +56,9 @@ export default defineConfig({
         //   }
         // },
 
-        manualChunks: {
-          monaco: ["monaco-editor-core"],
-          shiki: ["shiki", "@shikijs/monaco"],
+        manualChunks: (id) => {
+          if (id.includes("monaco-editor-core")) return "monaco";
+          if (id.includes("shiki") || id.includes("@shikijs/monaco")) return "shiki";
         },
       },
     },
