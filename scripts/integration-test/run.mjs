@@ -444,6 +444,22 @@ function prepareLocalSandbox(project, runContext) {
   const sandboxDir = path.join(runContext.sandboxesDir, sanitizeLocalName(project));
   fs.rmSync(sandboxDir, { recursive: true, force: true });
   copyRecursive(project.repoRoot, sandboxDir, LOCAL_SANDBOX_SKIP_ALWAYS, LOCAL_SANDBOX_SKIP_TOP_ONLY);
+
+  // Pre-patch .npmrc with Verter hoisting patterns BEFORE the first pnpm install.
+  // This prevents ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF errors when installVerterTarballs
+  // later adds packages that need hoisting.
+  if (project.packageManager === 'pnpm') {
+    const npmrcPath = path.join(sandboxDir, '.npmrc');
+    let npmrc = '';
+    if (fs.existsSync(npmrcPath)) {
+      npmrc = fs.readFileSync(npmrcPath, 'utf8');
+    }
+    if (!npmrc.includes('public-hoist-pattern[]=@verter/*')) {
+      npmrc += '\npublic-hoist-pattern[]=@verter/*\npublic-hoist-pattern[]=unplugin\n';
+      fs.writeFileSync(npmrcPath, npmrc);
+    }
+  }
+
   return sandboxDir;
 }
 
@@ -1085,16 +1101,40 @@ function ensureUnpluginResolvable(project, repoDir, unpluginDir) {
   }
 
   if (!unpluginSource) {
-    // Install unplugin into the project
-    const installCmd = project.packageManager === 'pnpm'
-      ? 'pnpm add unplugin'
-      : 'npm install --legacy-peer-deps unplugin';
-    const installResult = run(installCmd, repoDir, { timeout: 60_000 });
-    if (!installResult.ok) {
-      log(project.name, `  Warning: failed to install unplugin: ${(installResult.stderr || installResult.stdout).slice(0, 200)}`);
+    // Install unplugin into the project — try workspace-root first, then plain
+    if (project.packageManager === 'pnpm') {
+      let installResult = run('pnpm add -w unplugin', repoDir, { timeout: 60_000 });
+      if (!installResult.ok) {
+        installResult = run('pnpm add unplugin', repoDir, { timeout: 60_000 });
+      }
+      if (!installResult.ok) {
+        log(project.name, `  Warning: failed to install unplugin via pnpm, falling back to source copy`);
+      }
+    } else {
+      const installResult = run('npm install --legacy-peer-deps unplugin', repoDir, { timeout: 60_000 });
+      if (!installResult.ok) {
+        log(project.name, `  Warning: failed to install unplugin via npm, falling back to source copy`);
+      }
     }
     if (fs.existsSync(path.join(topLevel, 'package.json'))) {
       unpluginSource = topLevel;
+    }
+  }
+
+  // Last resort: copy from the Verter monorepo's pnpm store
+  if (!unpluginSource) {
+    const verterPnpmDir = path.join(ROOT, 'node_modules', '.pnpm');
+    if (fs.existsSync(verterPnpmDir)) {
+      for (const entry of fs.readdirSync(verterPnpmDir)) {
+        if (entry.startsWith('unplugin@')) {
+          const candidate = path.join(verterPnpmDir, entry, 'node_modules', 'unplugin');
+          if (fs.existsSync(candidate)) {
+            unpluginSource = candidate;
+            log(project.name, `  Found unplugin in Verter source: ${entry}`);
+            break;
+          }
+        }
+      }
     }
   }
 
@@ -1425,10 +1465,11 @@ function verifyReplacement(project, repoDir) {
 
 function runBuild(project, repoDir, label) {
   log(project.name, `[${label}] Building: ${project.buildCmd}`);
-  const result = run(project.buildCmd, repoDir);
+  const result = run(project.buildCmd, repoDir, { timeout: 3 * 60_000 });
   const dur = (result.durationMs / 1000).toFixed(1);
-  log(project.name, `[${label}] Build ${result.ok ? 'OK' : 'FAILED'} (${dur}s)`);
-  return { ...result, label: `${label}-build` };
+  const timedOut = result.durationMs >= 3 * 60_000 - 1000;
+  log(project.name, `[${label}] Build ${result.ok ? 'OK' : timedOut ? 'TIMEOUT' : 'FAILED'} (${dur}s)`);
+  return { ...result, timedOut, label: `${label}-build` };
 }
 
 function runTest(project, repoDir, label) {
@@ -1436,14 +1477,15 @@ function runTest(project, repoDir, label) {
     return { ok: true, stdout: '', stderr: '', durationMs: 0, skipped: true, label: `${label}-test` };
   }
   log(project.name, `[${label}] Testing: ${project.testCmd}`);
-  const result = run(project.testCmd, repoDir, { env: { NODE_ENV: 'test', CI: 'true' } });
+  const result = run(project.testCmd, repoDir, { timeout: 5 * 60_000, env: { NODE_ENV: 'test', CI: 'true' } });
   const dur = (result.durationMs / 1000).toFixed(1);
+  const timedOut = result.durationMs >= 5 * 60_000 - 1000;
   const counts = extractTestCounts(result.stdout + result.stderr);
   log(
     project.name,
-    `[${label}] Tests ${result.ok ? 'OK' : 'FAILED'} (${dur}s) — ${counts.passed} passed, ${counts.failed} failed`,
+    `[${label}] Tests ${result.ok ? 'OK' : timedOut ? 'TIMEOUT' : 'FAILED'} (${dur}s) — ${counts.passed} passed, ${counts.failed} failed`,
   );
-  return { ...result, ...counts, label: `${label}-test` };
+  return { ...result, ...counts, timedOut, label: `${label}-test` };
 }
 
 async function processLocalProject(project, opts, runContext) {
@@ -1552,7 +1594,11 @@ async function processLocalProject(project, opts, runContext) {
     }
 
     if (runBuilds && project.buildCmd) {
-      results.verter.build = runBuild(project, repoDir, 'verter');
+      // Replace vue-tsc in the build command if TypeScript tooling was replaced
+      const verterProject = replaceTypeScript
+        ? { ...project, buildCmd: project.buildCmd.split('vue-tsc').join('verter-tsc') }
+        : project;
+      results.verter.build = runBuild(verterProject, repoDir, 'verter');
       fs.writeFileSync(
         path.join(artifactDir, 'verter-build.log'),
         results.verter.build.stdout + '\n' + results.verter.build.stderr,

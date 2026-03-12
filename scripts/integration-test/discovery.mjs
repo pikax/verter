@@ -502,7 +502,7 @@ export function analyzeRepo(repoRoot, { discoveryRoot } = {}) {
 }
 
 export function buildDiscoveryInventory({
-  roots = ['D:\\dev'],
+  roots = ['D:/dev'],
   repoFilter = null,
   matrixProjects = [],
 } = {}) {
