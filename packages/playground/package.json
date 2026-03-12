@@ -24,13 +24,13 @@
     "@playwright/test": "^1.58.2",
     "@shikijs/monaco": "^4.0.2",
     "@verter/unplugin": "workspace:*",
-    "@vitejs/plugin-vue": "^6.0.4",
+    "@vitejs/plugin-vue": "^6.0.5",
     "happy-dom": "^20.8.3",
     "monaco-editor-core": "^0.55.1",
     "shiki": "^4.0.2",
     "tsx": "^4.21.0",
     "typescript": "6.0.0-beta",
-    "vite": "^7.3.1",
-    "vitest": "^4.0.18"
+    "vite": "^8.0.0",
+    "vitest": "^4.1.0"
   }
 }

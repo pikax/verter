@@ -14,7 +14,11 @@ function fixVueReExports(): Plugin {
         return code;
       }
 
-      const matches = [...code.matchAll(/export\s+\{\s*default\s+as\s+(?<name>\w+)\s*\}\s+from\s+"(?<importPath>\.\/[^"]+\.vue)";?/g)];
+      const matches = [
+        ...code.matchAll(
+          /export\s+\{\s*default\s+as\s+(?<name>\w+)\s*\}\s+from\s+"(?<importPath>\.\/[^"]+\.vue)";?/g,
+        ),
+      ];
       if (matches.length === 0) {
         return code;
       }
@@ -82,10 +86,9 @@ export default defineConfig(async () => {
         entry: path.resolve(__dirname, "src/index.ts"),
         name: "ExitRegressionFixture",
         formats: ["es", "cjs"],
-        fileName: (format, entryName) =>
-          `${entryName}.${format === "cjs" ? "cjs" : "mjs"}`,
+        fileName: (format, entryName) => `${entryName}.${format === "cjs" ? "cjs" : "mjs"}`,
       },
-      rollupOptions: {
+      rolldownOptions: {
         external: ["vue"],
         output: {
           preserveModules: true,
@@ -100,11 +103,6 @@ export default defineConfig(async () => {
         },
       },
     },
-    plugins: [
-      tailwindcss(),
-      vue(),
-      fixVueReExports(),
-      emitStyleFiles(),
-    ],
+    plugins: [tailwindcss(), vue(), fixVueReExports(), emitStyleFiles()],
   };
 });

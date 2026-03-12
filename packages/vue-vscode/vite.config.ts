@@ -9,7 +9,7 @@ export default defineConfig({
     },
     sourcemap: true,
 
-    rollupOptions: {
+    rolldownOptions: {
       external: ["path", "vscode", "vscode-languageclient/node", "lodash"],
     },
   },

@@ -40,8 +40,8 @@ export default defineConfig({
   },
   build: {
     target: "esnext",
-    minify: "esbuild",
-    rollupOptions: {
+    minify: true,
+    rolldownOptions: {
       output: {
         format: "es",
         // entryFileNames: "[name].js",
