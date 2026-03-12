@@ -1727,6 +1727,106 @@ const emit = defineEmits<TabsEmits>()
     expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
     expect(code).not.toContain("XInvalidMacroType");
   });
+
+  it("cache-hit: second transform of same SFC still resolves macro type deps", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // Create a .ts type file
+    writeFileSync(
+      join(tempDir, "shared-types.ts"),
+      "export interface SharedProps { theme: string; locale: string; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { SharedProps } from "./shared-types"
+defineProps<SharedProps>()
+</script>
+<template><div>app</div></template>
+`;
+
+    const typesPath = join(tempDir, "shared-types.ts").replace(/\\/g, "/");
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "./shared-types") return { id: typesPath };
+      return null;
+    });
+
+    // First transform — cold path, upsert returns moduleReferences
+    const result1 = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result1).toBeDefined();
+    expect(result1.code).toContain("theme");
+    expect(result1.code).toContain("locale");
+    expect(result1.code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+
+    // Second transform — same source, host cache hit, upsert returns EMPTY moduleReferences.
+    // hydrateMacroTypeDeps must still resolve the deps from the cached analysis.
+    const result2 = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result2).toBeDefined();
+    // Positive: props still resolved on cache hit
+    expect(result2.code).toContain("theme");
+    expect(result2.code).toContain("locale");
+    // Negative: no regression from empty moduleReferences
+    expect(result2.code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
+  it("Omit utility type in external emits resolves correctly (reka-ui pattern)", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    // Create a fake package with Omit-composed emit types (simulates reka-ui)
+    const pkgDir = join(tempDir, "node_modules", "fake-reka-ui");
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({ name: "fake-reka-ui", main: "./index.js", types: "./index.d.ts" }),
+    );
+    writeFileSync(join(pkgDir, "index.js"), "module.exports = {};\n");
+    writeFileSync(
+      join(pkgDir, "index.d.ts"),
+      `
+type DismissableLayerEmits = {
+  escapeKeyDown: [event: KeyboardEvent];
+  pointerDownOutside: [event: PointerEvent];
+};
+type RovingFocusGroupEmits = {
+  entryFocus: [event: Event];
+  'update:currentTabStopId': [value: string | null];
+};
+type MenuContentImplEmits = DismissableLayerEmits & Omit<RovingFocusGroupEmits, 'update:currentTabStopId'> & {
+  openAutoFocus: [event: Event];
+  closeAutoFocus: [event: Event];
+};
+type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>;
+export type DropdownMenuContentEmits = MenuContentEmits;
+`,
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { DropdownMenuContentEmits } from "fake-reka-ui"
+const emit = defineEmits<DropdownMenuContentEmits>()
+</script>
+<template><div>menu</div></template>
+`;
+
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "fake-reka-ui") {
+        return { id: join(pkgDir, "index.js").replace(/\\/g, "/") };
+      }
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: emits that should be included after Omit filtering
+    expect(code).toContain("escapeKeyDown");
+    expect(code).toContain("pointerDownOutside");
+    expect(code).toContain("closeAutoFocus");
+    // Negative: omitted emits must NOT appear, and no compile errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+    expect(code).not.toContain("XInvalidMacroType");
+  });
 });
 
 describe("barrel file export signatures", () => {
