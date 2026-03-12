@@ -80,7 +80,7 @@ pub(crate) fn compute_changed_removed_nodes(
 /// wrong output. Callers relying on `DevServeLastKnownGood` will get an
 /// error instead of stale content for these nodes.
 pub(crate) fn invalidate_nodes(
-    slots: &mut std::collections::HashMap<u64, CompileSlot>,
+    slots: &mut rustc_hash::FxHashMap<u64, CompileSlot>,
     nodes: &[VirtualNodeKind],
 ) {
     for slot in slots.values_mut() {
@@ -223,7 +223,9 @@ mod tests {
     // Phase 3: Additional cache tests
     // ═══════════════════════════════════════════════════════════
 
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
+
+    use rustc_hash::FxHashMap;
     use std::sync::Arc;
 
     use crate::types::{
@@ -243,7 +245,7 @@ mod tests {
             meta: FileMeta::default(),
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
-            dependency_resolutions: HashMap::new(),
+            dependency_resolutions: FxHashMap::default(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -252,11 +254,11 @@ mod tests {
             style_analyses: Arc::new(Vec::new()),
             template_analysis: None,
             arc_script_cache: crate::types::ScriptAnalysisArcs::default(),
-            resolved_type_hashes: HashMap::new(),
-            style_overrides: HashMap::new(),
-            content_overrides: HashMap::new(),
-            compile_slots: HashMap::new(),
-            latest_diagnostics: HashMap::new(),
+            resolved_type_hashes: FxHashMap::default(),
+            style_overrides: FxHashMap::default(),
+            content_overrides: FxHashMap::default(),
+            compile_slots: FxHashMap::default(),
+            latest_diagnostics: FxHashMap::default(),
             generation: 0,
             cached_parse: None,
             cached_tsc_extract: None,
@@ -268,7 +270,7 @@ mod tests {
                     semantic_hash: [0; 16],
                     style_override_hash: 0,
                     content_override_hash: 0,
-                    outputs: HashMap::new(),
+                    outputs: FxHashMap::default(),
                     diagnostics: DiagnosticsSnapshot::default(),
                     last_good_outputs: None,
                     last_access_tick: i as u64,
@@ -317,7 +319,7 @@ mod tests {
     /// @ai-generated - invalidate_nodes on empty slots doesn't panic
     #[test]
     fn invalidate_nodes_empty_slots_no_panic() {
-        let mut slots = HashMap::new();
+        let mut slots = FxHashMap::default();
         invalidate_nodes(
             &mut slots,
             &[VirtualNodeKind::Main, VirtualNodeKind::Template],
@@ -328,8 +330,8 @@ mod tests {
     /// @ai-generated - invalidate_nodes only removes targeted nodes, leaves others
     #[test]
     fn invalidate_nodes_partial() {
-        let mut slots = HashMap::new();
-        let mut outputs = HashMap::new();
+        let mut slots = FxHashMap::default();
+        let mut outputs = FxHashMap::default();
         outputs.insert(
             VirtualNodeKind::Main,
             CachedVirtualFile {

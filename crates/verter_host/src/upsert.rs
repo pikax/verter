@@ -196,12 +196,12 @@ pub(crate) fn compute_changed_exports(
         return old.iter().map(|s| s.name.clone()).collect();
     }
 
-    use std::collections::HashMap;
-    let old_map: HashMap<&str, &[u8; 16]> = old
+    use rustc_hash::FxHashMap;
+    let old_map: FxHashMap<&str, &[u8; 16]> = old
         .iter()
         .map(|s| (s.name.as_str(), &s.declaration_hash))
         .collect();
-    let new_map: HashMap<&str, &[u8; 16]> = new
+    let new_map: FxHashMap<&str, &[u8; 16]> = new
         .iter()
         .map(|s| (s.name.as_str(), &s.declaration_hash))
         .collect();

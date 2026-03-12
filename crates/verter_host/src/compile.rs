@@ -1,7 +1,8 @@
 //! External source merging and main module assembly.
 
-use std::collections::HashMap;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use verter_core::compile::{format_import_specifier, VerterCompileResult};
 
@@ -11,7 +12,7 @@ use crate::types::{CompileProfile, FileMeta, HmrStrategy, SrcBlockInfo, VirtualN
 pub(crate) fn merge_external_sources(
     source: &str,
     src_blocks: &[SrcBlockInfo],
-    external_sources: &HashMap<String, Arc<str>>,
+    external_sources: &FxHashMap<String, Arc<str>>,
 ) -> String {
     let mut merged = source.to_string();
     // Sort by descending tag_open_start so splicing from the end doesn't
@@ -326,7 +327,7 @@ mod tests {
             tag_open_end: 10,
             tag_close_start: Some(21),
         }];
-        let mut ext = HashMap::new();
+        let mut ext = FxHashMap::default();
         ext.insert("tpl.html".to_string(), Arc::<str>::from("<div>new</div>"));
         let result = merge_external_sources(source, &blocks, &ext);
         assert_eq!(result, "<template><div>new</div></template>");
@@ -342,7 +343,7 @@ mod tests {
             tag_open_end: 26,
             tag_close_start: None,
         }];
-        let mut ext = HashMap::new();
+        let mut ext = FxHashMap::default();
         ext.insert("t.html".to_string(), Arc::<str>::from("<p>hi</p>"));
         let result = merge_external_sources(source, &blocks, &ext);
         assert!(result.contains("<p>hi</p>"));
@@ -370,7 +371,7 @@ mod tests {
                 tag_close_start: Some(35),
             },
         ];
-        let mut ext = HashMap::new();
+        let mut ext = FxHashMap::default();
         ext.insert("t.html".to_string(), Arc::<str>::from("<div>A</div>"));
         ext.insert("s.css".to_string(), Arc::<str>::from(".a{color:red}"));
         let result = merge_external_sources(source, &blocks, &ext);
@@ -388,7 +389,7 @@ mod tests {
             tag_open_end: 10,
             tag_close_start: Some(13),
         }];
-        let ext = HashMap::new();
+        let ext = FxHashMap::default();
         let result = merge_external_sources(source, &blocks, &ext);
         assert_eq!(result, "<template></template>");
     }

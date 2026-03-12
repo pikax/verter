@@ -595,8 +595,8 @@ impl VerterHost {
     /// Internal recursive helper for following re-export chains.
     fn follow_reexport_chain(
         &self,
-        files: &std::collections::HashMap<String, crate::FileEntry>,
-        alias_map: &std::collections::HashMap<String, String>,
+        files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
+        alias_map: &rustc_hash::FxHashMap<String, String>,
         canonical_id: &str,
         binding_name: &str,
         remaining_depth: u32,
@@ -710,8 +710,8 @@ impl VerterHost {
     /// Recursively collect resolved exports from a file, following re-export chains.
     fn collect_resolved_exports(
         &self,
-        files: &std::collections::HashMap<String, crate::FileEntry>,
-        alias_map: &std::collections::HashMap<String, String>,
+        files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
+        alias_map: &rustc_hash::FxHashMap<String, String>,
         canonical_id: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Vec<ResolvedExport> {
@@ -808,8 +808,8 @@ impl VerterHost {
     /// Returns (ultimate_canonical_id, ultimate_name) or None if unresolvable.
     fn resolve_single_export(
         &self,
-        files: &std::collections::HashMap<String, crate::FileEntry>,
-        alias_map: &std::collections::HashMap<String, String>,
+        files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
+        alias_map: &rustc_hash::FxHashMap<String, String>,
         canonical_id: &str,
         name: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,

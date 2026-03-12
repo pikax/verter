@@ -216,9 +216,9 @@ pub(crate) fn should_invalidate_dependent(
 /// - Tier 2: Export-level hashing → invalidate only if macro-consumed exports changed
 /// - Tier 3: Cross-file type resolution → invalidate only if resolved type shape changed
 pub(crate) fn smart_invalidate_dependents(
-    files: &crate::shared::Shared<std::collections::HashMap<String, FileEntry>>,
+    files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
     reverse_dependencies: &crate::shared::Shared<
-        std::collections::HashMap<String, BTreeSet<String>>,
+        rustc_hash::FxHashMap<String, BTreeSet<String>>,
     >,
     config: &HostConfig,
     dependency_id: &str,

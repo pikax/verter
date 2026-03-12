@@ -15,8 +15,9 @@
 //! DefaultHasher is used only for transient in-process cache keys — never persisted.
 //! FxHash (`rustc-hash`) is used for in-memory `HashMap`/`HashSet` throughout (not shown here).
 
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+
+use rustc_hash::FxHashMap;
 
 use crate::types::{
     CompileProfile, ContentOverride, DescriptorMin, Hash16, SliceHashes, StyleOverrideEntry,
@@ -74,7 +75,7 @@ pub(crate) fn compile_profile_hash(profile: &CompileProfile) -> u64 {
     hasher.finish()
 }
 
-pub(crate) fn style_override_hash(overrides: &HashMap<usize, StyleOverrideEntry>) -> u64 {
+pub(crate) fn style_override_hash(overrides: &FxHashMap<usize, StyleOverrideEntry>) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut entries: Vec<_> = overrides.iter().collect();
     entries.sort_by_key(|(idx, _)| **idx);
@@ -278,7 +279,7 @@ mod tests {
     /// @ai-generated - style_override_hash: insertion order doesn't matter
     #[test]
     fn style_override_hash_order_independent() {
-        let mut map1 = HashMap::new();
+        let mut map1 = FxHashMap::default();
         map1.insert(
             0,
             StyleOverrideEntry {
@@ -296,7 +297,7 @@ mod tests {
             },
         );
 
-        let mut map2 = HashMap::new();
+        let mut map2 = FxHashMap::default();
         map2.insert(
             1,
             StyleOverrideEntry {

@@ -1,7 +1,11 @@
 #[cfg(feature = "host_metrics")]
 use std::collections::BTreeMap;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+#[cfg(feature = "host_metrics")]
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use thiserror::Error;
 
@@ -810,7 +814,7 @@ pub(crate) struct ParseSnapshot {
 #[derive(Debug, Clone)]
 pub(crate) struct StyleOverrideLayer {
     pub(crate) hash: u64,
-    pub(crate) by_index: HashMap<usize, StyleOverrideEntry>,
+    pub(crate) by_index: FxHashMap<usize, StyleOverrideEntry>,
 }
 
 /// Preprocessed template/script content that replaces the original block
@@ -891,9 +895,9 @@ pub(crate) struct CompileSlot {
     pub(crate) semantic_hash: Hash16,
     pub(crate) style_override_hash: u64,
     pub(crate) content_override_hash: u64,
-    pub(crate) outputs: HashMap<VirtualNodeKind, CachedVirtualFile>,
+    pub(crate) outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
     pub(crate) diagnostics: DiagnosticsSnapshot,
-    pub(crate) last_good_outputs: Option<HashMap<VirtualNodeKind, CachedVirtualFile>>,
+    pub(crate) last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
     pub(crate) last_access_tick: u64,
     /// Combined TSX output for LSP type checking. Not a virtual file.
     pub(crate) tsx: Option<CachedTsx>,
@@ -1001,12 +1005,12 @@ pub(crate) struct FileEntry {
     /// Per-specifier resolution records from the last `set_import_dependencies` call.
     /// Keyed by raw import specifier. Used by `resolve_loaded_dependency_canonical`
     /// for exact lookup before falling back to heuristics.
-    pub(crate) dependency_resolutions: HashMap<String, DependencyResolution>,
+    pub(crate) dependency_resolutions: FxHashMap<String, DependencyResolution>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
     /// Per-dep, per-type resolved type shape hash for Tier 3 precision.
     /// Key: (dep_canonical_id, type_name). Value: hash of resolved prop shape.
-    pub(crate) resolved_type_hashes: HashMap<(String, String), Hash16>,
+    pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,
 
     // ── Analysis snapshots ────────────────────────────────────────────
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
@@ -1021,11 +1025,11 @@ pub(crate) struct FileEntry {
     pub(crate) arc_script_cache: ScriptAnalysisArcs,
 
     // ── Compilation cache ─────────────────────────────────────────────
-    pub(crate) style_overrides: HashMap<u64, StyleOverrideLayer>,
+    pub(crate) style_overrides: FxHashMap<u64, StyleOverrideLayer>,
     /// Per-profile content overrides for preprocessed template/script blocks.
-    pub(crate) content_overrides: HashMap<u64, ContentOverrideLayer>,
-    pub(crate) compile_slots: HashMap<u64, CompileSlot>,
-    pub(crate) latest_diagnostics: HashMap<u64, DiagnosticsSnapshot>,
+    pub(crate) content_overrides: FxHashMap<u64, ContentOverrideLayer>,
+    pub(crate) compile_slots: FxHashMap<u64, CompileSlot>,
+    pub(crate) latest_diagnostics: FxHashMap<u64, DiagnosticsSnapshot>,
     /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
     pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
     /// Cached intermediate TSC extract state. Populated on first `get_public_api_with_mode`

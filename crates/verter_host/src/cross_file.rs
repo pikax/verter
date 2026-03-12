@@ -243,8 +243,8 @@ impl VerterHost {
 /// 6. Basename match (test helper — files registered by basename only)
 /// 7. Extension guessing (`.vue`, `/index.vue`)
 pub(crate) fn resolve_import_to_canonical(
-    files: &std::collections::HashMap<String, crate::types::FileEntry>,
-    alias_map: &std::collections::HashMap<String, String>,
+    files: &rustc_hash::FxHashMap<String, crate::types::FileEntry>,
+    alias_map: &rustc_hash::FxHashMap<String, String>,
     parent_entry: &crate::types::FileEntry,
     import_source: &str,
 ) -> Option<String> {

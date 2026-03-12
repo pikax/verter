@@ -4,8 +4,10 @@
 //! which handle file ingestion, change detection, cache invalidation, and
 //! style override application.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -160,7 +162,7 @@ impl VerterHost {
                     meta: FileMeta::default(),
                     aliases: BTreeSet::new(),
                     dependencies: BTreeSet::new(),
-                    dependency_resolutions: HashMap::new(),
+                    dependency_resolutions: FxHashMap::default(),
                     external_requests: Vec::new(),
                     src_blocks: Vec::new(),
                     parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -169,11 +171,11 @@ impl VerterHost {
                     style_analyses: Arc::new(Vec::new()),
                     template_analysis: None,
                     arc_script_cache: ScriptAnalysisArcs::default(),
-                    resolved_type_hashes: HashMap::new(),
-                    style_overrides: HashMap::new(),
-                    content_overrides: HashMap::new(),
-                    compile_slots: HashMap::new(),
-                    latest_diagnostics: HashMap::new(),
+                    resolved_type_hashes: FxHashMap::default(),
+                    style_overrides: FxHashMap::default(),
+                    content_overrides: FxHashMap::default(),
+                    compile_slots: FxHashMap::default(),
+                    latest_diagnostics: FxHashMap::default(),
                     generation: 0,
                     cached_parse: None,
                     cached_tsc_extract: None,
@@ -290,7 +292,7 @@ impl VerterHost {
                 canonical_id: canonical.clone(),
             })?;
 
-        let mut by_index = HashMap::new();
+        let mut by_index = FxHashMap::default();
         for ov in req.overrides {
             by_index.insert(ov.index, ov);
         }

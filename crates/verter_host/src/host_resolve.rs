@@ -4,8 +4,9 @@
 //! [`VerterHost::list_virtual_files`], and the internal [`VerterHost::compile_entry`]
 //! helper that drives on-demand compilation.
 
-use std::collections::HashMap;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "host_metrics")]
@@ -39,7 +40,7 @@ type ExternalTypeCache = rustc_hash::FxHashMap<
 impl VerterHost {
     fn resolve_loaded_dependency_canonical(
         &self,
-        files: &HashMap<String, FileEntry>,
+        files: &FxHashMap<String, FileEntry>,
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
@@ -103,7 +104,7 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     fn resolve_external_type_from_loaded_files(
         &self,
-        files: &HashMap<String, FileEntry>,
+        files: &FxHashMap<String, FileEntry>,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -379,7 +380,7 @@ impl VerterHost {
         // on the hot path.
         struct CacheMiss {
             compile_input: CompileInput,
-            fallback_last_good: Option<HashMap<VirtualNodeKind, CachedVirtualFile>>,
+            fallback_last_good: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
             meta: FileMeta,
             /// Captured under read lock so the compile slot is stored with the
             /// semantic_hash that was current when we decided to compile.
@@ -747,7 +748,7 @@ impl VerterHost {
         profile: &CompileProfile,
     ) -> Result<
         (
-            HashMap<VirtualNodeKind, CachedVirtualFile>,
+            FxHashMap<VirtualNodeKind, CachedVirtualFile>,
             DiagnosticsSnapshot,
             Option<CachedTsx>,
             Option<verter_analysis::template::TemplateAnalysisSnapshot>,
@@ -760,7 +761,7 @@ impl VerterHost {
         if !snapshot.src_blocks.is_empty() {
             let ext_sources = {
                 let files = read_lock(&self.files);
-                let mut map = HashMap::new();
+                let mut map = FxHashMap::default();
                 for req in &snapshot.external_requests {
                     let resolved_dep_id = files
                         .contains_key(&req.resolved_canonical_id)
@@ -906,7 +907,7 @@ impl VerterHost {
             return Err(compile_diags);
         }
 
-        let mut outputs = HashMap::new();
+        let mut outputs = FxHashMap::default();
 
         let main_code =
             assemble_main_module(&snapshot.canonical_id, &compiled, &snapshot.meta, profile);

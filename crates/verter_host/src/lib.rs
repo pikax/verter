@@ -66,9 +66,10 @@ pub use verter_core::VERTER_TYPES_STANDALONE_DTS;
 // without adding verter_core as a direct dependency.
 pub use verter_core::compile::CompileTarget;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use id::canonicalize_id;
+use rustc_hash::FxHashMap;
 pub use id::resolve_external;
 use shared::{default_shared, read_lock, write_lock, Shared};
 
@@ -86,9 +87,9 @@ use shared::{default_shared, read_lock, write_lock, Shared};
 #[derive(Debug)]
 pub struct VerterHost {
     pub(crate) config: HostConfig,
-    pub(crate) files: Shared<HashMap<String, FileEntry>>,
-    pub(crate) alias_to_canonical: Shared<HashMap<String, String>>,
-    pub(crate) reverse_dependencies: Shared<HashMap<String, BTreeSet<String>>>,
+    pub(crate) files: Shared<FxHashMap<String, FileEntry>>,
+    pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
+    pub(crate) reverse_dependencies: Shared<FxHashMap<String, BTreeSet<String>>>,
     pub(crate) tick: std::sync::atomic::AtomicU64,
     /// Last computed cross-file prop constness overrides.
     /// Used to detect changes on re-computation (Phase 7 invalidation).
@@ -103,9 +104,9 @@ impl VerterHost {
     pub fn new(config: HostConfig) -> Self {
         Self {
             config,
-            files: default_shared(HashMap::new()),
-            alias_to_canonical: default_shared(HashMap::new()),
-            reverse_dependencies: default_shared(HashMap::new()),
+            files: default_shared(FxHashMap::default()),
+            alias_to_canonical: default_shared(FxHashMap::default()),
+            reverse_dependencies: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "host_metrics")]
@@ -251,8 +252,10 @@ impl VerterHost {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
     use std::sync::Arc;
+
+    use rustc_hash::FxHashMap;
 
     use super::cache;
     use super::deps::{import_resolves_to_dep, strip_configured_extension};
@@ -345,7 +348,7 @@ mod tests {
             meta: snap.meta.clone(),
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
-            dependency_resolutions: HashMap::new(),
+            dependency_resolutions: FxHashMap::default(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -354,11 +357,11 @@ mod tests {
             style_analyses: Arc::new(Vec::new()),
             template_analysis: None,
             arc_script_cache: ScriptAnalysisArcs::default(),
-            resolved_type_hashes: HashMap::new(),
-            style_overrides: HashMap::new(),
-            content_overrides: HashMap::new(),
-            compile_slots: HashMap::new(),
-            latest_diagnostics: HashMap::new(),
+            resolved_type_hashes: FxHashMap::default(),
+            style_overrides: FxHashMap::default(),
+            content_overrides: FxHashMap::default(),
+            compile_slots: FxHashMap::default(),
+            latest_diagnostics: FxHashMap::default(),
             generation: 1,
             cached_parse: None,
             cached_tsc_extract: None,
@@ -891,7 +894,7 @@ mod tests {
             meta: FileMeta::default(),
             aliases: BTreeSet::new(),
             dependencies: deps,
-            dependency_resolutions: HashMap::new(),
+            dependency_resolutions: FxHashMap::default(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -900,11 +903,11 @@ mod tests {
             style_analyses: Arc::new(Vec::new()),
             template_analysis: None,
             arc_script_cache: ScriptAnalysisArcs::default(),
-            resolved_type_hashes: HashMap::new(),
-            style_overrides: HashMap::new(),
-            content_overrides: HashMap::new(),
-            compile_slots: HashMap::new(),
-            latest_diagnostics: HashMap::new(),
+            resolved_type_hashes: FxHashMap::default(),
+            style_overrides: FxHashMap::default(),
+            content_overrides: FxHashMap::default(),
+            compile_slots: FxHashMap::default(),
+            latest_diagnostics: FxHashMap::default(),
             generation: 0,
             cached_parse: None,
             cached_tsc_extract: None,
@@ -933,7 +936,7 @@ mod tests {
             meta: FileMeta::default(),
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
-            dependency_resolutions: HashMap::new(),
+            dependency_resolutions: FxHashMap::default(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -942,11 +945,11 @@ mod tests {
             style_analyses: Arc::new(Vec::new()),
             template_analysis: None,
             arc_script_cache: ScriptAnalysisArcs::default(),
-            resolved_type_hashes: HashMap::new(),
-            style_overrides: HashMap::new(),
-            content_overrides: HashMap::new(),
-            compile_slots: HashMap::new(),
-            latest_diagnostics: HashMap::new(),
+            resolved_type_hashes: FxHashMap::default(),
+            style_overrides: FxHashMap::default(),
+            content_overrides: FxHashMap::default(),
+            compile_slots: FxHashMap::default(),
+            latest_diagnostics: FxHashMap::default(),
             generation: 0,
             cached_parse: None,
             cached_tsc_extract: None,
@@ -969,7 +972,7 @@ mod tests {
             meta: FileMeta::default(),
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
-            dependency_resolutions: HashMap::new(),
+            dependency_resolutions: FxHashMap::default(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -978,11 +981,11 @@ mod tests {
             style_analyses: Arc::new(Vec::new()),
             template_analysis: None,
             arc_script_cache: ScriptAnalysisArcs::default(),
-            resolved_type_hashes: HashMap::new(),
-            style_overrides: HashMap::new(),
-            content_overrides: HashMap::new(),
-            compile_slots: HashMap::new(),
-            latest_diagnostics: HashMap::new(),
+            resolved_type_hashes: FxHashMap::default(),
+            style_overrides: FxHashMap::default(),
+            content_overrides: FxHashMap::default(),
+            compile_slots: FxHashMap::default(),
+            latest_diagnostics: FxHashMap::default(),
             generation: 0,
             cached_parse: None,
             cached_tsc_extract: None,
@@ -1009,7 +1012,7 @@ mod tests {
             },
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
-            dependency_resolutions: HashMap::new(),
+            dependency_resolutions: FxHashMap::default(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -1018,11 +1021,11 @@ mod tests {
             style_analyses: Arc::new(Vec::new()),
             template_analysis: None,
             arc_script_cache: ScriptAnalysisArcs::default(),
-            resolved_type_hashes: HashMap::new(),
-            style_overrides: HashMap::new(),
-            content_overrides: HashMap::new(),
-            compile_slots: HashMap::new(),
-            latest_diagnostics: HashMap::new(),
+            resolved_type_hashes: FxHashMap::default(),
+            style_overrides: FxHashMap::default(),
+            content_overrides: FxHashMap::default(),
+            compile_slots: FxHashMap::default(),
+            latest_diagnostics: FxHashMap::default(),
             generation: 0,
             cached_parse: None,
             cached_tsc_extract: None,
@@ -1043,8 +1046,8 @@ mod tests {
     fn invalidate_nodes_removes_last_good() {
         use cache::invalidate_nodes;
 
-        let mut slots = HashMap::new();
-        let mut outputs = HashMap::new();
+        let mut slots = FxHashMap::default();
+        let mut outputs = FxHashMap::default();
         outputs.insert(
             VirtualNodeKind::Main,
             CachedVirtualFile {
