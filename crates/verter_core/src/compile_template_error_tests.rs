@@ -681,7 +681,7 @@ fn error_x_invalid_expression() {
     let src = r#"<template>{{ if(true){} }}</template>"#;
     let result = compile_sfc(src);
     assert_has_error(&result, "XInvalidExpression");
-    assert_error_severity(&result, "XInvalidExpression");
+    assert_warning_severity(&result, "XInvalidExpression");
 }
 
 #[test]

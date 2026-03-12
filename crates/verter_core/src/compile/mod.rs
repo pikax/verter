@@ -225,13 +225,13 @@ fn collect_expression_errors(oxc_ast: &OxcParsedAst<'_>, diagnostics: &mut Vec<D
                 if let Some(ref v_for) = el.v_for {
                     for err in &v_for.parsed.result.left_errors {
                         diagnostics.push(
-                            Diagnostic::error("template", CompilerErrorCode::XInvalidExpression)
+                            Diagnostic::warning("template", CompilerErrorCode::XInvalidExpression)
                                 .with_message(err.message.to_string()),
                         );
                     }
                     for err in &v_for.parsed.result.right_errors {
                         diagnostics.push(
-                            Diagnostic::error("template", CompilerErrorCode::XInvalidExpression)
+                            Diagnostic::warning("template", CompilerErrorCode::XInvalidExpression)
                                 .with_message(err.message.to_string()),
                         );
                     }
@@ -240,7 +240,7 @@ fn collect_expression_errors(oxc_ast: &OxcParsedAst<'_>, diagnostics: &mut Vec<D
                     if let Some(ref errors) = v_slot.parsed.result.errors {
                         for err in errors {
                             diagnostics.push(
-                                Diagnostic::error(
+                                Diagnostic::warning(
                                     "template",
                                     CompilerErrorCode::XInvalidExpression,
                                 )
@@ -259,6 +259,11 @@ fn collect_expression_errors(oxc_ast: &OxcParsedAst<'_>, diagnostics: &mut Vec<D
 }
 
 /// Push parse errors from an OXC expression as XInvalidExpression diagnostics.
+///
+/// These are warnings (not errors) because:
+/// - The IDE codegen handles broken expressions gracefully (best-effort JSX output)
+/// - The type checker (TSGO/tsserver) will report the actual TS error for the broken syntax
+/// - Warning severity prevents the host from discarding usable IDE output
 fn push_expression_errors(
     expr: &crate::template::oxc::types::OxcParsedExpression<'_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -266,7 +271,7 @@ fn push_expression_errors(
     if let Some(ref errors) = expr.errors {
         for err in errors {
             diagnostics.push(
-                Diagnostic::error("template", CompilerErrorCode::XInvalidExpression)
+                Diagnostic::warning("template", CompilerErrorCode::XInvalidExpression)
                     .with_message(err.message.to_string()),
             );
         }

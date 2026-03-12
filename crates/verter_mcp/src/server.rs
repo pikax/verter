@@ -3055,7 +3055,6 @@ impl VerterMcpServer {
     }
 }
 
-
 // ── SSR Analysis Helpers ──────────────────────────────────────────
 
 /// Client-only lifecycle hooks that never fire during SSR.
@@ -3787,5 +3786,4 @@ const x = ref(1)
             "clean component should have no migration steps"
         );
     }
-
 }

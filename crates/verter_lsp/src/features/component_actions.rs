@@ -74,6 +74,61 @@ pub fn component_code_actions(
         }
     }
 
+    // Handle the case where a child has NO defineProps at all (empty prop definitions).
+    // `find_unknown_props` skips these to avoid false-positive diagnostics, but for
+    // code actions we want to offer "generate defineProps" for each parent-passed prop.
+    if let Some(template) = &analysis.template {
+        for comp in &template.components {
+            if comp.is_dynamic || comp.has_spread || comp.props.is_empty() {
+                continue;
+            }
+            let import_source = match comp.import_source.as_deref() {
+                Some(s) => s,
+                None => continue,
+            };
+            let ctx = match resolve_child_context(import_source) {
+                Some(ctx) => ctx,
+                None => continue,
+            };
+            if ctx.script_setup().is_none() {
+                continue;
+            }
+            // Only handle the case where child has NO defineProps macro at all
+            if ctx.find_macro(AnalyzedMacroKind::DefineProps).is_some() {
+                continue;
+            }
+            // Also skip if child already has prop definitions from other sources
+            if ctx
+                .analysis
+                .template
+                .as_ref()
+                .is_some_and(|t| !t.prop_definitions.is_empty())
+            {
+                continue;
+            }
+            // Generate a defineProps with ALL parent-passed props
+            let mut codegen = MacroCodegen::define_props();
+            for prop in &comp.props {
+                codegen = codegen.add_type_member(&prop.name, "unknown", false);
+            }
+            let macro_text = codegen.build();
+            if let Some(edit) = ctx.make_insert_at_macros(&macro_text) {
+                let title = if comp.props.len() == 1 {
+                    format!("Add prop '{}' to <{}>", comp.props[0].name, comp.name)
+                } else {
+                    format!("Add {} props to <{}>", comp.props.len(), comp.name)
+                };
+                actions.push(action_utils::make_code_action(
+                    title,
+                    CodeActionKind::QUICKFIX,
+                    edit,
+                    false,
+                    None,
+                ));
+            }
+        }
+    }
+
     // V-model actions: add missing defineModel to child
     let unknown_models = component_diagnostics::find_unknown_models(analysis, &|source| {
         resolve_child_context(source).map(|ctx| ctx.analysis.clone())
