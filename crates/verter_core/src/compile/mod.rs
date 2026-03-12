@@ -1170,6 +1170,7 @@ fn compile_inner(
                         self_name: &to_pascal_case(&component_name),
                         comments: options.comments.unwrap_or(!options.is_production),
                         is_jsx,
+                        strict_slots: options.strict_slots,
                     };
                     ide::template::generate_ide_template(
                         template_ast,

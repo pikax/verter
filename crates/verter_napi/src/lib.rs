@@ -219,6 +219,8 @@ pub struct NapiCompileProfile {
     pub sourceMap: Option<bool>,
     /// Compilation target preset: "bundler" (default), "ide", or "analysis".
     pub target: Option<String>,
+    /// Experimental: strict slot children type checking.
+    pub strictSlots: Option<bool>,
 }
 
 impl From<NapiCompileProfile> for FfiCompileProfile {
@@ -238,6 +240,7 @@ impl From<NapiCompileProfile> for FfiCompileProfile {
             force_js: n.forceJs,
             source_map: n.sourceMap,
             target: n.target,
+            strict_slots: n.strictSlots,
         }
     }
 }

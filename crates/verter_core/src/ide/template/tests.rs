@@ -40,6 +40,7 @@ fn gen_tsx_template(source: &str) -> String {
         self_name: "App",
         comments: true,
         is_jsx: false,
+        strict_slots: false,
     };
 
     generate_ide_template(
@@ -109,6 +110,7 @@ fn gen_tsx_template_with_bindings(source: &str, bindings: &[(&str, BindingType)]
         self_name: "App",
         comments: true,
         is_jsx: false,
+        strict_slots: false,
     };
 
     generate_ide_template(
@@ -2036,6 +2038,7 @@ fn gen_tsx_template_with_map(
         self_name: "App",
         comments: true,
         is_jsx: false,
+        strict_slots: false,
     };
 
     generate_ide_template(
@@ -4594,6 +4597,7 @@ fn gen_jsx_template(source: &str) -> String {
         self_name: "App",
         comments: true,
         is_jsx: true,
+        strict_slots: false,
     };
 
     generate_ide_template(
@@ -5082,6 +5086,686 @@ fn existing_v_if_comment_repositioning_not_regressed() {
     assert!(
         !result.contains("<!--"),
         "no raw HTML markers, got:\n{}",
+        result
+    );
+}
+
+// ── Strict slot children type checking ──────────────────────
+
+/// Helper: compile a template with strict_slots enabled.
+/// Returns the template portion of the TSX output.
+#[allow(dead_code)]
+fn gen_tsx_template_strict_slots(source: &str) -> String {
+    gen_tsx_template_strict_slots_with_bindings(source, &[])
+}
+
+fn gen_tsx_template_strict_slots_with_bindings(
+    source: &str,
+    bindings: &[(&str, BindingType)],
+) -> String {
+    let alloc = Allocator::new();
+    let bytes = source.as_bytes();
+
+    let mut syntax = crate::parser::Syntax::new(false);
+    crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+        syntax.handle(
+            &e,
+            &crate::diagnostics::SyntaxPluginContext {
+                input: source,
+                bytes,
+                options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                diagnostics: Vec::new(),
+            },
+        )
+    });
+
+    let template_ast = match syntax.take_template_ast() {
+        Some(ast) => ast,
+        None => return String::new(),
+    };
+
+    let source_type = oxc_span::SourceType::tsx();
+    let oxc_ast = crate::template::oxc::parse_template_expressions(
+        &template_ast,
+        source,
+        &alloc,
+        source_type,
+    );
+
+    let tpl_alloc = Allocator::new();
+    let mut tpl_ct = CodeTransform::new(source, &tpl_alloc);
+    let mut out = CodeGenOutput::new(&tpl_alloc);
+
+    let mut binding_map: FxHashMap<&str, BindingType> = FxHashMap::default();
+    for &(name, bt) in bindings {
+        binding_map.insert(tpl_alloc.alloc_str(name), bt);
+    }
+
+    let options = IdeTemplateOptions {
+        self_name: "App",
+        comments: true,
+        is_jsx: false,
+        strict_slots: true,
+    };
+
+    generate_ide_template(
+        &template_ast,
+        &oxc_ast,
+        source,
+        &mut out,
+        &tpl_alloc,
+        &binding_map,
+        &options,
+    );
+    out.apply_to(&mut tpl_ct);
+
+    let full = tpl_ct.build_string();
+    let tpl_start = template_ast.root.tag_open.start as usize;
+    let tpl_end = template_ast
+        .root
+        .tag_close
+        .as_ref()
+        .map(|tc| tc.end as usize)
+        .unwrap_or(full.len());
+    let suffix_len = source.len() - tpl_end;
+    full[tpl_start..full.len() - suffix_len].to_string()
+}
+
+#[test]
+fn strict_slots_component_children() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        "<template><Tabs><TabItem /><TabItem /></Tabs></template>",
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("TabItem", BindingType::SetupImport),
+        ],
+    );
+    // Positive: strictRenderSlot call with default slot and TabItem children
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot call, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("$slots"),
+        "should reference $slots, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("'default'"),
+        "should reference default slot, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("TabItem"),
+        "should reference TabItem constructor, got:\n{}",
+        result
+    );
+    // Negative: no v-if or v-for artifacts in slot check
+    assert!(
+        !result.contains("v-if"),
+        "v-if should not appear in output, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_html_children() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        "<template><Tabs><input /><span></span></Tabs></template>",
+        &[("Tabs", BindingType::SetupImport)],
+    );
+    // Positive: strictRenderSlot with HTML element type references
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot call, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("HTMLElementTagNameMap"),
+        "should reference HTMLElementTagNameMap, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("\"input\""),
+        "should reference input element, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("\"span\""),
+        "should reference span element, got:\n{}",
+        result
+    );
+    // Negative
+    assert!(
+        !result.contains("v-slot"),
+        "no v-slot in output, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_text_children() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        "<template><Tabs>hello world</Tabs></template>",
+        &[("Tabs", BindingType::SetupImport)],
+    );
+    // Positive: strictRenderSlot with string type for text
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot for text, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("as string"),
+        "should have string type for text node, got:\n{}",
+        result
+    );
+    // Negative
+    assert!(
+        !result.contains("HTMLElementTagNameMap"),
+        "should not have HTMLElementTagNameMap for text, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_named_slot() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        "<template><Tabs><template #header><input /></template></Tabs></template>",
+        &[("Tabs", BindingType::SetupImport)],
+    );
+    // Positive: strictRenderSlot referencing named slot 'header'
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("'header'"),
+        "should reference header slot name, got:\n{}",
+        result
+    );
+    // Negative: should NOT have 'default' slot call
+    assert!(
+        !result.contains("'default'"),
+        "should not have default slot (only named), got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_mixed_named_default() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        "<template><Tabs><template #header><input /></template><template #default><span /></template></Tabs></template>",
+        &[("Tabs", BindingType::SetupImport)],
+    );
+    // Positive: two separate strictRenderSlot calls
+    assert!(
+        result.contains("'header'"),
+        "should have header slot, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("'default'"),
+        "should have default slot, got:\n{}",
+        result
+    );
+    // Count occurrences of strictRenderSlot
+    let count = result.matches("strictRenderSlot").count();
+    assert!(
+        count >= 2,
+        "should have at least 2 strictRenderSlot calls, got {}, output:\n{}",
+        count,
+        result
+    );
+}
+
+#[test]
+fn strict_slots_no_children() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        "<template><Tabs /></template>",
+        &[("Tabs", BindingType::SetupImport)],
+    );
+    // Negative: no strictRenderSlot for self-closing components
+    assert!(
+        !result.contains("strictRenderSlot"),
+        "should NOT emit strictRenderSlot for self-closing, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_whitespace_only() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        "<template><Tabs>   \n   </Tabs></template>",
+        &[("Tabs", BindingType::SetupImport)],
+    );
+    // Negative: no strictRenderSlot for whitespace-only children
+    assert!(
+        !result.contains("strictRenderSlot"),
+        "should NOT emit strictRenderSlot for whitespace-only children, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_dynamic_component() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        r#"<template><component :is="comp"><span /></component></template>"#,
+        &[("comp", BindingType::SetupRef)],
+    );
+    // Negative: no strictRenderSlot for dynamic <component :is>
+    assert!(
+        !result.contains("strictRenderSlot"),
+        "should NOT emit strictRenderSlot for dynamic component, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_disabled() {
+    let result = gen_tsx_template_with_bindings(
+        "<template><Tabs><TabItem /></Tabs></template>",
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("TabItem", BindingType::SetupImport),
+        ],
+    );
+    // Negative: no strictRenderSlot when strict_slots is false (default helper)
+    assert!(
+        !result.contains("strictRenderSlot"),
+        "should NOT emit strictRenderSlot when disabled, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_v_if_child() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        r#"<template><Tabs><TabItem v-if="show" /></Tabs></template>"#,
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("TabItem", BindingType::SetupImport),
+            ("show", BindingType::SetupRef),
+        ],
+    );
+    // Positive: TabItem still in the strict slot check (v-if doesn't change the type)
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("TabItem"),
+        "should contain TabItem in slot check, got:\n{}",
+        result
+    );
+    // Negative
+    assert!(
+        !result.contains("v-if"),
+        "v-if should not appear in output, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_v_for_child() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        r#"<template><Tabs><TabItem v-for="i in 3" /></Tabs></template>"#,
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("TabItem", BindingType::SetupImport),
+        ],
+    );
+    // Positive: TabItem still in the strict slot check
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("TabItem"),
+        "should contain TabItem, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_interpolation_child() {
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        "<template><Tabs>{{ msg }}</Tabs></template>",
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("msg", BindingType::SetupRef),
+        ],
+    );
+    // Positive: strictRenderSlot with string type for interpolation
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot for interpolation, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("as string"),
+        "should have string type for interpolation, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_with_v_slot_params() {
+    // When a component has v-slot params, BOTH extractArgumentsFromRenderSlot
+    // (for slot props typing) AND strictRenderSlot (for children checking) should appear.
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        r#"<template><Tabs v-slot="{ item }"><TabItem /></Tabs></template>"#,
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("TabItem", BindingType::SetupImport),
+        ],
+    );
+    // Positive: both helpers present
+    assert!(
+        result.contains("extractArgumentsFromRenderSlot"),
+        "should have extractArgumentsFromRenderSlot for slot params, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should have strictRenderSlot for children, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("TabItem"),
+        "should reference TabItem in slot check, got:\n{}",
+        result
+    );
+    // Negative: no raw v-slot
+    assert!(
+        !result.contains("v-slot"),
+        "v-slot directive should not appear in output, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_v_if_narrowing() {
+    // v-if/v-else branches produce different element types — both should be in the array
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        r#"<template><Tabs><div v-if="isA" /><span v-else /></Tabs></template>"#,
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("isA", BindingType::SetupRef),
+        ],
+    );
+    // Positive: both div and span in the slot check array
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("\"div\""),
+        "should reference div element, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("\"span\""),
+        "should reference span element, got:\n{}",
+        result
+    );
+    // Negative
+    assert!(
+        !result.contains("v-if"),
+        "v-if should not appear in output, got:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("v-else"),
+        "v-else should not appear in output, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_v_for_nested() {
+    // <template v-for> with a slot name should still collect children correctly
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        r#"<template><Tabs><template v-for="item in items" #default><TabItem /></template></Tabs></template>"#,
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("TabItem", BindingType::SetupImport),
+            ("items", BindingType::SetupRef),
+        ],
+    );
+    // Positive: TabItem in default slot check
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("'default'"),
+        "should reference default slot, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("TabItem"),
+        "should reference TabItem, got:\n{}",
+        result
+    );
+}
+
+// ── Strict slot sourcemap test ──────────────────────────────
+
+/// Helper: generate TSX template with strict_slots AND return source map tokens.
+fn gen_tsx_template_strict_slots_with_map(
+    source: &str,
+    bindings: &[(&str, BindingType)],
+) -> (String, Vec<(u32, u32, u32)>) {
+    let alloc = Allocator::new();
+    let bytes = source.as_bytes();
+
+    let mut syntax = crate::parser::Syntax::new(false);
+    crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+        syntax.handle(
+            &e,
+            &crate::diagnostics::SyntaxPluginContext {
+                input: source,
+                bytes,
+                options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                diagnostics: Vec::new(),
+            },
+        )
+    });
+
+    let template_ast = match syntax.take_template_ast() {
+        Some(ast) => ast,
+        None => return (String::new(), Vec::new()),
+    };
+
+    let source_type = oxc_span::SourceType::tsx();
+    let oxc_ast = crate::template::oxc::parse_template_expressions(
+        &template_ast,
+        source,
+        &alloc,
+        source_type,
+    );
+
+    let tpl_alloc = Allocator::new();
+    let mut tpl_ct = CodeTransform::new(source, &tpl_alloc);
+    let mut out = CodeGenOutput::new(&tpl_alloc);
+    let binding_map: FxHashMap<&str, BindingType> = bindings
+        .iter()
+        .map(|&(name, bt)| (tpl_alloc.alloc_str(name) as &str, bt))
+        .collect();
+    let options = IdeTemplateOptions {
+        self_name: "App",
+        comments: true,
+        is_jsx: false,
+        strict_slots: true,
+    };
+
+    generate_ide_template(
+        &template_ast,
+        &oxc_ast,
+        source,
+        &mut out,
+        &tpl_alloc,
+        &binding_map,
+        &options,
+    );
+    out.apply_to(&mut tpl_ct);
+
+    let full = tpl_ct.build_string();
+    let map =
+        tpl_ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"));
+    let tokens: Vec<(u32, u32, u32)> = map
+        .get_tokens()
+        .filter(|t| t.get_source_id().is_some())
+        .map(|t| (t.get_dst_line(), t.get_dst_col(), t.get_src_col()))
+        .collect();
+
+    (full, tokens)
+}
+
+#[test]
+fn strict_slots_sourcemap_component_child() {
+    // Verify that the source map has a token mapping the child constructor
+    // name back to its position in the template.
+    let source = "<template><Tabs><TabItem /></Tabs></template>";
+    let (output, tokens) = gen_tsx_template_strict_slots_with_map(
+        source,
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("TabItem", BindingType::SetupImport),
+        ],
+    );
+
+    // Find `TabItem` position in the source (after `<`)
+    let tab_item_src_col = source.find("<TabItem").unwrap() as u32 + 1; // skip `<`
+
+    // The strictRenderSlot call should contain TabItem with a mapped token
+    assert!(
+        output.contains("strictRenderSlot"),
+        "should have strictRenderSlot in output: {}",
+        output
+    );
+
+    // Find a token that maps to the TabItem source position
+    let has_tab_item_token = tokens.iter().any(|&(_dl, _dc, sc)| sc == tab_item_src_col);
+    assert!(
+        has_tab_item_token,
+        "should have a source map token at TabItem position (col {}), tokens: {:?}\noutput: {}",
+        tab_item_src_col, tokens, output
+    );
+}
+
+#[test]
+fn strict_slots_sourcemap_html_child() {
+    // Verify sourcemap mapping for HTML element children
+    let source = "<template><Tabs><input /></Tabs></template>";
+    let (output, tokens) =
+        gen_tsx_template_strict_slots_with_map(source, &[("Tabs", BindingType::SetupImport)]);
+
+    // `input` position in source (after `<`)
+    let input_src_col = source.find("<input").unwrap() as u32 + 1;
+
+    assert!(
+        output.contains("HTMLElementTagNameMap[\"input\"]"),
+        "should have HTMLElementTagNameMap in output: {}",
+        output
+    );
+
+    // Find a token that maps to the input source position
+    let has_input_token = tokens.iter().any(|&(_dl, _dc, sc)| sc == input_src_col);
+    assert!(
+        has_input_token,
+        "should have a source map token at input position (col {}), tokens: {:?}\noutput: {}",
+        input_src_col, tokens, output
+    );
+}
+
+#[test]
+fn strict_slots_v_for_component_var() {
+    // v-for introduces a component variable — the strict slot check should use
+    // the loop variable name as the constructor reference.
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        r#"<template><Tabs v-for="Comp in components"><Comp /></Tabs></template>"#,
+        &[
+            ("Tabs", BindingType::SetupImport),
+            ("components", BindingType::SetupRef),
+        ],
+    );
+    // Positive: strictRenderSlot referencing v-for variable Comp
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("'default'"),
+        "should reference default slot, got:\n{}",
+        result
+    );
+    // The child constructor should be "Comp" — the v-for loop variable
+    // It appears in the strictRenderSlot array
+    let slot_call_start = result.find("strictRenderSlot").unwrap();
+    let slot_call = &result[slot_call_start..];
+    assert!(
+        slot_call.contains("Comp"),
+        "strictRenderSlot array should contain Comp (v-for variable), got:\n{}",
+        slot_call
+    );
+    // Negative: no raw v-for in output
+    assert!(
+        !result.contains("v-for"),
+        "v-for should not appear in output, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn strict_slots_v_slot_component_var() {
+    // v-slot destructures a component — the strict slot check on the inner
+    // component should reference the slot variable name.
+    let result = gen_tsx_template_strict_slots_with_bindings(
+        r#"<template><Provider v-slot="{ Child }"><Tabs><Child /></Tabs></Provider></template>"#,
+        &[
+            ("Provider", BindingType::SetupImport),
+            ("Tabs", BindingType::SetupImport),
+        ],
+    );
+    // Positive: strictRenderSlot on Tabs with Child in the array
+    assert!(
+        result.contains("strictRenderSlot"),
+        "should emit strictRenderSlot, got:\n{}",
+        result
+    );
+    // Find the Tabs strict slot call — it should reference Child
+    let slot_call_start = result.find("strictRenderSlot").unwrap();
+    let slot_call = &result[slot_call_start..];
+    assert!(
+        slot_call.contains("Child"),
+        "strictRenderSlot array should contain Child (v-slot variable), got:\n{}",
+        slot_call
+    );
+    assert!(
+        slot_call.contains("'default'"),
+        "should reference default slot, got:\n{}",
+        slot_call
+    );
+    // Negative: raw v-slot should not be in output
+    assert!(
+        !result.contains("v-slot"),
+        "v-slot should not appear in output, got:\n{}",
+        result
+    );
+    // Provider also has children (Tabs) so it should also get a strictRenderSlot call
+    let second_call = result.match_indices("strictRenderSlot").nth(1);
+    assert!(
+        second_call.is_some(),
+        "Provider should also get a strictRenderSlot call for its default slot, got:\n{}",
         result
     );
 }

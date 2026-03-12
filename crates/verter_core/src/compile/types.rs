@@ -144,6 +144,9 @@ pub struct CodegenOptions {
     pub embed_ambient_types: bool,
     /// Experimental: Enable conditional root generic narrowing.
     pub conditional_root_narrowing: bool,
+    /// Experimental: strict slot children type checking.
+    /// Emits `strictRenderSlot` calls to enforce typed slot children.
+    pub strict_slots: bool,
 }
 
 impl CodegenOptions {

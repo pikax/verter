@@ -54,6 +54,8 @@ pub struct FfiCompileProfile {
     pub source_map: Option<bool>,
     /// Compilation target preset: "bundler" (default), "ide", or "analysis".
     pub target: Option<String>,
+    /// Experimental: strict slot children type checking.
+    pub strict_slots: Option<bool>,
 }
 
 /// Request to upsert a file into the host.

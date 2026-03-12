@@ -172,6 +172,9 @@ pub fn ffi_profile_to_host(
         if let Some(target) = input.target {
             out.target = ffi_target_to_compile_target(&target)?;
         }
+        if let Some(strict_slots) = input.strict_slots {
+            out.strict_slots = strict_slots;
+        }
     }
     Ok(out)
 }
@@ -1010,12 +1013,14 @@ mod tests {
             force_js: Some(true),
             source_map: Some(true),
             target: Some("ide".to_string()),
+            strict_slots: Some(true),
         };
         let result = ffi_profile_to_host(Some(profile)).unwrap();
         assert_eq!(result.filename, Some("Comp.vue".to_string()));
         assert!(result.is_production);
         assert!(result.ssr);
         assert!(result.target.needs_tsx());
+        assert!(result.strict_slots);
         assert_eq!(result.hmr_strategy, host::HmrStrategy::Vite);
         assert_eq!(result.component_id, Some("abc123".to_string()));
         assert_eq!(

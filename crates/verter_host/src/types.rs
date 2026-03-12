@@ -186,6 +186,8 @@ pub struct CompileProfile {
     pub embed_ambient_types: bool,
     /// Experimental: Enable conditional root generic narrowing.
     pub conditional_root_narrowing: bool,
+    /// Experimental: strict slot children type checking.
+    pub strict_slots: bool,
 }
 
 impl Default for CompileProfile {
@@ -207,6 +209,7 @@ impl Default for CompileProfile {
             target: verter_core::compile::CompileTarget::BUNDLER,
             embed_ambient_types: false,
             conditional_root_narrowing: false,
+            strict_slots: false,
         }
     }
 }

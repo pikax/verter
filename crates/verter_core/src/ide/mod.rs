@@ -96,6 +96,9 @@ pub struct IdeTemplateOptions<'a> {
     pub comments: bool,
     /// When `true`, emit JavaScript (no TS annotations in template).
     pub is_jsx: bool,
+    /// Experimental: strict slot children type checking.
+    /// Emits `strictRenderSlot` calls to enforce typed slot children.
+    pub strict_slots: bool,
 }
 
 // ── Generic info ─────────────────────────────────────────────────

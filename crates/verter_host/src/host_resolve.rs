@@ -828,6 +828,7 @@ impl VerterHost {
             target: profile.target,
             embed_ambient_types: profile.embed_ambient_types,
             conditional_root_narrowing: profile.conditional_root_narrowing,
+            strict_slots: profile.strict_slots,
             ..CodegenOptions::default()
         };
 

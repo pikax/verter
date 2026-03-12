@@ -288,6 +288,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "**Experimental**: In test files, resolve `.vue` imports to Verter's VTU-style debug public API. This exposes `<script setup>` bindings on the instance and ignores `defineExpose()` narrowing to match `wrapper.vm` access in Vue Test Utils."
+        },
+        "verter.experimental.strictSlots": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Experimental**: Enforce strict type checking for slot children. When a component defines typed slots via `defineSlots()`, only matching children types are accepted. See [RFC #733](https://github.com/vuejs/rfcs/discussions/733)."
         }
       }
     },

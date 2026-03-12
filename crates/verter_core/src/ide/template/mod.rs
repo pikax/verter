@@ -36,6 +36,31 @@ use crate::types::NodeId;
 
 use super::IdeTemplateOptions;
 
+/// A collected strict slot entry for `strictRenderSlot` emission.
+struct StrictSlotEntry {
+    /// SFC-absolute offset of parent component's tag_open.start (for Comp function reference).
+    parent_comp_offset: u32,
+    /// Slot name ("default", "header", etc.).
+    slot_name: String,
+    /// Child type references with their source positions.
+    children: Vec<StrictSlotChild>,
+}
+
+/// A single child type reference for strict slot checking.
+///
+/// `source_pos` fields store SFC-absolute byte offsets used for sourcemap
+/// mapping (child constructor names → original template positions).
+enum StrictSlotChild {
+    /// Component: constructor name + tag name SFC-absolute position.
+    Component { name: String, source_pos: u32 },
+    /// HTML element: tag name + SFC-absolute position.
+    HtmlElement { tag: String, source_pos: u32 },
+    /// Text node: mapped to text start position.
+    Text { source_pos: u32 },
+    /// Interpolation: mapped to interpolation start position.
+    Interpolation { source_pos: u32 },
+}
+
 /// Shared context for TSX template walker functions.
 ///
 /// Groups the 7 parameters that are threaded identically through
@@ -50,6 +75,8 @@ struct IdeTemplateCtx<'a, 'alloc> {
     options: &'a IdeTemplateOptions<'a>,
     /// TS directive comments to inject inside `<component :is>` IIFE (before `return`).
     ts_directives_for_component_is: Vec<String>,
+    /// Collected strict slot entries for `strictRenderSlot` emission.
+    strict_slot_entries: Vec<StrictSlotEntry>,
 }
 
 /// Generate TSX template (JSX) from the template AST.
@@ -107,11 +134,17 @@ pub fn generate_ide_template<'alloc>(
         resolver: &resolver,
         options,
         ts_directives_for_component_is: Vec::new(),
+        strict_slot_entries: Vec::new(),
     };
     walk_children_with_iife_tracking(children, &mut ctx, &[]);
 
     if needs_fragment {
         ctx.out.prepend_alloc(content.end, "</>");
+    }
+
+    // Emit strict slot checks after template content
+    if !ctx.strict_slot_entries.is_empty() {
+        emit_strict_slot_checks(&mut ctx, content.end);
     }
 }
 
@@ -518,6 +551,11 @@ fn walk_element<'a, 'alloc>(
     // Walk children — children inherit the condition scopes from this element
     if let Some(content) = &el.content {
         walk_children_with_iife_tracking(&content.children, ctx, &full_scopes);
+    }
+
+    // ── Strict slot children collection ────────────────────────────
+    if ctx.options.strict_slots && !ctx.options.is_jsx && el.tag_type == TagType::Component {
+        collect_strict_slot_children(el, tag_name, ctx);
     }
 
     // Close slot IIFE: </>)(extractArgumentsFromRenderSlot(...))}
@@ -1585,6 +1623,240 @@ fn visit_comment(
     // Keep original comment-inner spacing untouched.
     out.overwrite(comment.start, comment.content_start, "{/*");
     out.overwrite(comment.content_end, comment.end, "*/}");
+}
+
+// ── Strict slot children ────────────────────────────────────────
+
+/// Collect children of a component element for strict slot type checking.
+///
+/// Groups children by slot name and classifies each child as Component,
+/// HtmlElement, Text, or Interpolation. Entries are stored in `ctx.strict_slot_entries`.
+fn collect_strict_slot_children(
+    el: &ElementNode,
+    tag_name: &str,
+    ctx: &mut IdeTemplateCtx<'_, '_>,
+) {
+    // Skip dynamic <component :is> — type is unreliable
+    if tag_name == "component" {
+        return;
+    }
+
+    let content = match &el.content {
+        Some(c) => c,
+        None => return,
+    };
+
+    if content.children.is_empty() {
+        return;
+    }
+
+    let parent_offset = el.tag_open.start;
+
+    // Group children by slot name
+    let mut slot_map: Vec<(String, Vec<StrictSlotChild>)> = Vec::new();
+
+    for &child_id in &content.children {
+        let child_node = &ctx.ast.nodes[child_id.0];
+        match &child_node.kind {
+            AstNodeKind::Element(child_el) => {
+                if child_el.tag_type == TagType::Template && child_el.v_slot.is_some() {
+                    // Named slot: <template #name>children</template>
+                    let slot_name = extract_template_slot_name(child_el, ctx.source);
+                    let children = collect_children_from_element(child_el, ctx);
+                    if !children.is_empty() {
+                        push_to_slot_map(&mut slot_map, slot_name, children);
+                    }
+                } else {
+                    // Direct child → default slot
+                    if let Some(child) = classify_element_child(child_el, ctx.source) {
+                        push_to_slot_map(&mut slot_map, "default".to_string(), vec![child]);
+                    }
+                }
+            }
+            AstNodeKind::Text(text) => {
+                let text_content = &ctx.source[text.start as usize..text.end as usize];
+                if !text_content.trim().is_empty() {
+                    push_to_slot_map(
+                        &mut slot_map,
+                        "default".to_string(),
+                        vec![StrictSlotChild::Text {
+                            source_pos: text.start,
+                        }],
+                    );
+                }
+            }
+            AstNodeKind::Interpolation(interp) => {
+                push_to_slot_map(
+                    &mut slot_map,
+                    "default".to_string(),
+                    vec![StrictSlotChild::Interpolation {
+                        source_pos: interp.start,
+                    }],
+                );
+            }
+            AstNodeKind::Comment(_) => {
+                // Skip comments
+            }
+        }
+    }
+
+    // Create entries for non-empty slot groups
+    for (slot_name, children) in slot_map {
+        if !children.is_empty() {
+            ctx.strict_slot_entries.push(StrictSlotEntry {
+                parent_comp_offset: parent_offset,
+                slot_name,
+                children,
+            });
+        }
+    }
+}
+
+/// Push children into the named slot group in the slot map.
+fn push_to_slot_map(
+    slot_map: &mut Vec<(String, Vec<StrictSlotChild>)>,
+    slot_name: String,
+    children: Vec<StrictSlotChild>,
+) {
+    if let Some(entry) = slot_map.iter_mut().find(|(name, _)| *name == slot_name) {
+        entry.1.extend(children);
+    } else {
+        slot_map.push((slot_name, children));
+    }
+}
+
+/// Extract slot name from a `<template #name>` or `<template v-slot:name>` element.
+fn extract_template_slot_name(el: &ElementNode, source: &str) -> String {
+    if let Some(ref v_slot) = el.v_slot {
+        if let (Some(arg_start), Some(arg_end)) = (v_slot.arg_start, v_slot.arg_end) {
+            return source[arg_start as usize..arg_end as usize].to_string();
+        }
+    }
+    "default".to_string()
+}
+
+/// Collect children from a `<template>` wrapper element for strict slot checking.
+fn collect_children_from_element(
+    el: &ElementNode,
+    ctx: &IdeTemplateCtx<'_, '_>,
+) -> Vec<StrictSlotChild> {
+    let content = match &el.content {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    let mut children = Vec::new();
+    for &child_id in &content.children {
+        let child_node = &ctx.ast.nodes[child_id.0];
+        match &child_node.kind {
+            AstNodeKind::Element(child_el) => {
+                if let Some(child) = classify_element_child(child_el, ctx.source) {
+                    children.push(child);
+                }
+            }
+            AstNodeKind::Text(text) => {
+                let text_content = &ctx.source[text.start as usize..text.end as usize];
+                if !text_content.trim().is_empty() {
+                    children.push(StrictSlotChild::Text {
+                        source_pos: text.start,
+                    });
+                }
+            }
+            AstNodeKind::Interpolation(interp) => {
+                children.push(StrictSlotChild::Interpolation {
+                    source_pos: interp.start,
+                });
+            }
+            AstNodeKind::Comment(_) => {}
+        }
+    }
+    children
+}
+
+/// Classify an element child for strict slot checking.
+fn classify_element_child(el: &ElementNode, source: &str) -> Option<StrictSlotChild> {
+    let tag_name_start = el.tag_open.start + 1; // skip `<`
+    let tag_name = &source[tag_name_start as usize..el.tag_open.name_end as usize];
+
+    match el.tag_type {
+        TagType::Component => Some(StrictSlotChild::Component {
+            name: tag_name.to_string(),
+            source_pos: tag_name_start,
+        }),
+        TagType::Element => Some(StrictSlotChild::HtmlElement {
+            tag: tag_name.to_string(),
+            source_pos: tag_name_start,
+        }),
+        TagType::Template => {
+            // <template> wrappers without v-slot are transparent
+            None
+        }
+        TagType::SlotOutlet => None,
+    }
+}
+
+/// Emit `strictRenderSlot` calls for all collected strict slot entries.
+///
+/// Each call is split into unmapped and mapped segments. Child constructor
+/// names are emitted as `InsertedMapped` chunks so that TypeScript errors
+/// on mismatched children point to the exact child position in the template.
+fn emit_strict_slot_checks(ctx: &mut IdeTemplateCtx<'_, '_>, emit_pos: u32) {
+    let entries = std::mem::take(&mut ctx.strict_slot_entries);
+    let prefix = "___VERTER___";
+
+    for entry in &entries {
+        // 1. Unmapped prefix: call site + slot type extraction
+        let call_prefix = format!(
+            "\n{prefix}strictRenderSlot({{}} as NonNullable<ReturnType<typeof {prefix}Comp{offset}>['$slots']['{slot}']>, [",
+            prefix = prefix,
+            offset = entry.parent_comp_offset,
+            slot = entry.slot_name,
+        );
+        ctx.out.prepend_alloc(emit_pos, &call_prefix);
+
+        // 2. Per-child: mapped reference with sourcemap token
+        for (i, child) in entry.children.iter().enumerate() {
+            if i > 0 {
+                ctx.out.prepend_alloc(emit_pos, ", ");
+            }
+            match child {
+                StrictSlotChild::Component {
+                    name, source_pos, ..
+                } => {
+                    // Component constructor: mapped to tag name position
+                    ctx.out.prepend_alloc_mapped(emit_pos, *source_pos, name);
+                }
+                StrictSlotChild::HtmlElement {
+                    tag, source_pos, ..
+                } => {
+                    // HTML element: `{} as HTMLElementTagNameMap["input"]`
+                    // Map the tag name inside the string to its template position
+                    let content = format!("{{}} as HTMLElementTagNameMap[\"{}\"]", tag);
+                    // content_offset points to the tag name inside the quotes
+                    let content_offset = "{} as HTMLElementTagNameMap[\"".len() as u32;
+                    ctx.out.prepend_alloc_mapped_with_offset(
+                        emit_pos,
+                        *source_pos,
+                        content_offset,
+                        &content,
+                    );
+                }
+                StrictSlotChild::Text { source_pos } => {
+                    // Text: `"" as string`, mapped to text start
+                    ctx.out
+                        .prepend_alloc_mapped(emit_pos, *source_pos, "\"\" as string");
+                }
+                StrictSlotChild::Interpolation { source_pos } => {
+                    // Interpolation: `"" as string`, mapped to interpolation start
+                    ctx.out
+                        .prepend_alloc_mapped(emit_pos, *source_pos, "\"\" as string");
+                }
+            }
+        }
+
+        // 3. Unmapped suffix
+        ctx.out.prepend_alloc(emit_pos, "]);");
+    }
 }
 
 #[cfg(test)]

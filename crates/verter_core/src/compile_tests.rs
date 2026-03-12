@@ -13676,3 +13676,144 @@ fn component_named_slot_forwarded_when_contains_slot_outlet() {
         tpl.code
     );
 }
+
+// ── Strict slot children integration tests (full SFC) ─────────────
+
+fn compile_tsx_strict_slots(source: &str) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        target: CompileTarget::BUNDLER | CompileTarget::TSX,
+        strict_slots: true,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        source_map: true,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+#[test]
+fn strict_slots_generic_component_integration() {
+    // A generic component (GenericList) with child (ItemCard) — the Comp function
+    // generated in script.rs carries generic params. The strictRenderSlot call
+    // references this Comp function via ReturnType<typeof ___VERTER___Comp{offset}>.
+    let result = compile_tsx_strict_slots(
+        r#"<script setup lang="ts">
+import GenericList from './GenericList.vue'
+import ItemCard from './ItemCard.vue'
+</script>
+<template>
+  <GenericList>
+    <ItemCard />
+  </GenericList>
+</template>"#,
+    );
+    let tsx = result.tsx.as_ref().expect("tsx output");
+    let code = &tsx.code;
+
+    // Positive: strictRenderSlot emitted
+    assert!(
+        code.contains("strictRenderSlot"),
+        "should emit strictRenderSlot in full SFC compilation, got:\n{}",
+        code
+    );
+    // The call references the Comp function for GenericList
+    assert!(
+        code.contains("$slots"),
+        "should reference $slots, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("'default'"),
+        "should reference default slot, got:\n{}",
+        code
+    );
+    // Child constructor is ItemCard
+    assert!(
+        code.contains("ItemCard"),
+        "should reference ItemCard constructor, got:\n{}",
+        code
+    );
+    // Negative: no raw template directives
+    assert!(
+        !code.contains("v-slot"),
+        "v-slot should not appear in tsx output, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn strict_slots_full_sfc_named_slots() {
+    // Full SFC compilation with named slots — verifies script+template integration
+    let result = compile_tsx_strict_slots(
+        r#"<script setup lang="ts">
+import Tabs from './Tabs.vue'
+import TabItem from './TabItem.vue'
+</script>
+<template>
+  <Tabs>
+    <template #header>
+      <input />
+    </template>
+    <template #default>
+      <TabItem />
+    </template>
+  </Tabs>
+</template>"#,
+    );
+    let tsx = result.tsx.as_ref().expect("tsx output");
+    let code = &tsx.code;
+
+    // Two separate strictRenderSlot calls for header and default
+    let calls: Vec<_> = code.match_indices("strictRenderSlot").collect();
+    assert!(
+        calls.len() >= 2,
+        "should have at least 2 strictRenderSlot calls (header + default), found {}, got:\n{}",
+        calls.len(),
+        code
+    );
+    assert!(
+        code.contains("'header'"),
+        "should reference header slot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("'default'"),
+        "should reference default slot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("HTMLElementTagNameMap[\"input\"]"),
+        "header slot should reference HTMLElementTagNameMap for input, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("TabItem"),
+        "default slot should reference TabItem, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn strict_slots_disabled_full_sfc() {
+    // Verify strict_slots: false (default) does NOT emit strictRenderSlot
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import Tabs from './Tabs.vue'
+import TabItem from './TabItem.vue'
+</script>
+<template>
+  <Tabs><TabItem /></Tabs>
+</template>"#,
+    );
+    let tsx = result.tsx.as_ref().expect("tsx output");
+    // The import line always includes strictRenderSlot, but with strict_slots: false
+    // no actual call should be emitted in the template body.
+    assert!(
+        !tsx.code.contains("strictRenderSlot("),
+        "strict_slots: false should NOT emit strictRenderSlot calls, got:\n{}",
+        tsx.code
+    );
+}

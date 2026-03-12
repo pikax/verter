@@ -4319,6 +4319,18 @@ impl LanguageServer for VerterLanguageServer {
                     if enabled { "enabled" } else { "disabled" }
                 );
             }
+            // Read experimental.strictSlots setting (default: false)
+            if let Some(enabled) = opts
+                .get("experimental")
+                .and_then(|v| v.get("strictSlots"))
+                .and_then(|v| v.as_bool())
+            {
+                self.documents.tsx_profile.write().strict_slots = enabled;
+                tracing::info!(
+                    "strict slots: {}",
+                    if enabled { "enabled" } else { "disabled" }
+                );
+            }
         }
 
         Ok(InitializeResult {
