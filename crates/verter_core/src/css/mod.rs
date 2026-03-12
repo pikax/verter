@@ -137,6 +137,125 @@ pub fn process_style_fast(
     })
 }
 
+/// Extract CSS class names from a style block (lightweight scan, no lightningcss).
+///
+/// Scans for `.className` patterns in CSS selectors. Handles basic cases:
+/// - `.btn { ... }` → `"btn"`
+/// - `.card-title, .card-body { ... }` → `"card-title"`, `"card-body"`
+/// - `@media (...) { .responsive { ... } }` → `"responsive"`
+///
+/// Skips class-like patterns inside strings, comments, and `v-bind()`.
+/// May produce false positives from comments, but that's acceptable for IDE completions.
+pub fn extract_css_class_names(css: &str) -> Vec<String> {
+    let mut classes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let bytes = css.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Skip block comments
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        // Skip line comments (SCSS)
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Skip strings
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            i += 1;
+            while i < len && bytes[i] != quote {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        // Skip rule bodies (between { and })
+        if bytes[i] == b'{' {
+            let mut depth = 1;
+            i += 1;
+            while i < len && depth > 0 {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    b'"' | b'\'' => {
+                        let q = bytes[i];
+                        i += 1;
+                        while i < len && bytes[i] != q {
+                            if bytes[i] == b'\\' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                    }
+                    b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                        i += 2;
+                        while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                            i += 1;
+                        }
+                        i += 1; // skip past '*'
+                    }
+                    b'.' => {
+                        // Nested selector (e.g. @media { .foo { } })
+                        i += 1;
+                        let start = i;
+                        while i < len
+                            && (bytes[i].is_ascii_alphanumeric()
+                                || bytes[i] == b'-'
+                                || bytes[i] == b'_')
+                        {
+                            i += 1;
+                        }
+                        if i > start {
+                            let name = &css[start..i];
+                            if seen.insert(name.to_string()) {
+                                classes.push(name.to_string());
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // Detect class selector
+        if bytes[i] == b'.' {
+            i += 1;
+            let start = i;
+            while i < len
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-' || bytes[i] == b'_')
+            {
+                i += 1;
+            }
+            if i > start {
+                let name = &css[start..i];
+                if seen.insert(name.to_string()) {
+                    classes.push(name.to_string());
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+
+    classes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,5 +1087,50 @@ mod tests {
             scope_count,
             result.code
         );
+    }
+
+    // ── extract_css_class_names tests ───────────────────────────
+
+    #[test]
+    fn extract_basic_classes() {
+        let css = ".btn { color: red; } .card { padding: 1rem; }";
+        let classes = extract_css_class_names(css);
+        assert_eq!(classes, vec!["btn", "card"]);
+    }
+
+    #[test]
+    fn extract_classes_with_media_query() {
+        let css = ".mobile { display: block; } @media (min-width: 768px) { .desktop { display: block; } }";
+        let classes = extract_css_class_names(css);
+        assert!(classes.contains(&"mobile".to_string()));
+        assert!(classes.contains(&"desktop".to_string()));
+    }
+
+    #[test]
+    fn extract_deduplicates() {
+        let css = ".btn { color: red; } .btn:hover { color: blue; }";
+        let classes = extract_css_class_names(css);
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0], "btn");
+    }
+
+    #[test]
+    fn extract_kebab_case_classes() {
+        let css = ".card-title { font-weight: bold; } .card-body { padding: 1rem; }";
+        let classes = extract_css_class_names(css);
+        assert_eq!(classes, vec!["card-title", "card-body"]);
+    }
+
+    #[test]
+    fn extract_empty_css() {
+        let classes = extract_css_class_names("");
+        assert!(classes.is_empty());
+    }
+
+    #[test]
+    fn extract_no_classes() {
+        let css = "div { color: red; } p { margin: 0; }";
+        let classes = extract_css_class_names(css);
+        assert!(classes.is_empty());
     }
 }

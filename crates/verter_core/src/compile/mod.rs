@@ -1057,6 +1057,26 @@ fn compile_inner(
             }
         };
 
+        // Extract CSS module class names for IDE completions
+        let css_modules: Vec<ide::CssModuleInfo> = parsed
+            .style_nodes()
+            .iter()
+            .filter(|s| s.module)
+            .filter_map(|s| {
+                let content_span = s.content.as_ref()?;
+                let css_content = &input[content_span.start as usize..content_span.end as usize];
+                let class_names = crate::css::extract_css_class_names(css_content);
+                if class_names.is_empty() {
+                    return None;
+                }
+                // TODO: parse module="customName" from attributes; default is "$style"
+                Some(ide::CssModuleInfo {
+                    binding_name: "$style".to_string(),
+                    class_names,
+                })
+            })
+            .collect();
+
         let tsx_script_opts = ide::IdeScriptOptions {
             component_name: &component_name,
             js_component_name: &js_component_name,
@@ -1073,6 +1093,7 @@ fn compile_inner(
             is_jsx,
             conditional_root_narrowing: options.conditional_root_narrowing,
             style_v_bind_vars: verter_options.style_v_bind_vars.clone(),
+            css_modules,
         };
 
         // Unified single CodeTransform for both script and template.
