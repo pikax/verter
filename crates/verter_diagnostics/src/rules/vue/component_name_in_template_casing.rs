@@ -1,17 +1,29 @@
 //! Rule: component-name-in-template-casing
 //!
-//! Enforces PascalCase for component names in templates. Component elements
-//! should use `<MyComponent>` rather than `<my-component>`.
+//! Enforces PascalCase for component names in templates. Kebab-case is
+//! accepted when the corresponding PascalCase component is a known import
+//! (e.g., `<my-component>` is valid if `MyComponent` is imported).
 
 // @ai-generated
 
-use crate::casing::is_pascal_case;
+use crate::casing::{is_pascal_case, kebab_to_pascal_case};
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::TemplateElement;
+use verter_analysis::template::TemplateAnalysisSnapshot;
 
 pub struct ComponentNameInTemplateCasing;
+
+const BUILTINS: &[&str] = &[
+    "component",
+    "slot",
+    "template",
+    "transition",
+    "transition-group",
+    "keep-alive",
+    "teleport",
+    "suspense",
+];
 
 impl LintRule for ComponentNameInTemplateCasing {
     fn name(&self) -> &'static str {
@@ -26,27 +38,30 @@ impl LintRule for ComponentNameInTemplateCasing {
         Severity::Warning
     }
 
-    fn check_element(&self, el: &TemplateElement, ctx: &mut LintContext) {
-        if !el.is_component {
-            return;
-        }
+    fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {
+        // Build set of known component names (PascalCase-normalized).
+        let known_components: std::collections::HashSet<&str> =
+            tpl.components.iter().map(|c| c.name.as_str()).collect();
 
-        // Skip built-in Vue components (lowercase by convention)
-        let builtins = [
-            "component",
-            "slot",
-            "template",
-            "transition",
-            "transition-group",
-            "keep-alive",
-            "teleport",
-            "suspense",
-        ];
-        if builtins.contains(&el.tag.as_str()) {
-            return;
-        }
+        for el in &tpl.elements {
+            if !el.is_component {
+                continue;
+            }
 
-        if !is_pascal_case(&el.tag) {
+            if BUILTINS.contains(&el.tag.as_str()) {
+                continue;
+            }
+
+            if is_pascal_case(&el.tag) {
+                continue;
+            }
+
+            // Kebab-case: accept if PascalCase form matches a known component.
+            let pascal = kebab_to_pascal_case(&el.tag);
+            if known_components.contains(pascal.as_str()) {
+                continue;
+            }
+
             ctx.report_with_severity(
                 self.name(),
                 self.category().as_str(),
@@ -83,13 +98,16 @@ mod tests {
     }
 
     #[test]
-    fn kebab_case_component_reports() {
+    fn kebab_case_without_import_reports() {
         let template = TemplateAnalysisSnapshot {
             elements: vec![make_el("my-component", true)],
             ..Default::default()
         };
         let diags = run_rule(&template);
-        assert!(!diags.is_empty(), "kebab-case component should trigger");
+        assert!(
+            !diags.is_empty(),
+            "kebab-case without matching import should trigger"
+        );
         assert!(diags
             .iter()
             .any(|d| d.rule == "component-name-in-template-casing"));
@@ -97,9 +115,32 @@ mod tests {
             diags[0].message.contains("PascalCase"),
             "message should mention PascalCase"
         );
+    }
+
+    #[test]
+    fn kebab_case_with_matching_import_passes() {
+        let template = TemplateAnalysisSnapshot {
+            elements: vec![make_el("my-component", true)],
+            components: vec![TemplateComponentUsage {
+                name: "MyComponent".to_string(),
+                import_source: None,
+                is_dynamic: false,
+                props: vec![],
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_classes: vec![],
+                span: Span::new(0, 20),
+                v_models: vec![],
+            }],
+            ..Default::default()
+        };
+        let diags = run_rule(&template);
         assert!(
-            !diags.iter().any(|d| d.rule == "no-v-html"),
-            "must not trigger unrelated rule"
+            diags.is_empty(),
+            "kebab-case with matching import should pass: {:?}",
+            diags
         );
     }
 
