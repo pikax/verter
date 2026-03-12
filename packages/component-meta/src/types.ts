@@ -96,6 +96,8 @@ export interface SlotBinding {
   name: string;
   /** Type descriptor for the binding value. */
   type: TypeDescriptor;
+  /** The expression text (e.g. `"row"`, `"i"`) — may differ from `name`. */
+  expression?: string;
 }
 
 /** Metadata for a `defineModel` declaration. */
@@ -116,6 +118,16 @@ export interface ExposedMeta {
 
 // ── Template usage types ───────────────────────────────────────────
 
+/** A prop usage on a child component in the template. */
+export interface ComponentPropUsage {
+  /** Prop name. */
+  name: string;
+  /** Whether this prop is bound (`:prop` vs `prop="static"`). */
+  isBound: boolean;
+  /** Constness classification. */
+  constness: "const" | "dynamic" | "unknown";
+}
+
 /** A child component used in the template. */
 export interface ComponentUsage {
   /** PascalCase component name. */
@@ -124,8 +136,8 @@ export interface ComponentUsage {
   importSource?: string;
   /** Whether this is a dynamic component (`<component :is>`). */
   isDynamic: boolean;
-  /** Prop names passed to this component. */
-  props: string[];
+  /** Props passed to this component. */
+  props: ComponentPropUsage[];
   /** Slot names used on this component. */
   slotsUsed: string[];
   /** Static class names from `class="foo bar"`. */
@@ -142,6 +154,8 @@ export interface TemplateRefMeta {
   name: string;
   /** Whether this is a dynamic ref (`:ref="expr"`). */
   isDynamic: boolean;
+  /** The element or component tag this ref points to (e.g. `"input"`, `"Modal"`). */
+  targetTag: string;
 }
 
 // ── Script analysis types ──────────────────────────────────────────
@@ -160,8 +174,12 @@ export interface ImportMeta {
 export interface BindingMeta {
   /** Binding name. */
   name: string;
+  /** Declaration kind. */
+  kind: "const" | "let" | "var" | "function" | "asyncFunction" | "class";
   /** Reactivity classification. */
   reactivityKind: "none" | "ref" | "reactive" | "computed" | "maybeRef" | "mutable";
+  /** TS type annotation if present (e.g. `"number"`, `"Ref<string>"`). */
+  typeAnnotation?: string;
   /** Whether this binding is used in the template. */
   usedInTemplate: boolean;
   /** Whether this binding is used in a style block (via `v-bind()`). */

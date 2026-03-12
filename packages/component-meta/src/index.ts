@@ -20,6 +20,7 @@ export type {
   SlotBinding,
   ModelMeta,
   ExposedMeta,
+  ComponentPropUsage,
   ComponentUsage,
   TemplateRefMeta,
   ImportMeta,

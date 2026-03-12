@@ -116,6 +116,52 @@ describe("snapshotToMeta", () => {
       const meta = snapshotToMeta(makeSnapshot(), "Comp.vue");
       expect(meta.optionsApi).toBe(false);
     });
+
+    it("mixed options + composition prefers composition path", () => {
+      const snapshot = makeSnapshot({
+        scriptFlags: (1 << 19) | (1 << 1), // HAS_OPTIONS_API | HAS_DEFINE_PROPS
+        optionsApi: {
+          isDefineComponent: true,
+          props: [
+            { name: "optProp", typeConstructor: "String", isRequired: true, hasDefault: false },
+          ],
+        },
+        macros: [
+          {
+            kind: "DefineProps",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            propFields: [{ name: "compProp", typeAnnotation: "string", spanStart: 0, spanEnd: 0 }],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        template: {
+          propDefinitions: [
+            {
+              name: "compProp",
+              typeAnnotation: "string",
+              hasDefault: false,
+              isRequired: true,
+              isBoolean: false,
+              usedInTemplate: true,
+              usedInScript: false,
+            },
+          ],
+        },
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      // optionsApi flag is true (flag is set)
+      expect(meta.optionsApi).toBe(true);
+      // But props come from composition (defineProps), not options
+      expect(meta.props).toHaveLength(1);
+      expect(meta.props[0].name).toBe("compProp");
+      // Negative: options prop should not leak through
+      expect(meta.props.map((p) => p.name)).not.toContain("optProp");
+    });
   });
 
   describe("composition API props", () => {
@@ -194,6 +240,50 @@ describe("snapshotToMeta", () => {
     it("returns empty props when no defineProps", () => {
       const meta = snapshotToMeta(makeSnapshot(), "Comp.vue");
       expect(meta.props).toEqual([]);
+    });
+
+    it("marks props as hasDefault when withDefaults macro is present", () => {
+      const snapshot = makeCompositionSnapshot(
+        [
+          { name: "msg", typeAnnotation: "string" },
+          { name: "count", typeAnnotation: "number" },
+        ],
+        [],
+        {
+          propDefinitions: [
+            {
+              name: "msg",
+              typeAnnotation: "string",
+              hasDefault: false,
+              isRequired: true,
+              isBoolean: false,
+              usedInTemplate: true,
+              usedInScript: false,
+            },
+          ],
+        },
+        [
+          {
+            kind: "WithDefaults",
+            isTypeBased: false,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+      );
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      // msg has explicit propDefinition with hasDefault:false + isRequired:true → required
+      expect(meta.props[0].name).toBe("msg");
+      expect(meta.props[0].required).toBe(true);
+      expect(meta.props[0].hasDefault).toBe(false);
+
+      // count has no propDefinition, so withDefaults presence sets hasDefault
+      expect(meta.props[1].name).toBe("count");
+      expect(meta.props[1].hasDefault).toBe(true);
     });
   });
 
@@ -322,6 +412,37 @@ describe("snapshotToMeta", () => {
       expect(meta.slots[0].bindings).toHaveLength(4);
       expect(meta.slots[0].bindings.map((b) => b.name)).toEqual(["a", "b", "c", "d"]);
     });
+
+    it("includes binding expressions on scoped slots", () => {
+      const snapshot = makeCompositionSnapshot([], [], {
+        definedSlots: [
+          {
+            name: "item",
+            hasBindings: true,
+            bindingNames: ["row", "index"],
+            bindingExpressions: ["row", "i"],
+          },
+        ],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.slots[0].bindings[0].expression).toBe("row");
+      expect(meta.slots[0].bindings[1].expression).toBe("i");
+      // Negative: expression should not be the binding name when they differ
+      expect(meta.slots[0].bindings[1].expression).not.toBe("index");
+    });
+
+    it("handles scoped slot with hasBindings true but no bindingNames", () => {
+      const snapshot = makeCompositionSnapshot([], [], {
+        definedSlots: [{ name: "fallback", hasBindings: true }],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.slots[0].isScoped).toBe(true);
+      expect(meta.slots[0].bindings).toEqual([]);
+      // Negative: bindings should not be undefined
+      expect(meta.slots[0].bindings).not.toBeUndefined();
+    });
   });
 
   describe("models", () => {
@@ -445,7 +566,10 @@ describe("snapshotToMeta", () => {
       expect(meta.components[0].name).toBe("MyButton");
       expect(meta.components[0].importSource).toBe("./MyButton.vue");
       expect(meta.components[0].isDynamic).toBe(false);
-      expect(meta.components[0].props).toEqual(["label", "disabled"]);
+      expect(meta.components[0].props).toEqual([
+        { name: "label", isBound: false, constness: "unknown" },
+        { name: "disabled", isBound: false, constness: "unknown" },
+      ]);
       expect(meta.components[0].slotsUsed).toEqual(["default"]);
       expect(meta.components[0].staticClasses).toEqual(["btn", "primary"]);
       expect(meta.components[0].hasDynamicClass).toBe(false);
@@ -480,7 +604,7 @@ describe("snapshotToMeta", () => {
       expect(meta.components[0].isDynamic).toBe(true);
     });
 
-    it("extracts v-model bindings on components", () => {
+    it("extracts v-model bindings on components using Rust bindingName field", () => {
       const snapshot = makeSnapshot({
         template: {
           components: [
@@ -492,7 +616,7 @@ describe("snapshotToMeta", () => {
               slotsUsed: [],
               staticClasses: [],
               hasDynamicClass: false,
-              vModels: [{ name: "modelValue" }, { name: "search" }],
+              vModels: [{ bindingName: "modelValue" }, { bindingName: "search" }],
             },
           ],
         },
@@ -502,6 +626,71 @@ describe("snapshotToMeta", () => {
       expect(meta.components[0].vModels).toEqual(["modelValue", "search"]);
       // Negative: should not contain prop names in vModels
       expect(meta.components[0].vModels).not.toContain("label");
+    });
+
+    it("extracts props with isBound and constness", () => {
+      const snapshot = makeSnapshot({
+        template: {
+          components: [
+            {
+              name: "MyButton",
+              isDynamic: false,
+              props: [
+                { name: "label", isBound: false, constness: "Const" },
+                { name: "disabled", isBound: true, constness: "Dynamic" },
+                { name: "variant", isBound: true, constness: "Unknown" },
+              ],
+              hasSpread: false,
+              slotsUsed: [],
+              staticClasses: [],
+              hasDynamicClass: false,
+              vModels: [],
+            },
+          ],
+        },
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.components[0].props).toHaveLength(3);
+      expect(meta.components[0].props[0]).toEqual({
+        name: "label",
+        isBound: false,
+        constness: "const",
+      });
+      expect(meta.components[0].props[1]).toEqual({
+        name: "disabled",
+        isBound: true,
+        constness: "dynamic",
+      });
+      expect(meta.components[0].props[2]).toEqual({
+        name: "variant",
+        isBound: true,
+        constness: "unknown",
+      });
+
+      // Negative: props should not be plain strings anymore
+      expect(typeof meta.components[0].props[0]).not.toBe("string");
+    });
+
+    it("handles components with empty optional fields", () => {
+      const snapshot = makeSnapshot({
+        template: {
+          components: [
+            {
+              name: "Empty",
+              isDynamic: false,
+              hasDynamicClass: false,
+            },
+          ],
+        },
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.components[0].name).toBe("Empty");
+      expect(meta.components[0].props).toEqual([]);
+      expect(meta.components[0].slotsUsed).toEqual([]);
+      expect(meta.components[0].staticClasses).toEqual([]);
+      expect(meta.components[0].vModels).toEqual([]);
     });
 
     it("returns empty array for null template", () => {
@@ -537,6 +726,23 @@ describe("snapshotToMeta", () => {
       const meta = snapshotToMeta(snapshot, "Comp.vue");
 
       expect(meta.templateRefs[0].isDynamic).toBe(true);
+    });
+
+    it("exposes targetTag on template refs", () => {
+      const snapshot = makeSnapshot({
+        template: {
+          templateRefs: [
+            { name: "inputEl", isDynamic: false, targetTag: "input" },
+            { name: "modal", isDynamic: false, targetTag: "Modal" },
+          ],
+        },
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.templateRefs[0].targetTag).toBe("input");
+      expect(meta.templateRefs[1].targetTag).toBe("Modal");
+      // Negative: targetTag should not be undefined
+      expect(meta.templateRefs[0].targetTag).not.toBeUndefined();
     });
 
     it("returns empty array for null template", () => {
@@ -582,6 +788,30 @@ describe("snapshotToMeta", () => {
     it("returns empty array for no imports", () => {
       const meta = snapshotToMeta(makeSnapshot(), "Comp.vue");
       expect(meta.imports).toEqual([]);
+    });
+
+    it("handles mixed type-only and runtime bindings in a single import", () => {
+      const snapshot = makeSnapshot({
+        imports: [
+          {
+            source: "vue",
+            isTypeOnly: false,
+            bindings: [
+              { name: "ref", isTypeOnly: false },
+              { name: "PropType", isTypeOnly: true },
+              { name: "computed", isTypeOnly: false },
+            ],
+          },
+        ],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.imports[0].bindings).toHaveLength(3);
+      expect(meta.imports[0].bindings[0].isTypeOnly).toBe(false);
+      expect(meta.imports[0].bindings[1].isTypeOnly).toBe(true);
+      expect(meta.imports[0].bindings[2].isTypeOnly).toBe(false);
+      // Negative: overall import should not be type-only
+      expect(meta.imports[0].isTypeOnly).toBe(false);
     });
   });
 
@@ -658,6 +888,112 @@ describe("snapshotToMeta", () => {
 
       expect(meta.bindings[0].usedInStyle).toBe(true);
     });
+
+    it("maps maybeRef reactivity kind", () => {
+      const snapshot = makeSnapshot({
+        bindings: [
+          {
+            name: "val",
+            kind: "Const",
+            reactivityKind: "MaybeRef",
+            usedInScript: false,
+            usedInStyle: false,
+          },
+        ],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.bindings[0].reactivityKind).toBe("maybeRef");
+    });
+
+    it("maps mutable reactivity kind", () => {
+      const snapshot = makeSnapshot({
+        bindings: [
+          {
+            name: "val",
+            kind: "Let",
+            reactivityKind: "Mutable",
+            usedInScript: false,
+            usedInStyle: false,
+          },
+        ],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.bindings[0].reactivityKind).toBe("mutable");
+    });
+
+    it("defaults to none for missing reactivityKind", () => {
+      const snapshot = makeSnapshot({
+        bindings: [{ name: "val", kind: "Const", usedInScript: false, usedInStyle: false }],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.bindings[0].reactivityKind).toBe("none");
+    });
+
+    it("extracts kind and typeAnnotation", () => {
+      const snapshot = makeSnapshot({
+        bindings: [
+          {
+            name: "count",
+            kind: "Const",
+            reactivityKind: "Ref",
+            typeAnnotation: "number",
+            usedInScript: true,
+            usedInStyle: false,
+          },
+          {
+            name: "name",
+            kind: "Let",
+            reactivityKind: "None",
+            typeAnnotation: "string",
+            usedInScript: false,
+            usedInStyle: false,
+          },
+          {
+            name: "onClick",
+            kind: "Function",
+            reactivityKind: "None",
+            usedInScript: false,
+            usedInStyle: false,
+          },
+          {
+            name: "fetchData",
+            kind: "AsyncFunction",
+            reactivityKind: "None",
+            usedInScript: false,
+            usedInStyle: false,
+          },
+          {
+            name: "MyClass",
+            kind: "Class",
+            reactivityKind: "None",
+            usedInScript: false,
+            usedInStyle: false,
+          },
+          {
+            name: "x",
+            kind: "Var",
+            reactivityKind: "None",
+            usedInScript: false,
+            usedInStyle: false,
+          },
+        ],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.bindings[0].kind).toBe("const");
+      expect(meta.bindings[0].typeAnnotation).toBe("number");
+      expect(meta.bindings[1].kind).toBe("let");
+      expect(meta.bindings[1].typeAnnotation).toBe("string");
+      expect(meta.bindings[2].kind).toBe("function");
+      expect(meta.bindings[2].typeAnnotation).toBeUndefined();
+      expect(meta.bindings[3].kind).toBe("asyncFunction");
+      expect(meta.bindings[4].kind).toBe("class");
+      expect(meta.bindings[5].kind).toBe("var");
+
+      // Negative: kind should not be the raw Rust PascalCase form
+      expect(meta.bindings[0].kind).not.toBe("Const");
+      expect(meta.bindings[2].kind).not.toBe("Function");
+    });
   });
 
   describe("vueApiCalls", () => {
@@ -689,6 +1025,21 @@ describe("snapshotToMeta", () => {
     it("returns empty array when no vueApiCalls", () => {
       const meta = snapshotToMeta(makeSnapshot(), "Comp.vue");
       expect(meta.vueApiCalls).toEqual([]);
+    });
+
+    it("treats null argValue same as absent", () => {
+      const snapshot = makeSnapshot({
+        vueApiCalls: [
+          { api: "OnMounted", argValue: null },
+          { api: "Watch", argValue: "count" },
+        ],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.vueApiCalls[0].argValue).toBeUndefined();
+      expect(meta.vueApiCalls[1].argValue).toBe("count");
+      // Negative: null should not appear
+      expect(meta.vueApiCalls[0]).not.toHaveProperty("argValue");
     });
   });
 
@@ -771,6 +1122,70 @@ describe("snapshotToMeta", () => {
       expect(meta.styles[0].selectors).toEqual([]);
       expect(meta.styles[0].ids).toEqual([]);
       expect(meta.styles[0].customProperties).toEqual([]);
+    });
+
+    it("extracts multiple style blocks with different configs", () => {
+      const snapshot = makeSnapshot({
+        styles: [
+          {
+            lang: "Scss",
+            scoped: true,
+            isModule: false,
+            css: { classes: [{ name: "a" }], selectors: [], ids: [], customProperties: [] },
+          },
+          {
+            lang: "Css",
+            scoped: false,
+            isModule: true,
+            moduleName: "classes",
+            css: { classes: [{ name: "b" }], selectors: [], ids: [], customProperties: [] },
+          },
+        ],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.styles).toHaveLength(2);
+      expect(meta.styles[0].lang).toBe("Scss");
+      expect(meta.styles[0].scoped).toBe(true);
+      expect(meta.styles[0].isModule).toBe(false);
+      expect(meta.styles[1].lang).toBe("Css");
+      expect(meta.styles[1].isModule).toBe(true);
+      expect(meta.styles[1].moduleName).toBe("classes");
+      // Negative: first block should not have moduleName
+      expect(meta.styles[0].moduleName).toBeUndefined();
+    });
+
+    it("extracts v-binds when CSS analysis is null", () => {
+      const snapshot = makeSnapshot({
+        styles: [
+          {
+            lang: "Css",
+            scoped: true,
+            isModule: false,
+            vBinds: [{ expression: "color" }, { expression: "fontSize" }],
+            css: null,
+          },
+        ],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.styles[0].vBinds).toEqual(["color", "fontSize"]);
+      expect(meta.styles[0].classes).toEqual([]);
+    });
+
+    it("defaults lang to Css when field is missing", () => {
+      const snapshot = makeSnapshot({
+        styles: [
+          {
+            scoped: false,
+            isModule: false,
+            css: null,
+          },
+        ],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+
+      expect(meta.styles[0].lang).toBe("Css");
     });
 
     it("returns empty array for no styles", () => {

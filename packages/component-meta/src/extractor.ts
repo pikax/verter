@@ -15,6 +15,7 @@ import type {
   ModelMeta,
   ExposedMeta,
   SlotBinding,
+  ComponentPropUsage,
   ComponentUsage,
   TemplateRefMeta,
   ImportMeta,
@@ -111,15 +112,18 @@ interface RawComponentUsage {
 
 interface RawTemplateProp {
   name: string;
+  isBound?: boolean;
+  constness?: string;
 }
 
 interface RawTemplateVModel {
-  name: string;
+  bindingName: string;
 }
 
 interface RawTemplateRef {
   name: string;
   isDynamic: boolean;
+  targetTag?: string;
 }
 
 interface RawBindingOccurrence {
@@ -383,9 +387,10 @@ function extractSlots(template: RawTemplate | null): SlotMeta[] {
 
   return template.definedSlots.map((slot): SlotMeta => {
     const bindings: SlotBinding[] = (slot.bindingNames ?? []).map(
-      (name): SlotBinding => ({
+      (name, i): SlotBinding => ({
         name,
         type: unknown("unknown"),
+        ...(slot.bindingExpressions?.[i] != null && { expression: slot.bindingExpressions[i] }),
       }),
     );
 
@@ -493,13 +498,32 @@ function extractComponents(template: RawTemplate | null): ComponentUsage[] {
       name: comp.name,
       ...(comp.importSource && { importSource: comp.importSource }),
       isDynamic: comp.isDynamic,
-      props: (comp.props ?? []).map((p) => p.name),
+      props: (comp.props ?? []).map(
+        (p): ComponentPropUsage => ({
+          name: p.name,
+          isBound: p.isBound ?? false,
+          constness: mapConstness(p.constness),
+        }),
+      ),
       slotsUsed: comp.slotsUsed ?? [],
       staticClasses: comp.staticClasses ?? [],
       hasDynamicClass: comp.hasDynamicClass,
-      vModels: (comp.vModels ?? []).map((m) => m.name),
+      vModels: (comp.vModels ?? []).map((m) => m.bindingName),
     }),
   );
+}
+
+function mapConstness(constness: string | undefined): "const" | "dynamic" | "unknown" {
+  switch (constness) {
+    case "Const":
+    case "const":
+      return "const";
+    case "Dynamic":
+    case "dynamic":
+      return "dynamic";
+    default:
+      return "unknown";
+  }
 }
 
 function extractTemplateRefs(template: RawTemplate | null): TemplateRefMeta[] {
@@ -509,6 +533,7 @@ function extractTemplateRefs(template: RawTemplate | null): TemplateRefMeta[] {
     (ref): TemplateRefMeta => ({
       name: ref.name,
       isDynamic: ref.isDynamic,
+      targetTag: ref.targetTag ?? "",
     }),
   );
 }
@@ -535,11 +560,40 @@ function extractBindings(bindings: RawBinding[], template: RawTemplate | null): 
   return bindings.map(
     (b): BindingMeta => ({
       name: b.name,
+      kind: mapBindingKind(b.kind),
       reactivityKind: mapReactivityKind(b.reactivityKind),
+      ...(b.typeAnnotation != null && { typeAnnotation: b.typeAnnotation }),
       usedInTemplate: templateBindings.has(b.name),
       usedInStyle: b.usedInStyle ?? false,
     }),
   );
+}
+
+function mapBindingKind(
+  kind: string,
+): "const" | "let" | "var" | "function" | "asyncFunction" | "class" {
+  switch (kind) {
+    case "Const":
+    case "const":
+      return "const";
+    case "Let":
+    case "let":
+      return "let";
+    case "Var":
+    case "var":
+      return "var";
+    case "Function":
+    case "function":
+      return "function";
+    case "AsyncFunction":
+    case "asyncFunction":
+      return "asyncFunction";
+    case "Class":
+    case "class":
+      return "class";
+    default:
+      return "const";
+  }
 }
 
 function mapReactivityKind(
