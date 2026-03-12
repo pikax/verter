@@ -7,14 +7,26 @@
  * - Integrated mode: accepts an existing host reference
  */
 
+/** Request to compile or update a file in the host. */
 export interface HostUpsertRequest {
+  /** File identifier (path or canonical ID). */
   inputId: string;
+  /** Full source text of the file. */
   source: string;
+  /** File kind hint. Defaults to auto-detection based on extension. */
   fileKind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
 }
 
+/**
+ * Unified interface over NAPI and WASM host backends.
+ *
+ * Use `createAdapter()` for auto-detection, or `wrapNapiHost()`/`wrapWasmHost()`
+ * to wrap an existing host instance.
+ */
 export interface VerterHostAdapter {
+  /** Compile or update a file. */
   upsert(request: HostUpsertRequest): unknown;
+  /** Retrieve the analysis snapshot for a file, or `null` if not found. */
   getAnalysis(canonicalOrAlias: string): unknown | null;
 }
 
