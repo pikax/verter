@@ -915,7 +915,66 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 5. Couldn't resolve - add diagnostic
+            // 5. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
+            if let Some(args) = &type_ref.type_arguments {
+                match type_name.as_str() {
+                    "Omit" if args.params.len() >= 2 => {
+                        // Omit<T, K>: resolve T, then remove keys in K
+                        let mut inner = ResolvedElements::default();
+                        resolve_type_elements_inner_with_ctx(
+                            &args.params[0],
+                            base_offset,
+                            &mut inner,
+                            ctx,
+                        );
+                        let keys = extract_string_literal_keys(&args.params[1]);
+                        inner
+                            .props
+                            .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
+                        inner.emits.retain(|e| !keys.contains(&e.name));
+                        result.props.extend(inner.props);
+                        result.emits.extend(inner.emits);
+                        if inner.has_call_signature {
+                            result.has_call_signature = true;
+                        }
+                        return;
+                    }
+                    "Pick" if args.params.len() >= 2 => {
+                        // Pick<T, K>: resolve T, then keep only keys in K
+                        let mut inner = ResolvedElements::default();
+                        resolve_type_elements_inner_with_ctx(
+                            &args.params[0],
+                            base_offset,
+                            &mut inner,
+                            ctx,
+                        );
+                        let keys = extract_string_literal_keys(&args.params[1]);
+                        inner
+                            .props
+                            .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
+                        inner.emits.retain(|e| keys.contains(&e.name));
+                        result.props.extend(inner.props);
+                        result.emits.extend(inner.emits);
+                        if inner.has_call_signature {
+                            result.has_call_signature = true;
+                        }
+                        return;
+                    }
+                    "Partial" | "Required" | "Readonly" if !args.params.is_empty() => {
+                        // These preserve structure, just change modifiers
+                        resolve_type_elements_inner_with_ctx(
+                            &args.params[0],
+                            base_offset,
+                            result,
+                            ctx,
+                        );
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            // 6. Couldn't resolve - add diagnostic
             // Note: We don't add to result.props here because we can't determine the structure
             ctx.diagnostics.push(ResolutionDiagnostic {
                 span: Span {
@@ -1029,9 +1088,63 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
                 if companion.has_call_signature {
                     result.has_call_signature = true;
                 }
+                return;
             }
 
-            // 5. Couldn't resolve - skip silently (no diagnostics in immutable version)
+            // 5. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
+            if let Some(args) = &type_ref.type_arguments {
+                match type_name.as_str() {
+                    "Omit" if args.params.len() >= 2 => {
+                        let mut inner = ResolvedElements::default();
+                        resolve_type_elements_inner_with_ctx_ref(
+                            &args.params[0],
+                            base_offset,
+                            &mut inner,
+                            ctx,
+                        );
+                        let keys = extract_string_literal_keys(&args.params[1]);
+                        inner
+                            .props
+                            .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
+                        inner.emits.retain(|e| !keys.contains(&e.name));
+                        result.props.extend(inner.props);
+                        result.emits.extend(inner.emits);
+                        if inner.has_call_signature {
+                            result.has_call_signature = true;
+                        }
+                    }
+                    "Pick" if args.params.len() >= 2 => {
+                        let mut inner = ResolvedElements::default();
+                        resolve_type_elements_inner_with_ctx_ref(
+                            &args.params[0],
+                            base_offset,
+                            &mut inner,
+                            ctx,
+                        );
+                        let keys = extract_string_literal_keys(&args.params[1]);
+                        inner
+                            .props
+                            .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
+                        inner.emits.retain(|e| keys.contains(&e.name));
+                        result.props.extend(inner.props);
+                        result.emits.extend(inner.emits);
+                        if inner.has_call_signature {
+                            result.has_call_signature = true;
+                        }
+                    }
+                    "Partial" | "Required" | "Readonly" if !args.params.is_empty() => {
+                        resolve_type_elements_inner_with_ctx_ref(
+                            &args.params[0],
+                            base_offset,
+                            result,
+                            ctx,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            // 6. Couldn't resolve - skip silently (no diagnostics in immutable version)
         }
 
         // Type query: typeof X — look up in companion types
@@ -1191,6 +1304,26 @@ fn get_property_key_name(key: &PropertyKey) -> Option<String> {
         PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
         PropertyKey::NumericLiteral(n) => n.raw.as_ref().map(|r| r.to_string()),
         _ => None,
+    }
+}
+
+/// Extract string literal keys from a type argument (supports single literal and unions).
+/// Used for `Omit<T, 'a' | 'b'>` and `Pick<T, 'a' | 'b'>`.
+fn extract_string_literal_keys(ty: &TSType) -> Vec<String> {
+    match ty {
+        TSType::TSLiteralType(lit) => {
+            if let TSLiteral::StringLiteral(s) = &lit.literal {
+                vec![s.value.to_string()]
+            } else {
+                vec![]
+            }
+        }
+        TSType::TSUnionType(union) => union
+            .types
+            .iter()
+            .flat_map(|t| extract_string_literal_keys(t))
+            .collect(),
+        _ => vec![],
     }
 }
 

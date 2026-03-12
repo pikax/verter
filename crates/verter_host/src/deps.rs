@@ -217,9 +217,7 @@ pub(crate) fn should_invalidate_dependent(
 /// - Tier 3: Cross-file type resolution → invalidate only if resolved type shape changed
 pub(crate) fn smart_invalidate_dependents(
     files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
-    reverse_dependencies: &crate::shared::Shared<
-        rustc_hash::FxHashMap<String, BTreeSet<String>>,
-    >,
+    reverse_dependencies: &crate::shared::Shared<rustc_hash::FxHashMap<String, BTreeSet<String>>>,
     config: &HostConfig,
     dependency_id: &str,
     old_export_signatures: &[verter_analysis::ExportSignature],

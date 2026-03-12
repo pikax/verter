@@ -69,8 +69,8 @@ pub use verter_core::compile::CompileTarget;
 use std::collections::BTreeSet;
 
 use id::canonicalize_id;
-use rustc_hash::FxHashMap;
 pub use id::resolve_external;
+use rustc_hash::FxHashMap;
 use shared::{default_shared, read_lock, write_lock, Shared};
 
 /// Central file store and compile cache for Vue SFC compilation.

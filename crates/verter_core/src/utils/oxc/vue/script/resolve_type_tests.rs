@@ -1524,3 +1524,222 @@ fn resolve_external_only_imports_returns_none() {
         "File with only imports and no matching type should return None"
     );
 }
+
+// --- Utility type resolution (Omit, Pick, Partial, Required, Readonly) ---
+
+#[test]
+fn omit_filters_emits_by_key() {
+    // Omit<BaseEmits, 'entryFocus'> should exclude the 'entryFocus' emit
+    let source = r#"
+type BaseEmits = {
+  entryFocus: [event: Event]
+  escapeKeyDown: [event: KeyboardEvent]
+  closeAutoFocus: [event: Event]
+}
+type Test = Omit<BaseEmits, 'entryFocus'>
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(
+        diagnostics.is_empty(),
+        "No unresolved diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(
+        resolved.emits.len(),
+        2,
+        "Should have 2 emits after omitting entryFocus"
+    );
+    assert!(resolved.emits.iter().any(|e| e.name == "escapeKeyDown"));
+    assert!(resolved.emits.iter().any(|e| e.name == "closeAutoFocus"));
+    assert!(
+        !resolved.emits.iter().any(|e| e.name == "entryFocus"),
+        "entryFocus must be omitted"
+    );
+}
+
+#[test]
+fn omit_filters_multiple_keys() {
+    // Omit<T, 'a' | 'b'> should exclude both
+    let source = r#"
+type BaseEmits = {
+  entryFocus: [event: Event]
+  openAutoFocus: [event: Event]
+  escapeKeyDown: [event: KeyboardEvent]
+  closeAutoFocus: [event: Event]
+}
+type Test = Omit<BaseEmits, 'entryFocus' | 'openAutoFocus'>
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.emits.len(), 2);
+    assert!(resolved.emits.iter().any(|e| e.name == "escapeKeyDown"));
+    assert!(resolved.emits.iter().any(|e| e.name == "closeAutoFocus"));
+    assert!(!resolved.emits.iter().any(|e| e.name == "entryFocus"));
+    assert!(!resolved.emits.iter().any(|e| e.name == "openAutoFocus"));
+}
+
+#[test]
+fn omit_filters_props_by_key() {
+    let source = r#"
+type Base = { foo: string; bar: number; baz: boolean }
+type Test = Omit<Base, 'bar'>
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.props.len(), 2);
+    assert!(resolved
+        .props
+        .iter()
+        .any(|p| p.key_name.as_deref() == Some("foo")));
+    assert!(resolved
+        .props
+        .iter()
+        .any(|p| p.key_name.as_deref() == Some("baz")));
+    assert!(!resolved
+        .props
+        .iter()
+        .any(|p| p.key_name.as_deref() == Some("bar")));
+}
+
+#[test]
+fn pick_keeps_only_selected_keys() {
+    let source = r#"
+type BaseEmits = {
+  entryFocus: [event: Event]
+  escapeKeyDown: [event: KeyboardEvent]
+  closeAutoFocus: [event: Event]
+}
+type Test = Pick<BaseEmits, 'escapeKeyDown'>
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.emits.len(), 1);
+    assert_eq!(resolved.emits[0].name, "escapeKeyDown");
+}
+
+#[test]
+fn pick_keeps_multiple_keys() {
+    let source = r#"
+type Base = { a: string; b: number; c: boolean; d: object }
+type Test = Pick<Base, 'a' | 'c'>
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.props.len(), 2);
+    assert!(resolved
+        .props
+        .iter()
+        .any(|p| p.key_name.as_deref() == Some("a")));
+    assert!(resolved
+        .props
+        .iter()
+        .any(|p| p.key_name.as_deref() == Some("c")));
+}
+
+#[test]
+fn omit_with_intersection_and_alias_chain() {
+    // Simulates the reka-ui DropdownMenuContentEmits pattern:
+    // type DismissableLayerEmits = { escapeKeyDown: [...]; pointerDownOutside: [...] }
+    // type RovingFocusGroupEmits = { entryFocus: [...]; 'update:currentTabStopId': [...] }
+    // type MenuContentImplEmits = DismissableLayerEmits & Omit<RovingFocusGroupEmits, 'update:currentTabStopId'> & { openAutoFocus: [...]; closeAutoFocus: [...] }
+    // type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>
+    // type DropdownMenuContentEmits = MenuContentEmits
+    let source = r#"
+type DismissableLayerEmits = {
+  escapeKeyDown: [event: KeyboardEvent]
+  pointerDownOutside: [event: PointerEvent]
+}
+type RovingFocusGroupEmits = {
+  entryFocus: [event: Event]
+  'update:currentTabStopId': [value: string | null]
+}
+type MenuContentImplEmits = DismissableLayerEmits & Omit<RovingFocusGroupEmits, 'update:currentTabStopId'> & {
+  openAutoFocus: [event: Event]
+  closeAutoFocus: [event: Event]
+}
+type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAutoFocus'>
+type DropdownMenuContentEmits = MenuContentEmits
+type Test = DropdownMenuContentEmits
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    // Should have: escapeKeyDown, pointerDownOutside, closeAutoFocus
+    // Should NOT have: entryFocus, openAutoFocus, update:currentTabStopId
+    assert_eq!(
+        resolved.emits.len(),
+        3,
+        "emits: {:?}",
+        resolved.emits.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+    assert!(resolved.emits.iter().any(|e| e.name == "escapeKeyDown"));
+    assert!(resolved
+        .emits
+        .iter()
+        .any(|e| e.name == "pointerDownOutside"));
+    assert!(resolved.emits.iter().any(|e| e.name == "closeAutoFocus"));
+    assert!(
+        !resolved.emits.iter().any(|e| e.name == "entryFocus"),
+        "entryFocus must be omitted"
+    );
+    assert!(
+        !resolved.emits.iter().any(|e| e.name == "openAutoFocus"),
+        "openAutoFocus must be omitted"
+    );
+    assert!(
+        !resolved
+            .emits
+            .iter()
+            .any(|e| e.name == "update:currentTabStopId"),
+        "update:currentTabStopId must be omitted"
+    );
+}
+
+#[test]
+fn resolve_external_type_omit_emits() {
+    // Test via resolve_external_type path (used by host for .d.ts files)
+    let alloc = Allocator::default();
+    let dep = r#"
+type BaseEmits = {
+  escapeKeyDown: [event: KeyboardEvent]
+  entryFocus: [event: Event]
+}
+export type Emits = Omit<BaseEmits, 'entryFocus'>
+"#;
+    let resolved = resolve_external_type("Emits", dep, &alloc).unwrap();
+    assert_eq!(resolved.emits.len(), 1);
+    assert_eq!(resolved.emits[0].name, "escapeKeyDown");
+    assert!(!resolved.emits.iter().any(|e| e.name == "entryFocus"));
+}
+
+#[test]
+fn partial_preserves_all_members() {
+    // Partial<T> should keep all props/emits (just makes them optional)
+    let source = r#"
+type Base = { foo: string; bar: number }
+type Test = Partial<Base>
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.props.len(), 2);
+}
+
+#[test]
+fn required_preserves_all_members() {
+    let source = r#"
+type Base = { foo?: string; bar?: number }
+type Test = Required<Base>
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.props.len(), 2);
+}
+
+#[test]
+fn readonly_preserves_all_members() {
+    let source = r#"
+type Base = { foo: string; bar: number }
+type Test = Readonly<Base>
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.props.len(), 2);
+}
