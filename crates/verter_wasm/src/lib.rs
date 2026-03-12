@@ -690,6 +690,8 @@ fn build_script_snapshot(
         dom_query_calls: snapshot.dom_query_calls.to_vec(),
         css_var_manipulations: snapshot.css_var_manipulations.to_vec(),
         script_binding_occurrences: snapshot.script_binding_occurrences.to_vec(),
+        store_usages: snapshot.store_usages.to_vec(),
+        store_definitions: snapshot.store_definitions.to_vec(),
         first_await_offset: None,
         type_enhancements: None,
         options_api: snapshot.options_api.clone(),

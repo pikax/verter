@@ -73,6 +73,15 @@ pub struct ProjectIndex {
 
     /// Route analysis snapshot (populated by `set_route_snapshot`)
     route_snapshot: Option<RouteAnalysisSnapshot>,
+
+    /// Store composable/callee → consumer files
+    store_usage_index: FxHashMap<String, FxHashSet<Arc<Path>>>,
+
+    /// Store ID → defining file
+    store_definition_index: FxHashMap<String, Arc<Path>>,
+
+    /// Store ID → dependent store IDs (from store_dependencies)
+    store_dep_graph: FxHashMap<String, Vec<String>>,
 }
 
 /// An edge in the component usage graph
@@ -199,6 +208,34 @@ pub struct ComponentUsageSummary {
     pub usage_counts: FxHashMap<String, usize>,
 }
 
+/// Cross-file store flow tracing result.
+#[derive(Debug, Clone, Default)]
+pub struct StoreFlow {
+    /// The store ID being traced.
+    pub store_id: String,
+    /// File that defines this store (via `defineStore`/`createStore`).
+    pub definition_file: Option<Arc<Path>>,
+    /// Files that consume this store.
+    pub consumer_files: Vec<Arc<Path>>,
+    /// Other stores this store depends on.
+    pub depends_on: Vec<String>,
+    /// Stores that depend on this store.
+    pub depended_by: Vec<String>,
+}
+
+/// Summary of store usage across the project.
+#[derive(Debug, Clone, Default)]
+pub struct StoreUsageSummary {
+    /// All store IDs defined in the project.
+    pub store_ids: Vec<String>,
+    /// All store composable callee names used.
+    pub store_callees: Vec<String>,
+    /// Number of files using each store callee.
+    pub usage_counts: FxHashMap<String, usize>,
+    /// Store IDs defined but never used.
+    pub unused_stores: Vec<String>,
+}
+
 /// Project-wide statistics
 #[derive(Debug, Clone, Default)]
 pub struct ProjectStats {
@@ -265,6 +302,9 @@ impl ProjectIndex {
             listener_index: FxHashMap::default(),
             template_id_index: FxHashMap::default(),
             route_snapshot: None,
+            store_usage_index: FxHashMap::default(),
+            store_definition_index: FxHashMap::default(),
+            store_dep_graph: FxHashMap::default(),
         }
     }
 
@@ -396,6 +436,22 @@ impl ProjectIndex {
                 .entry(id.id.clone())
                 .or_default()
                 .insert(Arc::clone(&path));
+        }
+
+        // Index store usages (callee → consumer files)
+        for usage in &info.store_usages {
+            self.store_usage_index
+                .entry(usage.callee.clone())
+                .or_default()
+                .insert(Arc::clone(&path));
+        }
+
+        // Index store definitions (store_id → defining file)
+        for def in &info.store_definitions {
+            if let Some(store_id) = &def.store_id {
+                self.store_definition_index
+                    .insert(store_id.clone(), Arc::clone(&path));
+            }
         }
 
         self.files.insert(path, info);
@@ -536,6 +592,22 @@ impl ProjectIndex {
                 if files.is_empty() {
                     self.template_id_index.remove(&id.id);
                 }
+            }
+        }
+
+        // Remove from store indexes
+        for usage in &info.store_usages {
+            if let Some(files) = self.store_usage_index.get_mut(&usage.callee) {
+                files.remove(&arc_path);
+                if files.is_empty() {
+                    self.store_usage_index.remove(&usage.callee);
+                }
+            }
+        }
+        for def in &info.store_definitions {
+            if let Some(store_id) = &def.store_id {
+                self.store_definition_index.remove(store_id);
+                self.store_dep_graph.remove(store_id);
             }
         }
 
@@ -737,6 +809,94 @@ impl ProjectIndex {
     /// Get all event names listened on child components in the project.
     pub fn all_listened_event_names(&self) -> impl Iterator<Item = &String> {
         self.listener_index.keys()
+    }
+
+    // ==================== Store Queries ====================
+
+    /// Get files that use a given store composable (by callee name).
+    pub fn files_using_store(&self, callee: &str) -> impl Iterator<Item = &Arc<Path>> {
+        self.store_usage_index
+            .get(callee)
+            .into_iter()
+            .flat_map(|s| s.iter())
+    }
+
+    /// Get the file that defines a store (by store ID).
+    pub fn store_defined_in(&self, store_id: &str) -> Option<&Arc<Path>> {
+        self.store_definition_index.get(store_id)
+    }
+
+    /// Get stores that the given store depends on.
+    pub fn store_dependencies(&self, store_id: &str) -> &[String] {
+        self.store_dep_graph
+            .get(store_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Get all store IDs defined in the project.
+    pub fn all_store_ids(&self) -> impl Iterator<Item = &String> {
+        self.store_definition_index.keys()
+    }
+
+    /// Get all store composable callee names used in the project.
+    pub fn all_store_callees(&self) -> impl Iterator<Item = &String> {
+        self.store_usage_index.keys()
+    }
+
+    /// Trace a store: definition file, all consumers, dependency chain.
+    pub fn store_flow(&self, store_id: &str) -> StoreFlow {
+        let definition_file = self.store_definition_index.get(store_id).cloned();
+        let depends_on = self
+            .store_dep_graph
+            .get(store_id)
+            .cloned()
+            .unwrap_or_default();
+        let depended_by: Vec<String> = self
+            .store_dep_graph
+            .iter()
+            .filter(|(_, deps)| deps.contains(&store_id.to_string()))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let consumer_files: Vec<Arc<Path>> = self
+            .store_usage_index
+            .iter()
+            .filter(|(_, files)| !files.is_empty())
+            .flat_map(|(_, files)| files.iter().cloned())
+            .collect();
+
+        StoreFlow {
+            store_id: store_id.to_string(),
+            definition_file,
+            consumer_files,
+            depends_on,
+            depended_by,
+        }
+    }
+
+    /// Get a summary of store usage across the project.
+    pub fn store_usage_summary(&self) -> StoreUsageSummary {
+        let store_ids: Vec<String> = self.store_definition_index.keys().cloned().collect();
+        let mut usage_counts = FxHashMap::default();
+        for (callee, files) in &self.store_usage_index {
+            usage_counts.insert(callee.clone(), files.len());
+        }
+        // A store is unused if no callee in the usage index references it
+        // (simplistic: checks if the store_id appears in any callee's consumer set)
+        let all_used_callees: FxHashSet<&str> =
+            self.store_usage_index.keys().map(|s| s.as_str()).collect();
+        let unused_stores: Vec<String> = store_ids
+            .iter()
+            .filter(|id| !all_used_callees.iter().any(|c| c.contains(id.as_str())))
+            .cloned()
+            .collect();
+
+        StoreUsageSummary {
+            store_ids,
+            store_callees: self.store_usage_index.keys().cloned().collect(),
+            usage_counts,
+            unused_stores,
+        }
     }
 
     // ==================== Template ID Queries ====================
@@ -981,6 +1141,9 @@ impl ProjectIndex {
         self.listener_index.clear();
         self.template_id_index.clear();
         self.route_snapshot = None;
+        self.store_usage_index.clear();
+        self.store_definition_index.clear();
+        self.store_dep_graph.clear();
     }
 }
 

@@ -8138,6 +8138,8 @@ mod tests {
             dom_query_calls: Vec::new(),
             css_var_manipulations: Vec::new(),
             script_binding_occurrences: Vec::new(),
+            store_usages: Vec::new(),
+            store_definitions: Vec::new(),
             first_await_offset: None,
             type_enhancements: None,
             options_api: None,

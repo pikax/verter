@@ -11,6 +11,7 @@ pub mod performance;
 pub mod reactivity;
 pub mod script;
 pub mod security;
+pub mod store;
 pub mod vapor;
 pub mod vue;
 
@@ -353,6 +354,11 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(cross_file::ProvideInjectValidation));
     registry.register(Box::new(cross_file::DeepComposableTracking));
     registry.register(Box::new(cross_file::NoDuplicateVue));
+    // Store
+    registry.register(Box::new(store::PreferStoreToRefs));
+    registry.register(Box::new(store::NoStoreOutsideSetup));
+    registry.register(Box::new(store::NoUnusedStoreImport));
+    registry.register(Box::new(store::NoCircularStoreDeps));
 }
 
 #[cfg(test)]

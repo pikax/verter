@@ -979,3 +979,151 @@ fn template_id_remove_file_cleans_index() {
     index.remove_file(Path::new("/src/App.vue"));
     assert!(!index.has_template_id("teleport-target"));
 }
+
+// =============================================================================
+// Store Index Tests
+// =============================================================================
+
+use crate::file_usage::{StoreDefinitionOwned, StoreUsageOwned};
+use crate::types::StoreApiClassification;
+
+fn make_file_with_store_usage(callee: &str, import_source: &str) -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    info.store_usages.push(StoreUsageOwned {
+        binding_name: "store".to_string(),
+        callee: callee.to_string(),
+        import_source: import_source.to_string(),
+        store_api: StoreApiClassification::StoreComposable,
+        has_store_to_refs: false,
+        destructured_without_store_to_refs: false,
+        destructured_props: Vec::new(),
+        start: 0,
+        end: 10,
+    });
+    info.flags |= FileUsageFlags::HAS_STORE_USAGE.bits();
+    info
+}
+
+fn make_file_with_store_definition(store_id: &str, export_name: &str) -> FileUsageInfoOwned {
+    let mut info = make_file_info();
+    info.store_definitions.push(StoreDefinitionOwned {
+        store_id: Some(store_id.to_string()),
+        export_name: export_name.to_string(),
+        store_api: StoreApiClassification::PiniaDefineStore,
+        state_properties: vec!["count".to_string()],
+        getters: vec!["doubleCount".to_string()],
+        actions: vec!["increment".to_string()],
+        start: 0,
+        end: 50,
+    });
+    info.flags |= FileUsageFlags::HAS_STORE_DEFINITION.bits();
+    info
+}
+
+/// @ai-generated - Store usage is indexed and queryable
+#[test]
+fn store_usage_indexed() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("/src/App.vue"),
+        make_file_with_store_usage("useUserStore", "@/stores/user"),
+    );
+
+    let users: Vec<_> = index.files_using_store("useUserStore").collect();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].as_ref(), Path::new("/src/App.vue"));
+
+    // Negative: non-existent store
+    let users: Vec<_> = index.files_using_store("useCartStore").collect();
+    assert!(users.is_empty(), "should not find non-existent store");
+}
+
+/// @ai-generated - Store definition is indexed and queryable
+#[test]
+fn store_definition_indexed() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("/src/stores/user.ts"),
+        make_file_with_store_definition("user", "useUserStore"),
+    );
+
+    let def_file = index.store_defined_in("user");
+    assert!(def_file.is_some());
+    assert_eq!(def_file.unwrap().as_ref(), Path::new("/src/stores/user.ts"));
+
+    // Negative: non-existent store
+    assert!(
+        index.store_defined_in("cart").is_none(),
+        "should not find non-existent store"
+    );
+}
+
+/// @ai-generated - all_store_ids returns all defined store IDs
+#[test]
+fn all_store_ids_query() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("/src/stores/user.ts"),
+        make_file_with_store_definition("user", "useUserStore"),
+    );
+    index.add_file(
+        PathBuf::from("/src/stores/cart.ts"),
+        make_file_with_store_definition("cart", "useCartStore"),
+    );
+
+    let ids: Vec<&String> = index.all_store_ids().collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.iter().any(|id| *id == "user"));
+    assert!(ids.iter().any(|id| *id == "cart"));
+}
+
+/// @ai-generated - Removing a file cleans up store indexes
+#[test]
+fn store_remove_file_cleans_indexes() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("/src/stores/user.ts"),
+        make_file_with_store_definition("user", "useUserStore"),
+    );
+    index.add_file(
+        PathBuf::from("/src/App.vue"),
+        make_file_with_store_usage("useUserStore", "@/stores/user"),
+    );
+
+    assert!(index.store_defined_in("user").is_some());
+    assert_eq!(index.files_using_store("useUserStore").count(), 1);
+
+    // Remove definition file
+    index.remove_file(Path::new("/src/stores/user.ts"));
+    assert!(
+        index.store_defined_in("user").is_none(),
+        "definition should be removed"
+    );
+
+    // Remove usage file
+    index.remove_file(Path::new("/src/App.vue"));
+    assert_eq!(
+        index.files_using_store("useUserStore").count(),
+        0,
+        "usage should be removed"
+    );
+}
+
+/// @ai-generated - store_flow traces definition + consumers
+#[test]
+fn store_flow_traces_correctly() {
+    let mut index = ProjectIndex::new();
+    index.add_file(
+        PathBuf::from("/src/stores/user.ts"),
+        make_file_with_store_definition("user", "useUserStore"),
+    );
+    index.add_file(
+        PathBuf::from("/src/App.vue"),
+        make_file_with_store_usage("useUserStore", "@/stores/user"),
+    );
+
+    let flow = index.store_flow("user");
+    assert_eq!(flow.store_id, "user");
+    assert!(flow.definition_file.is_some());
+    assert!(!flow.consumer_files.is_empty());
+}

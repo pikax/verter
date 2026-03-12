@@ -39,6 +39,8 @@ bitflags::bitflags! {
         const HAS_EXTERNAL_TYPE_DEPS  = 1 << 17;
         const HAS_INHERIT_ATTRS_FALSE = 1 << 18;
         const HAS_OPTIONS_API         = 1 << 19;
+        const HAS_STORE_USAGE         = 1 << 20;
+        const HAS_STORE_DEFINITION    = 1 << 21;
     }
 }
 
@@ -110,6 +112,14 @@ pub struct ScriptAnalysisSnapshot {
     /// These macros must be at root level in `<script setup>` — nested calls are invalid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested_macro_calls: Vec<NestedMacroCall>,
+
+    /// Store usage sites (Pinia, Vuex, convention-based composable stores).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub store_usages: Vec<StoreUsage>,
+
+    /// Store definitions (`defineStore`, `createStore`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub store_definitions: Vec<StoreDefinition>,
 }
 
 /// A Vue compiler macro call found inside a nested scope (not at the root level of `<script setup>`).
@@ -1255,4 +1265,83 @@ pub enum CssVarManipulationKind {
     GetPropertyValue,
     /// `el.style.removeProperty('--x')`
     RemoveProperty,
+}
+
+// =============================================================================
+// Store / State Management
+// =============================================================================
+
+/// Classification of store/state management APIs (Pinia, Vuex, convention-based).
+///
+/// Separate from `VueApiClassification` since stores are third-party, not Vue core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StoreApiClassification {
+    // Pinia
+    PiniaDefineStore,
+    PiniaStoreToRefs,
+    PiniaMapState,
+    PiniaMapGetters,
+    PiniaMapActions,
+    PiniaMapWritableState,
+    PiniaCreatePinia,
+    // Vuex
+    VuexCreateStore,
+    VuexUseStore,
+    VuexMapState,
+    VuexMapGetters,
+    VuexMapMutations,
+    VuexMapActions,
+    /// Convention-based: `useXxxStore` from `*/store*` paths.
+    StoreComposable,
+}
+
+/// A store usage site in a script block.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoreUsage {
+    /// The local binding name (e.g., `store`, `userStore`).
+    pub binding_name: String,
+    /// The callee function name (e.g., `useUserStore`, `defineStore`).
+    pub callee: String,
+    /// The import source (e.g., `"pinia"`, `"@/stores/user"`).
+    pub import_source: String,
+    /// How this store API is classified.
+    pub store_api: StoreApiClassification,
+    /// SFC-absolute byte span of the call expression.
+    pub span: Span,
+    /// Whether `storeToRefs()` was applied to this binding.
+    pub has_store_to_refs: bool,
+    /// Property names destructured from the store (e.g., `["count", "name"]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destructured_props: Vec<String>,
+    /// Whether the store was destructured without `storeToRefs()` (reactivity loss).
+    pub destructured_without_store_to_refs: bool,
+}
+
+/// A store definition site (e.g., `defineStore('user', { ... })`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoreDefinition {
+    /// The store ID (first string arg to `defineStore`, e.g., `"user"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<String>,
+    /// The export name (e.g., `useUserStore`).
+    pub export_name: String,
+    /// Which store API created this definition.
+    pub store_api: StoreApiClassification,
+    /// State property names extracted from the options object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_properties: Vec<String>,
+    /// Getter names extracted from the options object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub getters: Vec<String>,
+    /// Action names extracted from the options object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+    /// Other stores called inside this store definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub store_dependencies: Vec<String>,
+    /// SFC-absolute byte span of the definition.
+    pub span: Span,
+    /// Canonical file ID where this store is defined (populated by host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
 }

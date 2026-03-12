@@ -1,4 +1,4 @@
-use crate::types::VueApiClassification;
+use crate::types::{StoreApiClassification, VueApiClassification};
 
 /// Classify a Vue API name into a known category.
 pub fn classify_vue_api(name: &str) -> VueApiClassification {
@@ -117,6 +117,48 @@ pub fn is_watcher_api(api: VueApiClassification) -> bool {
     )
 }
 
+/// Classify a store/state management API based on the function name and import source.
+///
+/// Returns `Some(StoreApiClassification)` for known Pinia/Vuex APIs.
+/// Returns `None` for non-store APIs.
+pub fn classify_store_api(name: &str, import_source: &str) -> Option<StoreApiClassification> {
+    match import_source {
+        "pinia" => match name {
+            "defineStore" => Some(StoreApiClassification::PiniaDefineStore),
+            "storeToRefs" => Some(StoreApiClassification::PiniaStoreToRefs),
+            "mapState" => Some(StoreApiClassification::PiniaMapState),
+            "mapGetters" => Some(StoreApiClassification::PiniaMapGetters),
+            "mapActions" => Some(StoreApiClassification::PiniaMapActions),
+            "mapWritableState" => Some(StoreApiClassification::PiniaMapWritableState),
+            "createPinia" => Some(StoreApiClassification::PiniaCreatePinia),
+            _ => None,
+        },
+        "vuex" => match name {
+            "createStore" => Some(StoreApiClassification::VuexCreateStore),
+            "useStore" => Some(StoreApiClassification::VuexUseStore),
+            "mapState" => Some(StoreApiClassification::VuexMapState),
+            "mapGetters" => Some(StoreApiClassification::VuexMapGetters),
+            "mapMutations" => Some(StoreApiClassification::VuexMapMutations),
+            "mapActions" => Some(StoreApiClassification::VuexMapActions),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Returns true if a function call looks like a convention-based store composable.
+///
+/// Convention: callee matches `use*Store` and the import source contains `/store` or `/stores`.
+pub fn is_store_composable_call(callee: &str, import_source: &str) -> bool {
+    callee.starts_with("use")
+        && callee.ends_with("Store")
+        && callee.len() > "useStore".len()
+        && (import_source.contains("/store")
+            || import_source.contains("/stores")
+            || import_source.contains("\\store")
+            || import_source.contains("\\stores"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +230,103 @@ mod tests {
         assert_eq!(classify_vue_api(" ref"), VueApiClassification::Other);
         assert_eq!(classify_vue_api("refs"), VueApiClassification::Other);
         assert_eq!(classify_vue_api(""), VueApiClassification::Other);
+    }
+
+    // ── Store classifier tests ──
+
+    /// @ai-generated - Pinia APIs are classified correctly
+    #[test]
+    fn classify_pinia_apis() {
+        assert_eq!(
+            classify_store_api("defineStore", "pinia"),
+            Some(StoreApiClassification::PiniaDefineStore)
+        );
+        assert_eq!(
+            classify_store_api("storeToRefs", "pinia"),
+            Some(StoreApiClassification::PiniaStoreToRefs)
+        );
+        assert_eq!(
+            classify_store_api("mapState", "pinia"),
+            Some(StoreApiClassification::PiniaMapState)
+        );
+        assert_eq!(
+            classify_store_api("mapGetters", "pinia"),
+            Some(StoreApiClassification::PiniaMapGetters)
+        );
+        assert_eq!(
+            classify_store_api("mapActions", "pinia"),
+            Some(StoreApiClassification::PiniaMapActions)
+        );
+        assert_eq!(
+            classify_store_api("mapWritableState", "pinia"),
+            Some(StoreApiClassification::PiniaMapWritableState)
+        );
+        assert_eq!(
+            classify_store_api("createPinia", "pinia"),
+            Some(StoreApiClassification::PiniaCreatePinia)
+        );
+    }
+
+    /// @ai-generated - Vuex APIs are classified correctly
+    #[test]
+    fn classify_vuex_apis() {
+        assert_eq!(
+            classify_store_api("createStore", "vuex"),
+            Some(StoreApiClassification::VuexCreateStore)
+        );
+        assert_eq!(
+            classify_store_api("useStore", "vuex"),
+            Some(StoreApiClassification::VuexUseStore)
+        );
+        assert_eq!(
+            classify_store_api("mapState", "vuex"),
+            Some(StoreApiClassification::VuexMapState)
+        );
+        assert_eq!(
+            classify_store_api("mapGetters", "vuex"),
+            Some(StoreApiClassification::VuexMapGetters)
+        );
+        assert_eq!(
+            classify_store_api("mapMutations", "vuex"),
+            Some(StoreApiClassification::VuexMapMutations)
+        );
+        assert_eq!(
+            classify_store_api("mapActions", "vuex"),
+            Some(StoreApiClassification::VuexMapActions)
+        );
+    }
+
+    /// @ai-generated - Unknown APIs return None
+    #[test]
+    fn classify_store_api_unknown() {
+        assert_eq!(classify_store_api("unknownFn", "pinia"), None);
+        assert_eq!(classify_store_api("unknownFn", "vuex"), None);
+        assert_eq!(classify_store_api("defineStore", "vue"), None);
+        assert_eq!(classify_store_api("ref", "pinia"), None);
+    }
+
+    /// @ai-generated - Convention-based store composable detection
+    #[test]
+    fn convention_based_store_composable() {
+        assert!(is_store_composable_call("useUserStore", "@/stores/user"));
+        assert!(is_store_composable_call("useAuthStore", "../stores/auth"));
+        assert!(is_store_composable_call("useCartStore", "~/store/cart"));
+        assert!(is_store_composable_call(
+            "useSettingsStore",
+            "@/stores/settings.ts"
+        ));
+    }
+
+    /// @ai-generated - Convention-based detection rejects non-store composables
+    #[test]
+    fn convention_based_store_composable_negative() {
+        // Wrong naming pattern
+        assert!(!is_store_composable_call("useRouter", "@/stores/router"));
+        assert!(!is_store_composable_call("useStore", "@/stores/main")); // too short, just "useStore"
+                                                                         // Wrong import source
+        assert!(!is_store_composable_call("useUserStore", "@/utils/user"));
+        assert!(!is_store_composable_call("useAuthStore", "vue-router"));
+        // Not a composable at all
+        assert!(!is_store_composable_call("createStore", "@/stores/main"));
     }
 }

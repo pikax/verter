@@ -455,6 +455,13 @@ pub struct FileAnalysisSnapshot {
     /// Options API analysis (`export default { ... }` or `export default defineComponent({ ... })`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_api: Option<verter_analysis::AnalyzedOptionsApi>,
+
+    /// Store usage sites (Pinia, Vuex, convention-based composables).
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub store_usages: Arc<Vec<verter_analysis::types::StoreUsage>>,
+    /// Store definitions (defineStore, createStore, etc.).
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub store_definitions: Arc<Vec<verter_analysis::types::StoreDefinition>>,
 }
 
 /// Compile-time dependencies that must be available before a Vue SFC can codegen.
@@ -933,6 +940,8 @@ pub(crate) struct ScriptAnalysisArcs {
     pub(crate) css_var_manipulations: Arc<Vec<verter_analysis::types::CssVarManipulation>>,
     pub(crate) script_binding_occurrences:
         Arc<Vec<verter_analysis::types::ScriptBindingOccurrence>>,
+    pub(crate) store_usages: Arc<Vec<verter_analysis::types::StoreUsage>>,
+    pub(crate) store_definitions: Arc<Vec<verter_analysis::types::StoreDefinition>>,
 }
 
 impl ScriptAnalysisArcs {
@@ -946,6 +955,8 @@ impl ScriptAnalysisArcs {
             dom_query_calls: Arc::new(sa.dom_query_calls.clone()),
             css_var_manipulations: Arc::new(sa.css_var_manipulations.clone()),
             script_binding_occurrences: Arc::new(sa.script_binding_occurrences.clone()),
+            store_usages: Arc::new(sa.store_usages.clone()),
+            store_definitions: Arc::new(sa.store_definitions.clone()),
         }
     }
 }

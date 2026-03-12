@@ -4,7 +4,7 @@
 //! information into a single file-level summary, suitable for caching,
 //! serialization, and cross-file queries.
 
-use crate::types::AnalyzedMacroKind;
+use crate::types::{AnalyzedMacroKind, StoreApiClassification};
 
 // =============================================================================
 // File Usage Flags
@@ -53,6 +53,10 @@ bitflags::bitflags! {
         const HAS_DEEP_PSEUDO     = 1 << 26;
         const HAS_GLOBAL_PSEUDO   = 1 << 27;
         const HAS_SLOTTED_PSEUDO  = 1 << 28;
+
+        // Store-level flags (bits 29-30)
+        const HAS_STORE_USAGE      = 1 << 29;
+        const HAS_STORE_DEFINITION = 1 << 30;
     }
 }
 
@@ -201,6 +205,54 @@ pub struct StyleUsageInfoOwned {
     pub has_slotted: bool,
 }
 
+/// Owned store usage for serialization/caching.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StoreUsageOwned {
+    /// The local binding name (e.g., `store`, `userStore`).
+    pub binding_name: String,
+    /// The callee function name (e.g., `useUserStore`, `mapState`).
+    pub callee: String,
+    /// The import source (e.g., `"pinia"`, `"@/stores/user"`).
+    pub import_source: String,
+    /// How this store API is classified.
+    pub store_api: StoreApiClassification,
+    /// Whether `storeToRefs()` was applied to this binding.
+    pub has_store_to_refs: bool,
+    /// Whether the store was destructured without `storeToRefs()`.
+    pub destructured_without_store_to_refs: bool,
+    /// Property names destructured from the store.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destructured_props: Vec<String>,
+    /// Start offset in source.
+    pub start: u32,
+    /// End offset in source.
+    pub end: u32,
+}
+
+/// Owned store definition for serialization/caching.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StoreDefinitionOwned {
+    /// The store ID (first string arg to `defineStore`).
+    pub store_id: Option<String>,
+    /// The export name (e.g., `useUserStore`).
+    pub export_name: String,
+    /// Which store API created this definition.
+    pub store_api: StoreApiClassification,
+    /// State property names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_properties: Vec<String>,
+    /// Getter names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub getters: Vec<String>,
+    /// Action names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+    /// Start offset in source.
+    pub start: u32,
+    /// End offset in source.
+    pub end: u32,
+}
+
 /// Owned file usage info for serialization/caching.
 /// Resolves spans to actual string values.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -234,6 +286,12 @@ pub struct FileUsageInfoOwned {
     /// Static `id` attribute values from template elements (for teleport target lookup)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub template_ids: Vec<TemplateIdOwned>,
+    /// Store usages in the file (Pinia, Vuex, convention-based).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub store_usages: Vec<StoreUsageOwned>,
+    /// Store definitions in the file (defineStore, createStore).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub store_definitions: Vec<StoreDefinitionOwned>,
 }
 
 impl FileUsageInfoOwned {

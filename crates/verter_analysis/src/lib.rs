@@ -39,18 +39,20 @@ pub mod types;
 pub use analysis::{
     build_export_signatures, build_script_analysis, build_script_analysis_with_scope,
 };
+pub use classify::{classify_store_api, is_store_composable_call};
 pub use classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};
 pub use exports::extract_export_signatures;
 pub use file_usage::{
     ComponentUsageOwned, EmitDeclarationOwned, FileUsageFlags, FileUsageInfoOwned, ImportInfoOwned,
-    InjectUsageOwned, ListenedEventOwned, MacroInfoOwned, ProvideUsageOwned, StyleUsageInfoOwned,
-    TemplateIdOwned,
+    InjectUsageOwned, ListenedEventOwned, MacroInfoOwned, ProvideUsageOwned, StoreDefinitionOwned,
+    StoreUsageOwned, StyleUsageInfoOwned, TemplateIdOwned,
 };
 pub use imports::extract_import_sources;
 pub use macros::collect_type_references;
 pub use project_index::{
     ComponentEdge, ComponentUsageSummary, CssVarFlow, DynamicInjectEntry, FileInjectValidation,
     InjectValidation, InjectValidationEntry, ProjectIndex, ProjectStats, ProvideInjectSummary,
+    StoreFlow, StoreUsageSummary,
 };
 pub use routes::{
     analyze_route_health, build_route_analysis, detect_routing_framework,
@@ -89,5 +91,5 @@ pub use types::{
     ImportSourceInfo, LiteralKind, MacroTypeDep, ModuleReferenceAnalyzability,
     ModuleReferenceSemantics, ModuleReferenceSyntax, NestedMacroCall, ReactivityKind,
     ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot, ScriptTypeEnhancements,
-    VueApiClassification,
+    StoreApiClassification, StoreDefinition, StoreUsage, VueApiClassification,
 };

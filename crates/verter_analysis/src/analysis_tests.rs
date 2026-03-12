@@ -1571,3 +1571,189 @@ fn nested_with_defaults_in_function() {
     assert!(names.contains(&"withDefaults"));
     assert!(names.contains(&"defineProps"));
 }
+
+// =============================================================================
+// Store detection tests
+// =============================================================================
+
+/// @ai-generated - Pinia useXxxStore usage detected
+#[test]
+fn pinia_store_usage_detected() {
+    let result = analyze(
+        r#"
+import { useUserStore } from '@/stores/user';
+const store = useUserStore();
+"#,
+    );
+    assert!(!result.store_usages.is_empty(), "should detect store usage");
+    assert_eq!(result.store_usages[0].callee, "useUserStore");
+    assert_eq!(result.store_usages[0].import_source, "@/stores/user");
+    assert_eq!(
+        result.store_usages[0].store_api,
+        StoreApiClassification::StoreComposable
+    );
+    assert!(result.flags.contains(AnalysisFlags::HAS_STORE_USAGE));
+}
+
+/// @ai-generated - Pinia storeToRefs detected
+#[test]
+fn pinia_store_to_refs_detected() {
+    let result = analyze(
+        r#"
+import { storeToRefs } from 'pinia';
+import { useUserStore } from '@/stores/user';
+const store = useUserStore();
+const { name, email } = storeToRefs(store);
+"#,
+    );
+    assert!(result.store_usages.len() >= 1, "should detect store usage");
+    // The useUserStore call should be detected
+    let store_usage = result
+        .store_usages
+        .iter()
+        .find(|u| u.callee == "useUserStore")
+        .expect("should find useUserStore usage");
+    assert_eq!(store_usage.import_source, "@/stores/user");
+    assert!(result.flags.contains(AnalysisFlags::HAS_STORE_USAGE));
+}
+
+/// @ai-generated - Pinia defineStore detected as store definition
+#[test]
+fn pinia_define_store_detected() {
+    let result = analyze(
+        r#"
+import { defineStore } from 'pinia';
+export const useUserStore = defineStore('user', {
+    state: () => ({ name: '', email: '' }),
+    getters: { fullName: (state) => state.name },
+    actions: { setName(n: string) { this.name = n; } },
+});
+"#,
+    );
+    assert!(
+        !result.store_definitions.is_empty(),
+        "should detect store definition"
+    );
+    let def = &result.store_definitions[0];
+    assert_eq!(def.store_id.as_deref(), Some("user"));
+    assert_eq!(def.export_name, "useUserStore");
+    assert_eq!(def.store_api, StoreApiClassification::PiniaDefineStore);
+    assert!(result.flags.contains(AnalysisFlags::HAS_STORE_DEFINITION));
+}
+
+/// @ai-generated - Vuex createStore detected
+#[test]
+fn vuex_create_store_detected() {
+    let result = analyze(
+        r#"
+import { createStore } from 'vuex';
+export const store = createStore({
+    state: { count: 0 },
+});
+"#,
+    );
+    assert!(
+        !result.store_definitions.is_empty(),
+        "should detect Vuex store definition"
+    );
+    let def = &result.store_definitions[0];
+    assert_eq!(def.store_api, StoreApiClassification::VuexCreateStore);
+    assert_eq!(def.export_name, "store");
+    assert!(result.flags.contains(AnalysisFlags::HAS_STORE_DEFINITION));
+}
+
+/// @ai-generated - Vuex useStore detected
+#[test]
+fn vuex_use_store_detected() {
+    let result = analyze(
+        r#"
+import { useStore } from 'vuex';
+const store = useStore();
+"#,
+    );
+    assert!(
+        !result.store_usages.is_empty(),
+        "should detect Vuex useStore"
+    );
+    assert_eq!(result.store_usages[0].callee, "useStore");
+    assert_eq!(
+        result.store_usages[0].store_api,
+        StoreApiClassification::VuexUseStore
+    );
+    assert!(result.flags.contains(AnalysisFlags::HAS_STORE_USAGE));
+}
+
+/// @ai-generated - Destructured store usage detected
+#[test]
+fn destructured_store_usage_detected() {
+    let result = analyze(
+        r#"
+import { useUserStore } from '@/stores/user';
+const { name, email } = useUserStore();
+"#,
+    );
+    assert!(!result.store_usages.is_empty(), "should detect store usage");
+    let usage = &result.store_usages[0];
+    assert_eq!(usage.callee, "useUserStore");
+    assert!(
+        usage.destructured_without_store_to_refs,
+        "destructured without storeToRefs should be flagged"
+    );
+    assert!(
+        usage.destructured_props.contains(&"name".to_string()),
+        "should track destructured props"
+    );
+    assert!(
+        usage.destructured_props.contains(&"email".to_string()),
+        "should track destructured props"
+    );
+}
+
+/// @ai-generated - Regular composables are NOT detected as store usage
+#[test]
+fn regular_composables_not_detected_as_store() {
+    let result = analyze(
+        r#"
+import { useRouter } from 'vue-router';
+import { useMouse } from '@vueuse/core';
+const router = useRouter();
+const { x, y } = useMouse();
+"#,
+    );
+    assert!(
+        result.store_usages.is_empty(),
+        "non-store composables should not be detected"
+    );
+    assert!(!result.flags.contains(AnalysisFlags::HAS_STORE_USAGE));
+    assert!(!result.flags.contains(AnalysisFlags::HAS_STORE_DEFINITION));
+}
+
+/// @ai-generated - Pinia mapState detected as store usage
+#[test]
+fn pinia_map_helpers_detected() {
+    let result = analyze(
+        r#"
+import { mapState, mapActions } from 'pinia';
+import { useUserStore } from '@/stores/user';
+const mapped = mapState(useUserStore, ['name', 'email']);
+const actions = mapActions(useUserStore, ['setName']);
+"#,
+    );
+    // mapState and mapActions from pinia should be detected
+    let map_state = result.store_usages.iter().find(|u| u.callee == "mapState");
+    assert!(map_state.is_some(), "mapState should be detected");
+    assert_eq!(
+        map_state.unwrap().store_api,
+        StoreApiClassification::PiniaMapState
+    );
+
+    let map_actions = result
+        .store_usages
+        .iter()
+        .find(|u| u.callee == "mapActions");
+    assert!(map_actions.is_some(), "mapActions should be detected");
+    assert_eq!(
+        map_actions.unwrap().store_api,
+        StoreApiClassification::PiniaMapActions
+    );
+}

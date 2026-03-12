@@ -6,7 +6,10 @@ use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
 
-use crate::classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};
+use crate::classify::{
+    classify_store_api, classify_vue_api, is_lifecycle_api, is_reactivity_api,
+    is_store_composable_call, is_watcher_api,
+};
 use crate::exports::extract_export_signatures_from_program;
 use crate::imports::analyze_import_declaration;
 
@@ -103,6 +106,8 @@ pub fn build_script_analysis_with_scope(
     let mut vue_api_calls = Vec::new();
     let mut dom_query_calls = Vec::new();
     let mut css_var_manipulations = Vec::new();
+    let mut store_usages: Vec<StoreUsage> = Vec::new();
+    let mut store_definitions: Vec<StoreDefinition> = Vec::new();
     let mut first_await_offset: Option<u32> = None;
     let mut options_api: Option<AnalyzedOptionsApi> = None;
     let mut const_string_values: FxHashMap<String, Vec<String>> = FxHashMap::default();
@@ -160,6 +165,32 @@ pub fn build_script_analysis_with_scope(
                                 local_type_deps.insert(alias.id.name.to_string(), refs);
                             }
                         }
+                        Declaration::VariableDeclaration(var_decl) => {
+                            // Handle `export const useXxxStore = defineStore(...)`
+                            for vd in &var_decl.declarations {
+                                if let Some(ref init) = vd.init {
+                                    let binding_name = match &vd.id {
+                                        BindingPattern::BindingIdentifier(id) => {
+                                            Some(id.name.as_str())
+                                        }
+                                        _ => None,
+                                    };
+                                    try_extract_store_call(
+                                        init,
+                                        &imports,
+                                        &import_map,
+                                        Some(VarDeclContext {
+                                            binding_name,
+                                            destructured_props: &[],
+                                            _is_exported: true,
+                                        }),
+                                        &mut store_usages,
+                                        &mut store_definitions,
+                                        content,
+                                    );
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -188,6 +219,16 @@ pub fn build_script_analysis_with_scope(
                     &expr_stmt.expression,
                     content,
                     &mut css_var_manipulations,
+                );
+                // Detect store API calls (e.g., mapState(useUserStore, [...]))
+                try_extract_store_call(
+                    &expr_stmt.expression,
+                    &imports,
+                    &import_map,
+                    None,
+                    &mut store_usages,
+                    &mut store_definitions,
+                    content,
                 );
                 if first_await_offset.is_none() {
                     if let Some(offset) = find_await_offset(&expr_stmt.expression) {
@@ -274,6 +315,36 @@ pub fn build_script_analysis_with_scope(
                             content,
                             &const_string_values,
                             &mut module_references,
+                        );
+
+                        // Detect store API calls in variable initializers
+                        let binding_name = match &decl.id {
+                            BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+                            _ => None,
+                        };
+                        let destructured_props = match &decl.id {
+                            BindingPattern::ObjectPattern(obj) => obj
+                                .properties
+                                .iter()
+                                .filter_map(|p| match &p.key {
+                                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>(),
+                            _ => Vec::new(),
+                        };
+                        try_extract_store_call(
+                            init,
+                            &imports,
+                            &import_map,
+                            Some(VarDeclContext {
+                                binding_name,
+                                destructured_props: &destructured_props,
+                                _is_exported: false,
+                            }),
+                            &mut store_usages,
+                            &mut store_definitions,
+                            content,
                         );
                     }
 
@@ -382,6 +453,12 @@ pub fn build_script_analysis_with_scope(
     if options_api.is_some() {
         flags |= AnalysisFlags::HAS_OPTIONS_API;
     }
+    if !store_usages.is_empty() {
+        flags |= AnalysisFlags::HAS_STORE_USAGE;
+    }
+    if !store_definitions.is_empty() {
+        flags |= AnalysisFlags::HAS_STORE_DEFINITION;
+    }
 
     // ── Exported function analysis (when FUNC_RETURNS scope is active) ──
     let exported_functions = if scope.contains(AnalysisScope::FUNC_RETURNS) {
@@ -417,6 +494,8 @@ pub fn build_script_analysis_with_scope(
         type_enhancements: None,
         options_api,
         nested_macro_calls,
+        store_usages,
+        store_definitions,
     }
 }
 
@@ -3456,6 +3535,227 @@ fn collect_pattern_names(pattern: &BindingPattern<'_>, names: &mut FxHashSet<Str
         }
         BindingPattern::AssignmentPattern(assign) => {
             collect_pattern_names(&assign.left, names);
+        }
+    }
+}
+
+// =============================================================================
+// Store / State Management Detection
+// =============================================================================
+
+/// Context from a variable declaration, passed to store call extraction.
+struct VarDeclContext<'a> {
+    /// The binding name (e.g., `store` for `const store = useUserStore()`).
+    binding_name: Option<&'a str>,
+    /// Destructured property names (e.g., `["name", "email"]` for `const { name, email } = useUserStore()`).
+    destructured_props: &'a [String],
+    /// Whether the declaration is exported (`export const ...`).
+    _is_exported: bool,
+}
+
+/// Try to extract a store API call from an expression.
+///
+/// Handles:
+/// - `useXxxStore()` — convention-based store composable
+/// - `defineStore('id', { ... })` — Pinia store definition
+/// - `createStore({ ... })` — Vuex store definition
+/// - `mapState(...)`, `mapGetters(...)`, etc. — Pinia/Vuex map helpers
+/// - `storeToRefs(store)` — Pinia reactivity helper
+fn try_extract_store_call(
+    expr: &Expression<'_>,
+    imports: &[AnalyzedImport],
+    import_map: &ImportBindingMap,
+    var_ctx: Option<VarDeclContext<'_>>,
+    store_usages: &mut Vec<StoreUsage>,
+    store_definitions: &mut Vec<StoreDefinition>,
+    _content: &str,
+) {
+    let call = match expr {
+        Expression::CallExpression(call) => call,
+        _ => return,
+    };
+
+    let callee_name = match call_callee_name(&call.callee) {
+        Some(name) => name,
+        None => return,
+    };
+
+    let import_source = match import_map.source(imports, callee_name) {
+        Some(src) => src,
+        None => return,
+    };
+
+    // Try to classify as a known store API (Pinia/Vuex)
+    let store_api = classify_store_api(callee_name, import_source);
+
+    // If not a known API, check convention-based pattern
+    let store_api = match store_api {
+        Some(api) => api,
+        None => {
+            if is_store_composable_call(callee_name, import_source) {
+                StoreApiClassification::StoreComposable
+            } else {
+                return;
+            }
+        }
+    };
+
+    let span = Span::new(call.span.start, call.span.end);
+    let binding_name = var_ctx
+        .as_ref()
+        .and_then(|ctx| ctx.binding_name)
+        .unwrap_or(callee_name);
+
+    // Check if this is a store definition (defineStore, createStore)
+    match store_api {
+        StoreApiClassification::PiniaDefineStore => {
+            let store_id = call.arguments.first().and_then(|arg| {
+                if let Argument::StringLiteral(s) = arg {
+                    Some(s.value.to_string())
+                } else {
+                    None
+                }
+            });
+
+            // Extract state/getters/actions from options object
+            let (state_props, getters, actions) = extract_define_store_options(&call.arguments);
+
+            store_definitions.push(StoreDefinition {
+                store_id,
+                export_name: binding_name.to_string(),
+                store_api,
+                state_properties: state_props,
+                getters,
+                actions,
+                store_dependencies: Vec::new(),
+                span,
+                file_id: None,
+            });
+            return;
+        }
+        StoreApiClassification::VuexCreateStore => {
+            store_definitions.push(StoreDefinition {
+                store_id: None,
+                export_name: binding_name.to_string(),
+                store_api,
+                state_properties: Vec::new(),
+                getters: Vec::new(),
+                actions: Vec::new(),
+                store_dependencies: Vec::new(),
+                span,
+                file_id: None,
+            });
+            return;
+        }
+        _ => {}
+    }
+
+    // It's a store usage (useXxxStore, mapState, storeToRefs, etc.)
+    let destructured_props = var_ctx
+        .as_ref()
+        .map(|ctx| ctx.destructured_props.to_vec())
+        .unwrap_or_default();
+    let is_destructured = !destructured_props.is_empty();
+    let is_store_to_refs = matches!(store_api, StoreApiClassification::PiniaStoreToRefs);
+
+    store_usages.push(StoreUsage {
+        binding_name: binding_name.to_string(),
+        callee: callee_name.to_string(),
+        import_source: import_source.to_string(),
+        store_api,
+        span,
+        has_store_to_refs: is_store_to_refs,
+        destructured_props,
+        destructured_without_store_to_refs: is_destructured && !is_store_to_refs,
+    });
+}
+
+/// Extract state properties, getters, and actions from a `defineStore` options object.
+///
+/// Handles both forms:
+/// - `defineStore('id', { state: () => ({ ... }), getters: { ... }, actions: { ... } })`
+/// - `defineStore('id', () => { ... })` (setup store — no extraction)
+fn extract_define_store_options(args: &[Argument<'_>]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    // The options object is typically the 2nd argument (after store ID)
+    let options = args.get(1).or_else(|| args.first());
+    let obj = match options {
+        Some(Argument::ObjectExpression(obj)) => obj,
+        _ => return (Vec::new(), Vec::new(), Vec::new()),
+    };
+
+    let mut state_props = Vec::new();
+    let mut getters = Vec::new();
+    let mut actions = Vec::new();
+
+    for prop in &obj.properties {
+        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+            let key_name = match &p.key {
+                PropertyKey::StaticIdentifier(id) => id.name.as_str(),
+                _ => continue,
+            };
+
+            match key_name {
+                "state" => {
+                    // state: () => ({ count: 0, name: '' })
+                    if let Expression::ArrowFunctionExpression(arrow) = &p.value {
+                        extract_return_object_keys(&arrow.body, &mut state_props);
+                    }
+                }
+                "getters" => {
+                    extract_object_keys(&p.value, &mut getters);
+                }
+                "actions" => {
+                    extract_object_keys(&p.value, &mut actions);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (state_props, getters, actions)
+}
+
+/// Extract keys from an object expression (e.g., `{ foo() {}, bar: ... }`).
+fn extract_object_keys(expr: &Expression<'_>, keys: &mut Vec<String>) {
+    if let Expression::ObjectExpression(obj) = expr {
+        for prop in &obj.properties {
+            if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                if let PropertyKey::StaticIdentifier(id) = &p.key {
+                    keys.push(id.name.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Extract keys from the return object of an arrow function body.
+///
+/// Handles `() => ({ key1: val1, key2: val2 })`.
+fn extract_return_object_keys(body: &FunctionBody<'_>, keys: &mut Vec<String>) {
+    // For `() => ({...})`, the body has a single ExpressionStatement with parenthesized object
+    if body.statements.len() == 1 {
+        if let Statement::ExpressionStatement(stmt) = &body.statements[0] {
+            let expr = &stmt.expression;
+            // Handle parenthesized expression: `({...})`
+            let inner = match expr {
+                Expression::ParenthesizedExpression(paren) => &paren.expression,
+                other => other,
+            };
+            extract_object_keys(inner, keys);
+        }
+        // Also handle `() => { return { ... }; }`
+        if let Statement::ReturnStatement(ret) = &body.statements[0] {
+            if let Some(arg) = &ret.argument {
+                extract_object_keys(arg, keys);
+            }
+        }
+    }
+    // Multi-statement: look for return statement
+    for stmt in &body.statements {
+        if let Statement::ReturnStatement(ret) = stmt {
+            if let Some(arg) = &ret.argument {
+                extract_object_keys(arg, keys);
+            }
         }
     }
 }

@@ -26,6 +26,12 @@ pub struct CrossFileSnapshot {
     /// Populated by the caller (host, LSP, or build tool) since it requires
     /// filesystem scanning outside the project index.
     pub duplicate_vue_versions: Vec<DuplicateVueEntry>,
+    /// Store composable called outside `<script setup>` or setup function.
+    pub store_outside_setup: Vec<StoreOutsideSetupEntry>,
+    /// Pinia store destructured without `storeToRefs()` (reactivity loss).
+    pub store_reactivity_loss: Vec<StoreReactivityLossEntry>,
+    /// Circular store-to-store dependency cycles.
+    pub circular_store_deps: Vec<CircularStoreDepsEntry>,
 }
 
 /// An inject() call with no matching provide() in the project.
@@ -76,6 +82,39 @@ pub struct DuplicateVueEntry {
     pub version: String,
 }
 
+/// A store composable called outside `<script setup>` or setup function.
+#[derive(Debug, Clone)]
+pub struct StoreOutsideSetupEntry {
+    /// The callee function name (e.g., `useUserStore`).
+    pub callee: String,
+    /// File containing the store call.
+    pub file: PathBuf,
+    /// Byte span of the call.
+    pub span: verter_span::Span,
+}
+
+/// A circular dependency cycle between stores.
+#[derive(Debug, Clone)]
+pub struct CircularStoreDepsEntry {
+    /// The cycle as a list of store IDs (e.g., ["A", "B", "C", "A"]).
+    pub cycle: Vec<String>,
+    /// Byte span of the first store in the cycle in the current file.
+    pub span: verter_span::Span,
+}
+
+/// A Pinia store destructured without `storeToRefs()`, causing reactivity loss.
+#[derive(Debug, Clone)]
+pub struct StoreReactivityLossEntry {
+    /// The callee function name (e.g., `useUserStore`).
+    pub callee: String,
+    /// Property names destructured without storeToRefs.
+    pub destructured_props: Vec<String>,
+    /// File containing the destructured store.
+    pub file: PathBuf,
+    /// Byte span of the call.
+    pub span: verter_span::Span,
+}
+
 /// Build a [`CrossFileSnapshot`] for a specific file from the project index.
 ///
 /// Extracts only the cross-file issues relevant to the given file path,
@@ -113,7 +152,63 @@ pub fn build_cross_file_snapshot(project: &ProjectIndex, file_path: &Path) -> Cr
     // This data comes from the analysis of imported composables.
     // (Populated when deep analysis is available via FUNC_RETURNS scope)
 
+    // 4. Store reactivity loss: destructured without storeToRefs()
+    if let Some(info) = project.get_file(file_path) {
+        for usage in &info.store_usages {
+            if usage.destructured_without_store_to_refs {
+                snapshot
+                    .store_reactivity_loss
+                    .push(StoreReactivityLossEntry {
+                        callee: usage.callee.clone(),
+                        destructured_props: usage.destructured_props.clone(),
+                        file: file_path.to_path_buf(),
+                        span: verter_span::Span::new(usage.start, usage.end),
+                    });
+            }
+        }
+    }
+
+    // 5. Circular store dependency detection
+    if let Some(info) = project.get_file(file_path) {
+        for def in &info.store_definitions {
+            if let Some(store_id) = &def.store_id {
+                if let Some(cycle) = detect_store_cycle(project, store_id) {
+                    snapshot.circular_store_deps.push(CircularStoreDepsEntry {
+                        cycle,
+                        span: verter_span::Span::new(def.start, def.end),
+                    });
+                }
+            }
+        }
+    }
+
     snapshot
+}
+
+/// DFS cycle detection starting from `start_id` in the store dependency graph.
+fn detect_store_cycle(project: &ProjectIndex, start_id: &str) -> Option<Vec<String>> {
+    let mut visited = HashSet::new();
+    let mut stack = vec![(start_id.to_string(), vec![start_id.to_string()])];
+
+    while let Some((current, path)) = stack.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        let deps = project.store_dependencies(&current);
+        for dep in deps {
+            if dep == start_id {
+                let mut cycle = path.clone();
+                cycle.push(dep.to_string());
+                return Some(cycle);
+            }
+            if !visited.contains(dep) {
+                let mut new_path = path.clone();
+                new_path.push(dep.to_string());
+                stack.push((dep.to_string(), new_path));
+            }
+        }
+    }
+    None
 }
 
 // ── Component cross-file analysis ────────────────────────────────────

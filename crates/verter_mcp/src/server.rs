@@ -155,6 +155,12 @@ pub struct SaveBaselineParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TraceStoreFlowParams {
+    #[schemars(description = "Store ID or export name to trace")]
+    pub store_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TraceEventFlowParams {
     #[schemars(description = "Event name to trace (e.g., 'submit', 'update:modelValue')")]
     pub event_name: String,
@@ -204,6 +210,8 @@ fn build_script_snapshot(
         dom_query_calls: analysis.dom_query_calls.to_vec(),
         css_var_manipulations: analysis.css_var_manipulations.to_vec(),
         script_binding_occurrences: analysis.script_binding_occurrences.to_vec(),
+        store_usages: analysis.store_usages.to_vec(),
+        store_definitions: analysis.store_definitions.to_vec(),
         first_await_offset: None,
         type_enhancements: None,
         options_api: analysis.options_api.clone(),
@@ -2683,9 +2691,7 @@ impl VerterMcpServer {
         let json = serde_json::to_string_pretty(&report).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
-}
 
-impl VerterMcpServer {
     /// Build a route analysis snapshot by combining framework detection, route extraction,
     /// and template analysis from loaded files.
     fn build_route_snapshot(
@@ -2712,6 +2718,215 @@ impl VerterMcpServer {
                 .collect();
 
         verter_analysis::build_route_analysis(project_root, &template_components)
+    }
+
+    // ── Store Analysis Tools ──────────────────────────────────────────
+
+    #[tool(
+        description = "Per-file store usages: which stores are imported, used, destructured, and whether storeToRefs is applied."
+    )]
+    async fn get_store_usage(
+        &self,
+        Parameters(params): Parameters<OptionalPathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut results: Vec<serde_json::Value> = Vec::new();
+
+        let filter_id = params.path.as_ref().map(|p| self.resolve(p));
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            if let Some(ref filter) = filter_id {
+                if id != filter {
+                    continue;
+                }
+            }
+            let _ = ensure_loaded(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                if analysis.store_usages.is_empty() && analysis.store_definitions.is_empty() {
+                    continue;
+                }
+                let usages: Vec<serde_json::Value> = analysis
+                    .store_usages
+                    .iter()
+                    .map(|u| {
+                        serde_json::json!({
+                            "binding_name": u.binding_name,
+                            "callee": u.callee,
+                            "import_source": u.import_source,
+                            "store_api": format!("{:?}", u.store_api),
+                            "has_store_to_refs": u.has_store_to_refs,
+                            "destructured_props": u.destructured_props,
+                            "destructured_without_store_to_refs": u.destructured_without_store_to_refs,
+                        })
+                    })
+                    .collect();
+                let definitions: Vec<serde_json::Value> = analysis
+                    .store_definitions
+                    .iter()
+                    .map(|d| {
+                        serde_json::json!({
+                            "store_id": d.store_id,
+                            "export_name": d.export_name,
+                            "store_api": format!("{:?}", d.store_api),
+                            "state_properties": d.state_properties,
+                            "getters": d.getters,
+                            "actions": d.actions,
+                        })
+                    })
+                    .collect();
+                results.push(serde_json::json!({
+                    "file": id,
+                    "store_usages": usages,
+                    "store_definitions": definitions,
+                }));
+            }
+        }
+
+        let response = serde_json::json!({
+            "files_with_stores": results.len(),
+            "results": results,
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Project-wide store dependency graph: components → stores, store → store deps, unused stores."
+    )]
+    async fn get_store_graph(&self) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut store_definitions: Vec<serde_json::Value> = Vec::new();
+        let mut store_usages_by_file: Vec<serde_json::Value> = Vec::new();
+        let mut all_store_ids: Vec<String> = Vec::new();
+        let mut used_callees: HashSet<String> = HashSet::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_loaded(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                for def in analysis.store_definitions.iter() {
+                    if let Some(store_id) = &def.store_id {
+                        all_store_ids.push(store_id.clone());
+                    }
+                    store_definitions.push(serde_json::json!({
+                        "file": id,
+                        "store_id": def.store_id,
+                        "export_name": def.export_name,
+                        "state_properties": def.state_properties,
+                        "getters": def.getters,
+                        "actions": def.actions,
+                        "store_dependencies": def.store_dependencies,
+                    }));
+                }
+                if !analysis.store_usages.is_empty() {
+                    let callees: Vec<&str> = analysis
+                        .store_usages
+                        .iter()
+                        .map(|u| u.callee.as_str())
+                        .collect();
+                    for c in &callees {
+                        used_callees.insert(c.to_string());
+                    }
+                    store_usages_by_file.push(serde_json::json!({
+                        "file": id,
+                        "stores_used": callees,
+                    }));
+                }
+            }
+        }
+
+        let unused_stores: Vec<&String> = all_store_ids
+            .iter()
+            .filter(|id| !used_callees.iter().any(|c| c.contains(id.as_str())))
+            .collect();
+
+        let response = serde_json::json!({
+            "total_store_definitions": store_definitions.len(),
+            "total_files_using_stores": store_usages_by_file.len(),
+            "store_definitions": store_definitions,
+            "store_usages_by_file": store_usages_by_file,
+            "all_store_ids": all_store_ids,
+            "unused_stores": unused_stores,
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Trace a specific store: definition file, all consumers, dependency chain."
+    )]
+    async fn trace_store_flow(
+        &self,
+        Parameters(params): Parameters<TraceStoreFlowParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let files = self.host.list_files();
+        let mut definition_file: Option<String> = None;
+        let mut definition_info: Option<serde_json::Value> = None;
+        let mut consumer_files: Vec<serde_json::Value> = Vec::new();
+
+        for (id, kind) in &files {
+            if *kind != verter_host::FileKind::VueSfc {
+                continue;
+            }
+            let _ = ensure_loaded(&self.host, id);
+            if let Some(analysis) = self.host.get_analysis(id) {
+                // Check if this file defines the target store
+                for def in analysis.store_definitions.iter() {
+                    if def.store_id.as_deref() == Some(params.store_id.as_str())
+                        || def.export_name == params.store_id
+                    {
+                        definition_file = Some(id.clone());
+                        definition_info = Some(serde_json::json!({
+                            "store_id": def.store_id,
+                            "export_name": def.export_name,
+                            "state_properties": def.state_properties,
+                            "getters": def.getters,
+                            "actions": def.actions,
+                            "store_dependencies": def.store_dependencies,
+                        }));
+                    }
+                }
+                // Check if this file uses the target store
+                let matching_usages: Vec<serde_json::Value> = analysis
+                    .store_usages
+                    .iter()
+                    .filter(|u| {
+                        u.callee.contains(&params.store_id)
+                            || u.import_source.contains(&params.store_id)
+                    })
+                    .map(|u| {
+                        serde_json::json!({
+                            "binding_name": u.binding_name,
+                            "callee": u.callee,
+                            "has_store_to_refs": u.has_store_to_refs,
+                            "destructured_props": u.destructured_props,
+                            "destructured_without_store_to_refs": u.destructured_without_store_to_refs,
+                        })
+                    })
+                    .collect();
+                if !matching_usages.is_empty() {
+                    consumer_files.push(serde_json::json!({
+                        "file": id,
+                        "usages": matching_usages,
+                    }));
+                }
+            }
+        }
+
+        let response = serde_json::json!({
+            "store_id": params.store_id,
+            "definition_file": definition_file,
+            "definition": definition_info,
+            "consumer_count": consumer_files.len(),
+            "consumers": consumer_files,
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
 
@@ -3029,6 +3244,8 @@ const count = ref(0)
             dom_query_calls: vec![],
             css_var_manipulations: vec![],
             script_binding_occurrences: vec![],
+            store_usages: vec![],
+            store_definitions: vec![],
             first_await_offset: None,
             type_enhancements: None,
             options_api: None,
