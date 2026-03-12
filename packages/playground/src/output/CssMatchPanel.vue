@@ -8,6 +8,8 @@ const props = defineProps<{ store: Store }>();
 const results = computed<HostSelectorMatchResult[]>(() => {
   const file = props.store.activeFile;
   if (!file) return [];
+  // Access analysis to create reactive dependency on recompilation
+  void file.compiled.analysis;
   return matchCssSelectors(file.filename);
 });
 

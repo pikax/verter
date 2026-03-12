@@ -8,6 +8,8 @@ const props = defineProps<{ store: Store }>();
 const symbols = computed<HostDocumentSymbol[]>(() => {
   const file = props.store.activeFile;
   if (!file) return [];
+  // Access analysis to create reactive dependency on recompilation
+  void file.compiled.analysis;
   return getDocumentSymbols(file.filename);
 });
 
