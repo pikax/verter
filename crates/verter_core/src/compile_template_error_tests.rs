@@ -145,12 +145,11 @@ fn no_error_duplicate_attribute_on_valid() {
 }
 
 #[test]
-#[ignore = "requires tokenizer changes to detect attributes on close tags"]
 fn error_end_tag_with_attributes() {
     let src = r#"<template><div></div foo="bar"></template>"#;
     let result = compile_sfc(src);
     assert_has_error(&result, "EndTagWithAttributes");
-    assert_error_severity(&result, "EndTagWithAttributes");
+    assert_warning_severity(&result, "EndTagWithAttributes");
 }
 
 #[test]
@@ -161,10 +160,9 @@ fn no_error_end_tag_with_attributes_on_valid() {
 }
 
 #[test]
-#[ignore = "requires tokenizer changes to distinguish EOF before tag name from other states"]
 fn error_eof_before_tag_name() {
-    // `<` at the end of template content with no tag name following
-    let src = "<template><</template>";
+    // `<` at the very end with no tag name following (true EOF)
+    let src = "<template><";
     let result = compile_sfc(src);
     assert_has_error(&result, "EofBeforeTagName");
     assert_error_severity(&result, "EofBeforeTagName");
@@ -216,12 +214,11 @@ fn no_error_missing_end_tag_name_on_valid() {
 }
 
 #[test]
-#[ignore = "requires tokenizer changes to track whitespace between attributes"]
 fn error_missing_whitespace_between_attributes() {
     let src = r#"<template><div class="a"id="b">hello</div></template>"#;
     let result = compile_sfc(src);
     assert_has_error(&result, "MissingWhitespaceBetweenAttributes");
-    assert_error_severity(&result, "MissingWhitespaceBetweenAttributes");
+    assert_warning_severity(&result, "MissingWhitespaceBetweenAttributes");
 }
 
 #[test]
@@ -467,7 +464,6 @@ fn no_error_x_v_slot_misplaced_on_template() {
 }
 
 #[test]
-#[ignore = "requires cross-sibling slot name tracking during component child finalization"]
 fn error_x_v_slot_duplicate_slot_names() {
     let src = r#"<template><MyComp><template #default>a</template><template #default>b</template></MyComp></template>"#;
     let result = compile_sfc(src);
@@ -584,7 +580,6 @@ fn no_error_duplicate_script_on_valid() {
 // template expression OXC parsing when invalid JavaScript is found in
 // interpolations or directive values.
 #[test]
-#[ignore = "requires OXC expression parse error propagation during template codegen"]
 fn error_x_invalid_expression() {
     let src = r#"<template>{{ if(true){} }}</template>"#;
     let result = compile_sfc(src);
@@ -714,7 +709,6 @@ fn no_errors_v_for_destructured() {
 // ════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "requires cross-sibling key tracking during v-if chain resolution"]
 fn error_x_v_if_same_key() {
     let src = r#"<template><div v-if="a" :key="1">a</div><div v-else :key="1">b</div></template>"#;
     let result = compile_sfc(src);

@@ -203,6 +203,82 @@ fn validate_imported_macro_type(
     }
 }
 
+/// Collect OXC expression parse errors from template expressions and emit them
+/// as `XInvalidExpression` diagnostics.
+///
+/// Only checks interpolation expressions and structural directive expressions
+/// (v-if/v-else-if conditions, v-for). Regular directive prop values (`:attr="..."`)
+/// are excluded because they may contain HTML entities or template-specific syntax
+/// that fails OXC parsing but is handled by codegen.
+fn collect_expression_errors(oxc_ast: &OxcParsedAst<'_>, diagnostics: &mut Vec<Diagnostic>) {
+    use crate::template::oxc::types::OxcNodeData;
+
+    for node in &oxc_ast.data {
+        match node {
+            OxcNodeData::Interpolation(expr) => {
+                push_expression_errors(expr, diagnostics);
+            }
+            OxcNodeData::Element(el) => {
+                if let Some(ref cond) = el.condition {
+                    push_expression_errors(cond, diagnostics);
+                }
+                if let Some(ref v_for) = el.v_for {
+                    for err in &v_for.parsed.result.left_errors {
+                        diagnostics.push(
+                            Diagnostic::error(
+                                "template",
+                                CompilerErrorCode::XInvalidExpression,
+                            )
+                            .with_message(err.message.to_string()),
+                        );
+                    }
+                    for err in &v_for.parsed.result.right_errors {
+                        diagnostics.push(
+                            Diagnostic::error(
+                                "template",
+                                CompilerErrorCode::XInvalidExpression,
+                            )
+                            .with_message(err.message.to_string()),
+                        );
+                    }
+                }
+                if let Some(ref v_slot) = el.v_slot {
+                    if let Some(ref errors) = v_slot.parsed.result.errors {
+                        for err in errors {
+                            diagnostics.push(
+                                Diagnostic::error(
+                                    "template",
+                                    CompilerErrorCode::XInvalidExpression,
+                                )
+                                .with_message(err.message.to_string()),
+                            );
+                        }
+                    }
+                }
+                // Note: regular directive prop expressions (`:class="..."`, `@click="..."`)
+                // are intentionally NOT checked here. They may contain HTML entities
+                // (e.g., `&quot;`) that haven't been decoded yet, causing false OXC errors.
+            }
+            OxcNodeData::None => {}
+        }
+    }
+}
+
+/// Push parse errors from an OXC expression as XInvalidExpression diagnostics.
+fn push_expression_errors(
+    expr: &crate::template::oxc::types::OxcParsedExpression<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Some(ref errors) = expr.errors {
+        for err in errors {
+            diagnostics.push(
+                Diagnostic::error("template", CompilerErrorCode::XInvalidExpression)
+                    .with_message(err.message.to_string()),
+            );
+        }
+    }
+}
+
 fn collect_invalid_macro_type_diagnostics(
     input: &str,
     parsed: &ParsedSfc,
@@ -828,6 +904,9 @@ fn compile_inner(
                     Some(ast) => ast,
                     None => parse_template_expressions(template_ast, input, allocator, source_type),
                 };
+
+                // Collect OXC expression parse errors as XInvalidExpression diagnostics
+                collect_expression_errors(&oxc_ast, &mut all_diagnostics);
 
                 // Extract raw template data for cross-file analysis (before bindings are moved)
                 let raw_template_data = if needs_tpl_data {

@@ -15,7 +15,8 @@
 
 use crate::ast::builder::TemplateAstBuilder;
 use crate::ast::types::{
-    AstNodeKind, ElementNodeCondition, ElementNodeConditionKind, PropFlags, TagType, TemplateAst,
+    AstNodeKind, ElementNode, ElementNodeCondition, ElementNodeConditionKind, PropFlags, TagType,
+    TemplateAst,
 };
 use crate::common::{ErrorCode, Span};
 use crate::cursor::ScriptLanguage;
@@ -527,6 +528,7 @@ impl Syntax {
                     builder.set_self_closing();
                     let closed_id = builder.close_element(None, end);
                     self.validate_v_condition_adjacency(closed_id, ctx);
+                    self.validate_v_if_same_key(closed_id, ctx);
                 } else {
                     builder.mark_element_content_start(end);
                 }
@@ -599,6 +601,7 @@ impl Syntax {
             builder.set_self_closing();
             let closed_id = builder.close_element(None, end);
             self.validate_v_condition_adjacency(closed_id, ctx);
+            self.validate_v_if_same_key(closed_id, ctx);
         }
     }
 
@@ -690,6 +693,8 @@ impl Syntax {
         } else if let Some(builder) = self.ast_builder.as_mut() {
             let closed_id = builder.close_element(Some(tag_close), start);
             self.validate_v_condition_adjacency(closed_id, ctx);
+            self.validate_v_if_same_key(closed_id, ctx);
+            self.validate_slot_names(closed_id, ctx);
         }
     }
 
@@ -717,6 +722,7 @@ impl Syntax {
                     // Use the open tag end as a synthetic content_end.
                     let closed_id = builder.close_element(None, se.tag_open_end);
                     self.validate_v_condition_adjacency(closed_id, ctx);
+                    self.validate_v_if_same_key(closed_id, ctx);
                 }
             } else {
                 // Unclosed SFC root — store what we can.
@@ -770,13 +776,13 @@ impl Syntax {
     fn handle_tokenizer_error(&mut self, code: ErrorCode, index: u32) {
         let (compiler_code, severity_is_error) = match code {
             ErrorCode::DUPLICATE_ATTRIBUTE => (CompilerErrorCode::DuplicateAttribute, true),
-            ErrorCode::END_TAG_WITH_ATTRIBUTES => (CompilerErrorCode::EndTagWithAttributes, true),
+            ErrorCode::END_TAG_WITH_ATTRIBUTES => (CompilerErrorCode::EndTagWithAttributes, false),
             ErrorCode::EOF_BEFORE_TAG_NAME => (CompilerErrorCode::EofBeforeTagName, true),
             ErrorCode::EOF_IN_TAG => (CompilerErrorCode::EofInTag, true),
             ErrorCode::MISSING_ATTRIBUTE_VALUE => (CompilerErrorCode::MissingAttributeValue, true),
             ErrorCode::MISSING_END_TAG_NAME => (CompilerErrorCode::MissingEndTagName, true),
             ErrorCode::MISSING_WHITESPACE_BETWEEN_ATTRIBUTES => {
-                (CompilerErrorCode::MissingWhitespaceBetweenAttributes, true)
+                (CompilerErrorCode::MissingWhitespaceBetweenAttributes, false)
             }
             ErrorCode::X_MISSING_INTERPOLATION_END => {
                 (CompilerErrorCode::XMissingInterpolationEnd, true)
@@ -1422,6 +1428,157 @@ impl Syntax {
         self.diagnostics.push(
             Diagnostic::error("syntax", CompilerErrorCode::XVElseNoAdjacentIf).with_span(tag_span),
         );
+    }
+}
+
+impl Syntax {
+    /// Validate that v-if chain siblings don't share the same `:key` value.
+    /// Called after close_element for elements with v_condition.
+    fn validate_v_if_same_key<'alloc>(&mut self, id: NodeId, ctx: &SyntaxPluginContext<'alloc>) {
+        let builder = match self.ast_builder.as_ref() {
+            Some(b) => b,
+            None => return,
+        };
+        let ast = &builder.ast;
+        let node = &ast.nodes[id.0];
+        let AstNodeKind::Element(el) = &node.kind else {
+            return;
+        };
+
+        // Only check elements in v-if chains
+        if el.v_condition.is_none() {
+            return;
+        }
+
+        // Find :key prop on this element
+        let my_key = match find_key_value(el, ctx.bytes) {
+            Some(k) => k,
+            None => return,
+        };
+
+        let key_span = Span::new(el.tag_open.start, el.tag_open.name_end);
+
+        // Walk backwards through v-if chain siblings
+        let mut prev = ast.prev_sibling(id);
+        while let Some(prev_id) = prev {
+            let prev_node = &ast.nodes[prev_id.0];
+            match &prev_node.kind {
+                AstNodeKind::Element(prev_el) => {
+                    if prev_el.v_condition.is_some() {
+                        // Check if previous sibling has same key value
+                        if let Some(prev_key) = find_key_value(prev_el, ctx.bytes) {
+                            if my_key == prev_key {
+                                self.diagnostics.push(
+                                    Diagnostic::error(
+                                        "syntax",
+                                        CompilerErrorCode::XVIfSameKey,
+                                    )
+                                    .with_span(key_span),
+                                );
+                                return;
+                            }
+                        }
+                        // If it's a v-if, stop walking (start of chain)
+                        if let Some(ref cond) = prev_el.v_condition {
+                            if matches!(cond.kind, ElementNodeConditionKind::If) {
+                                return;
+                            }
+                        }
+                    } else {
+                        // Non-conditional element — stop
+                        return;
+                    }
+                }
+                AstNodeKind::Comment(_) | AstNodeKind::Text(_) => {
+                    // Skip comments and whitespace text
+                }
+                AstNodeKind::Interpolation(_) => {
+                    return; // Stop at interpolation
+                }
+            }
+            prev = ast.prev_sibling(prev_id);
+        }
+    }
+}
+
+/// Find the `:key` directive value text from an element's props.
+fn find_key_value<'a>(el: &ElementNode, bytes: &'a [u8]) -> Option<&'a [u8]> {
+    for prop in &el.props {
+        if !prop.is_directive {
+            continue;
+        }
+        // Check if this is a :key or v-bind:key directive
+        if let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) {
+            let arg = &bytes[arg_start as usize..arg_end as usize];
+            if arg == b"key" {
+                // Return the value text
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    if ve > vs {
+                        return Some(&bytes[vs as usize..ve as usize]);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+impl Syntax {
+    /// Validate that a component element does not have duplicate v-slot names
+    /// among its children. Called after close_element attaches the node to its parent.
+    fn validate_slot_names<'alloc>(&mut self, id: NodeId, ctx: &SyntaxPluginContext<'alloc>) {
+        let builder = match self.ast_builder.as_ref() {
+            Some(b) => b,
+            None => return,
+        };
+        let ast = &builder.ast;
+        let node = &ast.nodes[id.0];
+        let AstNodeKind::Element(el) = &node.kind else {
+            return;
+        };
+
+        // Only check component elements (which can receive named slots)
+        if !matches!(el.tag_type, TagType::Component) {
+            return;
+        }
+
+        let Some(content) = &el.content else {
+            return;
+        };
+
+        let mut seen_slot_names: smallvec::SmallVec<[(&[u8], Span); 4]> = smallvec::SmallVec::new();
+
+        for &child_id in &content.children {
+            let child = &ast.nodes[child_id.0];
+            let AstNodeKind::Element(child_el) = &child.kind else {
+                continue;
+            };
+
+            let Some(ref v_slot) = child_el.v_slot else {
+                // Implicit default slot (child without v-slot on a non-template element)
+                // We skip these — only explicit v-slot directives are checked for duplicates.
+                continue;
+            };
+
+            // Extract slot name from the directive arg
+            let slot_name: &[u8] = match (v_slot.arg_start, v_slot.arg_end) {
+                (Some(s), Some(e)) if e > s => &ctx.bytes[s as usize..e as usize],
+                _ => b"default",
+            };
+
+            let slot_span = Span::new(v_slot.start, v_slot.name_end);
+
+            // Check for duplicate
+            if let Some((_, first_span)) = seen_slot_names.iter().find(|(name, _)| *name == slot_name) {
+                let _ = first_span; // first occurrence span available if needed
+                self.diagnostics.push(
+                    Diagnostic::error("syntax", CompilerErrorCode::XVSlotDuplicateSlotNames)
+                        .with_span(slot_span),
+                );
+            } else {
+                seen_slot_names.push((slot_name, slot_span));
+            }
+        }
     }
 }
 

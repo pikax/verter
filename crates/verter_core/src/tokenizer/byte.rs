@@ -542,6 +542,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
 
     fn state_before_tag_name(&mut self) {
         if self.index >= self.input.len() {
+            self.emit(Event::Error {
+                code: ErrorCode::EOF_BEFORE_TAG_NAME,
+                index: self.index as u32,
+            });
             return;
         }
         let c = self.input[self.index];
@@ -640,6 +644,18 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                     }
                     None => (self.index + gt_pos) as u32,
                 };
+
+                // Check for attributes on close tag: if there's non-whitespace
+                // content between the tag name and >, it's an error.
+                if let Some(ws) = ws_pos {
+                    let between = &remaining[ws..gt_pos];
+                    if between.iter().any(|&b| !is_whitespace(b)) {
+                        self.emit(Event::Error {
+                            code: ErrorCode::END_TAG_WITH_ATTRIBUTES,
+                            index: (self.index + ws) as u32,
+                        });
+                    }
+                }
 
                 let abs_gt = self.index + gt_pos;
                 self.emit_close_tag(tag_start as u32, abs_gt as u32 + 1, name_end);
@@ -1349,6 +1365,17 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                         quote: quote_type,
                         end: self.index as u32,
                     });
+                    // Check for missing whitespace between attributes:
+                    // after a closing quote, the next char must be whitespace, >, /, or EOF.
+                    if self.index < self.input.len() {
+                        let next = self.input[self.index];
+                        if !is_whitespace(next) && next != GT && next != SLASH {
+                            self.emit(Event::Error {
+                                code: ErrorCode::MISSING_WHITESPACE_BETWEEN_ATTRIBUTES,
+                                index: self.index as u32,
+                            });
+                        }
+                    }
                     self.state = State::BeforeAttrName;
                     self.section_start = self.index;
                     self.state_before_attr_name();
