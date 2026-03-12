@@ -1684,6 +1684,49 @@ defineProps<BacktopProps>()
     // Negative: no unresolved type errors
     expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
   });
+
+  it("relative import resolving to .mjs uses companion .d.ts for type resolution", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "dist", "tabs-view.vue").replace(/\\/g, "/");
+
+    // Create a dist/ structure with .mjs + .d.ts (like a pre-built workspace package)
+    const distDir = join(tempDir, "dist");
+    mkdirSync(distDir, { recursive: true });
+
+    // The runtime .mjs file — no type information
+    writeFileSync(join(distDir, "types.mjs"), "export const nothing = true;\n");
+    // The declaration file — has the actual type definitions
+    writeFileSync(
+      join(distDir, "types.d.ts"),
+      "export type TabsEmits = {\n  close: [string];\n  sortTabs: [number, number];\n  unpin: [any];\n};\n",
+    );
+
+    // SFC imports from ./types — bundler resolves to .mjs
+    const sfc = `<script setup lang="ts">
+import type { TabsEmits } from './types'
+const emit = defineEmits<TabsEmits>()
+</script>
+<template><div>tabs</div></template>
+`;
+
+    // Resolve hook returns the .mjs runtime file (not the .d.ts)
+    const resolveSpy = vi.fn(async (source: string) => {
+      if (source === "./types") return { id: join(distDir, "types.mjs").replace(/\\/g, "/") };
+      return null;
+    });
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // Positive: emit names from the .d.ts companion file
+    expect(code).toContain("close");
+    expect(code).toContain("sortTabs");
+    expect(code).toContain("unpin");
+    // Negative: no unresolved type errors
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+    expect(code).not.toContain("XInvalidMacroType");
+  });
 });
 
 describe("barrel file export signatures", () => {

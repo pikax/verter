@@ -274,13 +274,32 @@ export async function hydrateMacroTypeDeps(
       // Bare specifiers (npm packages) should go to Phase 2 which properly finds
       // the .d.ts declaration entry via package.json, not the .js runtime entry.
       if (isRelativeImport(specifier)) {
+        // If the resolved file is a JS runtime file (.js, .mjs, .cjs), check for a
+        // companion .d.ts/.d.mts/.d.cts file that has the actual type declarations.
+        // This happens in pre-built workspace packages (dist/) where types.mjs has
+        // no type info but types.d.ts has the full declarations.
+        let effectivePath = resolvedPath;
+        let effectiveNormalized = normalized;
+        const jsExtMatch = resolvedPath.match(/\.(js|mjs|cjs)$/);
+        if (jsExtMatch) {
+          const base = resolvedPath.slice(0, -jsExtMatch[0].length);
+          const dtsExts = [".d.ts", ".d.mts", ".d.cts"];
+          for (const ext of dtsExts) {
+            const candidate = base + ext;
+            if (fs.existsSync(candidate)) {
+              effectivePath = candidate;
+              effectiveNormalized = normalizePath(candidate);
+              break;
+            }
+          }
+        }
         try {
-          const depSrc = fs.readFileSync(resolvedPath);
-          host.upsert({ inputId: normalized, source: depSrc, fileKind: "non_sfc" });
+          const depSrc = fs.readFileSync(effectivePath);
+          host.upsert({ inputId: effectiveNormalized, source: depSrc, fileKind: "non_sfc" });
         } catch {
           // Read failed — skip
         }
-        resolutions.push({ specifier, resolvedCanonicalId: normalized });
+        resolutions.push({ specifier, resolvedCanonicalId: effectiveNormalized });
         continue;
       }
     }
