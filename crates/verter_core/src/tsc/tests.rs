@@ -3093,3 +3093,43 @@ fn tsc_dual_script_js_vuetify_figure_pattern() {
         parsed.errors.len()
     );
 }
+
+#[test]
+fn reserved_word_component_name_is_prefixed() {
+    let code = generate_tsc_output_with_options(
+        "<template><div>hello</div></template>",
+        "default",
+        &TscGenOptions::default(),
+    )
+    .code;
+    assert!(
+        code.contains("_default"),
+        "reserved word 'default' should be prefixed with _, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("const default"),
+        "should not produce `const default` (reserved word), got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn digit_prefix_component_name_is_prefixed() {
+    let code = generate_tsc_output_with_options(
+        "<template><div>not found</div></template>",
+        "404",
+        &TscGenOptions::default(),
+    )
+    .code;
+    assert!(
+        code.contains("_404"),
+        "digit-prefixed name should get _ prefix, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("const 404"),
+        "should not produce `const 404` (invalid identifier), got:\n{}",
+        code
+    );
+}

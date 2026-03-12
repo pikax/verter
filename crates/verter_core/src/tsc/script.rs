@@ -636,18 +636,35 @@ pub fn generate_tsc_output(sfc_source: &str, component_name: &str) -> TscOutput 
 /// Replaces non-alphanumeric, non-underscore, non-`$` characters with `_`.
 /// This handles dotted file stems like `Drawer.draggable` → `Drawer_draggable`.
 fn sanitize_tsc_component_name(name: &str) -> String {
-    let mut result = String::with_capacity(name.len());
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
-            result.push(ch);
-        } else {
-            result.push('_');
-        }
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '$' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let result = if sanitized.is_empty() {
+        "_Component".to_string()
+    } else if sanitized.chars().next().unwrap().is_ascii_digit() {
+        format!("_{sanitized}")
+    } else {
+        sanitized
+    };
+
+    // Prefix reserved words so they are valid TS identifiers
+    match result.as_str() {
+        "default" | "export" | "import" | "class" | "function" | "return" | "var" | "let"
+        | "const" | "if" | "else" | "for" | "while" | "do" | "switch" | "case" | "break"
+        | "continue" | "new" | "delete" | "typeof" | "void" | "this" | "with" | "throw" | "try"
+        | "catch" | "finally" | "in" | "of" | "yield" | "await" | "async" | "extends" | "super"
+        | "static" | "enum" | "implements" | "interface" | "package" | "private" | "protected"
+        | "public" => format!("_{result}"),
+        _ => result,
     }
-    if result.is_empty() {
-        result.push_str("_Component");
-    }
-    result
 }
 
 /// Like [`generate_tsc_output`] but with explicit options.
