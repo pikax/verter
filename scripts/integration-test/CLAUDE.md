@@ -18,6 +18,7 @@ When adding, removing, or modifying a project in **either** file, you **MUST** u
 | `e2eCmd` | `e2e-cmd` |
 | `packageManager` | `package-manager` |
 | `bundler` | `bundler` |
+| `shallow` | `shallow` |
 
 ## Running Integration Tests
 
