@@ -3,7 +3,13 @@
   "version": "0.0.1-alpha.3",
   "private": true,
   "description": "Vue compiler and Language Server Protocol implementation",
-  "keywords": ["vue", "compiler", "sfc", "typescript", "lsp"],
+  "keywords": [
+    "vue",
+    "compiler",
+    "sfc",
+    "typescript",
+    "lsp"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -63,6 +69,7 @@
     "esbuild-plugin-alias": "^0.2.1",
     "esbuild-plugin-alias-path": "^2.0.2",
     "glob": "^13.0.6",
+    "husky": "^9.1.7",
     "json-diff": "^1.0.6",
     "vitest": "^4.1.0"
   },
