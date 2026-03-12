@@ -19,8 +19,8 @@ impl LintRule for NoArrowFunctionsInWatch {
         RuleCategory::Script
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {

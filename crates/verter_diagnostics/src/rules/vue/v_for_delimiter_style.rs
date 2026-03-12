@@ -21,8 +21,8 @@ impl LintRule for VForDelimiterStyle {
         RuleCategory::VueRecommended
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_v_for(&self, _vfor: &VForDirective, _el: &TemplateElement, _ctx: &mut LintContext) {
@@ -41,6 +41,6 @@ mod tests {
         let rule = VForDelimiterStyle;
         assert_eq!(rule.name(), "v-for-delimiter-style");
         assert_eq!(rule.category(), RuleCategory::VueRecommended);
-        assert_eq!(rule.default_severity(), Severity::Warning);
+        assert_eq!(rule.default_severity(), Some(Severity::Warning));
     }
 }

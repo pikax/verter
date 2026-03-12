@@ -20,8 +20,8 @@ impl LintRule for MatchComponentFileName {
         RuleCategory::VueRecommended
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_file(&self, _file: &FileContext<'_>, _ctx: &mut LintContext) {
@@ -39,6 +39,6 @@ mod tests {
         let rule = MatchComponentFileName;
         assert_eq!(rule.name(), "match-component-file-name");
         assert_eq!(rule.category(), RuleCategory::VueRecommended);
-        assert_eq!(rule.default_severity(), Severity::Warning);
+        assert_eq!(rule.default_severity(), Some(Severity::Warning));
     }
 }

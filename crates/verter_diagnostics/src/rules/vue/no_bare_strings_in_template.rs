@@ -22,9 +22,9 @@ impl LintRule for NoBareStringsInTemplate {
         RuleCategory::VueRecommended
     }
 
-    fn default_severity(&self) -> Severity {
+    fn default_severity(&self) -> Option<Severity> {
         // This is a very noisy rule — default to Hint
-        Severity::Hint
+        Some(Severity::Hint)
     }
 
     fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {

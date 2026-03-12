@@ -21,8 +21,8 @@ impl LintRule for NoDeprecatedVIs {
         RuleCategory::VueEssential
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_directive(

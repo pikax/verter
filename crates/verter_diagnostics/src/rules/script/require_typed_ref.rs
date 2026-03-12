@@ -26,12 +26,8 @@ impl LintRule for RequireTypedRef {
         RuleCategory::Script
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
-    }
-
-    fn is_default_off(&self) -> bool {
-        true
+    fn default_severity(&self) -> Option<Severity> {
+        None // Opt-in: off by default
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {
@@ -56,11 +52,24 @@ impl LintRule for RequireTypedRef {
 mod tests {
     use super::*;
 
+    use crate::config::LintConfig;
+    use crate::context::LintContext;
+    use crate::visitor::LintVisitor;
     use verter_analysis::types::*;
     use verter_span::Span;
 
+    /// Run the rule with it explicitly enabled (since it's off by default).
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
-        crate::test_support::run_script_rule(RequireTypedRef, script)
+        let rule = RequireTypedRef;
+        let rules: Vec<Box<dyn crate::rules::LintRule>> = vec![Box::new(rule)];
+        let visitor = LintVisitor::new(&rules);
+        let mut config = LintConfig::default();
+        config
+            .rules
+            .insert("require-typed-ref".to_string(), Some(Severity::Warning));
+        let mut ctx = LintContext::new(&config);
+        visitor.visit_script(script, &mut ctx);
+        ctx.into_diagnostics()
     }
 
     fn make_ref_call(has_type_params: bool, arg_value: Option<&str>) -> VueApiCallSite {
@@ -166,10 +175,11 @@ mod tests {
     }
 
     #[test]
-    fn is_default_off() {
-        assert!(
-            RequireTypedRef.is_default_off(),
-            "require-typed-ref should be default off"
+    fn default_severity_is_none() {
+        assert_eq!(
+            RequireTypedRef.default_severity(),
+            None,
+            "require-typed-ref should be off by default (None severity)"
         );
     }
 }

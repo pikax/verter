@@ -23,8 +23,8 @@ impl LintRule for ValidVModel {
         RuleCategory::VueEssential
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Error
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Error)
     }
 
     fn check_element(&self, el: &TemplateElement, ctx: &mut LintContext) {

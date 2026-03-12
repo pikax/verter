@@ -105,8 +105,8 @@ mod tests {
         fn category(&self) -> RuleCategory {
             RuleCategory::VueEssential
         }
-        fn default_severity(&self) -> Severity {
-            Severity::Warning
+        fn default_severity(&self) -> Option<Severity> {
+            Some(Severity::Warning)
         }
         fn check_element(
             &self,

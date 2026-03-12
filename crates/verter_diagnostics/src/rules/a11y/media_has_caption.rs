@@ -24,8 +24,8 @@ impl LintRule for MediaHasCaption {
         RuleCategory::Accessibility
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Error
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Error)
     }
 
     fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {

@@ -16,8 +16,8 @@ impl LintRule for NoVShowPreferVIf {
         RuleCategory::Ssr
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Hint
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Hint)
     }
 
     fn check_directive(

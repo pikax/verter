@@ -35,8 +35,8 @@ impl LintRule for NoCircularStoreDeps {
         RuleCategory::CrossFile
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_cross_file(&self, snapshot: &CrossFileSnapshot, ctx: &mut LintContext) {

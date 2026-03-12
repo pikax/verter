@@ -46,8 +46,8 @@ impl LintRule for MaxTemplateDepth {
         RuleCategory::Performance
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {
@@ -138,7 +138,7 @@ mod tests {
         let rule = MaxTemplateDepth::new();
         assert_eq!(rule.name(), "max-template-depth");
         assert_eq!(rule.category(), RuleCategory::Performance);
-        assert_eq!(rule.default_severity(), Severity::Warning);
+        assert_eq!(rule.default_severity(), Some(Severity::Warning));
     }
 
     /// @ai-generated - Depth within limit produces no diagnostic

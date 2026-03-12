@@ -22,8 +22,8 @@ impl LintRule for PreferStaticClass {
         RuleCategory::Performance
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_element(&self, el: &TemplateElement, ctx: &mut LintContext) {
@@ -107,7 +107,7 @@ mod tests {
         let rule = PreferStaticClass;
         assert_eq!(rule.name(), "prefer-static-class");
         assert_eq!(rule.category(), RuleCategory::Performance);
-        assert_eq!(rule.default_severity(), Severity::Warning);
+        assert_eq!(rule.default_severity(), Some(Severity::Warning));
     }
 
     /// @ai-generated - Dynamic class with string literal reports

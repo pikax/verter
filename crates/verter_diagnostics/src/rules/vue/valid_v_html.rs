@@ -18,8 +18,8 @@ impl LintRule for ValidVHtml {
         RuleCategory::VueEssential
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Error
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Error)
     }
 
     fn check_directive(

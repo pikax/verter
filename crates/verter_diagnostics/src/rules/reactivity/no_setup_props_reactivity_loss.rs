@@ -31,8 +31,8 @@ impl LintRule for NoSetupPropsReactivityLoss {
         RuleCategory::Reactivity
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, _ctx: &mut LintContext) {
@@ -66,7 +66,7 @@ mod tests {
         let rule = NoSetupPropsReactivityLoss;
         assert_eq!(rule.name(), "no-setup-props-reactivity-loss");
         assert_eq!(rule.category(), RuleCategory::Reactivity);
-        assert_eq!(rule.default_severity(), Severity::Warning);
+        assert_eq!(rule.default_severity(), Some(Severity::Warning));
     }
 
     /// @ai-generated - check_script runs without panic on empty macros

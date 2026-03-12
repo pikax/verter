@@ -19,8 +19,8 @@ impl LintRule for UndefinedCssClass {
         RuleCategory::Css
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Hint
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Hint)
     }
 
     fn check_file(&self, file: &FileContext<'_>, ctx: &mut LintContext) {

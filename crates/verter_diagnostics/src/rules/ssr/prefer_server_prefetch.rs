@@ -16,8 +16,8 @@ impl LintRule for PreferServerPrefetch {
         RuleCategory::Ssr
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Hint
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Hint)
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {

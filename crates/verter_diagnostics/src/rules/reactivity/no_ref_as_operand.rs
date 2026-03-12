@@ -22,8 +22,8 @@ impl LintRule for NoRefAsOperand {
         RuleCategory::Reactivity
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, _ctx: &mut LintContext) {
@@ -55,7 +55,7 @@ mod tests {
         let rule = NoRefAsOperand;
         assert_eq!(rule.name(), "no-ref-as-operand");
         assert_eq!(rule.category(), RuleCategory::Reactivity);
-        assert_eq!(rule.default_severity(), Severity::Warning);
+        assert_eq!(rule.default_severity(), Some(Severity::Warning));
     }
 
     /// @ai-generated - check_script runs without panic on empty bindings

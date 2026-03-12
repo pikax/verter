@@ -20,8 +20,8 @@ impl LintRule for NoUnusedComponents {
         RuleCategory::VueRecommended
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {
@@ -54,6 +54,6 @@ mod tests {
         let rule = NoUnusedComponents;
         assert_eq!(rule.name(), "no-unused-components");
         assert_eq!(rule.category(), RuleCategory::VueRecommended);
-        assert_eq!(rule.default_severity(), Severity::Warning);
+        assert_eq!(rule.default_severity(), Some(Severity::Warning));
     }
 }

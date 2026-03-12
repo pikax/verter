@@ -18,8 +18,8 @@ impl LintRule for TabindexNoPositive {
     fn category(&self) -> RuleCategory {
         RuleCategory::Accessibility
     }
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
     fn check_element(&self, el: &TemplateElement, ctx: &mut LintContext) {
         for attr in &el.attributes {

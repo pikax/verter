@@ -376,7 +376,7 @@ mod tests {
             "Unused selector".to_string(),
             5,
             20,
-            Severity::Hint,
+            Some(Severity::Hint),
             vec![DiagnosticTag::Unnecessary],
             DiagnosticSpanKind::CssSelector,
         );

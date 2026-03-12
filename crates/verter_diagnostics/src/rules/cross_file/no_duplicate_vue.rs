@@ -35,8 +35,8 @@ impl LintRule for NoDuplicateVue {
         RuleCategory::CrossFile
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Error
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Error)
     }
 
     fn check_cross_file(&self, snapshot: &CrossFileSnapshot, ctx: &mut LintContext) {

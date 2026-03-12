@@ -18,8 +18,8 @@ impl LintRule for NoAutofocus {
     fn category(&self) -> RuleCategory {
         RuleCategory::Accessibility
     }
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
     fn check_element(&self, el: &TemplateElement, ctx: &mut LintContext) {
         if let Some(attr) = el.attributes.iter().find(|a| a.name == "autofocus") {

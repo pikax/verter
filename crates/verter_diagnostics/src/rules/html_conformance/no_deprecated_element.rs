@@ -40,8 +40,8 @@ impl LintRule for NoDeprecatedElement {
         RuleCategory::HtmlConformance
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_element(&self, el: &TemplateElement, ctx: &mut LintContext) {

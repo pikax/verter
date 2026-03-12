@@ -31,8 +31,8 @@ impl LintRule for DeepComposableTracking {
         RuleCategory::CrossFile
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Info
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Info)
     }
 
     fn check_cross_file(&self, snapshot: &CrossFileSnapshot, ctx: &mut LintContext) {

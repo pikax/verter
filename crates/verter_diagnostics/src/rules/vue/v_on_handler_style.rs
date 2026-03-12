@@ -22,8 +22,8 @@ impl LintRule for VOnHandlerStyle {
         RuleCategory::VueRecommended
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Hint
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Hint)
     }
 
     fn check_directive(

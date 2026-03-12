@@ -22,8 +22,8 @@ impl LintRule for PreferDefineOptions {
         RuleCategory::Script
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Hint
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Hint)
     }
 
     fn check_script(&self, _script: &ScriptAnalysisSnapshot, _ctx: &mut LintContext) {
@@ -46,6 +46,6 @@ mod tests {
         let rule = PreferDefineOptions;
         assert_eq!(rule.name(), "prefer-define-options");
         assert_eq!(rule.category(), RuleCategory::Script);
-        assert_eq!(rule.default_severity(), Severity::Hint);
+        assert_eq!(rule.default_severity(), Some(Severity::Hint));
     }
 }

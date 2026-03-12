@@ -35,8 +35,8 @@ impl LintRule for NoInlineLifecycle {
         RuleCategory::Script
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Info
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Info)
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {

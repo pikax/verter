@@ -29,8 +29,8 @@ impl LintRule for ProvideInjectValidation {
         RuleCategory::CrossFile
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_cross_file(&self, snapshot: &CrossFileSnapshot, ctx: &mut LintContext) {
@@ -46,7 +46,7 @@ impl LintRule for ProvideInjectValidation {
                 ),
                 entry.span.start,
                 entry.span.end,
-                Severity::Warning,
+                Some(Severity::Warning),
                 DiagnosticSpanKind::CrossFileEntry,
             );
         }
@@ -62,7 +62,7 @@ impl LintRule for ProvideInjectValidation {
                 ),
                 entry.span.start,
                 entry.span.end,
-                Severity::Info,
+                Some(Severity::Info),
                 DiagnosticSpanKind::CrossFileEntry,
             );
         }

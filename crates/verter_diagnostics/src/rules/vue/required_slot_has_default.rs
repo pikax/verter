@@ -45,8 +45,8 @@ impl LintRule for RequiredSlotHasDefault {
         RuleCategory::VueRecommended
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_file(&self, file: &FileContext<'_>, ctx: &mut LintContext) {

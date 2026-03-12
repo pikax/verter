@@ -22,8 +22,8 @@ impl LintRule for NoVForIndexAsKey {
         RuleCategory::Performance
     }
 
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
+    fn default_severity(&self) -> Option<Severity> {
+        Some(Severity::Warning)
     }
 
     fn check_v_for(&self, vfor: &VForDirective, _el: &TemplateElement, ctx: &mut LintContext) {
