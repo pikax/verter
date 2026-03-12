@@ -201,7 +201,9 @@ Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preproc
 
 **`@vitejs/plugin-vue` approach** (for comparison): Returns raw style content from `load()`, performs only scoping (not preprocessing) in `transform()` via `compileStyleAsync`, and lets Vite's built-in CSS pipeline handle all preprocessing. Verter preprocesses eagerly because it needs the compiled CSS for analysis.
 
-**Key files**: `packages/unplugin/src/core/preprocessor-session.ts` (child process preprocessing), `crates/verter_host/src/host_upsert.rs` (`apply_style_overrides` — lang update), `crates/verter_host/src/id.rs` (`render_ids` — URL generation).
+**Preprocessor tuning**: The child process has a 120s request timeout (`REQUEST_TIMEOUT_MS`) and max 8 concurrent `preprocessCSS()` calls. The timeout was raised from 30s because projects like zyronon-douyin have 123 Less files — with default Vite Less preprocessing, individual files can take 10-30s. The concurrency limiter prevents resource exhaustion when all files queue simultaneously.
+
+**Key files**: `packages/unplugin/src/core/preprocessor-session.ts` (child process preprocessing, timeout + session lifecycle), `packages/unplugin/src/core/style-preprocess-worker.ts` (concurrency limiter, actual preprocessing), `crates/verter_host/src/host_upsert.rs` (`apply_style_overrides` — lang update), `crates/verter_host/src/id.rs` (`render_ids` — URL generation).
 
 ### Cached Directive Fields on ElementNode
 

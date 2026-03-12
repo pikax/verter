@@ -130,9 +130,7 @@ async function applyAdditionalData(
   return content;
 }
 
-async function tryCompileSass(
-  msg: PreprocessMessage,
-): Promise<WorkerPreprocessResult | null> {
+async function tryCompileSass(msg: PreprocessMessage): Promise<WorkerPreprocessResult | null> {
   const lang = msg.lang.toLowerCase();
   if (lang !== "scss" && lang !== "sass") {
     return null;
@@ -147,11 +145,7 @@ async function tryCompileSass(
 
   try {
     const options = getStyleOptions(lang);
-    const content = await applyAdditionalData(
-      msg.content,
-      options.additionalData,
-      msg.filename,
-    );
+    const content = await applyAdditionalData(msg.content, options.additionalData, msg.filename);
     const result = await sass.compileStringAsync(content, {
       syntax: lang === "sass" ? "indented" : "scss",
       url: pathToFileURL(`${msg.filename}.${lang}`),
@@ -170,9 +164,7 @@ async function tryCompileSass(
   }
 }
 
-async function preprocessWithVite(
-  msg: PreprocessMessage,
-): Promise<WorkerPreprocessResult> {
+async function preprocessWithVite(msg: PreprocessMessage): Promise<WorkerPreprocessResult> {
   const { preprocessCSS } = await import("vite");
   const result = await preprocessCSS(
     msg.content,
@@ -188,7 +180,7 @@ async function preprocessWithVite(
 
 async function handlePreprocess(msg: PreprocessMessage): Promise<void> {
   try {
-    const result = await tryCompileSass(msg) ?? await preprocessWithVite(msg);
+    const result = (await tryCompileSass(msg)) ?? (await preprocessWithVite(msg));
     process.send!({
       type: "result",
       id: msg.id,
@@ -202,6 +194,30 @@ async function handlePreprocess(msg: PreprocessMessage): Promise<void> {
       message: e instanceof Error ? e.message : String(e),
     });
   }
+}
+
+// Concurrency limiter: avoid overwhelming the system when 100+ files
+// queue up for preprocessing simultaneously (e.g., 123 Less files in
+// zyronon-douyin).  Without this, all preprocessCSS() calls run in
+// parallel, exhausting memory/CPU and causing timeouts.
+const MAX_CONCURRENT = 8;
+let activeCount = 0;
+const queue: PreprocessMessage[] = [];
+
+function drainQueue(): void {
+  while (queue.length > 0 && activeCount < MAX_CONCURRENT) {
+    const next = queue.shift()!;
+    activeCount++;
+    handlePreprocess(next).finally(() => {
+      activeCount--;
+      drainQueue();
+    });
+  }
+}
+
+function enqueuePreprocess(msg: PreprocessMessage): void {
+  queue.push(msg);
+  drainQueue();
 }
 
 process.on("message", async (msg: ParentMessage) => {
@@ -218,7 +234,7 @@ process.on("message", async (msg: ParentMessage) => {
       }
       break;
     case "preprocess":
-      await handlePreprocess(msg);
+      enqueuePreprocess(msg);
       break;
     case "close":
       process.exit(0);

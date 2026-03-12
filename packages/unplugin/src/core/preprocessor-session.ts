@@ -17,11 +17,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { HostPreprocessorRequest } from "@verter/native";
 import type { BlockPreprocessor } from "./types";
-import {
-  preprocessCustom,
-  preprocessScript,
-  preprocessTemplate,
-} from "./preprocessor";
+import { preprocessCustom, preprocessScript, preprocessTemplate } from "./preprocessor";
 
 interface PreprocessResult {
   code: string;
@@ -45,7 +41,7 @@ interface WorkerLaunchConfig {
 }
 
 const STYLE_LANGS = new Set(["scss", "sass", "less", "styl", "stylus"]);
-const REQUEST_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 120_000;
 const CLOSE_TIMEOUT_MS = 2_000;
 const require = createRequire(import.meta.url);
 

@@ -93,6 +93,25 @@ If "No files contain @verter/unplugin after replacement":
 2. Check how the project imports its Vue plugin (grep for `@vitejs/plugin-vue` or `rollup-plugin-vue`)
 3. The replacement patterns may need to be extended in both `run.mjs` (Node.js `String.replace`) and `integration-test.yml` (bash `sed`)
 
+### Stale native binary (`.node` file)
+
+**Symptom**: `host?.close is not a function` or missing methods on `VerterHost` at runtime.
+
+**Cause**: pnpm's content-addressable store retains old `.node` binaries via hardlinks. `copyRecursive()` may fail silently on locked/hardlinked files (the `catch {}` swallows the error), leaving a stale binary in `.pnpm/` even after the overwrite step reports success.
+
+**Diagnosis**: Run from the project's `node_modules/`:
+```bash
+node -e "const r = require('@verter/native'); const h = new r.VerterHost({}); console.log(Object.getOwnPropertyNames(Object.getPrototypeOf(h)))"
+```
+Check that the listed methods include the one reported missing (e.g., `close`).
+
+**Fix**:
+1. Rebuild native bindings: `pnpm run build:native`
+2. Delete the project's checkout: `rm -rf .integration-tests/repos/<project>/`
+3. Re-run: `pnpm integration-test --skip-build --no-clone <project>`
+
+**Prevention**: The overwrite step now verifies native binary file size after copy and retries with direct `fs.copyFileSync` if the initial copy failed.
+
 ### Type-check review queue
 
 `vue-tsc` is the baseline. Extra `verter-tsc` diagnostics are persisted, not auto-dismissed:

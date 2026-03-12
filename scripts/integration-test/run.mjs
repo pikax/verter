@@ -1103,6 +1103,42 @@ function installVerterTarballs(project, repoDir) {
 
     fs.rmSync(destDist, { recursive: true, force: true });
     copyRecursive(srcDist, destDist);
+
+    // Verify native binary was actually copied (copyRecursive silently swallows
+    // errors for locked/hardlinked files — common with pnpm's content-addressable store).
+    if (pkg === "native") {
+      const binaries = expectedNativeBinaries();
+      let verified = false;
+      for (const bin of binaries) {
+        const srcBin = path.join(srcDist, bin);
+        const destBin = path.join(destDist, bin);
+        if (!fs.existsSync(srcBin)) continue;
+        const srcSize = fs.statSync(srcBin).size;
+        if (!fs.existsSync(destBin) || fs.statSync(destBin).size !== srcSize) {
+          log(
+            project.name,
+            `  Native binary ${bin} copy failed or size mismatch, retrying with direct copy...`,
+          );
+          try {
+            // Remove destination first in case it's a stale hardlink
+            if (fs.existsSync(destBin)) fs.rmSync(destBin, { force: true });
+            fs.copyFileSync(srcBin, destBin);
+          } catch (e) {
+            log(project.name, `  WARNING: Could not copy native binary ${bin}: ${e.message}`);
+          }
+        }
+        if (fs.existsSync(destBin) && fs.statSync(destBin).size === srcSize) {
+          verified = true;
+        }
+      }
+      if (!verified) {
+        log(
+          project.name,
+          `  WARNING: Native binary verification failed for ${destDist}. Build may crash at runtime.`,
+        );
+      }
+    }
+
     overwrittenPkgs.add(pkg);
     overwritten++;
   }
@@ -1648,9 +1684,10 @@ function verifyReplacement(project, repoDir) {
 
 function runBuild(project, repoDir, label) {
   log(project.name, `[${label}] Building: ${project.buildCmd}`);
-  const result = run(project.buildCmd, repoDir, { timeout: 3 * 60_000 });
+  const buildTimeout = project.bundler === "nuxt" ? 10 * 60_000 : 5 * 60_000;
+  const result = run(project.buildCmd, repoDir, { timeout: buildTimeout });
   const dur = (result.durationMs / 1000).toFixed(1);
-  const timedOut = result.durationMs >= 3 * 60_000 - 1000;
+  const timedOut = result.durationMs >= buildTimeout - 1000;
   log(
     project.name,
     `[${label}] Build ${result.ok ? "OK" : timedOut ? "TIMEOUT" : "FAILED"} (${dur}s)`,
