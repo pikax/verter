@@ -95,8 +95,17 @@ pub trait LintRule: Send + Sync {
     fn name(&self) -> &'static str;
     /// Rule category.
     fn category(&self) -> RuleCategory;
-    /// Default severity.
+    /// Default severity (used when the rule is enabled).
     fn default_severity(&self) -> Severity;
+
+    /// Whether this rule is off by default (opt-in).
+    ///
+    /// Opt-in rules are not run unless explicitly enabled via configuration
+    /// (e.g., in `.verterrc.json` `rules` map). Override this to return `true`
+    /// for rules that users must consciously opt into.
+    fn is_default_off(&self) -> bool {
+        false
+    }
 
     // ── Template hooks ──
 
@@ -276,6 +285,7 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(vue::NoUnusedRefs));
     registry.register(Box::new(vue::NoVTextDirective));
     registry.register(Box::new(vue::RequireDefineSlots));
+    registry.register(Box::new(vue::RequiredSlotHasDefault));
     registry.register(Box::new(vue::NoDuplicateModelModifiers));
     registry.register(Box::new(vue::DefineModelTypeRequired));
     registry.register(Box::new(vue::NoInvalidHtmlNesting));

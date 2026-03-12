@@ -67,14 +67,26 @@ pub enum LintPreset {
 impl LintConfig {
     /// Returns the effective severity for a rule, considering the preset and overrides.
     /// Returns `None` if the rule is disabled.
-    pub fn effective_severity(&self, rule_name: &str, default: Severity) -> Option<Severity> {
+    ///
+    /// If `default_off` is true, the rule is opt-in: it is disabled unless
+    /// explicitly enabled in the config `rules` map or a Strict preset is active.
+    pub fn effective_severity(
+        &self,
+        rule_name: &str,
+        default: Severity,
+        default_off: bool,
+    ) -> Option<Severity> {
         // Check per-rule overrides first
         if let Some(override_sev) = self.rules.get(rule_name) {
             return *override_sev;
         }
-        // Strict preset promotes everything to Error
+        // Strict preset promotes everything to Error (including opt-in rules)
         if self.preset == LintPreset::Strict {
             return Some(Severity::Error);
+        }
+        // Opt-in rules are disabled unless explicitly enabled
+        if default_off {
+            return None;
         }
         Some(default)
     }
@@ -418,7 +430,7 @@ mod tests {
         let mut config = LintConfig::default();
         config.rules.insert("no-v-html".to_string(), None);
         assert_eq!(
-            config.effective_severity("no-v-html", Severity::Warning),
+            config.effective_severity("no-v-html", Severity::Warning, false),
             None
         );
     }
@@ -430,7 +442,7 @@ mod tests {
             .rules
             .insert("no-v-html".to_string(), Some(Severity::Error));
         assert_eq!(
-            config.effective_severity("no-v-html", Severity::Warning),
+            config.effective_severity("no-v-html", Severity::Warning, false),
             Some(Severity::Error)
         );
     }
@@ -442,8 +454,44 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            config.effective_severity("any-rule", Severity::Warning),
+            config.effective_severity("any-rule", Severity::Warning, false),
             Some(Severity::Error)
+        );
+    }
+
+    #[test]
+    fn default_off_rule_is_disabled_without_override() {
+        let config = LintConfig::default();
+        assert_eq!(
+            config.effective_severity("require-typed-ref", Severity::Warning, true),
+            None,
+            "default-off rules should be disabled without explicit config"
+        );
+    }
+
+    #[test]
+    fn default_off_rule_can_be_enabled_via_override() {
+        let mut config = LintConfig::default();
+        config
+            .rules
+            .insert("require-typed-ref".to_string(), Some(Severity::Warning));
+        assert_eq!(
+            config.effective_severity("require-typed-ref", Severity::Warning, true),
+            Some(Severity::Warning),
+            "default-off rules should be enabled when explicitly configured"
+        );
+    }
+
+    #[test]
+    fn default_off_rule_enabled_by_strict_preset() {
+        let config = LintConfig {
+            preset: LintPreset::Strict,
+            ..Default::default()
+        };
+        assert_eq!(
+            config.effective_severity("require-typed-ref", Severity::Warning, true),
+            Some(Severity::Error),
+            "Strict preset should enable default-off rules at Error severity"
         );
     }
 

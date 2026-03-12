@@ -60,6 +60,7 @@ mod tests {
             api: VueApiClassification::NextTick,
             span: Span::new(10, 40),
             arg_value: None,
+            has_type_params: false,
             is_async_callback,
             callback_params: vec![],
         }
@@ -101,6 +102,7 @@ mod tests {
                 api: VueApiClassification::WatchEffect,
                 span: Span::new(10, 40),
                 arg_value: None,
+                has_type_params: false,
                 is_async_callback: true,
                 callback_params: vec![],
             }],

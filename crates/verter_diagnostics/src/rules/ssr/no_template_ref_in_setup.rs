@@ -53,6 +53,7 @@ mod tests {
             api,
             span: Span::new(10, 40),
             arg_value: Some("myRef".to_string()),
+            has_type_params: false,
             is_async_callback: false,
             callback_params: vec![],
         }

@@ -1142,6 +1142,7 @@ fn try_extract_vue_api_call(
                     api,
                     span: call.span.into(),
                     arg_value,
+                    has_type_params: call.type_arguments.is_some(),
                     is_async_callback,
                     callback_params,
                 });

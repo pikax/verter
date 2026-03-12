@@ -103,7 +103,7 @@ mod tests {
                 api: VueApiClassification::OnMounted,
                 span: Span::new(10, 30),
                 arg_value: None,
-
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }],
@@ -120,7 +120,7 @@ mod tests {
                 api: VueApiClassification::OnMounted,
                 span: Span::new(10, 30),
                 arg_value: None,
-
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }],
@@ -138,7 +138,7 @@ mod tests {
                 api: VueApiClassification::OnMounted,
                 span: Span::new(100, 120),
                 arg_value: None,
-
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }],
@@ -160,7 +160,7 @@ mod tests {
                 api: VueApiClassification::Watch,
                 span: Span::new(80, 100),
                 arg_value: None,
-
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }],
@@ -180,7 +180,7 @@ mod tests {
                 api: VueApiClassification::Provide,
                 span: Span::new(80, 100),
                 arg_value: None,
-
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }],
@@ -200,7 +200,7 @@ mod tests {
                 api: VueApiClassification::Ref,
                 span: Span::new(80, 100),
                 arg_value: None,
-
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }],
@@ -220,7 +220,7 @@ mod tests {
                     api: VueApiClassification::OnMounted,
                     span: Span::new(10, 30), // before await
                     arg_value: None,
-
+                    has_type_params: false,
                     is_async_callback: false,
                     callback_params: vec![],
                 },
@@ -228,7 +228,7 @@ mod tests {
                     api: VueApiClassification::OnUnmounted,
                     span: Span::new(100, 120), // after await
                     arg_value: None,
-
+                    has_type_params: false,
                     is_async_callback: false,
                     callback_params: vec![],
                 },
@@ -236,7 +236,7 @@ mod tests {
                     api: VueApiClassification::WatchEffect,
                     span: Span::new(130, 150), // after await
                     arg_value: None,
-
+                    has_type_params: false,
                     is_async_callback: false,
                     callback_params: vec![],
                 },

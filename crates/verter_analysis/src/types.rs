@@ -413,6 +413,8 @@ pub struct VueApiCallSite {
     pub span: Span,
     /// First string argument value, if available (e.g., for `useTemplateRef('foo')`).
     pub arg_value: Option<String>,
+    /// Whether the call has type parameters (e.g., `ref<string>()`).
+    pub has_type_params: bool,
     /// Whether the first function argument is an async function/arrow.
     /// Used by `no-async-in-computed` rule.
     pub is_async_callback: bool,
@@ -442,6 +444,7 @@ impl serde::Serialize for VueApiCallSite {
         use serde::ser::SerializeStruct;
         let count = 3
             + usize::from(self.arg_value.is_some())
+            + usize::from(self.has_type_params)
             + usize::from(self.is_async_callback)
             + usize::from(!self.callback_params.is_empty());
         let mut s = serializer.serialize_struct("VueApiCallSite", count)?;
@@ -450,6 +453,9 @@ impl serde::Serialize for VueApiCallSite {
         s.serialize_field("spanEnd", &self.span.end)?;
         if self.arg_value.is_some() {
             s.serialize_field("argValue", &self.arg_value)?;
+        }
+        if self.has_type_params {
+            s.serialize_field("hasTypeParams", &self.has_type_params)?;
         }
         if self.is_async_callback {
             s.serialize_field("isAsyncCallback", &self.is_async_callback)?;
@@ -472,6 +478,8 @@ impl<'de> serde::Deserialize<'de> for VueApiCallSite {
             #[serde(default)]
             arg_value: Option<String>,
             #[serde(default)]
+            has_type_params: bool,
+            #[serde(default)]
             is_async_callback: bool,
             #[serde(default)]
             callback_params: Vec<VueApiCallbackParam>,
@@ -481,6 +489,7 @@ impl<'de> serde::Deserialize<'de> for VueApiCallSite {
             api: w.api,
             span: Span::new(w.span_start, w.span_end),
             arg_value: w.arg_value,
+            has_type_params: w.has_type_params,
             is_async_callback: w.is_async_callback,
             callback_params: w.callback_params,
         })
@@ -828,6 +837,18 @@ pub struct AnalyzedEmitField {
     pub span: Span,
 }
 
+/// An individual slot field from `defineSlots`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedSlotField {
+    /// Slot name (e.g., `"default"`, `"header"`).
+    pub name: String,
+    /// Whether the slot is required (no `?` in type param).
+    pub is_required: bool,
+    /// SFC-absolute byte span of the slot name in the declaration.
+    pub span: Span,
+}
+
 // ── Options API Analysis Types ──
 
 /// Full analysis of an Options API component (`export default { ... }` or
@@ -931,6 +952,9 @@ pub struct AnalyzedMacro {
     /// Individual emit fields from `defineEmits` (type-based and runtime).
     /// Each field has the event name and the SFC-absolute span of the event name key.
     pub emit_fields: Vec<AnalyzedEmitField>,
+    /// Individual slot fields from `defineSlots` (type-based).
+    /// Each field has the slot name, whether it's required, and the SFC-absolute span.
+    pub slot_fields: Vec<AnalyzedSlotField>,
     /// SFC-absolute byte span of the macro call.
     pub span: Span,
 }
@@ -941,7 +965,8 @@ impl serde::Serialize for AnalyzedMacro {
         let count = 7
             + usize::from(self.model_name.is_some())
             + usize::from(!self.prop_fields.is_empty())
-            + usize::from(!self.emit_fields.is_empty());
+            + usize::from(!self.emit_fields.is_empty())
+            + usize::from(!self.slot_fields.is_empty());
         let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("isTypeBased", &self.is_type_based)?;
@@ -956,6 +981,9 @@ impl serde::Serialize for AnalyzedMacro {
         }
         if !self.emit_fields.is_empty() {
             s.serialize_field("emitFields", &self.emit_fields)?;
+        }
+        if !self.slot_fields.is_empty() {
+            s.serialize_field("slotFields", &self.slot_fields)?;
         }
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
@@ -981,6 +1009,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             #[serde(default)]
             emit_fields: Vec<AnalyzedEmitField>,
             #[serde(default)]
+            slot_fields: Vec<AnalyzedSlotField>,
+            #[serde(default)]
             span_start: u32,
             #[serde(default)]
             span_end: u32,
@@ -995,6 +1025,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             has_inherit_attrs_false: w.has_inherit_attrs_false,
             prop_fields: w.prop_fields,
             emit_fields: w.emit_fields,
+            slot_fields: w.slot_fields,
             span: Span::new(w.span_start, w.span_end),
         })
     }

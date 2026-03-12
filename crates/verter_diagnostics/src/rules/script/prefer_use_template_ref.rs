@@ -112,6 +112,7 @@ mod tests {
             api: VueApiClassification::UseTemplateRef,
             span: Span::new(0, 30),
             arg_value: Some(ref_name.to_string()),
+            has_type_params: false,
             is_async_callback: false,
             callback_params: vec![],
         }

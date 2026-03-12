@@ -388,6 +388,8 @@ export interface VueApiCallSite {
   spanEnd: number;
   /** First string argument value (e.g., provide key, useTemplateRef name). */
   argValue?: string | null;
+  /** Whether the call has type parameters (e.g., `ref<string>()`). */
+  hasTypeParams?: boolean;
   /** Whether the first function argument is async. */
   isAsyncCallback?: boolean;
 }
@@ -412,10 +414,7 @@ export interface DomQueryCallSite {
 
 // ── CSS Variable Manipulations ────────────────────────────────
 
-export type CssVarManipulationKind =
-  | "SetProperty"
-  | "GetPropertyValue"
-  | "RemoveProperty";
+export type CssVarManipulationKind = "SetProperty" | "GetPropertyValue" | "RemoveProperty";
 
 export interface CssVarManipulation {
   kind: CssVarManipulationKind;

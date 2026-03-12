@@ -23,6 +23,9 @@ pub struct LintContext<'a> {
     /// Each entry: `(rule_name, severity, start_offset, end_offset)`.
     /// `None` rule_name = all rules; `None` severity = suppress (off).
     severity_overrides: Vec<(Option<String>, Option<Severity>, u32, u32)>,
+    /// Rules that are off by default (opt-in). Only fired when explicitly
+    /// enabled in the config `rules` map or under the Strict preset.
+    default_off_rules: std::collections::HashSet<&'static str>,
 }
 
 impl<'a> LintContext<'a> {
@@ -33,6 +36,23 @@ impl<'a> LintContext<'a> {
             config,
             disabled_ranges: Vec::new(),
             severity_overrides: Vec::new(),
+            default_off_rules: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Create a new lint context, populating default-off rules from the registry.
+    pub fn with_rules(config: &'a LintConfig, rules: &[Box<dyn crate::rules::LintRule>]) -> Self {
+        let default_off_rules = rules
+            .iter()
+            .filter(|r| r.is_default_off())
+            .map(|r| r.name())
+            .collect();
+        Self {
+            set: DiagnosticSet::new(),
+            config,
+            disabled_ranges: Vec::new(),
+            severity_overrides: Vec::new(),
+            default_off_rules,
         }
     }
 
@@ -73,7 +93,11 @@ impl<'a> LintContext<'a> {
         if self.is_disabled(rule, span_start) {
             return;
         }
-        let severity = match self.config.effective_severity(rule, default_severity) {
+        let severity = match self.config.effective_severity(
+            rule,
+            default_severity,
+            self.default_off_rules.contains(rule),
+        ) {
             Some(s) => s,
             None => return, // Rule disabled via config
         };
@@ -134,7 +158,11 @@ impl<'a> LintContext<'a> {
         if self.is_disabled(rule, span_start) {
             return;
         }
-        let severity = match self.config.effective_severity(rule, default_severity) {
+        let severity = match self.config.effective_severity(
+            rule,
+            default_severity,
+            self.default_off_rules.contains(rule),
+        ) {
             Some(s) => s,
             None => return,
         };
@@ -173,7 +201,11 @@ impl<'a> LintContext<'a> {
         if self.is_disabled(rule, span_start) {
             return;
         }
-        let severity = match self.config.effective_severity(rule, default_severity) {
+        let severity = match self.config.effective_severity(
+            rule,
+            default_severity,
+            self.default_off_rules.contains(rule),
+        ) {
             Some(s) => s,
             None => return,
         };

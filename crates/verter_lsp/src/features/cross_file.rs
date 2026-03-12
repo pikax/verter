@@ -227,6 +227,7 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: verter_span::Span::new(24, 60),
             }])
             .into(),
@@ -335,6 +336,7 @@ mod tests {
                 api: VueApiClassification::UseAttrs,
                 span: verter_span::Span::new(30, 42),
                 arg_value: None,
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }])
@@ -402,6 +404,7 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: verter_span::Span::new(24, 57), // past the closing `)`
             }])
             .into(),
@@ -434,6 +437,7 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: verter_span::Span::new(15, 35),
             }])
             .into(),

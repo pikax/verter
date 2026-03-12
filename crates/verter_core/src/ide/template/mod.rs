@@ -61,6 +61,16 @@ enum StrictSlotChild {
     Interpolation { source_pos: u32 },
 }
 
+/// A collected entry for `checkRequiredSlots` emission.
+struct RequiredSlotsCheck {
+    /// SFC-absolute offset of the component's tag_open.start (for Comp function reference).
+    comp_offset: u32,
+    /// Slot names provided by the parent.
+    provided_slot_names: Vec<String>,
+    /// SFC-absolute position of the component tag (for sourcemapping).
+    source_pos: u32,
+}
+
 /// Shared context for TSX template walker functions.
 ///
 /// Groups the 7 parameters that are threaded identically through
@@ -77,6 +87,8 @@ struct IdeTemplateCtx<'a, 'alloc> {
     ts_directives_for_component_is: Vec<String>,
     /// Collected strict slot entries for `strictRenderSlot` emission.
     strict_slot_entries: Vec<StrictSlotEntry>,
+    /// Collected required slots checks for `checkRequiredSlots` emission.
+    required_slot_checks: Vec<RequiredSlotsCheck>,
 }
 
 /// Generate TSX template (JSX) from the template AST.
@@ -135,6 +147,7 @@ pub fn generate_ide_template<'alloc>(
         options,
         ts_directives_for_component_is: Vec::new(),
         strict_slot_entries: Vec::new(),
+        required_slot_checks: Vec::new(),
     };
     walk_children_with_iife_tracking(children, &mut ctx, &[]);
 
@@ -143,7 +156,7 @@ pub fn generate_ide_template<'alloc>(
     }
 
     // Emit strict slot checks after template content
-    if !ctx.strict_slot_entries.is_empty() {
+    if !ctx.strict_slot_entries.is_empty() || !ctx.required_slot_checks.is_empty() {
         emit_strict_slot_checks(&mut ctx, content.end);
     }
 }
@@ -556,6 +569,8 @@ fn walk_element<'a, 'alloc>(
     // ── Strict slot children collection ────────────────────────────
     if ctx.options.strict_slots && !ctx.options.is_jsx && el.tag_type == TagType::Component {
         collect_strict_slot_children(el, tag_name, ctx);
+        // Collect provided slot names for checkRequiredSlots
+        collect_required_slots_check(el, tag_name, ctx);
     }
 
     // Close slot IIFE: </>)(extractArgumentsFromRenderSlot(...))}
@@ -1857,6 +1872,96 @@ fn emit_strict_slot_checks(ctx: &mut IdeTemplateCtx<'_, '_>, emit_pos: u32) {
         // 3. Unmapped suffix
         ctx.out.prepend_alloc(emit_pos, "]);");
     }
+
+    // Emit required slot checks after strict slot checks
+    let required_checks = std::mem::take(&mut ctx.required_slot_checks);
+    for check in &required_checks {
+        let mut provided = String::from("{ ");
+        for (i, name) in check.provided_slot_names.iter().enumerate() {
+            if i > 0 {
+                provided.push_str(", ");
+            }
+            // Quote names containing hyphens or other special chars
+            if name.contains('-') || name.contains(' ') {
+                provided.push_str(&format!("'{}': true", name));
+            } else {
+                provided.push_str(&format!("{}: true", name));
+            }
+        }
+        provided.push_str(" }");
+
+        let call = format!(
+            "\n{prefix}checkRequiredSlots({{}} as NonNullable<ReturnType<typeof {prefix}Comp{offset}>['$slots']>, {provided});",
+            prefix = prefix,
+            offset = check.comp_offset,
+            provided = provided,
+        );
+        ctx.out
+            .prepend_alloc_mapped(emit_pos, check.source_pos, &call);
+    }
+}
+
+/// Collect provided slot names for a component element for required slot checking.
+///
+/// For every component usage, records which slot names the parent provides.
+/// Self-closing components (no children) get an empty `provided_slot_names`.
+fn collect_required_slots_check(
+    el: &ElementNode,
+    tag_name: &str,
+    ctx: &mut IdeTemplateCtx<'_, '_>,
+) {
+    // Skip dynamic <component :is>
+    if tag_name == "component" {
+        return;
+    }
+
+    let comp_offset = el.tag_open.start;
+    let source_pos = el.tag_open.start;
+
+    // Collect provided slot names from children
+    let mut provided_slot_names: Vec<String> = Vec::new();
+
+    if let Some(content) = &el.content {
+        if content.children.is_empty() {
+            // Empty tag like <Child></Child> — no slots provided
+        } else {
+            // Check for default slot (direct children that aren't templates with #name)
+            let mut has_non_template_child = false;
+            for &child_id in &content.children {
+                let child_node = &ctx.ast.nodes[child_id.0];
+                match &child_node.kind {
+                    crate::ast::types::AstNodeKind::Element(child_el) => {
+                        let child_tag_name = &ctx.source[(child_el.tag_open.start + 1) as usize
+                            ..child_el.tag_open.name_end as usize];
+                        if child_tag_name == "template" && child_el.v_slot.is_some() {
+                            // Named slot: <template #header> or <template v-slot:name>
+                            let slot_name = extract_template_slot_name(child_el, ctx.source);
+                            if !provided_slot_names.contains(&slot_name) {
+                                provided_slot_names.push(slot_name);
+                            }
+                        } else {
+                            has_non_template_child = true;
+                        }
+                    }
+                    crate::ast::types::AstNodeKind::Text(_)
+                    | crate::ast::types::AstNodeKind::Interpolation(_) => {
+                        has_non_template_child = true;
+                    }
+                    _ => {}
+                }
+            }
+            if has_non_template_child && !provided_slot_names.contains(&"default".to_string()) {
+                provided_slot_names.push("default".to_string());
+            }
+        }
+    }
+    // Self-closing: no content → empty provided_slot_names
+
+    ctx.required_slot_checks.push(RequiredSlotsCheck {
+        comp_offset,
+        provided_slot_names,
+        source_pos,
+    });
 }
 
 #[cfg(test)]

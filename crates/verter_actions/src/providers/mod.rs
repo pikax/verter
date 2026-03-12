@@ -4,6 +4,7 @@ mod add_component_is;
 mod extract_bare_text;
 mod html_self_close;
 mod insert_attribute;
+mod insert_type_param;
 mod prefer_script_attrs;
 mod remove_attribute;
 mod remove_directive;
@@ -27,6 +28,7 @@ pub use add_component_is::AddComponentIs;
 pub use extract_bare_text::ExtractBareText;
 pub use html_self_close::HtmlSelfClose;
 pub use insert_attribute::InsertAttribute;
+pub use insert_type_param::InsertTypeParam;
 pub use prefer_script_attrs::PreferScriptAttrs;
 pub use remove_attribute::RemoveAttribute;
 pub use remove_directive::RemoveDirective;
@@ -72,4 +74,5 @@ pub fn register_builtin_providers(engine: &mut ActionEngine) {
     engine.register(Box::new(PreferScriptAttrs));
     engine.register(Box::new(ExtractBareText));
     engine.register(Box::new(SsrWrap));
+    engine.register(Box::new(InsertTypeParam));
 }

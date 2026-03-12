@@ -86,6 +86,7 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: Span::new(20, 34),
             }],
             ..Default::default()
@@ -119,6 +120,7 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: Span::new(20, 42),
             }],
             ..Default::default()
@@ -143,6 +145,7 @@ mod tests {
                     has_inherit_attrs_false: false,
                     prop_fields: vec![],
                     emit_fields: vec![],
+                    slot_fields: vec![],
                     span: Span::new(20, 42),
                 },
                 AnalyzedMacro {
@@ -154,6 +157,7 @@ mod tests {
                     has_inherit_attrs_false: false,
                     prop_fields: vec![],
                     emit_fields: vec![],
+                    slot_fields: vec![],
                     span: Span::new(50, 72),
                 },
             ],
@@ -179,6 +183,7 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: Span::new(20, 40),
             }],
             ..Default::default()

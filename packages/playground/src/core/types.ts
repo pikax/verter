@@ -79,7 +79,23 @@ export class File {
   }
 }
 
-export type OutputMode = "preview" | "js" | "ssr" | "css" | "types" | "tsc" | "analysis" | "lint" | "outline" | "files" | "cssMatch" | "map" | "diagnostics" | "templateAst" | "cssVarFlow" | "depGraph";
+export type OutputMode =
+  | "preview"
+  | "js"
+  | "ssr"
+  | "css"
+  | "types"
+  | "tsc"
+  | "analysis"
+  | "lint"
+  | "outline"
+  | "files"
+  | "cssMatch"
+  | "map"
+  | "diagnostics"
+  | "templateAst"
+  | "cssVarFlow"
+  | "depGraph";
 
 export interface TsDiagnosticEntry {
   message: string;
@@ -501,6 +517,7 @@ export interface AnalysisVueApiCallSite {
   spanStart: number;
   spanEnd: number;
   argValue?: string | null;
+  hasTypeParams?: boolean;
   isAsyncCallback?: boolean;
 }
 

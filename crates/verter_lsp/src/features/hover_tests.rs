@@ -195,6 +195,7 @@ fn test_hover_on_vue_api_call_site() {
                 (call_offset + "onMounted".len()) as u32,
             ),
             arg_value: None,
+            has_type_params: false,
             is_async_callback: false,
             callback_params: vec![],
         }])

@@ -174,6 +174,7 @@ fn use_attrs_suppresses_all_unknown_props() {
             api: VueApiClassification::UseAttrs,
             span: verter_span::Span::new(30, 42),
             arg_value: None,
+            has_type_params: false,
             is_async_callback: false,
             callback_params: vec![],
         }])
@@ -486,6 +487,7 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: verter_span::Span::new(0, 30),
             })
             .collect::<Vec<_>>()
@@ -771,6 +773,7 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                 })
                 .collect(),
             emit_fields: vec![],
+            slot_fields: vec![],
             span: verter_span::Span::new(0, 30),
         }]
         .into(),
@@ -836,6 +839,7 @@ fn macro_fallback_with_defaults_pattern() {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: verter_span::Span::new(0, 50),
             },
             AnalyzedMacro {
@@ -858,6 +862,7 @@ fn macro_fallback_with_defaults_pattern() {
                     },
                 ],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: verter_span::Span::new(10, 40),
             },
         ]
@@ -912,5 +917,137 @@ fn empty_props_no_false_positives() {
     assert!(
         unknowns.is_empty(),
         "empty prop definitions should NOT produce false positive diagnostics"
+    );
+}
+
+// -- missing required slot tests --
+
+fn make_component_with_slots(
+    name: &str,
+    import_source: &str,
+    slots_used: Vec<String>,
+) -> TemplateComponentUsage {
+    TemplateComponentUsage {
+        name: name.to_string(),
+        import_source: Some(import_source.to_string()),
+        is_dynamic: false,
+        props: vec![],
+        has_spread: false,
+        slots_used,
+        static_classes: vec![],
+        has_dynamic_class: false,
+        dynamic_classes: vec![],
+        v_models: vec![],
+        span: verter_span::Span::new(0, 50),
+    }
+}
+
+fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSnapshot {
+    FileAnalysisSnapshot {
+        macros: vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineSlots,
+            is_type_based: true,
+            type_references: vec![],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: vec![],
+            emit_fields: vec![],
+            slot_fields: slot_names
+                .iter()
+                .map(|(name, required)| verter_analysis::AnalyzedSlotField {
+                    name: name.to_string(),
+                    is_required: *required,
+                    span: verter_span::Span::new(0, 10),
+                })
+                .collect(),
+            span: verter_span::Span::new(0, 30),
+        }]
+        .into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn missing_required_slot_reports() {
+    // Parent: <Child> (no slots), Child: defineSlots<{ default(p: {}): any }>
+    let parent = make_parent_analysis(vec![make_component_with_slots(
+        "Child",
+        "./Child.vue",
+        vec![], // no slots provided
+    )]);
+    let child = make_child_with_required_slots(&[("default", true)]);
+
+    let missing = find_missing_required_slots(&parent, &|_| Some(child.clone()));
+    assert_eq!(missing.len(), 1, "should find 1 missing required slot");
+    assert_eq!(missing[0].slot_name, "default");
+    assert_eq!(missing[0].component_name, "Child");
+}
+
+#[test]
+fn provided_required_slot_no_report() {
+    // Parent: <Child> <template #default>...</template> </Child>
+    let parent = make_parent_analysis(vec![make_component_with_slots(
+        "Child",
+        "./Child.vue",
+        vec!["default".to_string()],
+    )]);
+    let child = make_child_with_required_slots(&[("default", true)]);
+
+    let missing = find_missing_required_slots(&parent, &|_| Some(child.clone()));
+    assert!(
+        missing.is_empty(),
+        "provided required slot should not report: {:?}",
+        missing.iter().map(|m| &m.slot_name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn optional_slot_not_provided_no_report() {
+    // Parent: <Child> (no slots), Child: defineSlots<{ header?(p: {}): any }>
+    let parent = make_parent_analysis(vec![make_component_with_slots(
+        "Child",
+        "./Child.vue",
+        vec![],
+    )]);
+    let child = make_child_with_required_slots(&[("header", false)]);
+
+    let missing = find_missing_required_slots(&parent, &|_| Some(child.clone()));
+    assert!(
+        missing.is_empty(),
+        "optional slot should not report when not provided"
+    );
+}
+
+#[test]
+fn mixed_required_optional_slots() {
+    // Child: default (required), header (optional), footer (required)
+    // Parent provides default and header but NOT footer
+    let parent = make_parent_analysis(vec![make_component_with_slots(
+        "Child",
+        "./Child.vue",
+        vec!["default".to_string(), "header".to_string()],
+    )]);
+    let child =
+        make_child_with_required_slots(&[("default", true), ("header", false), ("footer", true)]);
+
+    let missing = find_missing_required_slots(&parent, &|_| Some(child.clone()));
+    assert_eq!(missing.len(), 1, "should find 1 missing required slot");
+    assert_eq!(missing[0].slot_name, "footer");
+}
+
+#[test]
+fn no_define_slots_no_report() {
+    let parent = make_parent_analysis(vec![make_component_with_slots(
+        "Child",
+        "./Child.vue",
+        vec![],
+    )]);
+    let child = FileAnalysisSnapshot::default();
+
+    let missing = find_missing_required_slots(&parent, &|_| Some(child.clone()));
+    assert!(
+        missing.is_empty(),
+        "no defineSlots should not report missing required slots"
     );
 }

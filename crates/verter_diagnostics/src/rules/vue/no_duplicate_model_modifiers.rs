@@ -109,6 +109,7 @@ mod tests {
             has_inherit_attrs_false: false,
             prop_fields: vec![],
             emit_fields: vec![],
+            slot_fields: vec![],
             span: Span::new(span_start, span_end),
         }
     }
@@ -226,6 +227,7 @@ mod tests {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![],
+                slot_fields: vec![],
                 span: Span::new(10, 30),
             }],
             ..Default::default()

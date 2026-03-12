@@ -211,6 +211,7 @@ mod tests {
                 api: VueApiClassification::OnMounted,
                 span: verter_span::Span::new(0, 5),
                 arg_value: None,
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }])

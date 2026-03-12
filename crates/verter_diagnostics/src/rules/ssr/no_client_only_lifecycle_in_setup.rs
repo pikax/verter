@@ -71,6 +71,7 @@ mod tests {
             api,
             span: Span::new(start, end),
             arg_value: None,
+            has_type_params: false,
             is_async_callback: false,
             callback_params: vec![],
         }

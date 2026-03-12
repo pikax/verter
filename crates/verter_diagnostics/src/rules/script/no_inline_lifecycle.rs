@@ -79,7 +79,7 @@ mod tests {
                 api: VueApiClassification::Ref,
                 span: Span::new(10, 30),
                 arg_value: None,
-
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }],
@@ -95,7 +95,7 @@ mod tests {
                 api: VueApiClassification::OnMounted,
                 span: Span::new(10, 30),
                 arg_value: None,
-
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }],
@@ -116,7 +116,7 @@ mod tests {
                 api: VueApiClassification::Watch,
                 span: Span::new(10, 30),
                 arg_value: None,
-
+                has_type_params: false,
                 is_async_callback: false,
                 callback_params: vec![],
             }],
@@ -134,7 +134,7 @@ mod tests {
                     api: VueApiClassification::OnMounted,
                     span: Span::new(10, 30),
                     arg_value: None,
-
+                    has_type_params: false,
                     is_async_callback: false,
                     callback_params: vec![],
                 },
@@ -142,7 +142,7 @@ mod tests {
                     api: VueApiClassification::OnUnmounted,
                     span: Span::new(40, 60),
                     arg_value: None,
-
+                    has_type_params: false,
                     is_async_callback: false,
                     callback_params: vec![],
                 },
