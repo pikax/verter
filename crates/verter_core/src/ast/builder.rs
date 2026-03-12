@@ -345,6 +345,17 @@ impl TemplateAstBuilder {
         self.set_cached_directive(prop, |el| &mut el.v_ref)
     }
 
+    /// Get the tag type of the currently open element.
+    pub fn current_tag_type(&self) -> Option<TagType> {
+        let id = self.open_stack.last()?;
+        let node = &self.ast.nodes[id.0];
+        if let AstNodeKind::Element(el) = &node.kind {
+            Some(el.tag_type)
+        } else {
+            None
+        }
+    }
+
     // ---- tag metadata setters ----
 
     /// Set the tag type on the currently open element.

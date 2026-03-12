@@ -17,7 +17,7 @@ use crate::ast::builder::TemplateAstBuilder;
 use crate::ast::types::{
     AstNodeKind, ElementNodeCondition, ElementNodeConditionKind, PropFlags, TagType, TemplateAst,
 };
-use crate::common::Span;
+use crate::common::{ErrorCode, Span};
 use crate::cursor::ScriptLanguage;
 use crate::diagnostics::{CompilerErrorCode, Diagnostic, SyntaxPluginContext};
 use crate::parser::types::{
@@ -27,6 +27,7 @@ use crate::parser::types::{
 use crate::tokenizer::{Event as TokenizerEvent, QuoteType};
 use crate::types::{NodeId, NodeProp, NodeTag};
 use crate::utils::vue::{is_html_tag, is_mathml_tag, is_svg_tag, is_void_tag};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 #[cfg(test)]
@@ -133,6 +134,11 @@ pub struct Syntax {
     /// Finalized template AST. Set when the template root closes or on EOF.
     template_ast: Option<TemplateAst>,
 
+    // ---- per-element attribute tracking ----
+    /// Seen attribute/directive names for the current element, used for
+    /// `DuplicateAttribute` detection. Cleared on each `OpenTagName`.
+    seen_attr_names: FxHashSet<Vec<u8>>,
+
     // ---- diagnostics ----
     /// Accumulated parse diagnostics (errors / warnings). Stored here because
     /// `SyntaxPluginContext` is `&`-immutable during event dispatch.
@@ -193,6 +199,7 @@ impl Syntax {
             ast_builder,
             template_ast: None,
 
+            seen_attr_names: FxHashSet::default(),
             diagnostics: Vec::new(),
         }
     }
@@ -414,6 +421,11 @@ impl<'alloc> Syntax {
                 self.handle_end(ctx);
             }
 
+            // Tokenizer-level parse errors — convert to diagnostics.
+            TokenizerEvent::Error { code, index } => {
+                self.handle_tokenizer_error(*code, *index);
+            }
+
             _ => {}
         }
     }
@@ -447,6 +459,7 @@ impl Syntax {
         };
 
         self.stack_elements.push(se);
+        self.seen_attr_names.clear();
 
         // If inside <template> (or template_mode), open an element node in the builder.
         // In SFC mode, skip the root element itself (stack len == 1) since it's handled
@@ -746,6 +759,48 @@ impl Syntax {
     }
 }
 
+// tokenizer error conversion
+
+impl Syntax {
+    /// Convert a tokenizer `ErrorCode` into a `CompilerErrorCode` diagnostic.
+    ///
+    /// The tokenizer emits `Event::Error` for HTML parse errors (duplicate attributes,
+    /// missing values, EOF conditions, etc.). This method maps the subset of tokenizer
+    /// error codes that have corresponding `CompilerErrorCode` variants into diagnostics.
+    fn handle_tokenizer_error(&mut self, code: ErrorCode, index: u32) {
+        let (compiler_code, severity_is_error) = match code {
+            ErrorCode::DUPLICATE_ATTRIBUTE => (CompilerErrorCode::DuplicateAttribute, true),
+            ErrorCode::END_TAG_WITH_ATTRIBUTES => (CompilerErrorCode::EndTagWithAttributes, true),
+            ErrorCode::EOF_BEFORE_TAG_NAME => (CompilerErrorCode::EofBeforeTagName, true),
+            ErrorCode::EOF_IN_TAG => (CompilerErrorCode::EofInTag, true),
+            ErrorCode::MISSING_ATTRIBUTE_VALUE => (CompilerErrorCode::MissingAttributeValue, true),
+            ErrorCode::MISSING_END_TAG_NAME => (CompilerErrorCode::MissingEndTagName, true),
+            ErrorCode::MISSING_WHITESPACE_BETWEEN_ATTRIBUTES => {
+                (CompilerErrorCode::MissingWhitespaceBetweenAttributes, true)
+            }
+            ErrorCode::X_MISSING_INTERPOLATION_END => {
+                (CompilerErrorCode::XMissingInterpolationEnd, true)
+            }
+            ErrorCode::X_MISSING_DIRECTIVE_NAME => (CompilerErrorCode::XMissingDirectiveName, true),
+            ErrorCode::X_MISSING_DYNAMIC_DIRECTIVE_ARGUMENT_END => {
+                (CompilerErrorCode::XMissingDynamicDirectiveArgumentEnd, true)
+            }
+            // Other tokenizer errors (CDATA, comment, etc.) don't have CompilerErrorCode
+            // equivalents — silently ignore them.
+            _ => return,
+        };
+
+        let span = Span::new(index.saturating_sub(1), index);
+        if severity_is_error {
+            self.diagnostics
+                .push(Diagnostic::error("syntax", compiler_code).with_span(span));
+        } else {
+            self.diagnostics
+                .push(Diagnostic::warning("syntax", compiler_code).with_span(span));
+        }
+    }
+}
+
 // root node storage
 
 impl Syntax {
@@ -908,6 +963,15 @@ impl Syntax {
     }
 
     fn handle_directive_name(&mut self, start: u32, name_end: u32) {
+        // Detect empty directive name (just "v-" with nothing after the dash).
+        // The tokenizer emits DirName for the full span including "v-", so a
+        // 2-byte name means only the prefix was present.
+        if name_end - start == 2 {
+            self.diagnostics.push(
+                Diagnostic::error("syntax", CompilerErrorCode::XMissingDirectiveName)
+                    .with_span(Span::new(start, name_end)),
+            );
+        }
         self.current_prop = Some(NodeProp {
             start,
             name_end,
@@ -973,6 +1037,19 @@ impl Syntax {
             });
         }
 
+        // Duplicate attribute detection: track seen names and emit error on repeat.
+        // Only check non-directive (static HTML) attributes — Vue allows duplicate
+        // directives (e.g., multiple `@click` handlers get merged into an array).
+        if !prop.is_directive {
+            let attr_name = &ctx.bytes[prop.start as usize..prop.name_end as usize];
+            if !self.seen_attr_names.insert(attr_name.to_vec()) {
+                self.diagnostics.push(
+                    Diagnostic::error("syntax", CompilerErrorCode::DuplicateAttribute)
+                        .with_span(Span::new(prop.start, prop.name_end)),
+                );
+            }
+        }
+
         // Detect special root-level attributes (SFC mode only).
         // Attributes arrive before OpenTagEnd, so ast_builder may not exist yet
         // for <template>. We check stack depth, not builder presence.
@@ -1029,15 +1106,20 @@ impl Syntax {
                 let dir_name = &ctx.bytes[p.start as usize..p.name_end as usize];
                 let prop_start = p.start;
                 let prop_name_end = p.name_end;
-                // Helper: emit duplicate directive warning if setter returns true.
-                let mut warn_if_dup = |is_dup: bool| {
-                    if is_dup {
-                        self.diagnostics.push(
-                            Diagnostic::warning("syntax", CompilerErrorCode::XDuplicateDirective)
+                // Macro: emit duplicate directive warning if setter returns true.
+                macro_rules! warn_if_dup {
+                    ($is_dup:expr) => {
+                        if $is_dup {
+                            self.diagnostics.push(
+                                Diagnostic::warning(
+                                    "syntax",
+                                    CompilerErrorCode::XDuplicateDirective,
+                                )
                                 .with_span(Span::new(prop_start, prop_name_end)),
-                        );
-                    }
-                };
+                            );
+                        }
+                    };
+                }
 
                 match dir_name {
                     b"v-if" | b"v-else-if" | b"v-else" => {
@@ -1046,39 +1128,77 @@ impl Syntax {
                             b"v-else-if" => ElementNodeConditionKind::ElseIf,
                             _ => ElementNodeConditionKind::Else,
                         };
+                        // v-if and v-else-if require an expression
+                        if !matches!(kind, ElementNodeConditionKind::Else) {
+                            let p = prop.as_ref().expect("invariant: prop is Some");
+                            if !prop_has_value(p) {
+                                self.diagnostics.push(
+                                    Diagnostic::error(
+                                        "syntax",
+                                        CompilerErrorCode::XVIfNoExpression,
+                                    )
+                                    .with_span(Span::new(prop_start, prop_name_end)),
+                                );
+                            }
+                        }
                         let cond = ElementNodeCondition {
                             kind,
                             prop: prop
                                 .take()
                                 .expect("invariant: prop not yet taken in v-if branch"),
                         };
-                        warn_if_dup(builder.set_v_condition(cond));
+                        warn_if_dup!(builder.set_v_condition(cond));
                     }
                     b"v-for" => {
-                        warn_if_dup(
-                            builder.set_v_for(
-                                prop.take()
-                                    .expect("invariant: prop not yet taken in v-for branch"),
-                            ),
-                        );
+                        let p = prop.as_ref().expect("invariant: prop is Some");
+                        if !prop_has_value(p) {
+                            self.diagnostics.push(
+                                Diagnostic::error("syntax", CompilerErrorCode::XVForNoExpression)
+                                    .with_span(Span::new(prop_start, prop_name_end)),
+                            );
+                        } else {
+                            // Check for "in" or "of" separator
+                            let val_s = p.value_start.unwrap() as usize;
+                            let val_e = p.value_end.unwrap() as usize;
+                            let val = &ctx.input[val_s..val_e];
+                            if !has_v_for_separator(val) {
+                                self.diagnostics.push(
+                                    Diagnostic::error(
+                                        "syntax",
+                                        CompilerErrorCode::XVForMalformedExpression,
+                                    )
+                                    .with_span(Span::new(val_s as u32, val_e as u32)),
+                                );
+                            }
+                        }
+                        warn_if_dup!(builder.set_v_for(
+                            prop.take()
+                                .expect("invariant: prop not yet taken in v-for branch"),
+                        ));
                     }
                     b"v-slot" | b"#" => {
-                        warn_if_dup(
-                            builder.set_v_slot(
-                                prop.take()
-                                    .expect("invariant: prop not yet taken in v-slot branch"),
-                            ),
-                        );
+                        // Validate v-slot placement: only on components or <template>
+                        if let Some(tag_type) = builder.current_tag_type() {
+                            if !matches!(tag_type, TagType::Component | TagType::Template) {
+                                self.diagnostics.push(
+                                    Diagnostic::error("syntax", CompilerErrorCode::XVSlotMisplaced)
+                                        .with_span(Span::new(prop_start, prop_name_end)),
+                                );
+                            }
+                        }
+                        warn_if_dup!(builder.set_v_slot(
+                            prop.take()
+                                .expect("invariant: prop not yet taken in v-slot branch"),
+                        ));
                     }
                     b"v-once" => {
-                        warn_if_dup(
-                            builder.set_v_once(
-                                prop.take()
-                                    .expect("invariant: prop not yet taken in v-once branch"),
-                            ),
-                        );
+                        warn_if_dup!(builder.set_v_once(
+                            prop.take()
+                                .expect("invariant: prop not yet taken in v-once branch"),
+                        ));
                     }
                     // v-bind / : shorthand — classify arg for key/class/style, or spread
+                    // Note: `:attr` without value is Vue 3.4 same-name shorthand, NOT an error.
                     b"v-bind" | b":" => {
                         let p = prop
                             .as_ref()
@@ -1097,6 +1217,8 @@ impl Syntax {
                         }
                     }
                     // v-on / @ shorthand — event listener or spread
+                    // Note: `@click` without value is Vue 3.4 same-name shorthand, NOT an error.
+                    // `@click.prevent` without value is also valid (modifier-only).
                     b"v-on" | b"@" => {
                         let p = prop
                             .as_ref()
@@ -1110,6 +1232,29 @@ impl Syntax {
                     }
                     // v-model
                     b"v-model" => {
+                        let p = prop
+                            .as_ref()
+                            .expect("invariant: prop is Some in v-model branch");
+                        if !prop_has_value(p) {
+                            self.diagnostics.push(
+                                Diagnostic::error("syntax", CompilerErrorCode::XVModelNoExpression)
+                                    .with_span(Span::new(prop_start, prop_name_end)),
+                            );
+                        } else {
+                            // Validate v-model value is a member expression
+                            let val_s = p.value_start.unwrap() as usize;
+                            let val_e = p.value_end.unwrap() as usize;
+                            let val = ctx.input[val_s..val_e].trim();
+                            if !is_member_expression(val) {
+                                self.diagnostics.push(
+                                    Diagnostic::error(
+                                        "syntax",
+                                        CompilerErrorCode::XVModelMalformedExpression,
+                                    )
+                                    .with_span(Span::new(val_s as u32, val_e as u32)),
+                                );
+                            }
+                        }
                         builder.add_prop_flag(PropFlags::HasModel);
                     }
                     // v-show
@@ -1278,6 +1423,102 @@ impl Syntax {
             Diagnostic::error("syntax", CompilerErrorCode::XVElseNoAdjacentIf).with_span(tag_span),
         );
     }
+}
+
+// directive validation helpers
+
+/// Check if a prop has a non-empty value (value_start and value_end are set and distinct).
+#[inline]
+fn prop_has_value(prop: &NodeProp) -> bool {
+    match (prop.value_start, prop.value_end) {
+        (Some(s), Some(e)) => e > s,
+        _ => false,
+    }
+}
+
+/// Check if a v-for expression contains an "in" or "of" separator.
+/// The separator must be a standalone word (not part of an identifier).
+fn has_v_for_separator(expr: &str) -> bool {
+    // Look for " in " or " of " as word boundaries
+    // Also handle "(item, index) in items" and similar patterns
+    let bytes = expr.as_bytes();
+    let len = bytes.len();
+    for i in 0..len {
+        if i + 3 < len
+            && (bytes[i] == b' ' || bytes[i] == b')' || bytes[i] == b'\n' || bytes[i] == b'\t')
+        {
+            let rest = &bytes[i + 1..];
+            if (rest.starts_with(b"in ") || rest.starts_with(b"in\t") || rest.starts_with(b"in\n"))
+                || (rest.starts_with(b"of ")
+                    || rest.starts_with(b"of\t")
+                    || rest.starts_with(b"of\n"))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a string is a valid JavaScript member expression (for v-model).
+/// Valid: identifiers, member access (a.b), bracket access (a[b]), optional chaining (a?.b).
+/// Invalid: binary expressions (a + b), function calls (a()), assignments (a = b).
+fn is_member_expression(expr: &str) -> bool {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Simple heuristic: a member expression consists of identifiers, dots, brackets, and optional chaining
+    // It should NOT contain operators like +, -, *, /, =, !, <, >, &, |, ^, ?, :, ,
+    // (except ? in ?. optional chaining)
+    // It should NOT contain parentheses that indicate function calls
+    let bytes = trimmed.as_bytes();
+    let mut bracket_depth = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            // Valid identifier characters
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$' => {}
+            // Dot access (including optional chaining ?.)
+            b'.' => {}
+            b'?' if i + 1 < bytes.len() && bytes[i + 1] == b'.' => {
+                i += 1; // skip the dot
+            }
+            // Bracket access
+            b'[' => bracket_depth += 1,
+            b']' => {
+                bracket_depth -= 1;
+                if bracket_depth < 0 {
+                    return false;
+                }
+            }
+            // Quoted strings inside brackets
+            b'"' | b'\'' | b'`' => {
+                if bracket_depth > 0 {
+                    let quote = bytes[i];
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != quote {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            // Whitespace is only allowed inside brackets
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                if bracket_depth == 0 {
+                    return false;
+                }
+            }
+            // Everything else is invalid for a member expression
+            _ => return false,
+        }
+        i += 1;
+    }
+    bracket_depth == 0
 }
 
 // utilities

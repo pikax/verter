@@ -1243,3 +1243,7 @@ fn compile_inner(
 #[cfg(test)]
 #[path = "../compile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../compile_template_error_tests.rs"]
+mod compile_template_error_tests;

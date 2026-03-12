@@ -1383,7 +1383,11 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
             self.section_start = self.index;
 
             if c == GT {
-                // GT after = ends the tag (empty unquoted value)
+                // GT after = ends the tag (empty unquoted value) — missing attribute value
+                self.emit(Event::Error {
+                    code: ErrorCode::MISSING_ATTRIBUTE_VALUE,
+                    index: self.index as u32,
+                });
                 self.emit(Event::AttribData {
                     start: self.section_start as u32,
                     end: self.index as u32,
