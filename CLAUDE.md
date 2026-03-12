@@ -186,6 +186,23 @@ The server sends `$/verter/viteConfigTrustRequired` notifications for complex co
 
 **Lock ordering** (prevents deadlocks): `workspace_roots` (async) → `project_registry` (sync read) → release → `fallback_linter` (sync read). Never acquire `fallback_linter` while holding `project_registry`.
 
+### Style Preprocessing in Bundler Mode
+
+Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preprocessing to CSS before Vite can consume them. The preprocessing pipeline differs between Verter and `@vitejs/plugin-vue`:
+
+**Verter's approach** (preprocess-then-serve):
+1. `transform()` on the main `.vue` file triggers `applyPreprocessorRequests()` in the unplugin (`packages/unplugin/src/core/preprocessor-session.ts`).
+2. The preprocessor session spawns a child process to compile SCSS/SASS/Less → CSS.
+3. The compiled CSS is sent to the Rust host via `apply_block_overrides()` (`host_upsert.rs`).
+4. **Critical**: `apply_style_overrides()` updates `meta.style_langs[idx]` from the original lang (e.g., `"sass"`) to `"css"`. This ensures `render_ids()` generates URLs with `lang.css` instead of `lang.sass`.
+5. When Vite requests the style sub-module (e.g., `App.vue?vue&type=style&index=0&lang.css`), the `load()` hook returns already-compiled CSS.
+
+**Why `meta.style_langs` must be updated**: `render_ids()` (`host/src/id.rs`) uses `meta.style_langs` to construct virtual file URLs. If the lang stays as `"sass"` after preprocessing, Vite sees `lang.sass` in the URL, feeds the already-compiled CSS back through its SASS preprocessor, and fails because CSS syntax (e.g., `{`) is invalid in SASS indented syntax.
+
+**`@vitejs/plugin-vue` approach** (for comparison): Returns raw style content from `load()`, performs only scoping (not preprocessing) in `transform()` via `compileStyleAsync`, and lets Vite's built-in CSS pipeline handle all preprocessing. Verter preprocesses eagerly because it needs the compiled CSS for analysis.
+
+**Key files**: `packages/unplugin/src/core/preprocessor-session.ts` (child process preprocessing), `crates/verter_host/src/host_upsert.rs` (`apply_style_overrides` — lang update), `crates/verter_host/src/id.rs` (`render_ids` — URL generation).
+
 ### Cached Directive Fields on ElementNode
 
 The parser extracts structural directives from `el.props` via `prop.take()` and caches them as dedicated fields on `ElementNode` (`ast/types.rs`):
