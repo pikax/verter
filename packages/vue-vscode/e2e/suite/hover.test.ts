@@ -10,16 +10,11 @@ import {
   measureHover,
   findPosition,
   findNthPosition,
+  hoverText,
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
 import { getTimer } from "../timer";
-
-function hoverText(hover: vscode.Hover): string {
-  return hover.contents
-    .map((content) => (typeof content === "string" ? content : content.value))
-    .join("\n");
-}
 
 function expectNoHoverDegrade(content: string, messagePrefix: string): void {
   expect(content, `${messagePrefix} should not degrade to any`).to.not.match(/:\s*any\b/);

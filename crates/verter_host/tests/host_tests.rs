@@ -2054,6 +2054,52 @@ const msg = 'hello'
     assert!(analysis.styles[0].scoped);
 }
 
+/// Bindings referenced by CSS v-bind() should have used_in_style = true.
+#[test]
+fn test_vbind_marks_used_in_style() {
+    let host = VerterHost::new(HostConfig::default());
+    let src = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const color = ref('red')
+const size = ref(12)
+</script>
+<template><div>{{ color }}</div></template>
+<style scoped>
+.app { color: v-bind(color); }
+</style>"#;
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "VBind.vue".to_string(),
+            source: Arc::from(src),
+            file_kind: FileKind::VueSfc,
+            aliases: vec![],
+        })
+        .unwrap();
+
+    let analysis = host
+        .get_analysis("VBind.vue")
+        .expect("analysis should exist");
+    let color_binding = analysis
+        .bindings
+        .iter()
+        .find(|b| b.name == "color")
+        .expect("color binding should exist");
+    assert!(
+        color_binding.used_in_style,
+        "color should be marked used_in_style because of v-bind(color) in <style>"
+    );
+    let size_binding = analysis
+        .bindings
+        .iter()
+        .find(|b| b.name == "size")
+        .expect("size binding should exist");
+    assert!(
+        !size_binding.used_in_style,
+        "size should NOT be marked used_in_style"
+    );
+}
+
 /// @ai-generated - upsert returns parse_duration_ms > 0
 #[test]
 fn test_upsert_returns_parse_duration() {

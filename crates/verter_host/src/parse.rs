@@ -354,11 +354,16 @@ pub(crate) fn parse_vue_snapshot(
         };
 
     // Build script analysis from script block contents (when script analysis flags are set)
-    let (script_analysis, script_panic_diag) = if analysis_scope.needs_script_analysis() {
+    let (mut script_analysis, script_panic_diag) = if analysis_scope.needs_script_analysis() {
         build_script_analysis_from_parsed_with_diagnostic(&parsed, source)
     } else {
         (verter_analysis::ScriptAnalysisSnapshot::default(), None)
     };
+
+    // Cross-reference: mark script bindings that are referenced by CSS v-bind() in style blocks
+    if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
+        script_analysis.mark_bindings_used_in_style(&style_analyses);
+    }
 
     // Merge any panic diagnostic into parse diagnostics
     let parse_diagnostics = if let Some(diag) = script_panic_diag {
@@ -542,9 +547,11 @@ fn build_single_style_analysis(
         special_pseudos: vec![],
     };
 
+    let sfc_source_len = source.len() as u32;
+
     let analysis_lang = match style.lang {
         Some(verter_core::parser::types::StyleLang::Css) | None => {
-            return verter_analysis::build_css_style_analysis(
+            let analysis = verter_analysis::build_css_style_analysis(
                 css_content,
                 vue_input,
                 style.scoped,
@@ -552,6 +559,10 @@ fn build_single_style_analysis(
                 module_name.as_deref(),
                 content_offset,
             );
+            if let Some(css) = &analysis.css {
+                css.debug_assert_valid_spans(sfc_source_len);
+            }
+            return analysis;
         }
         Some(verter_core::parser::types::StyleLang::Scss) => {
             verter_analysis::StyleAnalysisLang::Scss

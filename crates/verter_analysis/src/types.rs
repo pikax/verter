@@ -122,6 +122,46 @@ pub struct ScriptAnalysisSnapshot {
     pub store_definitions: Vec<StoreDefinition>,
 }
 
+impl ScriptAnalysisSnapshot {
+    /// Mark bindings that are referenced by CSS `v-bind()` expressions in style blocks.
+    ///
+    /// For each `v-bind(expr)` found in style analysis, extracts the root identifier
+    /// (e.g., `"color"` from `v-bind(color)`, `"theme"` from `v-bind(theme.color)`)
+    /// and sets `used_in_style = true` on the matching binding.
+    pub fn mark_bindings_used_in_style(
+        &mut self,
+        style_analyses: &[crate::style::StyleBlockAnalysis],
+    ) {
+        // Collect all root identifiers from v-bind() expressions across all style blocks.
+        let referenced: rustc_hash::FxHashSet<&str> = style_analyses
+            .iter()
+            .flat_map(|s| &s.v_binds)
+            .map(|vb| {
+                // Extract root identifier: "theme.color" → "theme", "color" → "color"
+                vb.expression
+                    .split_once('.')
+                    .map_or(vb.expression.as_str(), |(root, _)| root)
+            })
+            // Also handle bracket access: "obj['key']" → "obj"
+            .map(|root| {
+                root.split_once('[')
+                    .map_or(root, |(before_bracket, _)| before_bracket)
+            })
+            .filter(|name| !name.is_empty())
+            .collect();
+
+        if referenced.is_empty() {
+            return;
+        }
+
+        for binding in &mut self.bindings {
+            if referenced.contains(binding.name.as_str()) {
+                binding.used_in_style = true;
+            }
+        }
+    }
+}
+
 /// A Vue compiler macro call found inside a nested scope (not at the root level of `<script setup>`).
 /// These are invalid — macros like `defineProps`, `defineEmits`, etc. must be at the top level.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

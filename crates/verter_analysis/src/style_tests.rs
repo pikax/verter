@@ -1273,3 +1273,75 @@ fn test_var_reference_spans_are_sfc_absolute() {
     let name_end = (var_ref.name_span.end - content_offset) as usize;
     assert_eq!(&css[name_start..name_end], "--c");
 }
+
+#[test]
+fn test_debug_assert_valid_spans_passes_for_correct_offset() {
+    // SFC source: "<style>\n.btn { color: red; }\n</style>"
+    let sfc = "<style>\n.btn { color: red; }\n</style>";
+    let css = ".btn { color: red; }\n";
+    let content_offset = 8u32; // length of "<style>\n"
+    let sfc_source_len = sfc.len() as u32;
+
+    let analysis = build_css_style_analysis(
+        css,
+        VueStyleInput::default(),
+        false,
+        false,
+        None,
+        content_offset,
+    );
+    let css_analysis = analysis.css.as_ref().expect("should have CSS analysis");
+
+    // This must not panic — all spans are within [content_offset, sfc_source_len)
+    css_analysis.debug_assert_valid_spans(sfc_source_len);
+
+    // Verify spans are actually SFC-absolute (>= content_offset)
+    assert!(
+        !css_analysis.classes.is_empty(),
+        "should have at least one class"
+    );
+    for cls in &css_analysis.classes {
+        assert!(
+            cls.span.start >= content_offset,
+            "class span start should be SFC-absolute"
+        );
+        assert!(
+            cls.span.end <= sfc_source_len,
+            "class span end should be within SFC"
+        );
+    }
+    for sel in &css_analysis.selectors {
+        assert!(
+            sel.span.start >= content_offset,
+            "selector span start should be SFC-absolute"
+        );
+        assert!(
+            sel.span.end <= sfc_source_len,
+            "selector span end should be within SFC"
+        );
+    }
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "CSS span out of bounds")]
+fn test_debug_assert_valid_spans_panics_for_double_offset() {
+    // Simulate a double-offset bug: content_offset is applied twice
+    // by passing a large content_offset that pushes spans beyond the SFC length
+    let css = ".btn { color: red; }";
+    let content_offset = 500u32; // way beyond the actual SFC length
+    let sfc_source_len = 100u32; // smaller than content_offset
+
+    let analysis = build_css_style_analysis(
+        css,
+        VueStyleInput::default(),
+        false,
+        false,
+        None,
+        content_offset,
+    );
+    let css_analysis = analysis.css.as_ref().expect("should have CSS analysis");
+
+    // This should panic because spans (500+) exceed sfc_source_len (100)
+    css_analysis.debug_assert_valid_spans(sfc_source_len);
+}

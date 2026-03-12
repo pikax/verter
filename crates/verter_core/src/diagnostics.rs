@@ -17,13 +17,37 @@ use crate::{common::Span, utils::vue::is_void_tag};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompilerErrorCode {
     // -- HTML parse errors --
+    /// Malformed empty comment: `<!-->` or `<!--->`.
+    AbruptClosingOfEmptyComment,
+    /// CDATA section (`<![CDATA[`) used in HTML content (only valid in SVG/MathML).
+    CdataInHtmlContent,
     DuplicateAttribute,
     EndTagWithAttributes,
     EofBeforeTagName,
+    /// Unclosed CDATA section — EOF reached before `]]>`.
+    EofInCdata,
+    /// Unclosed comment — EOF reached before `-->`.
+    EofInComment,
     EofInTag,
+    /// Comment closed with `--!>` instead of `-->`.
+    IncorrectlyClosedComment,
+    /// Invalid comment-like sequence: `<!` not followed by `--`.
+    IncorrectlyOpenedComment,
+    /// Invalid first character after `<` in a tag name (e.g. `<1div>`).
+    InvalidFirstCharacterOfTagName,
     MissingAttributeValue,
     MissingEndTagName,
     MissingWhitespaceBetweenAttributes,
+    /// Nested HTML comment (`<!-- <!-- -->`).
+    NestedComment,
+    /// Unexpected character (e.g. `"`, `'`, `<`) in attribute name.
+    UnexpectedCharacterInAttributeName,
+    /// Unexpected character (e.g. `"`, `'`, `<`, `=`, `` ` ``) in unquoted attribute value.
+    UnexpectedCharacterInUnquotedAttributeValue,
+    /// Equals sign before attribute name (e.g. `<div ="val">`).
+    UnexpectedEqualsSignBeforeAttributeName,
+    /// Processing instruction (`<?`) instead of a tag name.
+    UnexpectedQuestionMarkInsteadOfTagName,
 
     // -- Vue template errors --
     /// Invalid end tag — close tag doesn't match any open element.
@@ -86,13 +110,31 @@ impl CompilerErrorCode {
     /// The default human-readable message for this error code (Vue-compatible).
     pub fn message(&self) -> &'static str {
         match self {
+            Self::AbruptClosingOfEmptyComment => "Abrupt closing of empty comment.",
+            Self::CdataInHtmlContent => "CDATA section is not allowed in HTML content.",
             Self::DuplicateAttribute => "Duplicate attribute.",
             Self::EndTagWithAttributes => "End tag cannot have attributes.",
             Self::EofBeforeTagName => "Unexpected EOF in tag.",
+            Self::EofInCdata => "Unexpected EOF in CDATA section.",
+            Self::EofInComment => "Unexpected EOF in comment.",
             Self::EofInTag => "Unexpected EOF in tag.",
+            Self::IncorrectlyClosedComment => "Incorrectly closed comment.",
+            Self::IncorrectlyOpenedComment => "Incorrectly opened comment.",
+            Self::InvalidFirstCharacterOfTagName => "Invalid first character of tag name.",
             Self::MissingAttributeValue => "Attribute value was expected.",
             Self::MissingEndTagName => "End tag name was expected.",
             Self::MissingWhitespaceBetweenAttributes => "Whitespace was expected.",
+            Self::NestedComment => "Unexpected nested comment.",
+            Self::UnexpectedCharacterInAttributeName => "Unexpected character in attribute name.",
+            Self::UnexpectedCharacterInUnquotedAttributeValue => {
+                "Unexpected character in unquoted attribute value."
+            }
+            Self::UnexpectedEqualsSignBeforeAttributeName => {
+                "Unexpected equals sign before attribute name."
+            }
+            Self::UnexpectedQuestionMarkInsteadOfTagName => {
+                "Unexpected question mark instead of tag name."
+            }
             Self::XInvalidEndTag => "Invalid end tag.",
             Self::XMissingEndTag => "Element is missing end tag.",
             Self::XMissingInterpolationEnd => "Interpolation end sign was not found.",

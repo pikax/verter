@@ -220,6 +220,15 @@ export class PreprocessorSession {
       this.expectedExit = false;
       this.installCleanupGuards();
 
+      // Unref the child so its IPC channel and stdio pipes do not prevent the
+      // parent's event loop from exiting.  Messages still work as long as the
+      // process is alive for other reasons (pending I/O, timers, etc.).
+      // Without this, a leaked session (e.g., missing closeBundle) keeps the
+      // parent process alive indefinitely.
+      child.unref();
+      child.stdout?.unref();
+      child.stderr?.unref();
+
       child.stdout?.on("data", (chunk: Buffer) => {
         process.stdout.write(chunk);
       });

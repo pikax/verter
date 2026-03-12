@@ -360,6 +360,11 @@ impl VerterHost {
                     );
                 }
 
+                // Validate remapped spans are still within SFC bounds
+                if let Some(ref css) = new_analysis.css {
+                    css.debug_assert_valid_spans(source.len() as u32);
+                }
+
                 // Preserve existing Vue features (v-binds, special pseudos)
                 // since they were extracted from the original parse
                 new_analysis.v_binds = existing.v_binds.clone();

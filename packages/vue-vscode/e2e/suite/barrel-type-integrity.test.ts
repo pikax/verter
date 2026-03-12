@@ -7,15 +7,10 @@ import {
   measureHover,
   getCompletions,
   findPosition,
+  hoverText,
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
-
-function hoverText(hover: vscode.Hover): string {
-  return hover.contents
-    .map((content) => (typeof content === "string" ? content : content.value))
-    .join("\n");
-}
 
 function completionLabel(item: vscode.CompletionItem): string {
   return typeof item.label === "string" ? item.label : item.label.label;

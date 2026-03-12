@@ -47,7 +47,7 @@ impl VerterHost {
             let export_sigs = entry.export_signatures.clone();
             drop(files);
 
-            let script_analysis = if !scope.needs_script_analysis() {
+            let mut script_analysis = if !scope.needs_script_analysis() {
                 if let Some(parsed) = cached_parse.as_deref() {
                     crate::parse::build_script_analysis_from_parsed(parsed, &source)
                 } else {
@@ -70,6 +70,10 @@ impl VerterHost {
             } else {
                 stored_styles
             };
+            // Cross-reference: mark script bindings referenced by CSS v-bind()
+            if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
+                script_analysis.mark_bindings_used_in_style(&style_analyses);
+            }
             // On-demand path: build fresh Arcs (not cached, but avoids deep clone)
             let mut snapshot = FileAnalysisSnapshot {
                 imports: script_analysis.imports,

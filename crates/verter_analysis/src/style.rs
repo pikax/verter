@@ -122,6 +122,47 @@ pub struct CssAnalysis {
     pub rule_count: u32,
 }
 
+impl CssAnalysis {
+    /// Validate that all SFC-absolute spans are within `[0, sfc_source_len)`.
+    ///
+    /// This catches double-offset bugs where `content_offset` is accidentally
+    /// applied twice, pushing spans beyond the SFC source boundary.
+    /// Only runs in debug builds (`debug_assert!`).
+    pub fn debug_assert_valid_spans(&self, sfc_source_len: u32) {
+        fn check(span: Span, sfc_source_len: u32, label: &str) {
+            debug_assert!(
+                span.end <= sfc_source_len,
+                "CSS span out of bounds: {label} span {start}..{end} exceeds SFC length {sfc_source_len}",
+                start = span.start,
+                end = span.end,
+                sfc_source_len = sfc_source_len,
+            );
+        }
+
+        for sel in &self.selectors {
+            check(sel.span, sfc_source_len, "selector");
+        }
+        for cls in &self.classes {
+            check(cls.span, sfc_source_len, "class");
+        }
+        for id in &self.ids {
+            check(id.span, sfc_source_len, "id");
+        }
+        for prop in &self.custom_properties {
+            check(prop.name_span, sfc_source_len, "custom-property name");
+            check(prop.value_span, sfc_source_len, "custom-property value");
+            for var_ref in &prop.var_references {
+                check(var_ref.span, sfc_source_len, "var-reference");
+                check(var_ref.name_span, sfc_source_len, "var-reference name");
+            }
+        }
+        for usage in &self.var_usages {
+            check(usage.reference.span, sfc_source_len, "var-usage");
+            check(usage.reference.name_span, sfc_source_len, "var-usage name");
+        }
+    }
+}
+
 /// A CSS selector with its computed specificity and optional parsed structure.
 #[derive(Debug, Clone)]
 pub struct AnalyzedSelector {

@@ -775,15 +775,14 @@ impl Syntax {
     /// error codes that have corresponding `CompilerErrorCode` variants into diagnostics.
     fn handle_tokenizer_error(&mut self, code: ErrorCode, index: u32) {
         let (compiler_code, severity_is_error) = match code {
+            // -- Errors (true = error severity) --
             ErrorCode::DUPLICATE_ATTRIBUTE => (CompilerErrorCode::DuplicateAttribute, true),
-            ErrorCode::END_TAG_WITH_ATTRIBUTES => (CompilerErrorCode::EndTagWithAttributes, false),
             ErrorCode::EOF_BEFORE_TAG_NAME => (CompilerErrorCode::EofBeforeTagName, true),
+            ErrorCode::EOF_IN_CDATA => (CompilerErrorCode::EofInCdata, true),
+            ErrorCode::EOF_IN_COMMENT => (CompilerErrorCode::EofInComment, true),
             ErrorCode::EOF_IN_TAG => (CompilerErrorCode::EofInTag, true),
             ErrorCode::MISSING_ATTRIBUTE_VALUE => (CompilerErrorCode::MissingAttributeValue, true),
             ErrorCode::MISSING_END_TAG_NAME => (CompilerErrorCode::MissingEndTagName, true),
-            ErrorCode::MISSING_WHITESPACE_BETWEEN_ATTRIBUTES => {
-                (CompilerErrorCode::MissingWhitespaceBetweenAttributes, false)
-            }
             ErrorCode::X_MISSING_INTERPOLATION_END => {
                 (CompilerErrorCode::XMissingInterpolationEnd, true)
             }
@@ -791,8 +790,45 @@ impl Syntax {
             ErrorCode::X_MISSING_DYNAMIC_DIRECTIVE_ARGUMENT_END => {
                 (CompilerErrorCode::XMissingDynamicDirectiveArgumentEnd, true)
             }
-            // Other tokenizer errors (CDATA, comment, etc.) don't have CompilerErrorCode
-            // equivalents — silently ignore them.
+
+            // -- Warnings (false = warning severity) --
+            ErrorCode::ABRUPT_CLOSING_OF_EMPTY_COMMENT => {
+                (CompilerErrorCode::AbruptClosingOfEmptyComment, false)
+            }
+            ErrorCode::CDATA_IN_HTML_CONTENT => (CompilerErrorCode::CdataInHtmlContent, false),
+            ErrorCode::END_TAG_WITH_ATTRIBUTES => (CompilerErrorCode::EndTagWithAttributes, false),
+            ErrorCode::INCORRECTLY_CLOSED_COMMENT => {
+                (CompilerErrorCode::IncorrectlyClosedComment, false)
+            }
+            ErrorCode::INCORRECTLY_OPENED_COMMENT => {
+                (CompilerErrorCode::IncorrectlyOpenedComment, false)
+            }
+            ErrorCode::INVALID_FIRST_CHARACTER_OF_TAG_NAME => {
+                (CompilerErrorCode::InvalidFirstCharacterOfTagName, false)
+            }
+            ErrorCode::MISSING_WHITESPACE_BETWEEN_ATTRIBUTES => {
+                (CompilerErrorCode::MissingWhitespaceBetweenAttributes, false)
+            }
+            ErrorCode::NESTED_COMMENT => (CompilerErrorCode::NestedComment, false),
+            ErrorCode::UNEXPECTED_CHARACTER_IN_ATTRIBUTE_NAME => {
+                (CompilerErrorCode::UnexpectedCharacterInAttributeName, false)
+            }
+            ErrorCode::UNEXPECTED_CHARACTER_IN_UNQUOTED_ATTRIBUTE_VALUE => (
+                CompilerErrorCode::UnexpectedCharacterInUnquotedAttributeValue,
+                false,
+            ),
+            ErrorCode::UNEXPECTED_EQUALS_SIGN_BEFORE_ATTRIBUTE_NAME => (
+                CompilerErrorCode::UnexpectedEqualsSignBeforeAttributeName,
+                false,
+            ),
+            ErrorCode::UNEXPECTED_QUESTION_MARK_INSTEAD_OF_TAG_NAME => (
+                CompilerErrorCode::UnexpectedQuestionMarkInsteadOfTagName,
+                false,
+            ),
+
+            // Remaining tokenizer errors are too minor/noisy to surface:
+            // END_TAG_WITH_TRAILING_SOLIDUS, UNEXPECTED_SOLIDUS_IN_TAG,
+            // UNEXPECTED_NULL_CHARACTER, EOF_IN_SCRIPT_HTML_COMMENT_LIKE_TEXT
             _ => return,
         };
 

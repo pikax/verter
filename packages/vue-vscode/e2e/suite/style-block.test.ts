@@ -7,14 +7,9 @@ import {
   getReferences,
   measureHover,
   findPosition,
+  hoverText,
   FIXTURE_NAME,
 } from "../helpers";
-
-function hoverText(hover: vscode.Hover): string {
-  return hover.contents
-    .map((content) => (typeof content === "string" ? content : content.value))
-    .join("\n");
-}
 
 suite(`Style Block [${FIXTURE_NAME}]`, function () {
   this.timeout(60_000);

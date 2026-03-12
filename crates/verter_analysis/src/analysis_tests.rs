@@ -1757,3 +1757,128 @@ const actions = mapActions(useUserStore, ['setName']);
         StoreApiClassification::PiniaMapActions
     );
 }
+
+// =============================================================================
+// used_in_style — CSS v-bind() binding marking
+// =============================================================================
+
+#[test]
+fn mark_bindings_used_in_style_simple() {
+    let mut result =
+        analyze("import { ref } from 'vue';\nconst color = ref('red');\nconst size = ref(12);");
+    // Simulate style analysis with v-bind(color)
+    let style_analyses = vec![crate::style::StyleBlockAnalysis {
+        v_binds: vec![crate::style::AnalyzedVBind {
+            expression: "color".into(),
+            quoted: false,
+            start: 0,
+            end: 5,
+            generated_var_name: None,
+        }],
+        ..Default::default()
+    }];
+    result.mark_bindings_used_in_style(&style_analyses);
+
+    let color = result.bindings.iter().find(|b| b.name == "color").unwrap();
+    assert!(color.used_in_style, "color should be marked used_in_style");
+
+    let size = result.bindings.iter().find(|b| b.name == "size").unwrap();
+    assert!(
+        !size.used_in_style,
+        "size should NOT be marked used_in_style"
+    );
+}
+
+#[test]
+fn mark_bindings_used_in_style_member_expression() {
+    let mut result = analyze("const theme = reactive({ color: 'red' });");
+    let style_analyses = vec![crate::style::StyleBlockAnalysis {
+        v_binds: vec![crate::style::AnalyzedVBind {
+            expression: "theme.color".into(),
+            quoted: false,
+            start: 0,
+            end: 11,
+            generated_var_name: None,
+        }],
+        ..Default::default()
+    }];
+    result.mark_bindings_used_in_style(&style_analyses);
+
+    let theme = result.bindings.iter().find(|b| b.name == "theme").unwrap();
+    assert!(
+        theme.used_in_style,
+        "theme should be marked used_in_style (root of theme.color)"
+    );
+}
+
+#[test]
+fn mark_bindings_used_in_style_multiple_blocks() {
+    let mut result = analyze("const a = 1;\nconst b = 2;\nconst c = 3;");
+    let style_analyses = vec![
+        crate::style::StyleBlockAnalysis {
+            v_binds: vec![crate::style::AnalyzedVBind {
+                expression: "a".into(),
+                quoted: false,
+                start: 0,
+                end: 1,
+                generated_var_name: None,
+            }],
+            ..Default::default()
+        },
+        crate::style::StyleBlockAnalysis {
+            v_binds: vec![crate::style::AnalyzedVBind {
+                expression: "c".into(),
+                quoted: false,
+                start: 0,
+                end: 1,
+                generated_var_name: None,
+            }],
+            ..Default::default()
+        },
+    ];
+    result.mark_bindings_used_in_style(&style_analyses);
+
+    let a = result.bindings.iter().find(|b| b.name == "a").unwrap();
+    assert!(a.used_in_style, "a should be marked used_in_style");
+
+    let b = result.bindings.iter().find(|b| b.name == "b").unwrap();
+    assert!(!b.used_in_style, "b should NOT be marked used_in_style");
+
+    let c = result.bindings.iter().find(|b| b.name == "c").unwrap();
+    assert!(c.used_in_style, "c should be marked used_in_style");
+}
+
+#[test]
+fn mark_bindings_used_in_style_no_v_binds() {
+    let mut result = analyze("const color = 'red';");
+    let style_analyses = vec![crate::style::StyleBlockAnalysis::default()];
+    result.mark_bindings_used_in_style(&style_analyses);
+
+    let color = result.bindings.iter().find(|b| b.name == "color").unwrap();
+    assert!(
+        !color.used_in_style,
+        "color should NOT be marked when no v-bind references it"
+    );
+}
+
+#[test]
+fn mark_bindings_used_in_style_quoted_expression() {
+    let mut result = analyze("const color = 'red';");
+    let style_analyses = vec![crate::style::StyleBlockAnalysis {
+        v_binds: vec![crate::style::AnalyzedVBind {
+            expression: "color".into(),
+            quoted: true,
+            start: 0,
+            end: 5,
+            generated_var_name: None,
+        }],
+        ..Default::default()
+    }];
+    result.mark_bindings_used_in_style(&style_analyses);
+
+    let color = result.bindings.iter().find(|b| b.name == "color").unwrap();
+    assert!(
+        color.used_in_style,
+        "quoted v-bind(color) should still mark the binding"
+    );
+}

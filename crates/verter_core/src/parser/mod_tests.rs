@@ -3087,3 +3087,281 @@ fn sfc_mode_multiple_custom_blocks_with_html_content() {
     );
     assert_eq!(syn.unknown_nodes.len(), 2);
 }
+
+// =========================================================================
+// Tokenizer error diagnostics — previously silently dropped error codes
+// =========================================================================
+
+#[test]
+fn tokenizer_error_eof_in_comment() {
+    let input = "<template><!-- unclosed comment</template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let errs: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::EofInComment)
+        .collect();
+    assert_eq!(errs.len(), 1, "should emit EofInComment diagnostic");
+    assert_eq!(
+        errs[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Error
+    );
+    // Negative: must NOT emit EofInTag for this case
+    assert!(
+        !syn.diagnostics
+            .iter()
+            .any(|d| d.code == CompilerErrorCode::EofInTag),
+        "should not emit EofInTag for unclosed comment"
+    );
+}
+
+#[test]
+fn tokenizer_error_abrupt_closing_of_empty_comment_short() {
+    // <!-->  — abrupt closing of empty comment (3-char form)
+    let input = "<template><!-->text</template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let warns: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::AbruptClosingOfEmptyComment)
+        .collect();
+    assert_eq!(
+        warns.len(),
+        1,
+        "should emit AbruptClosingOfEmptyComment for <!-->",
+    );
+    assert_eq!(
+        warns[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Warning
+    );
+    // Negative: must NOT emit EofInComment
+    assert!(
+        !syn.diagnostics
+            .iter()
+            .any(|d| d.code == CompilerErrorCode::EofInComment),
+        "should not emit EofInComment for abrupt close"
+    );
+}
+
+#[test]
+fn tokenizer_error_abrupt_closing_of_empty_comment_long() {
+    // <!--->  — abrupt closing of empty comment (4-char form)
+    let input = "<template><!--->text</template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let warns: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::AbruptClosingOfEmptyComment)
+        .collect();
+    assert_eq!(
+        warns.len(),
+        1,
+        "should emit AbruptClosingOfEmptyComment for <!--->",
+    );
+    assert_eq!(
+        warns[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Warning
+    );
+}
+
+#[test]
+fn tokenizer_error_incorrectly_opened_comment_declaration() {
+    // `<!DOCTYPE>` or `<!something>` — not a valid comment opening
+    let input = "<template><!something></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let warns: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::IncorrectlyOpenedComment)
+        .collect();
+    assert_eq!(
+        warns.len(),
+        1,
+        "should emit IncorrectlyOpenedComment for <!something>"
+    );
+    assert_eq!(
+        warns[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Warning
+    );
+}
+
+#[test]
+fn tokenizer_error_incorrectly_opened_comment_single_dash() {
+    // `<!-x>` — single dash, not a valid comment
+    let input = "<template><!-x></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let warns: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::IncorrectlyOpenedComment)
+        .collect();
+    assert_eq!(
+        warns.len(),
+        1,
+        "should emit IncorrectlyOpenedComment for <!-x>"
+    );
+    assert_eq!(
+        warns[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Warning
+    );
+}
+
+#[test]
+fn tokenizer_error_cdata_in_html_content() {
+    let input = "<template><div><![CDATA[text]]></div></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let warns: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::CdataInHtmlContent)
+        .collect();
+    assert_eq!(
+        warns.len(),
+        1,
+        "should emit CdataInHtmlContent for <![CDATA[ in HTML"
+    );
+    assert_eq!(
+        warns[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Warning
+    );
+}
+
+#[test]
+fn tokenizer_error_eof_in_cdata() {
+    // CDATA that reaches EOF without ]]>
+    let input = "<template><![CDATA[unclosed";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let errs: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::EofInCdata)
+        .collect();
+    assert_eq!(errs.len(), 1, "should emit EofInCdata diagnostic");
+    assert_eq!(
+        errs[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Error
+    );
+}
+
+#[test]
+fn tokenizer_error_unexpected_equals_sign_before_attribute_name() {
+    let input = "<template><div =\"val\"></div></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let warns: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::UnexpectedEqualsSignBeforeAttributeName)
+        .collect();
+    assert!(
+        !warns.is_empty(),
+        "should emit UnexpectedEqualsSignBeforeAttributeName"
+    );
+    assert_eq!(
+        warns[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Warning
+    );
+}
+
+#[test]
+fn tokenizer_error_unexpected_question_mark_instead_of_tag_name() {
+    let input = "<template><?xml version=\"1.0\"?></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let warns: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::UnexpectedQuestionMarkInsteadOfTagName)
+        .collect();
+    assert_eq!(
+        warns.len(),
+        1,
+        "should emit UnexpectedQuestionMarkInsteadOfTagName for <?xml>"
+    );
+    assert_eq!(
+        warns[0].severity,
+        crate::diagnostics::DiagnosticSeverity::Warning
+    );
+}
+
+#[test]
+fn tokenizer_no_invalid_first_char_for_text_with_less_than() {
+    // `<` followed by a digit is common in Vue templates (e.g., `count < 10`).
+    // The tokenizer falls back to text mode — no diagnostic should be emitted.
+    let input = "<template>2 < 1</template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    assert!(
+        !syn.diagnostics
+            .iter()
+            .any(|d| d.code == CompilerErrorCode::InvalidFirstCharacterOfTagName),
+        "should NOT emit InvalidFirstCharacterOfTagName for text containing '<'"
+    );
+}
+
+#[test]
+fn tokenizer_no_spurious_diagnostics_for_valid_template() {
+    // Ensure valid templates don't emit any of the new diagnostics
+    let input = "<template><div class=\"foo\"><!-- valid comment -->text</div></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_sfc_and_feed(&mut syn, input, &ctx);
+
+    let new_codes = [
+        CompilerErrorCode::EofInComment,
+        CompilerErrorCode::EofInCdata,
+        CompilerErrorCode::AbruptClosingOfEmptyComment,
+        CompilerErrorCode::IncorrectlyOpenedComment,
+        CompilerErrorCode::CdataInHtmlContent,
+        CompilerErrorCode::UnexpectedEqualsSignBeforeAttributeName,
+        CompilerErrorCode::UnexpectedQuestionMarkInsteadOfTagName,
+    ];
+    let spurious: Vec<_> = syn
+        .diagnostics
+        .iter()
+        .filter(|d| new_codes.contains(&d.code))
+        .collect();
+    assert!(
+        spurious.is_empty(),
+        "valid template should not emit any new tokenizer error diagnostics, got: {:?}",
+        spurious
+    );
+}

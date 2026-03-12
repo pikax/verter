@@ -152,6 +152,7 @@ describe("type exports", () => {
 
 describe("vite style virtual modules", () => {
   let tempDir: string;
+  let activePlugin: any = null;
 
   beforeEach(() => {
     tempDir = join(
@@ -162,7 +163,14 @@ describe("vite style virtual modules", () => {
     resetHost();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Always close the plugin to kill the preprocessor child process.
+    // Without this, leaked child processes keep the Node.js event loop alive
+    // and cause vitest to hang after tests complete.
+    if (activePlugin) {
+      await activePlugin.closeBundle();
+      activePlugin = null;
+    }
     rmSync(tempDir, { recursive: true, force: true });
     resetHost();
   });
@@ -183,6 +191,7 @@ describe("vite style virtual modules", () => {
     );
 
     plugin.vite.configResolved(viteConfig);
+    activePlugin = plugin;
     return plugin;
   }
 
@@ -224,14 +233,18 @@ $color: #333;
 }
 </style>`;
 
-    await plugin.transform(sfc, file);
-    const styleId = `${file}?vue&type=style&index=0&lang.scss`;
-    const style = await plugin.load(styleId);
-    const transformed = await plugin.transform(style.code, styleId);
+    try {
+      await plugin.transform(sfc, file);
+      const styleId = `${file}?vue&type=style&index=0&lang.scss`;
+      const style = await plugin.load(styleId);
+      const transformed = await plugin.transform(style.code, styleId);
 
-    expect(transformed).toBeDefined();
-    expect(transformed.code).not.toContain("[data-v-");
-    expect(transformed.code).toContain("#333");
+      expect(transformed).toBeDefined();
+      expect(transformed.code).not.toContain("[data-v-");
+      expect(transformed.code).toContain("#333");
+    } finally {
+      await plugin.closeBundle();
+    }
   });
 
   it("scopes compiled CSS for non-css style virtual modules without re-preprocessing", async () => {
@@ -947,7 +960,7 @@ describe("closeBundle hook", () => {
     expect(typeof plugin.closeBundle).toBe("function");
 
     // Call closeBundle — should not throw
-    plugin.closeBundle();
+    await plugin.closeBundle();
 
     // After closeBundle, loadHost() should create a NEW host (the old one was nulled)
     // We verify by importing loadHost and checking it works without error

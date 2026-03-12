@@ -337,7 +337,7 @@ export async function measureHover(
   return { hovers: hovers || [], latencyMs };
 }
 
-function hoverContentText(hover: vscode.Hover): string {
+export function hoverText(hover: vscode.Hover): string {
   return hover.contents
     .map((content) => (typeof content === "string" ? content : content.value))
     .join("\n");
@@ -354,7 +354,7 @@ export async function getHoverText(
   );
 
   assert.ok(hovers && hovers.length > 0, `Expected hover results at ${uri.toString()} ${position.line}:${position.character}`);
-  const text = hoverContentText(hovers[0]);
+  const text = hoverText(hovers[0]);
   assert.ok(text.trim().length > 0, `Expected non-empty hover text at ${uri.toString()} ${position.line}:${position.character}`);
   return text;
 }

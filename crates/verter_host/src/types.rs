@@ -982,15 +982,21 @@ pub struct DependencyResolution {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
+    // ── Identity ──────────────────────────────────────────────────────
     pub(crate) canonical_id: String,
     pub(crate) file_kind: FileKind,
+    pub(crate) aliases: BTreeSet<String>,
+    pub(crate) generation: u64,
+
+    // ── Content & hashes ──────────────────────────────────────────────
     pub(crate) source: Arc<str>,
     pub(crate) whole_hash: Hash16,
     pub(crate) semantic_hash: Hash16,
     pub(crate) slices: SliceHashes,
     pub(crate) descriptor: DescriptorMin,
     pub(crate) meta: FileMeta,
-    pub(crate) aliases: BTreeSet<String>,
+
+    // ── Dependencies ──────────────────────────────────────────────────
     pub(crate) dependencies: BTreeSet<String>,
     /// Per-specifier resolution records from the last `set_import_dependencies` call.
     /// Keyed by raw import specifier. Used by `resolve_loaded_dependency_canonical`
@@ -998,6 +1004,11 @@ pub(crate) struct FileEntry {
     pub(crate) dependency_resolutions: HashMap<String, DependencyResolution>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
+    /// Per-dep, per-type resolved type shape hash for Tier 3 precision.
+    /// Key: (dep_canonical_id, type_name). Value: hash of resolved prop shape.
+    pub(crate) resolved_type_hashes: HashMap<(String, String), Hash16>,
+
+    // ── Analysis snapshots ────────────────────────────────────────────
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
     pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
     pub(crate) export_signatures: Vec<verter_analysis::ExportSignature>,
@@ -1008,15 +1019,13 @@ pub(crate) struct FileEntry {
     /// Cached Arc-wrapped script analysis fields for cheap snapshot cloning.
     /// Built once during upsert, shared across all `get_analysis()` calls.
     pub(crate) arc_script_cache: ScriptAnalysisArcs,
-    /// Per-dep, per-type resolved type shape hash for Tier 3 precision.
-    /// Key: (dep_canonical_id, type_name). Value: hash of resolved prop shape.
-    pub(crate) resolved_type_hashes: HashMap<(String, String), Hash16>,
+
+    // ── Compilation cache ─────────────────────────────────────────────
     pub(crate) style_overrides: HashMap<u64, StyleOverrideLayer>,
     /// Per-profile content overrides for preprocessed template/script blocks.
     pub(crate) content_overrides: HashMap<u64, ContentOverrideLayer>,
     pub(crate) compile_slots: HashMap<u64, CompileSlot>,
     pub(crate) latest_diagnostics: HashMap<u64, DiagnosticsSnapshot>,
-    pub(crate) generation: u64,
     /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
     pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
     /// Cached intermediate TSC extract state. Populated on first `get_public_api_with_mode`

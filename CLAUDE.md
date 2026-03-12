@@ -37,7 +37,7 @@ crates/
   verter_core/       # Core template compiler (Rust)
   verter_analysis/   # Static analysis: imports, exports, bindings, type resolution
   verter_host/       # In-memory file host: caching, dependency tracking, multi-file compilation
-  verter_diagnostics/ # Vue SFC diagnostic engine: ~169 lint rules, rule trait, visitor, DiagnosticSet (depends only on verter_analysis)
+  verter_diagnostics/ # Vue SFC diagnostic engine: ~186 lint rules, rule trait, visitor, DiagnosticSet (depends only on verter_analysis)
   verter_actions/    # Code actions engine: quick fixes, refactoring (depends on verter_diagnostics + verter_analysis)
   verter_lsp/        # Rust LSP server binary (stdio, launched by VS Code extension)
   verter_ffi/        # FFI types: shared serializable structs for NAPI/WASM boundaries

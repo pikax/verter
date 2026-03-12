@@ -554,6 +554,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
             self.index += 1;
             self.state_before_declaration();
         } else if c == QUESTION_MARK {
+            self.emit(Event::Error {
+                code: ErrorCode::UNEXPECTED_QUESTION_MARK_INSTEAD_OF_TAG_NAME,
+                index: self.index as u32,
+            });
             self.state = State::InProcessingInstruction;
             self.index += 1;
             self.section_start = self.index;
@@ -568,6 +572,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
             self.state = State::InTagName;
             self.state_in_tag_name()
         } else {
+            // Not emitting INVALID_FIRST_CHARACTER_OF_TAG_NAME here because
+            // `<` followed by non-alpha is extremely common in Vue templates
+            // (e.g., `count < 10` in text content). The tokenizer correctly
+            // falls back to text mode, so this is not a real error.
             self.state = State::Text;
             self.state_text();
         }
@@ -698,6 +706,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                 // CDATA: scan for ]]> or fall back to scanning to >
                 self.index += 1;
                 if next_bytes_equal(b"CDATA[", &self.input[self.index..]) {
+                    self.emit(Event::Error {
+                        code: ErrorCode::CDATA_IN_HTML_CONTENT,
+                        index: (self.index - 2) as u32, // point at "<!"
+                    });
                     self.index += 6; // skip "CDATA["
                     match find_subslice(CDATA_END, &self.input[self.index..]) {
                         Some(p) => {
@@ -705,6 +717,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                         }
                         None => {
                             self.index = self.input.len();
+                            self.emit(Event::Error {
+                                code: ErrorCode::EOF_IN_CDATA,
+                                index: self.index as u32,
+                            });
                         }
                     }
                 } else {
@@ -719,6 +735,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
 
                 if next_bytes_equal(b"->", &self.input[self.index + 1..]) {
                     // Short comment: <!-->
+                    self.emit(Event::Error {
+                        code: ErrorCode::ABRUPT_CLOSING_OF_EMPTY_COMMENT,
+                        index: self.index as u32,
+                    });
                     let comment_start = self.section_start;
                     let content_pos = (self.index + 1) as u32; // after "<!-", before "->"
                     self.index += 3;
@@ -738,6 +758,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
 
                     // Check for abrupt-close comment: <!--->
                     if next_bytes_equal(b"->", &self.input[self.index..]) {
+                        self.emit(Event::Error {
+                            code: ErrorCode::ABRUPT_CLOSING_OF_EMPTY_COMMENT,
+                            index: self.index as u32,
+                        });
                         self.index += 2;
                         self.emit(Event::Comment {
                             start: self.section_start as u32,
@@ -782,6 +806,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                     }
                 } else {
                     // Single dash only (e.g., `<!-x>`) — not a valid comment, scan to >
+                    self.emit(Event::Error {
+                        code: ErrorCode::INCORRECTLY_OPENED_COMMENT,
+                        index: (self.index - 1) as u32, // point at "<!"
+                    });
                     self.scan_to_gt();
                     self.state = State::Text;
                     self.section_start = self.index;
@@ -789,6 +817,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
             }
             _ => {
                 // Declaration (e.g., <!DOCTYPE html>) — scan to closing >
+                self.emit(Event::Error {
+                    code: ErrorCode::INCORRECTLY_OPENED_COMMENT,
+                    index: (self.index - 1) as u32, // point at "<!"
+                });
                 self.scan_to_gt();
                 self.state = State::Text;
                 self.section_start = self.index;
