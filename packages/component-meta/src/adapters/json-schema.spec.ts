@@ -134,7 +134,7 @@ describe("propsToJsonSchema", () => {
     const meta: ComponentMeta = {
       filePath: "Comp.vue",
       componentName: "Comp",
-      apiStyle: "composition",
+      optionsApi: false,
       props: [
         {
           name: "title",
@@ -153,6 +153,23 @@ describe("propsToJsonSchema", () => {
       slots: [],
       models: [],
       exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
     };
 
     const schema = propsToJsonSchema(meta);

@@ -14,8 +14,15 @@ import type {
   SlotMeta,
   ModelMeta,
   ExposedMeta,
-  ApiStyle,
   SlotBinding,
+  ComponentUsage,
+  TemplateRefMeta,
+  ImportMeta,
+  BindingMeta,
+  VueApiCallMeta,
+  StyleMeta,
+  SelectorMeta,
+  ComponentFlags,
 } from "./types.js";
 import type { VerterHostAdapter } from "./host-adapter.js";
 import { parseType, runtimeTypeToDescriptor } from "./resolver.js";
@@ -29,9 +36,10 @@ interface RawSnapshot {
   macros: RawMacro[];
   macroTypeDeps: RawMacroTypeDep[];
   scriptFlags: number;
-  styles: unknown[];
+  styles: RawStyleBlock[];
   template: RawTemplate | null;
   optionsApi?: RawOptionsApi | null;
+  vueApiCalls?: RawVueApiCall[];
 }
 
 interface RawImport {
@@ -43,7 +51,10 @@ interface RawImport {
 interface RawBinding {
   name: string;
   kind: string;
+  reactivityKind?: string;
   typeAnnotation?: string | null;
+  usedInScript?: boolean;
+  usedInStyle?: boolean;
 }
 
 interface RawMacro {
@@ -79,9 +90,40 @@ interface RawMacroTypeDep {
 }
 
 interface RawTemplate {
+  components?: RawComponentUsage[];
+  templateRefs?: RawTemplateRef[];
+  bindingOccurrences?: RawBindingOccurrence[];
   propDefinitions?: RawPropDefinition[];
   emitDefinitions?: RawEmitDefinition[];
   definedSlots?: RawDefinedSlot[];
+}
+
+interface RawComponentUsage {
+  name: string;
+  importSource?: string;
+  isDynamic: boolean;
+  props?: RawTemplateProp[];
+  slotsUsed?: string[];
+  staticClasses?: string[];
+  hasDynamicClass: boolean;
+  vModels?: RawTemplateVModel[];
+}
+
+interface RawTemplateProp {
+  name: string;
+}
+
+interface RawTemplateVModel {
+  name: string;
+}
+
+interface RawTemplateRef {
+  name: string;
+  isDynamic: boolean;
+}
+
+interface RawBindingOccurrence {
+  name: string;
 }
 
 interface RawPropDefinition {
@@ -125,11 +167,62 @@ interface RawOptionsField {
   name: string;
 }
 
+interface RawStyleBlock {
+  lang?: string;
+  scoped?: boolean;
+  isModule?: boolean;
+  moduleName?: string | null;
+  vBinds?: RawVBind[];
+  css?: RawCssAnalysis | null;
+}
+
+interface RawVBind {
+  expression: string;
+}
+
+interface RawCssAnalysis {
+  selectors?: RawSelector[];
+  classes?: RawCssClass[];
+  ids?: RawCssId[];
+  customProperties?: RawCustomProperty[];
+}
+
+interface RawSelector {
+  text: string;
+  specificity: [number, number, number];
+}
+
+interface RawCssClass {
+  name: string;
+}
+
+interface RawCssId {
+  name: string;
+}
+
+interface RawCustomProperty {
+  name: string;
+}
+
+interface RawVueApiCall {
+  api: string;
+  argValue?: string;
+}
+
 // ── Script flags (matches verter_analysis AnalysisFlags) ─────────
 
-const HAS_DEFINE_PROPS = 1 << 0;
-const HAS_DEFINE_EMITS = 1 << 1;
-const HAS_OPTIONS_API = 1 << 16;
+const ASYNC_SETUP = 1 << 0;
+const HAS_DEFINE_PROPS = 1 << 1;
+const HAS_DEFINE_EMITS = 1 << 2;
+const HAS_REACTIVE_STATE = 1 << 11;
+const HAS_COMPUTED = 1 << 12;
+const HAS_WATCHERS = 1 << 13;
+const HAS_LIFECYCLE_HOOKS = 1 << 14;
+const HAS_PROVIDE = 1 << 15;
+const HAS_INJECT = 1 << 16;
+const HAS_INHERIT_ATTRS_FALSE = 1 << 18;
+const HAS_OPTIONS_API = 1 << 19;
+const HAS_STORE_USAGE = 1 << 20;
 
 // ── Extraction ───────────────────────────────────────────────────
 
@@ -156,7 +249,7 @@ export function extractComponentMeta(
  */
 export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMeta {
   const raw = snapshot as RawSnapshot;
-  const apiStyle = detectApiStyle(raw);
+  const optionsApi = detectOptionsApi(raw);
   const componentName = deriveComponentName(filePath);
 
   let props: PropMeta[];
@@ -165,7 +258,7 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
   let models: ModelMeta[];
   let exposed: ExposedMeta[];
 
-  if (apiStyle === "options") {
+  if (optionsApi && !hasCompositionMacros(raw)) {
     props = extractOptionsProps(raw.optionsApi);
     events = extractOptionsEmits(raw.optionsApi, raw.template);
     slots = extractSlots(raw.template);
@@ -182,19 +275,30 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
   return {
     filePath,
     componentName,
-    apiStyle,
+    optionsApi,
     props,
     events,
     slots,
     models,
     exposed,
+    components: extractComponents(raw.template),
+    templateRefs: extractTemplateRefs(raw.template),
+    imports: extractImports(raw.imports),
+    bindings: extractBindings(raw.bindings, raw.template),
+    vueApiCalls: extractVueApiCalls(raw.vueApiCalls),
+    styles: extractStyles(raw.styles),
+    flags: extractFlags(raw.scriptFlags),
   };
 }
 
 // ── API style detection ──────────────────────────────────────────
 
-function detectApiStyle(raw: RawSnapshot): ApiStyle {
-  const hasComposition =
+function detectOptionsApi(raw: RawSnapshot): boolean {
+  return (raw.scriptFlags & HAS_OPTIONS_API) !== 0 || raw.optionsApi != null;
+}
+
+function hasCompositionMacros(raw: RawSnapshot): boolean {
+  return (
     (raw.scriptFlags & HAS_DEFINE_PROPS) !== 0 ||
     (raw.scriptFlags & HAS_DEFINE_EMITS) !== 0 ||
     raw.macros.some(
@@ -204,13 +308,8 @@ function detectApiStyle(raw: RawSnapshot): ApiStyle {
         m.kind === "DefineModel" ||
         m.kind === "DefineExpose" ||
         m.kind === "DefineSlots",
-    );
-
-  const hasOptions = (raw.scriptFlags & HAS_OPTIONS_API) !== 0 || raw.optionsApi != null;
-
-  if (hasComposition && hasOptions) return "mixed";
-  if (hasOptions) return "options";
-  return "composition";
+    )
+  );
 }
 
 // ── Component name derivation ────────────────────────────────────
@@ -382,4 +481,134 @@ function extractOptionsExpose(optionsApi: RawOptionsApi | null | undefined): Exp
       type: unknown("unknown"),
     }),
   );
+}
+
+// ── New extraction functions ─────────────────────────────────────
+
+function extractComponents(template: RawTemplate | null): ComponentUsage[] {
+  if (!template?.components) return [];
+
+  return template.components.map(
+    (comp): ComponentUsage => ({
+      name: comp.name,
+      ...(comp.importSource && { importSource: comp.importSource }),
+      isDynamic: comp.isDynamic,
+      props: (comp.props ?? []).map((p) => p.name),
+      slotsUsed: comp.slotsUsed ?? [],
+      staticClasses: comp.staticClasses ?? [],
+      hasDynamicClass: comp.hasDynamicClass,
+      vModels: (comp.vModels ?? []).map((m) => m.name),
+    }),
+  );
+}
+
+function extractTemplateRefs(template: RawTemplate | null): TemplateRefMeta[] {
+  if (!template?.templateRefs) return [];
+
+  return template.templateRefs.map(
+    (ref): TemplateRefMeta => ({
+      name: ref.name,
+      isDynamic: ref.isDynamic,
+    }),
+  );
+}
+
+function extractImports(imports: RawImport[]): ImportMeta[] {
+  return imports.map(
+    (imp): ImportMeta => ({
+      source: imp.source,
+      isTypeOnly: imp.isTypeOnly,
+      bindings: imp.bindings,
+    }),
+  );
+}
+
+function extractBindings(bindings: RawBinding[], template: RawTemplate | null): BindingMeta[] {
+  // Build a set of binding names used in template from bindingOccurrences
+  const templateBindings = new Set<string>();
+  if (template?.bindingOccurrences) {
+    for (const occ of template.bindingOccurrences) {
+      templateBindings.add(occ.name);
+    }
+  }
+
+  return bindings.map(
+    (b): BindingMeta => ({
+      name: b.name,
+      reactivityKind: mapReactivityKind(b.reactivityKind),
+      usedInTemplate: templateBindings.has(b.name),
+      usedInStyle: b.usedInStyle ?? false,
+    }),
+  );
+}
+
+function mapReactivityKind(
+  kind: string | undefined,
+): "none" | "ref" | "reactive" | "computed" | "maybeRef" | "mutable" {
+  switch (kind) {
+    case "Ref":
+    case "ref":
+      return "ref";
+    case "Reactive":
+    case "reactive":
+      return "reactive";
+    case "Computed":
+    case "computed":
+      return "computed";
+    case "MaybeRef":
+    case "maybeRef":
+      return "maybeRef";
+    case "Mutable":
+    case "mutable":
+      return "mutable";
+    default:
+      return "none";
+  }
+}
+
+function extractVueApiCalls(calls: RawVueApiCall[] | undefined): VueApiCallMeta[] {
+  if (!calls) return [];
+
+  return calls.map(
+    (call): VueApiCallMeta => ({
+      api: call.api,
+      ...(call.argValue != null && { argValue: call.argValue }),
+    }),
+  );
+}
+
+function extractStyles(styles: RawStyleBlock[]): StyleMeta[] {
+  return styles.map((style): StyleMeta => {
+    const css = style.css;
+    return {
+      lang: style.lang ?? "Css",
+      scoped: style.scoped ?? false,
+      isModule: style.isModule ?? false,
+      ...(style.moduleName != null && { moduleName: style.moduleName }),
+      classes: (css?.classes ?? []).map((c) => c.name),
+      ids: (css?.ids ?? []).map((id) => id.name),
+      customProperties: (css?.customProperties ?? []).map((cp) => cp.name),
+      vBinds: (style.vBinds ?? []).map((vb) => vb.expression),
+      selectors: (css?.selectors ?? []).map(
+        (sel): SelectorMeta => ({
+          text: sel.text,
+          specificity: sel.specificity,
+        }),
+      ),
+    };
+  });
+}
+
+function extractFlags(scriptFlags: number): ComponentFlags {
+  return {
+    asyncSetup: (scriptFlags & ASYNC_SETUP) !== 0,
+    hasReactiveState: (scriptFlags & HAS_REACTIVE_STATE) !== 0,
+    hasComputed: (scriptFlags & HAS_COMPUTED) !== 0,
+    hasWatchers: (scriptFlags & HAS_WATCHERS) !== 0,
+    hasLifecycleHooks: (scriptFlags & HAS_LIFECYCLE_HOOKS) !== 0,
+    hasProvide: (scriptFlags & HAS_PROVIDE) !== 0,
+    hasInject: (scriptFlags & HAS_INJECT) !== 0,
+    hasInheritAttrsFalse: (scriptFlags & HAS_INHERIT_ATTRS_FALSE) !== 0,
+    hasStoreUsage: (scriptFlags & HAS_STORE_USAGE) !== 0,
+  };
 }

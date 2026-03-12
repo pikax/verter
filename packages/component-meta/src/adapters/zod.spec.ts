@@ -95,7 +95,7 @@ describe("propsToZodString", () => {
     const meta: ComponentMeta = {
       filePath: "Comp.vue",
       componentName: "Comp",
-      apiStyle: "composition",
+      optionsApi: false,
       props: [
         {
           name: "title",
@@ -114,6 +114,23 @@ describe("propsToZodString", () => {
       slots: [],
       models: [],
       exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
     };
 
     const result = propsToZodString(meta);
@@ -181,7 +198,7 @@ describe("propsToZodSchema (runtime)", () => {
     const meta: ComponentMeta = {
       filePath: "Comp.vue",
       componentName: "Comp",
-      apiStyle: "composition",
+      optionsApi: false,
       props: [
         {
           name: "title",
@@ -200,6 +217,23 @@ describe("propsToZodSchema (runtime)", () => {
       slots: [],
       models: [],
       exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
     };
 
     const schema = propsToZodSchema(meta) as z.ZodObject<any>;

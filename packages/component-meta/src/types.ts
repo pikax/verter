@@ -4,17 +4,14 @@
 
 import type { TypeDescriptor } from "./type-ir.js";
 
-/** The API style detected in the component's script block. */
-export type ApiStyle = "composition" | "options" | "mixed";
-
 /** Structured metadata extracted from a Vue Single File Component. */
 export interface ComponentMeta {
   /** File path or canonical ID of the source SFC. */
   filePath: string;
   /** Component name derived from the file name (e.g. `"MyButton"`). */
   componentName: string;
-  /** Detected API style: Composition API, Options API, or both. */
-  apiStyle: ApiStyle;
+  /** Whether the component uses the Options API (`export default { ... }`). */
+  optionsApi: boolean;
   /** Props declared via `defineProps` or Options API `props`. */
   props: PropMeta[];
   /** Events declared via `defineEmits` or Options API `emits`. */
@@ -25,6 +22,32 @@ export interface ComponentMeta {
   models: ModelMeta[];
   /** Members exposed via `defineExpose` or Options API `expose`. */
   exposed: ExposedMeta[];
+
+  // ── Template usage ─────────────────────────────────────────────
+
+  /** Child components used in the template. */
+  components: ComponentUsage[];
+  /** `ref="foo"` usages in the template. */
+  templateRefs: TemplateRefMeta[];
+
+  // ── Script analysis ────────────────────────────────────────────
+
+  /** All imports in the script block. */
+  imports: ImportMeta[];
+  /** Script bindings (variables, functions, etc.). */
+  bindings: BindingMeta[];
+  /** Vue API call sites (lifecycle hooks, watchers, provide/inject, etc.). */
+  vueApiCalls: VueApiCallMeta[];
+
+  // ── Style analysis ─────────────────────────────────────────────
+
+  /** Per-style-block analysis. */
+  styles: StyleMeta[];
+
+  // ── Flags ──────────────────────────────────────────────────────
+
+  /** Quick O(1) boolean checks for component characteristics. */
+  flags: ComponentFlags;
 }
 
 /** Metadata for a single component prop. */
@@ -89,4 +112,122 @@ export interface ExposedMeta {
   name: string;
   /** Type descriptor for the exposed value. */
   type: TypeDescriptor;
+}
+
+// ── Template usage types ───────────────────────────────────────────
+
+/** A child component used in the template. */
+export interface ComponentUsage {
+  /** PascalCase component name. */
+  name: string;
+  /** Resolved import path (undefined for globals/unresolved). */
+  importSource?: string;
+  /** Whether this is a dynamic component (`<component :is>`). */
+  isDynamic: boolean;
+  /** Prop names passed to this component. */
+  props: string[];
+  /** Slot names used on this component. */
+  slotsUsed: string[];
+  /** Static class names from `class="foo bar"`. */
+  staticClasses: string[];
+  /** Whether `:class="..."` is present. */
+  hasDynamicClass: boolean;
+  /** v-model binding names. */
+  vModels: string[];
+}
+
+/** A template ref usage (`ref="foo"` or `:ref="expr"`). */
+export interface TemplateRefMeta {
+  /** Ref name. */
+  name: string;
+  /** Whether this is a dynamic ref (`:ref="expr"`). */
+  isDynamic: boolean;
+}
+
+// ── Script analysis types ──────────────────────────────────────────
+
+/** An import statement from the script block. */
+export interface ImportMeta {
+  /** Import source path (e.g. `"vue"`, `"./utils"`). */
+  source: string;
+  /** Whether the entire import is type-only (`import type ...`). */
+  isTypeOnly: boolean;
+  /** Individual imported bindings. */
+  bindings: { name: string; isTypeOnly: boolean }[];
+}
+
+/** A script-level binding (variable, function, class, etc.). */
+export interface BindingMeta {
+  /** Binding name. */
+  name: string;
+  /** Reactivity classification. */
+  reactivityKind: "none" | "ref" | "reactive" | "computed" | "maybeRef" | "mutable";
+  /** Whether this binding is used in the template. */
+  usedInTemplate: boolean;
+  /** Whether this binding is used in a style block (via `v-bind()`). */
+  usedInStyle: boolean;
+}
+
+/** A Vue API function call site. */
+export interface VueApiCallMeta {
+  /** API name (e.g. `"OnMounted"`, `"Watch"`, `"Provide"`). */
+  api: string;
+  /** First string argument value, if available. */
+  argValue?: string;
+}
+
+// ── Style analysis types ───────────────────────────────────────────
+
+/** Analysis of a single `<style>` block. */
+export interface StyleMeta {
+  /** Preprocessor language (`"Css"`, `"Scss"`, `"Less"`, etc.). */
+  lang: string;
+  /** Whether the style block is scoped. */
+  scoped: boolean;
+  /** Whether this is a CSS module (`<style module>`). */
+  isModule: boolean;
+  /** Module name if named module (`<style module="foo">`). */
+  moduleName?: string;
+  /** All class names found in this style block. */
+  classes: string[];
+  /** All ID selectors found. */
+  ids: string[];
+  /** CSS custom property names (`--foo`). */
+  customProperties: string[];
+  /** `v-bind()` expression names used in styles. */
+  vBinds: string[];
+  /** All selectors with specificity. */
+  selectors: SelectorMeta[];
+}
+
+/** A CSS selector with its computed specificity. */
+export interface SelectorMeta {
+  /** Selector text. */
+  text: string;
+  /** Specificity as `[id, class, type]`. */
+  specificity: [number, number, number];
+}
+
+// ── Component flags ────────────────────────────────────────────────
+
+/** Quick boolean flags derived from script analysis flags. */
+export interface ComponentFlags {
+  /** Whether the setup function is async. */
+  asyncSetup: boolean;
+  /** Whether the component has reactive state (`ref`, `reactive`, etc.). */
+  hasReactiveState: boolean;
+  /** Whether the component uses `computed()`. */
+  hasComputed: boolean;
+  /** Whether the component uses watchers (`watch`, `watchEffect`, etc.). */
+  hasWatchers: boolean;
+  /** Whether the component has lifecycle hooks. */
+  hasLifecycleHooks: boolean;
+  /** Whether the component uses `provide()`. */
+  hasProvide: boolean;
+  /** Whether the component uses `inject()`. */
+  hasInject: boolean;
+  /** Whether `inheritAttrs: false` is set. */
+  hasInheritAttrsFalse: boolean;
+  /** Whether the component uses Pinia/Vuex stores. */
+  hasStoreUsage: boolean;
 }

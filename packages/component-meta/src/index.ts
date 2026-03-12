@@ -20,7 +20,14 @@ export type {
   SlotBinding,
   ModelMeta,
   ExposedMeta,
-  ApiStyle,
+  ComponentUsage,
+  TemplateRefMeta,
+  ImportMeta,
+  BindingMeta,
+  VueApiCallMeta,
+  StyleMeta,
+  SelectorMeta,
+  ComponentFlags,
 } from "./types.js";
 
 // Type IR

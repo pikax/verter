@@ -1,6 +1,6 @@
 # @verter/component-meta
 
-Extract Vue component metadata (props, events, slots, models, expose) from Single File Components into a structured format. Includes a generic **Type IR** and adapters for Storybook, Histoire, Zod, and JSON Schema.
+Extract Vue component metadata (props, events, slots, models, expose, imports, bindings, styles, flags) from Single File Components into a structured format. Includes a generic **Type IR** and adapters for Storybook, Histoire, Zod, and JSON Schema.
 
 ## Install
 
@@ -23,6 +23,9 @@ adapter.upsert({
   inputId: "MyButton.vue",
   source: `
 <script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import Icon from './Icon.vue'
+
 defineProps<{
   label: string
   variant?: 'primary' | 'secondary'
@@ -32,13 +35,27 @@ defineProps<{
 defineEmits<{
   (e: 'click', payload: MouseEvent): void
 }>()
+
+const count = ref(0)
+
+onMounted(() => {
+  console.log('mounted')
+})
 </script>
 
 <template>
-  <button :disabled="disabled" @click="$emit('click', $event)">
+  <button ref="buttonEl" :disabled="disabled" @click="$emit('click', $event)">
+    <Icon name="check" />
     <slot>{{ label }}</slot>
   </button>
 </template>
+
+<style scoped>
+.btn {
+  --btn-color: blue;
+  color: var(--btn-color);
+}
+</style>
 `,
 });
 
@@ -47,17 +64,134 @@ console.log(meta);
 // {
 //   filePath: "MyButton.vue",
 //   componentName: "MyButton",
-//   apiStyle: "composition",
+//   optionsApi: false,
 //   props: [
 //     { name: "label", type: { kind: "primitive", name: "string" }, required: true, ... },
-//     { name: "variant", type: { kind: "union", types: [{ kind: "literal", value: "primary" }, ...] }, ... },
-//     { name: "disabled", type: { kind: "primitive", name: "boolean" }, ... },
+//     { name: "variant", type: { kind: "union", types: [...] }, required: false, ... },
+//     { name: "disabled", type: { kind: "primitive", name: "boolean" }, required: false, ... },
 //   ],
 //   events: [{ name: "click", ... }],
 //   slots: [{ name: "default", isScoped: false, bindings: [] }],
 //   models: [],
 //   exposed: [],
+//   components: [
+//     { name: "Icon", importSource: "./Icon.vue", isDynamic: false, props: ["name"], ... }
+//   ],
+//   templateRefs: [{ name: "buttonEl", isDynamic: false }],
+//   imports: [
+//     { source: "vue", isTypeOnly: false, bindings: [{ name: "ref", ... }, { name: "onMounted", ... }] },
+//     { source: "./Icon.vue", isTypeOnly: false, bindings: [{ name: "Icon", ... }] },
+//   ],
+//   bindings: [
+//     { name: "count", reactivityKind: "ref", usedInTemplate: false, usedInStyle: false },
+//   ],
+//   vueApiCalls: [{ api: "OnMounted" }],
+//   styles: [{
+//     lang: "Css", scoped: true, isModule: false,
+//     classes: ["btn"], ids: [], customProperties: ["--btn-color"], vBinds: [],
+//     selectors: [{ text: ".btn", specificity: [0, 1, 0] }],
+//   }],
+//   flags: {
+//     asyncSetup: false, hasReactiveState: true, hasComputed: false,
+//     hasWatchers: false, hasLifecycleHooks: true, hasProvide: false,
+//     hasInject: false, hasInheritAttrsFalse: false, hasStoreUsage: false,
+//   },
 // }
+```
+
+## Slots
+
+Slot metadata is extracted from `<slot>` elements in the template. Named slots, scoped slots, and default slots are all captured:
+
+```ts
+const meta = extractComponentMeta(adapter, "DataTable.vue");
+// DataTable.vue has:
+//   <slot name="header" :columns="columns" :sortBy="sortBy" />
+//   <slot name="row" :item="item" :index="index" />
+//   <slot name="empty" />
+//   <slot />  (default)
+
+console.log(meta.slots);
+// [
+//   { name: "default", isScoped: false, bindings: [] },
+//   { name: "header", isScoped: true, bindings: [
+//     { name: "columns", type: { kind: "unknown", rawType: "unknown" } },
+//     { name: "sortBy", type: { kind: "unknown", rawType: "unknown" } },
+//   ]},
+//   { name: "row", isScoped: true, bindings: [
+//     { name: "item", type: { kind: "unknown", rawType: "unknown" } },
+//     { name: "index", type: { kind: "unknown", rawType: "unknown" } },
+//   ]},
+//   { name: "empty", isScoped: false, bindings: [] },
+// ]
+```
+
+Note: Slot binding types are currently `unknown` — resolving them from `defineSlots<{}>()` type params is future work.
+
+## Rich Analysis
+
+Beyond props/events/slots, the metadata includes deeper analysis of each SFC:
+
+### Components
+
+Child components used in the template, with props passed, slots used, and class bindings:
+
+```ts
+meta.components
+// [{ name: "MyButton", importSource: "./MyButton.vue", isDynamic: false,
+//    props: ["label", "disabled"], slotsUsed: ["default"],
+//    staticClasses: ["btn"], hasDynamicClass: false, vModels: [] }]
+```
+
+### Template Refs
+
+All `ref="..."` usages, with dynamic ref detection:
+
+```ts
+meta.templateRefs
+// [{ name: "inputEl", isDynamic: false }, { name: "container", isDynamic: false }]
+```
+
+### Bindings
+
+Script-level bindings with reactivity classification and usage tracking:
+
+```ts
+meta.bindings
+// [{ name: "count", reactivityKind: "ref", usedInTemplate: true, usedInStyle: false },
+//  { name: "doubled", reactivityKind: "computed", usedInTemplate: true, usedInStyle: false }]
+```
+
+### Vue API Calls
+
+Lifecycle hooks, watchers, provide/inject, and other Vue API call sites:
+
+```ts
+meta.vueApiCalls
+// [{ api: "OnMounted" }, { api: "Watch", argValue: "count" }, { api: "Provide", argValue: "theme" }]
+```
+
+### Styles
+
+Per-style-block analysis with classes, IDs, CSS variables, selectors, and specificity:
+
+```ts
+meta.styles
+// [{ lang: "Scss", scoped: true, isModule: false,
+//    classes: ["btn", "active"], ids: ["app"],
+//    customProperties: ["--primary-color"], vBinds: ["color"],
+//    selectors: [{ text: ".btn", specificity: [0, 1, 0] }] }]
+```
+
+### Flags
+
+Quick boolean checks for component characteristics (O(1) bitflag reads):
+
+```ts
+meta.flags
+// { asyncSetup: false, hasReactiveState: true, hasComputed: true,
+//   hasWatchers: false, hasLifecycleHooks: true, hasProvide: false,
+//   hasInject: false, hasInheritAttrsFalse: false, hasStoreUsage: false }
 ```
 
 ## Adapters
@@ -197,6 +331,25 @@ const adapter = wrapNapiHost(host);
 | `snapshotToMeta(snapshot, filePath)` | Convert a raw analysis snapshot to `ComponentMeta` |
 | `parseType(input)` | Parse a TS type annotation string into a `TypeDescriptor` |
 | `runtimeTypeToDescriptor(name)` | Convert a Vue runtime constructor (`"String"`) to a `TypeDescriptor` |
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `ComponentMeta` | Full component metadata |
+| `PropMeta` | Prop declaration |
+| `EventMeta` | Event declaration |
+| `SlotMeta` | Slot with optional scoped bindings |
+| `ModelMeta` | `defineModel` declaration |
+| `ExposedMeta` | `defineExpose` member |
+| `ComponentUsage` | Child component used in template |
+| `TemplateRefMeta` | Template `ref` attribute |
+| `ImportMeta` | Import statement |
+| `BindingMeta` | Script binding with reactivity |
+| `VueApiCallMeta` | Vue API call site |
+| `StyleMeta` | Style block analysis |
+| `SelectorMeta` | CSS selector with specificity |
+| `ComponentFlags` | Boolean component characteristics |
 
 ### Adapters
 
