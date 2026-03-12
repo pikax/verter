@@ -538,6 +538,145 @@ where
             .ok()
             .and_then(|guard| guard.as_ref().and_then(|provider| provider.child_pid()))
     }
+
+    // ── Background-priority forwarding ──────────────────────────────
+
+    fn open_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        let content_owned = content.to_string();
+        Box::pin(async move {
+            self.cache_file(&path_owned, &content_owned, Some(CachedFileMode::Open))
+                .await;
+            let provider = self.get_inner().await?;
+            provider
+                .open_file_background(&path_owned, &content_owned)
+                .await
+        })
+    }
+
+    fn load_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        let content_owned = content.to_string();
+        Box::pin(async move {
+            self.cache_file(&path_owned, &content_owned, Some(CachedFileMode::Load))
+                .await;
+            let provider = self.get_inner().await?;
+            provider
+                .load_file_background(&path_owned, &content_owned)
+                .await
+        })
+    }
+
+    fn update_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        let content_owned = content.to_string();
+        Box::pin(async move {
+            self.cache_file(&path_owned, &content_owned, None).await;
+            let provider = self.get_inner().await?;
+            provider
+                .update_file_background(&path_owned, &content_owned)
+                .await
+        })
+    }
+
+    fn close_file_background(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        Box::pin(async move {
+            self.remove_cached_file(&path_owned).await;
+            let provider = self.get_inner().await?;
+            provider.close_file_background(&path_owned).await
+        })
+    }
+
+    fn get_diagnostics_background(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+        let path_owned = path.to_string();
+        Box::pin(async move {
+            let provider = self.get_inner().await?;
+            provider.get_diagnostics_background(&path_owned).await
+        })
+    }
+
+    fn configure_paths_background(
+        &self,
+        base_url: &str,
+        paths: serde_json::Value,
+    ) -> ProviderFuture<'_, ()> {
+        let base_url = base_url.to_string();
+        let cached_paths = paths.clone();
+        Box::pin(async move {
+            self.cache_path_config(&base_url, cached_paths).await;
+            match self.get_inner().await {
+                Ok(provider) => provider.configure_paths_background(&base_url, paths).await,
+                Err(_) => Ok(()),
+            }
+        })
+    }
+
+    fn update_workspace_folders_background(
+        &self,
+        added: Vec<serde_json::Value>,
+        removed: Vec<serde_json::Value>,
+    ) -> ProviderFuture<'_, ()> {
+        let added_clone = added.clone();
+        let removed_clone = removed.clone();
+        Box::pin(async move {
+            self.cache_workspace_folders(&added_clone, &removed_clone)
+                .await;
+            match self.get_inner().await {
+                Ok(provider) => {
+                    provider
+                        .update_workspace_folders_background(added, removed)
+                        .await
+                }
+                Err(_) => Ok(()),
+            }
+        })
+    }
+
+    // ── Normal-priority forwarding ──────────────────────────────────
+
+    fn open_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        let content_owned = content.to_string();
+        Box::pin(async move {
+            self.cache_file(&path_owned, &content_owned, Some(CachedFileMode::Open))
+                .await;
+            let provider = self.get_inner().await?;
+            provider.open_file_normal(&path_owned, &content_owned).await
+        })
+    }
+
+    fn load_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        let content_owned = content.to_string();
+        Box::pin(async move {
+            self.cache_file(&path_owned, &content_owned, Some(CachedFileMode::Load))
+                .await;
+            let provider = self.get_inner().await?;
+            provider.load_file_normal(&path_owned, &content_owned).await
+        })
+    }
+
+    fn update_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        let content_owned = content.to_string();
+        Box::pin(async move {
+            self.cache_file(&path_owned, &content_owned, None).await;
+            let provider = self.get_inner().await?;
+            provider
+                .update_file_normal(&path_owned, &content_owned)
+                .await
+        })
+    }
+
+    fn close_file_normal(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path_owned = path.to_string();
+        Box::pin(async move {
+            self.remove_cached_file(&path_owned).await;
+            let provider = self.get_inner().await?;
+            provider.close_file_normal(&path_owned).await
+        })
+    }
 }
 
 #[cfg(test)]

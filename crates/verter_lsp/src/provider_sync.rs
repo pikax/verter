@@ -64,6 +64,24 @@ impl ProviderSyncState {
         }
     }
 
+    /// Returns `true` if this state was created by provisional (pre-snapshot) sync.
+    pub fn is_provisional(&self) -> bool {
+        self.owner_key == "__provisional__"
+    }
+
+    /// Create a provisional sync state (no resolver, IDE-only).
+    pub fn provisional(ide_path: String) -> Self {
+        Self {
+            owner_key: "__provisional__".to_string(),
+            ide_path: Some(ide_path),
+            api_path: None,
+            shadow_path: None,
+            ide_background_loaded: false,
+            api_background_loaded: false,
+            shadow_background_loaded: false,
+        }
+    }
+
     pub fn carry_background_loaded_from(&mut self, previous: &ProviderSyncState) {
         for kind in [
             ProviderPathKind::Ide,
@@ -135,6 +153,28 @@ pub fn stale_paths_for_transition(
     next: &ProviderSyncState,
 ) -> Vec<(ProviderPathKind, String)> {
     let owner_changed = previous.owner_key != next.owner_key;
+
+    // Provisional → owner-aware upgrade with unchanged IDE path: not stale.
+    // The type provider already has the correct TSX content; only the owner metadata changes.
+    if previous.is_provisional() && owner_changed {
+        let mut stale = Vec::new();
+        for kind in [
+            ProviderPathKind::Ide,
+            ProviderPathKind::Api,
+            ProviderPathKind::Shadow,
+        ] {
+            let prev_path = previous.path_for_kind(kind);
+            let next_path = next.path_for_kind(kind);
+            if let Some(path) = prev_path {
+                // Only stale if the actual path changed (not just the owner key)
+                if Some(path) != next_path {
+                    stale.push((kind, path.to_string()));
+                }
+            }
+        }
+        return stale;
+    }
+
     let mut stale = Vec::new();
     for kind in [
         ProviderPathKind::Ide,
@@ -328,6 +368,54 @@ mod tests {
         assert!(transition.stale_paths.is_empty());
         assert!(transition.next.ide_background_loaded);
         assert!(transition.next.api_background_loaded);
+    }
+
+    #[test]
+    fn provisional_state_is_detected() {
+        let state = ProviderSyncState::provisional("/workspace/src/App.vue.tsx".to_string());
+        assert!(
+            state.is_provisional(),
+            "provisional state should be detected"
+        );
+        assert_eq!(state.owner_key, "__provisional__");
+        assert_eq!(
+            state.ide_path.as_deref(),
+            Some("/workspace/src/App.vue.tsx")
+        );
+        assert!(state.api_path.is_none(), "provisional has no API path");
+    }
+
+    #[test]
+    fn provisional_to_owner_aware_same_ide_path_not_stale() {
+        let provisional = ProviderSyncState::provisional("/workspace/src/App.vue.tsx".to_string());
+        let owner_aware = ProviderSyncState {
+            owner_key: "/workspace/tsconfig.json".to_string(),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ..Default::default()
+        };
+
+        let stale = stale_paths_for_transition(&provisional, &owner_aware);
+        assert!(
+            stale.is_empty(),
+            "provisional → owner-aware with same IDE path should not be stale, got: {:?}",
+            stale
+        );
+    }
+
+    #[test]
+    fn provisional_to_owner_aware_different_ide_path_is_stale() {
+        let provisional = ProviderSyncState::provisional("/workspace/src/App.vue.tsx".to_string());
+        let owner_aware = ProviderSyncState {
+            owner_key: "/workspace/tsconfig.json".to_string(),
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ..Default::default()
+        };
+
+        let stale = stale_paths_for_transition(&provisional, &owner_aware);
+        assert_eq!(stale.len(), 1, "different IDE path should be stale");
+        assert_eq!(stale[0].1, "/workspace/src/App.vue.tsx");
     }
 
     #[test]

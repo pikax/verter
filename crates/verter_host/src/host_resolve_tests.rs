@@ -1453,3 +1453,46 @@ const height = ref('100px')
         "compile should have no errors at all"
     );
 }
+
+#[test]
+fn expand_relative_candidates_produces_correct_paths() {
+    let host = VerterHost::new(HostConfig::default());
+    let candidates = host.expand_relative_candidates("/workspace/src/App.vue", "./types");
+
+    // Direct resolution
+    assert_eq!(candidates[0], "/workspace/src/types");
+
+    // Extension candidates
+    assert!(
+        candidates.contains(&"/workspace/src/types.ts".to_string()),
+        "should include .ts extension variant"
+    );
+    assert!(
+        candidates.contains(&"/workspace/src/types.tsx".to_string()),
+        "should include .tsx extension variant"
+    );
+
+    // Index candidates
+    assert!(
+        candidates.contains(&"/workspace/src/types/index.ts".to_string()),
+        "should include /index.ts variant"
+    );
+
+    // Should NOT contain the bare specifier itself
+    assert!(
+        !candidates.contains(&"./types".to_string()),
+        "should not contain the raw specifier"
+    );
+}
+
+#[test]
+fn expand_relative_candidates_handles_parent_traversal() {
+    let host = VerterHost::new(HostConfig::default());
+    let candidates = host.expand_relative_candidates("/workspace/src/deep/file.vue", "../utils");
+
+    assert_eq!(candidates[0], "/workspace/src/utils");
+    assert!(
+        candidates.contains(&"/workspace/src/utils.ts".to_string()),
+        "should resolve parent traversal correctly"
+    );
+}

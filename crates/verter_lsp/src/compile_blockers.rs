@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use verter_host::{FileKind, UpsertRequest, VerterHost};
+use dashmap::DashMap;
+use verter_host::{FileKind, Hash16, UpsertRequest, VerterHost};
 
 /// Reader that resolves content from the host first, then falls back to disk.
 pub struct HostFsProjectResolverReader<'a> {
@@ -71,6 +72,173 @@ pub fn ensure_source_loaded_into_host(host: &VerterHost, canonical_id: &str) -> 
         aliases: Vec::new(),
     })
     .is_ok()
+}
+
+/// Cached hydration entry. Only complete hydrations are cached.
+#[derive(Debug, Clone)]
+struct HydrationCacheEntry {
+    /// Semantic hash of the file at hydration time.
+    source_hash: Hash16,
+    /// Resolver generation at hydration time.
+    resolver_generation: u64,
+}
+
+/// Cache for compile blocker hydrations. Keyed by canonical ID.
+/// Thread-safe via DashMap. Only stores entries for **complete** hydrations
+/// (all specifiers resolved). Invalidated by semantic hash mismatch.
+pub struct HydrationCache {
+    entries: DashMap<String, HydrationCacheEntry>,
+}
+
+impl Default for HydrationCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HydrationCache {
+    pub fn new() -> Self {
+        Self {
+            entries: DashMap::new(),
+        }
+    }
+
+    /// Check if a file's hydration is still valid (hash + generation match).
+    fn is_valid(&self, canonical_id: &str, current_hash: Hash16, resolver_generation: u64) -> bool {
+        self.entries
+            .get(canonical_id)
+            .map(|entry| {
+                entry.source_hash == current_hash
+                    && entry.resolver_generation == resolver_generation
+            })
+            .unwrap_or(false)
+    }
+
+    /// Record a successful complete hydration.
+    fn insert(&self, canonical_id: &str, source_hash: Hash16, resolver_generation: u64) {
+        self.entries.insert(
+            canonical_id.to_string(),
+            HydrationCacheEntry {
+                source_hash,
+                resolver_generation,
+            },
+        );
+    }
+
+    /// Remove cache entry for a file (e.g. on file removal).
+    pub fn remove(&self, canonical_id: &str) {
+        self.entries.remove(canonical_id);
+    }
+}
+
+/// Outcome of a pre-snapshot blocker hydration.
+pub struct HydrationOutcome {
+    /// `true` when all blocker specifiers were resolved.
+    /// `false` when bare/alias specifiers were deferred.
+    pub complete: bool,
+}
+
+/// Cache-aware wrapper around `hydrate_vue_compile_blockers`.
+///
+/// Checks the hydration cache first. If the file's semantic hash and resolver
+/// generation match the cached entry, hydration is skipped. On success,
+/// inserts a new cache entry.
+pub fn hydrate_cached(
+    cache: &HydrationCache,
+    host: &VerterHost,
+    resolver: &crate::project_resolver::NativeProjectResolver,
+    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    canonical_id: &str,
+    resolver_generation: u64,
+) {
+    let Some(current_hash) = host.get_semantic_hash(canonical_id) else {
+        return;
+    };
+    if cache.is_valid(canonical_id, current_hash, resolver_generation) {
+        return;
+    }
+    hydrate_vue_compile_blockers(host, resolver, reader, canonical_id);
+    cache.insert(canonical_id, current_hash, resolver_generation);
+}
+
+/// Pre-snapshot blocker hydration: resolves only relative/absolute specifiers.
+///
+/// For each compile blocker specifier:
+/// - **Relative/absolute** (`./`, `../`, `/`): probe disk with `expand_relative_candidates()`
+/// - **Bare/alias**: skip (deferred to real resolver post-snapshot)
+///
+/// Returns `HydrationOutcome { complete: false }` when any specifiers were skipped.
+pub fn hydrate_vue_compile_blockers_pre_snapshot(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> HydrationOutcome {
+    let mut complete = true;
+    let mut pending = vec![canonical_id.to_string()];
+    let mut seen = HashSet::new();
+
+    while let Some(source_id) = pending.pop() {
+        if !seen.insert(source_id.clone()) {
+            continue;
+        }
+
+        if !ensure_source_loaded_into_host(host, &source_id) {
+            continue;
+        }
+
+        if source_id.ends_with(".vue") {
+            if let Some(blockers) = host.get_compile_blockers(&source_id) {
+                for request in blockers.external_source_requests {
+                    if !is_relative_or_absolute(&request.specifier) {
+                        complete = false;
+                        continue;
+                    }
+                    if let Some(loaded_id) =
+                        probe_and_load_relative(host, &source_id, &request.specifier)
+                    {
+                        pending.push(loaded_id);
+                    }
+                }
+
+                for dep in blockers.macro_type_deps.iter() {
+                    if !is_relative_or_absolute(&dep.import_source) {
+                        complete = false;
+                        continue;
+                    }
+                    if let Some(loaded_id) =
+                        probe_and_load_relative(host, &source_id, &dep.import_source)
+                    {
+                        pending.push(loaded_id);
+                    }
+                }
+            }
+        }
+    }
+
+    HydrationOutcome { complete }
+}
+
+/// Check if a specifier is relative (`./`, `../`) or absolute (`/`).
+fn is_relative_or_absolute(specifier: &str) -> bool {
+    specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/')
+}
+
+/// Probe disk for a relative specifier using the host's resolve extensions.
+/// Returns the canonical ID of the first candidate found on disk.
+fn probe_and_load_relative(
+    host: &VerterHost,
+    owner_canonical: &str,
+    specifier: &str,
+) -> Option<String> {
+    let candidates = host.expand_relative_candidates(owner_canonical, specifier);
+    for candidate in candidates {
+        let normalized = normalize_fs_path(&candidate);
+        if std::path::Path::new(&normalized).is_file()
+            && ensure_source_loaded_into_host(host, &candidate)
+        {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub fn hydrate_vue_compile_blockers(
@@ -532,6 +700,97 @@ mod tests {
         assert!(
             host.get_source("/nonexistent/file.ts").is_none(),
             "missing file should not appear in host"
+        );
+    }
+
+    #[test]
+    fn hydration_cache_skips_when_hash_and_generation_match() {
+        let cache = HydrationCache::new();
+        let hash: Hash16 = [1; 16];
+        cache.insert("/src/App.vue", hash, 1);
+        assert!(
+            cache.is_valid("/src/App.vue", hash, 1),
+            "cache hit: same hash + generation"
+        );
+    }
+
+    #[test]
+    fn hydration_cache_invalidates_on_hash_mismatch() {
+        let cache = HydrationCache::new();
+        cache.insert("/src/App.vue", [1; 16], 1);
+        assert!(
+            !cache.is_valid("/src/App.vue", [2; 16], 1),
+            "cache miss: different hash"
+        );
+    }
+
+    #[test]
+    fn hydration_cache_invalidates_on_generation_mismatch() {
+        let cache = HydrationCache::new();
+        cache.insert("/src/App.vue", [1; 16], 1);
+        assert!(
+            !cache.is_valid("/src/App.vue", [1; 16], 2),
+            "cache miss: different generation"
+        );
+    }
+
+    #[test]
+    fn hydration_cache_returns_false_for_unknown_file() {
+        let cache = HydrationCache::new();
+        assert!(
+            !cache.is_valid("/src/Unknown.vue", [0; 16], 0),
+            "cache miss: never inserted"
+        );
+    }
+
+    #[test]
+    fn hydration_cache_remove_clears_entry() {
+        let cache = HydrationCache::new();
+        cache.insert("/src/App.vue", [1; 16], 1);
+        cache.remove("/src/App.vue");
+        assert!(
+            !cache.is_valid("/src/App.vue", [1; 16], 1),
+            "cache miss after removal"
+        );
+    }
+
+    #[test]
+    fn pre_snapshot_hydration_skips_bare_specifiers() {
+        let host = strict_host();
+        let source = "<script setup lang=\"ts\">\nimport type { Props } from 'some-pkg'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props }}</div></template>";
+        upsert_vue(&host, "/workspace/src/App.vue", source);
+        let outcome = hydrate_vue_compile_blockers_pre_snapshot(&host, "/workspace/src/App.vue");
+        assert!(
+            !outcome.complete,
+            "bare specifier should make outcome incomplete"
+        );
+    }
+
+    #[test]
+    fn pre_snapshot_hydration_resolves_relative_specifiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let types_path = dir.path().join("types.ts");
+        std::fs::write(&types_path, "export interface Props { msg: string }").unwrap();
+
+        let vue_path = dir.path().join("App.vue");
+        let vue_source = format!(
+            "<script setup lang=\"ts\">\nimport type {{ Props }} from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{{{ props.msg }}}}</div></template>"
+        );
+        std::fs::write(&vue_path, &vue_source).unwrap();
+
+        let host = strict_host();
+        let canonical_vue = normalize_fs_path(&vue_path.to_string_lossy());
+        let canonical_types = normalize_fs_path(&types_path.to_string_lossy());
+        upsert_vue(&host, &canonical_vue, &vue_source);
+
+        let outcome = hydrate_vue_compile_blockers_pre_snapshot(&host, &canonical_vue);
+        assert!(
+            outcome.complete,
+            "relative specifier should be fully resolved"
+        );
+        assert!(
+            host.get_source(&canonical_types).is_some(),
+            "relative dependency should be loaded into host"
         );
     }
 

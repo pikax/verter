@@ -38,6 +38,28 @@ type ExternalTypeCache = rustc_hash::FxHashMap<
 >;
 
 impl VerterHost {
+    /// Expand a relative import specifier into all candidate canonical IDs.
+    ///
+    /// Given an owner file and a relative specifier (e.g. `./types`), returns
+    /// a list of candidates: the direct path, then with each resolve extension,
+    /// then `/index` variants. Used by pre-snapshot blocker hydration to probe
+    /// the filesystem without a full resolver.
+    pub fn expand_relative_candidates(
+        &self,
+        owner_canonical: &str,
+        specifier: &str,
+    ) -> Vec<String> {
+        let direct = crate::id::resolve_external(owner_canonical, specifier);
+        let mut candidates = vec![direct.clone()];
+        for ext in &self.config.resolve_extensions {
+            candidates.push(format!("{direct}{ext}"));
+        }
+        for ext in &self.config.resolve_extensions {
+            candidates.push(format!("{direct}/index{ext}"));
+        }
+        candidates
+    }
+
     fn resolve_loaded_dependency_canonical(
         &self,
         files: &FxHashMap<String, FileEntry>,

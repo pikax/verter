@@ -507,8 +507,15 @@ pub struct VerterLanguageServer {
     /// triggers a completion request. By incrementing this counter, stale requests can
     /// detect they've been superseded and skip the expensive type provider call.
     completion_generation: std::sync::atomic::AtomicU64,
-    /// Canonical IDs of files needing provider sync (set in did_change, cleared after sync).
-    /// Prevents flooding the type provider with updates during rapid typing.
+    /// Canonical IDs needing **interactive IDE sync** (set by did_change, cleared by
+    /// `ensure_current_file_synced`). Only the IDE TSX path is flushed on hover/completion.
+    needs_ide_sync: Arc<DashSet<String>>,
+    /// Canonical IDs needing **deferred API/.vue.ts sync** + owner-aware reconciliation.
+    /// Set by did_change and by the interactive path (when API is deferred).
+    /// Cleared by the coordinator's debounced sync after a resolver snapshot exists.
+    needs_deferred_sync: Arc<DashSet<String>>,
+    /// Legacy alias — kept so the coordinator still has a single dirty set to drain.
+    /// Points to the same `DashSet` as `needs_deferred_sync`.
     needs_provider_sync: Arc<DashSet<String>>,
     /// Source IDs whose provider sync depends on a resolver snapshot that is not ready yet.
     /// Drained after background initialization commits a new snapshot.
@@ -553,6 +560,13 @@ pub struct VerterLanguageServer {
     no_project_found_uris: DashSet<String>,
     /// Whether the "no project found" limitation notification has already been sent.
     no_project_found_notified: std::sync::atomic::AtomicBool,
+    /// Most-recently-used canonical IDs. Updated on did_open, did_change, and
+    /// interactive reads (hover, completion, definition). Used for MRU-ordered
+    /// snapshot drain — most recently interacted files reconcile first.
+    mru_canonical_ids: parking_lot::Mutex<Vec<String>>,
+    /// Shared hydration cache: prevents re-hydrating compile blockers when
+    /// the file's semantic hash hasn't changed since the last hydration.
+    hydration_cache: Arc<crate::compile_blockers::HydrationCache>,
 }
 
 impl VerterLanguageServer {
@@ -562,7 +576,10 @@ impl VerterLanguageServer {
             .as_ref()
             .map(|tp| ProjectSync::new(Arc::clone(tp), config.project_sync_mode));
 
-        let needs_provider_sync = Arc::new(DashSet::new());
+        let needs_ide_sync = Arc::new(DashSet::new());
+        let needs_deferred_sync = Arc::new(DashSet::new());
+        // Legacy alias: coordinator drains from needs_deferred_sync
+        let needs_provider_sync = Arc::clone(&needs_deferred_sync);
         let documents = Arc::new(DocumentRegistry::new(config.host));
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
@@ -616,6 +633,8 @@ impl VerterLanguageServer {
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
             completion_generation: std::sync::atomic::AtomicU64::new(0),
+            needs_ide_sync,
+            needs_deferred_sync,
             needs_provider_sync,
             pending_snapshot_provider_sync,
             sync_coordinator,
@@ -627,6 +646,8 @@ impl VerterLanguageServer {
             type_provider_none_reason: config.type_provider_none_reason,
             no_project_found_uris: DashSet::new(),
             no_project_found_notified: std::sync::atomic::AtomicBool::new(false),
+            mru_canonical_ids: parking_lot::Mutex::new(Vec::new()),
+            hydration_cache: Arc::new(crate::compile_blockers::HydrationCache::new()),
         }
     }
 
@@ -807,6 +828,7 @@ impl VerterLanguageServer {
         }
     }
 
+    #[allow(dead_code)] // Used by sync_coordinator, may be useful for future callers
     async fn sync_ide_to_provider(&self, uri: &Uri) {
         let _timer = self
             .statistics
@@ -1132,42 +1154,158 @@ impl VerterLanguageServer {
         });
     }
 
-    /// If the file has pending changes, sync the IDE TSX + API DTS to the type provider NOW.
-    /// Called by interactive handlers (hover, completion, etc.) to ensure the provider is up-to-date
-    /// before making a query. Uses a tight timeout to avoid blocking interactive requests.
-    async fn ensure_provider_synced(&self, uri: &Uri) {
-        if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
-            if self.resolver_snapshot().is_none() {
-                self.pending_snapshot_provider_sync
-                    .insert(canonical_id.clone());
-                self.needs_provider_sync.insert(canonical_id);
-                return;
-            }
-            if self.needs_provider_sync.remove(&canonical_id).is_some() {
-                tracing::info!(
-                    "ensure_provider_synced: flushing pending sync for {}",
-                    uri.as_str()
-                );
-                // Use a tight timeout — if the provider is overwhelmed, don't block
-                // the interactive request. The debounced task will retry later.
-                if tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                    tokio::join!(
-                        self.sync_ide_to_provider(uri),
-                        self.sync_api_to_provider(uri),
-                    );
-                })
-                .await
-                .is_err()
-                {
-                    tracing::warn!(
-                        "ensure_provider_synced: sync timed out for {}, proceeding with stale data",
-                        uri.as_str()
-                    );
-                    // Re-insert so a future request or debounced task can retry
-                    self.needs_provider_sync.insert(canonical_id);
+    /// Flush the active file's IDE TSX to the type provider for interactive queries.
+    ///
+    /// Called by hover, completion, goto_definition, type_definition BEFORE making
+    /// a type provider query. Only syncs the IDE path (TSX) — API (.vue.ts) sync
+    /// is deferred to the coordinator.
+    ///
+    /// Runs when:
+    /// - File is in `needs_ide_sync`, OR
+    /// - No committed provider sync state exists (first open, timeout retry, failure recovery)
+    ///
+    /// **With resolver snapshot**: owner-aware IDE sync.
+    /// **Without snapshot**: pre-snapshot blocker hydration + provisional IDE sync.
+    async fn ensure_current_file_synced(&self, uri: &Uri) {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+
+        // Touch MRU for snapshot drain ordering
+        self.touch_mru(&canonical_id);
+
+        let has_committed_state = self.provider_sync_states.contains_key(&canonical_id);
+        let needs_sync = self.needs_ide_sync.remove(&canonical_id).is_some();
+
+        if !needs_sync && has_committed_state {
+            return; // IDE is fresh
+        }
+
+        tracing::info!(
+            "ensure_current_file_synced: flushing IDE sync for {} (needs_sync={}, has_state={})",
+            uri.as_str(),
+            needs_sync,
+            has_committed_state,
+        );
+
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+
+        // Hydrate compile blockers
+        if let Some(snapshot) = self.resolver_snapshot() {
+            // Full hydration with resolver
+            let reader =
+                crate::compile_blockers::HostFsProjectResolverReader::new(self.documents.host());
+            crate::compile_blockers::hydrate_cached(
+                &self.hydration_cache,
+                self.documents.host(),
+                &snapshot.resolver,
+                &reader,
+                &canonical_id,
+                snapshot.generation,
+            );
+        } else {
+            // Pre-snapshot: resolve relative blockers only
+            crate::compile_blockers::hydrate_vue_compile_blockers_pre_snapshot(
+                self.documents.host(),
+                &canonical_id,
+            );
+        }
+
+        // Recompile + refresh mapper (in case blocker hydration changed TSX)
+        self.documents.recompile_and_refresh_mapper(uri);
+
+        let ide = self.documents.get_ide(uri);
+        let is_jsx = ide.as_ref().map(|r| r.is_jsx).unwrap_or(false);
+
+        // Determine IDE path — owner-aware or provisional
+        let (ide_path, provisional) = if let Some(snapshot) = self.resolver_snapshot() {
+            match provider_ide_path_for_source(&snapshot.resolver, &canonical_id, is_jsx) {
+                Some(path) => (path, false),
+                None => {
+                    self.pending_snapshot_provider_sync
+                        .insert(canonical_id.clone());
+                    return;
                 }
             }
+        } else {
+            // Provisional: no resolver
+            let ext = if is_jsx { ".jsx" } else { ".tsx" };
+            (format!("{canonical_id}{ext}"), true)
+        };
+
+        let Some(ide) = ide else {
+            return;
+        };
+
+        // Choose open_file vs update_file based on existing state
+        let result = if has_committed_state {
+            // Already known to provider — update
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                sync.sync_tsx(&ide_path, &ide.code),
+            )
+            .await
+        } else {
+            // First time — open
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                sync.open_tsx(&ide_path, &ide.code),
+            )
+            .await
+        };
+
+        match result {
+            Ok(Ok(())) => {
+                // Commit state
+                let state = if provisional {
+                    crate::provider_sync::ProviderSyncState {
+                        owner_key: "__provisional__".to_string(),
+                        ide_path: Some(ide_path),
+                        api_path: None,
+                        ..Default::default()
+                    }
+                } else {
+                    let snapshot = self.resolver_snapshot().unwrap();
+                    crate::provider_sync::vue_sync_state_for_source(
+                        &snapshot.resolver,
+                        &canonical_id,
+                        is_jsx,
+                    )
+                    .unwrap_or_else(|| {
+                        crate::provider_sync::ProviderSyncState {
+                            owner_key: "__provisional__".to_string(),
+                            ide_path: Some(ide_path),
+                            api_path: None,
+                            ..Default::default()
+                        }
+                    })
+                };
+                self.commit_provider_sync_state(&canonical_id, state);
+                // Queue deferred API sync
+                self.needs_deferred_sync.insert(canonical_id);
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "ensure_current_file_synced: IDE sync failed for {}: {e}",
+                    uri.as_str()
+                );
+                self.needs_ide_sync.insert(canonical_id);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "ensure_current_file_synced: IDE sync timed out for {}",
+                    uri.as_str()
+                );
+                self.needs_ide_sync.insert(canonical_id);
+            }
         }
+    }
+
+    /// Legacy wrapper for backward compat — calls `ensure_current_file_synced`.
+    async fn ensure_provider_synced(&self, uri: &Uri) {
+        self.ensure_current_file_synced(uri).await;
     }
 
     /// Returns true if the user is actively typing (last change was within the cooldown window).
@@ -1223,22 +1361,52 @@ impl VerterLanguageServer {
         };
         let reader =
             crate::compile_blockers::HostFsProjectResolverReader::new(self.documents.host());
-        crate::compile_blockers::hydrate_vue_compile_blockers(
+        crate::compile_blockers::hydrate_cached(
+            &self.hydration_cache,
             self.documents.host(),
             &snapshot.resolver,
             &reader,
             canonical_id,
+            snapshot.generation,
         );
     }
 
+    /// Generate a provisional IDE file path (.tsx or .jsx) without resolver.
+    ///
+    /// Mirrors `provider_ide_id_for_source()` but skips `owner_for_file()` — used
+    /// before `background_init()` finishes building the resolver snapshot.
+    fn provisional_ide_path(&self, uri: &Uri) -> Option<String> {
+        let canonical = self
+            .documents
+            .get_canonical_id(uri)
+            .unwrap_or_else(|| uri.as_str().to_string());
+        if !canonical.ends_with(".vue") {
+            return None;
+        }
+        let ext = if self.documents.is_jsx(uri) {
+            ".jsx"
+        } else {
+            ".tsx"
+        };
+        Some(format!("{canonical}{ext}"))
+    }
+
     /// Generate the IDE file path (.tsx or .jsx) for a given Vue file URI.
+    /// Falls back to `provisional_ide_path` when no resolver snapshot is available.
     fn ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
         let canonical = self
             .documents
             .get_canonical_id(uri)
             .unwrap_or_else(|| uri.as_str().to_string());
-        let snapshot = self.resolver_snapshot()?;
-        provider_ide_path_for_source(&snapshot.resolver, &canonical, self.documents.is_jsx(uri))
+        if let Some(snapshot) = self.resolver_snapshot() {
+            return provider_ide_path_for_source(
+                &snapshot.resolver,
+                &canonical,
+                self.documents.is_jsx(uri),
+            );
+        }
+        // Fallback: provisional path without resolver
+        self.provisional_ide_path(uri)
     }
 
     /// Get IDE content and mapper by IDE path (reverse lookup).
@@ -1640,6 +1808,15 @@ impl VerterLanguageServer {
         let canonical_id =
             source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
         self.documents.canonical_id_to_uri(&canonical_id)
+    }
+
+    /// Touch a canonical ID in the MRU list (push to front, dedup).
+    fn touch_mru(&self, canonical_id: &str) {
+        let mut mru = self.mru_canonical_ids.lock();
+        mru.retain(|id| id != canonical_id);
+        mru.insert(0, canonical_id.to_string());
+        // Cap at a reasonable size
+        mru.truncate(64);
     }
 
     fn queue_snapshot_provider_sync(&self, canonical_id: impl Into<String>) {
@@ -2060,6 +2237,12 @@ impl VerterLanguageServer {
             is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
             cached_verter_diags: Arc::clone(&self.cached_verter_diags),
             position_encoding: Arc::clone(&self.position_encoding),
+            mru_canonical_ids: {
+                // Snapshot the MRU list at spawn time — background_init uses it for drain ordering
+                Arc::new(parking_lot::Mutex::new(
+                    self.mru_canonical_ids.lock().clone(),
+                ))
+            },
         };
 
         let ctx = context.to_owned();
@@ -3650,6 +3833,8 @@ struct BackgroundInitArgs {
     is_tsgo: bool,
     cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
     position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
+    /// Snapshot of MRU list at init time for drain ordering.
+    mru_canonical_ids: Arc<parking_lot::Mutex<Vec<String>>>,
 }
 
 /// Run all blocking initialization work in the background.
@@ -3683,6 +3868,7 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         is_tsgo,
         cached_verter_diags,
         position_encoding,
+        mru_canonical_ids,
     } = args;
 
     let host = documents.host_arc();
@@ -3821,6 +4007,7 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         &provider_sync_states,
         &pending_snapshot_provider_sync,
         is_tsgo,
+        Some(&mru_canonical_ids),
     )
     .await;
 
@@ -3973,6 +4160,7 @@ async fn drain_pending_snapshot_provider_sync(
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     pending_snapshot_provider_sync: &DashSet<String>,
     is_tsgo: bool,
+    mru_canonical_ids: Option<&parking_lot::Mutex<Vec<String>>>,
 ) {
     let Some(sync) = project_sync else {
         pending_snapshot_provider_sync.clear();
@@ -3982,10 +4170,33 @@ async fn drain_pending_snapshot_provider_sync(
         return;
     };
 
-    let pending_ids: Vec<String> = pending_snapshot_provider_sync
-        .iter()
-        .map(|entry| entry.key().clone())
-        .collect();
+    // Collect pending IDs and sort by MRU order
+    let pending_ids: Vec<String> = {
+        let all_pending: Vec<String> = pending_snapshot_provider_sync
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        if let Some(mru_lock) = mru_canonical_ids {
+            let mru = mru_lock.lock();
+            let mut ordered = Vec::with_capacity(all_pending.len());
+            // MRU files first
+            for mru_id in mru.iter() {
+                if all_pending.contains(mru_id) {
+                    ordered.push(mru_id.clone());
+                }
+            }
+            // Then remaining files not in MRU
+            for id in &all_pending {
+                if !ordered.contains(id) {
+                    ordered.push(id.clone());
+                }
+            }
+            ordered
+        } else {
+            all_pending
+        }
+    };
 
     for canonical_id in pending_ids {
         let synced = sync_pending_snapshot_provider_file(
@@ -4590,6 +4801,10 @@ impl LanguageServer for VerterLanguageServer {
             .timer("did_open", Some(uri.as_str().to_string()));
         tracing::info!("did_open: {}", uri.as_str());
         let result = self.documents.did_open(&params.text_document);
+        // Touch MRU for snapshot drain ordering (after did_open registers the canonical ID)
+        if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+            self.touch_mru(&canonical_id);
+        }
         if result.diagnostics.has_errors {
             tracing::debug!(
                 "did_open: {} errors for {}",
@@ -4638,6 +4853,14 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
+        // Active file IDE sync FIRST (Interactive priority) — enables typed hover immediately
+        let provider_sync_policy = did_open_provider_sync_policy(self.type_provider_kind);
+        if provider_sync_policy.await_ide_sync {
+            // Use ensure_current_file_synced for immediate IDE-only sync
+            self.ensure_current_file_synced(uri).await;
+        }
+
+        // Imported Vue API warmup SECOND (Normal priority, never blocks active file)
         if startup_policy.sync_imported_vue_files {
             for import_id in &imported_vue_priority_ids {
                 let should_sync =
@@ -4648,10 +4871,7 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
-        let provider_sync_policy = did_open_provider_sync_policy(self.type_provider_kind);
-        if provider_sync_policy.await_ide_sync {
-            self.sync_ide_to_provider(uri).await;
-        }
+        // API sync (deferred — queued for coordinator)
         if provider_sync_policy.await_api_sync {
             self.sync_api_to_provider(uri).await;
         } else if provider_sync_policy.background_api_sync {
@@ -4746,7 +4966,8 @@ impl LanguageServer for VerterLanguageServer {
         // after 300ms of silence. No concurrent spawned tasks.
         if !style_only {
             if let Some(canonical_id) = self.documents.get_canonical_id(&uri) {
-                self.needs_provider_sync.insert(canonical_id.clone());
+                self.needs_ide_sync.insert(canonical_id.clone());
+                self.needs_deferred_sync.insert(canonical_id.clone());
                 if let Some(coordinator) = &self.sync_coordinator {
                     coordinator.signal(canonical_id, uri.as_str().to_string());
                 }
@@ -9198,6 +9419,7 @@ function handleCustom(payload: string) {
             &provider_sync_states,
             &pending_snapshot_provider_sync,
             false,
+            None,
         )
         .await;
 

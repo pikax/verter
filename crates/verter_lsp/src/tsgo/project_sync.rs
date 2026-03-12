@@ -103,6 +103,158 @@ impl ProjectSync {
     pub fn mode(&self) -> ProjectSyncMode {
         self.mode
     }
+
+    // ── Background-priority variants ─────────────────────────────────
+
+    pub async fn load_tsx_background(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider
+            .load_file_background(tsx_path, tsx_content)
+            .await
+    }
+
+    pub async fn open_tsx_background(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider
+            .open_file_background(tsx_path, tsx_content)
+            .await
+    }
+
+    pub async fn sync_tsx_background(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider
+            .update_file_background(tsx_path, tsx_content)
+            .await
+    }
+
+    pub async fn close_tsx_background(&self, tsx_path: &str) -> Result<(), TypeProviderError> {
+        self.provider.close_file_background(tsx_path).await
+    }
+
+    pub async fn load_dts_background(
+        &self,
+        dts_path: &str,
+        dts_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider
+            .load_file_background(dts_path, dts_content)
+            .await
+    }
+
+    pub async fn open_dts_background(
+        &self,
+        dts_path: &str,
+        dts_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider
+            .open_file_background(dts_path, dts_content)
+            .await
+    }
+
+    pub async fn sync_dts_background(
+        &self,
+        dts_path: &str,
+        dts_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider
+            .update_file_background(dts_path, dts_content)
+            .await
+    }
+
+    pub async fn close_dts_background(&self, dts_path: &str) -> Result<(), TypeProviderError> {
+        self.provider.close_file_background(dts_path).await
+    }
+
+    pub async fn load_file_background(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.load_file_background(path, content).await
+    }
+
+    pub async fn sync_file_background(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.update_file_background(path, content).await
+    }
+
+    pub async fn close_file_background(&self, path: &str) -> Result<(), TypeProviderError> {
+        self.provider.close_file_background(path).await
+    }
+
+    // ── Normal-priority variants ─────────────────────────────────────
+
+    pub async fn load_tsx_normal(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.load_file_normal(tsx_path, tsx_content).await
+    }
+
+    pub async fn open_tsx_normal(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.open_file_normal(tsx_path, tsx_content).await
+    }
+
+    pub async fn sync_tsx_normal(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider
+            .update_file_normal(tsx_path, tsx_content)
+            .await
+    }
+
+    pub async fn close_tsx_normal(&self, tsx_path: &str) -> Result<(), TypeProviderError> {
+        self.provider.close_file_normal(tsx_path).await
+    }
+
+    pub async fn load_dts_normal(
+        &self,
+        dts_path: &str,
+        dts_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.load_file_normal(dts_path, dts_content).await
+    }
+
+    pub async fn open_dts_normal(
+        &self,
+        dts_path: &str,
+        dts_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider.open_file_normal(dts_path, dts_content).await
+    }
+
+    pub async fn sync_dts_normal(
+        &self,
+        dts_path: &str,
+        dts_content: &str,
+    ) -> Result<(), TypeProviderError> {
+        self.provider
+            .update_file_normal(dts_path, dts_content)
+            .await
+    }
+
+    pub async fn close_dts_normal(&self, dts_path: &str) -> Result<(), TypeProviderError> {
+        self.provider.close_file_normal(dts_path).await
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,22 @@ use std::pin::Pin;
 
 use crate::tsgo::protocol::*;
 
+/// Priority tiers for type provider operations.
+///
+/// Interactive > Normal > Background — the transport drains higher-priority
+/// lanes first and preempts lower-priority flushes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ProviderPriority {
+    /// Hover, completion, definition, type_definition queries;
+    /// active-file IDE sync in `ensure_current_file_synced`.
+    Interactive,
+    /// Imported Vue API warmup, tsconfig path config, deferred same-file API sync.
+    Normal,
+    /// Workspace scanner sync, non-Vue shadow graph loading,
+    /// post-init workspace-folder updates, debounced diagnostics.
+    Background,
+}
+
 /// A boxed, Send future — the return type for all TypeProvider methods.
 pub type ProviderFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TypeProviderError>> + Send + 'a>>;
@@ -137,5 +153,64 @@ pub trait TypeProvider: Send + Sync {
     /// Used by the server to report the TSGO PID to the extension for orphan cleanup.
     fn child_pid(&self) -> Option<u32> {
         None
+    }
+
+    // ── Background-priority file operations ────────────────────────────
+    // Default: delegate to the interactive (standard) versions.
+    // Concrete providers override to route through the Background lane.
+
+    fn open_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file(path, content)
+    }
+
+    fn load_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.load_file(path, content)
+    }
+
+    fn update_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.update_file(path, content)
+    }
+
+    fn close_file_background(&self, path: &str) -> ProviderFuture<'_, ()> {
+        self.close_file(path)
+    }
+
+    fn get_diagnostics_background(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+        self.get_diagnostics(path)
+    }
+
+    fn configure_paths_background(
+        &self,
+        base_url: &str,
+        paths: serde_json::Value,
+    ) -> ProviderFuture<'_, ()> {
+        self.configure_paths(base_url, paths)
+    }
+
+    fn update_workspace_folders_background(
+        &self,
+        added: Vec<serde_json::Value>,
+        removed: Vec<serde_json::Value>,
+    ) -> ProviderFuture<'_, ()> {
+        self.update_workspace_folders(added, removed)
+    }
+
+    // ── Normal-priority file operations ─────────────────────────────
+    // Default: delegate to the interactive (standard) versions.
+
+    fn open_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file(path, content)
+    }
+
+    fn load_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.load_file(path, content)
+    }
+
+    fn update_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.update_file(path, content)
+    }
+
+    fn close_file_normal(&self, path: &str) -> ProviderFuture<'_, ()> {
+        self.close_file(path)
     }
 }

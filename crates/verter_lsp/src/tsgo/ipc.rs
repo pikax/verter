@@ -28,33 +28,58 @@ enum StdinMessage {
     Shutdown,
 }
 
-/// Dedicated task that owns the stdin writer and serially writes messages from the channel.
-/// This eliminates Mutex contention between `request()`/`notify()` callers and the
-/// `read_loop` (which needs to reply to server→client requests).
+/// Maximum number of Normal-priority frames to flush before checking Interactive.
+const NORMAL_BATCH_CAP: usize = 5;
+/// Maximum number of Background-priority frames to flush before checking higher lanes.
+const BACKGROUND_BATCH_CAP: usize = 3;
+
+/// Dedicated task that owns the stdin writer and drains three priority lanes.
 ///
-/// Batches pending frames: when multiple messages are queued (e.g., during background
-/// file sync), writes them all in a single `write_all` + `flush` instead of flushing
-/// after each frame. This prevents per-message backpressure from the child process.
+/// Priority order: Interactive > Normal > Background.
+/// - Interactive: drained fully (unbounded) before checking lower lanes.
+/// - Normal: drained up to `NORMAL_BATCH_CAP` frames, then back to check Interactive.
+/// - Background: drained up to `BACKGROUND_BATCH_CAP` frames, then back to check higher.
+///
+/// Each flush is a separate `write_all + flush`. Interactive always preempts.
 ///
 /// Generic over the writer type to support both `ChildStdin` and test `DuplexStream`.
 async fn stdin_writer_loop(
     mut stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
-    mut rx: mpsc::Receiver<StdinMessage>,
+    mut interactive_rx: mpsc::Receiver<StdinMessage>,
+    mut normal_rx: mpsc::Receiver<StdinMessage>,
+    mut background_rx: mpsc::Receiver<StdinMessage>,
 ) {
     let mut buffer = Vec::new();
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            StdinMessage::Frame(data) => {
-                buffer.extend_from_slice(&data);
+
+    loop {
+        // Wait for any message from any lane
+        tokio::select! {
+            biased; // Prefer higher priority
+            msg = interactive_rx.recv() => {
+                match msg {
+                    Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Some(StdinMessage::Shutdown) | None => break,
+                }
             }
-            StdinMessage::Shutdown => break,
+            msg = normal_rx.recv() => {
+                match msg {
+                    Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Some(StdinMessage::Shutdown) | None => break,
+                }
+            }
+            msg = background_rx.recv() => {
+                match msg {
+                    Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Some(StdinMessage::Shutdown) | None => break,
+                }
+            }
         }
-        // Drain any additional queued messages to batch them together.
+
+        // Drain Interactive fully (unbounded)
         loop {
-            match rx.try_recv() {
+            match interactive_rx.try_recv() {
                 Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
                 Ok(StdinMessage::Shutdown) => {
-                    // Flush remaining data before shutting down.
                     let _ = stdin.write_all(&buffer).await;
                     let _ = stdin.flush().await;
                     return;
@@ -62,19 +87,117 @@ async fn stdin_writer_loop(
                 Err(_) => break,
             }
         }
-        // Write all accumulated frames in one batch.
-        if stdin.write_all(&buffer).await.is_err() {
-            break;
+
+        // Flush Interactive batch
+        if !buffer.is_empty() {
+            if stdin.write_all(&buffer).await.is_err() {
+                break;
+            }
+            let _ = stdin.flush().await;
+            buffer.clear();
         }
-        let _ = stdin.flush().await;
-        buffer.clear();
+
+        // Drain Normal (capped)
+        for _ in 0..NORMAL_BATCH_CAP {
+            match normal_rx.try_recv() {
+                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                Ok(StdinMessage::Shutdown) => {
+                    let _ = stdin.write_all(&buffer).await;
+                    let _ = stdin.flush().await;
+                    return;
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Check Interactive again before flushing Normal
+        loop {
+            match interactive_rx.try_recv() {
+                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                Ok(StdinMessage::Shutdown) => {
+                    let _ = stdin.write_all(&buffer).await;
+                    let _ = stdin.flush().await;
+                    return;
+                }
+                Err(_) => break,
+            }
+        }
+
+        if !buffer.is_empty() {
+            if stdin.write_all(&buffer).await.is_err() {
+                break;
+            }
+            let _ = stdin.flush().await;
+            buffer.clear();
+        }
+
+        // Drain Background (capped)
+        for _ in 0..BACKGROUND_BATCH_CAP {
+            match background_rx.try_recv() {
+                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                Ok(StdinMessage::Shutdown) => {
+                    let _ = stdin.write_all(&buffer).await;
+                    let _ = stdin.flush().await;
+                    return;
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Check Interactive + Normal again before flushing Background
+        loop {
+            match interactive_rx.try_recv() {
+                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                Ok(StdinMessage::Shutdown) => {
+                    let _ = stdin.write_all(&buffer).await;
+                    let _ = stdin.flush().await;
+                    return;
+                }
+                Err(_) => break,
+            }
+        }
+        loop {
+            match normal_rx.try_recv() {
+                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                Ok(StdinMessage::Shutdown) => {
+                    let _ = stdin.write_all(&buffer).await;
+                    let _ = stdin.flush().await;
+                    return;
+                }
+                Err(_) => break,
+            }
+        }
+
+        if !buffer.is_empty() {
+            if stdin.write_all(&buffer).await.is_err() {
+                break;
+            }
+            let _ = stdin.flush().await;
+            buffer.clear();
+        }
     }
+}
+
+/// Legacy single-channel wrapper for backward compat (tests).
+#[cfg(test)]
+async fn stdin_writer_loop_single(
+    stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+    rx: mpsc::Receiver<StdinMessage>,
+) {
+    // Create dummy channels for normal and background that never receive
+    let (_normal_tx, normal_rx) = mpsc::channel(1);
+    let (_bg_tx, background_rx) = mpsc::channel(1);
+    stdin_writer_loop(stdin, rx, normal_rx, background_rx).await;
 }
 
 /// LSP JSON-RPC transport over a child process's stdio.
 struct LspTransport {
-    /// Channel sender for writing to the child's stdin via the writer task.
-    stdin_tx: mpsc::Sender<StdinMessage>,
+    /// Interactive-priority lane: hover, completion, definition, active-file sync.
+    interactive_tx: mpsc::Sender<StdinMessage>,
+    /// Normal-priority lane: imported-file warmup, tsconfig config, deferred API.
+    normal_tx: mpsc::Sender<StdinMessage>,
+    /// Background-priority lane: workspace scanner, shadow graph, diagnostics.
+    background_tx: mpsc::Sender<StdinMessage>,
     /// Pending request senders, keyed by request ID. Shared with the read loop.
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     next_id: AtomicI64,
@@ -99,23 +222,40 @@ const INITIALIZE_TIMEOUT_SECS: u64 = 30;
 /// existing restart machinery (kill process, backoff, re-spawn, replay file cache).
 const HANG_THRESHOLD: u32 = 3;
 
+use crate::tsgo::traits::ProviderPriority;
+
 impl LspTransport {
-    /// Send an LSP request and wait for the response.
+    /// Get the sender for a given priority lane.
+    fn tx_for_priority(&self, priority: ProviderPriority) -> &mpsc::Sender<StdinMessage> {
+        match priority {
+            ProviderPriority::Interactive => &self.interactive_tx,
+            ProviderPriority::Normal => &self.normal_tx,
+            ProviderPriority::Background => &self.background_tx,
+        }
+    }
+
+    /// Send an LSP request at Interactive priority and wait for the response.
     async fn request(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        self.request_with_timeout(method, params, REQUEST_TIMEOUT_SECS)
-            .await
+        self.request_with_priority(
+            method,
+            params,
+            REQUEST_TIMEOUT_SECS,
+            ProviderPriority::Interactive,
+        )
+        .await
     }
 
-    /// Send an LSP request with a custom timeout (in seconds).
-    async fn request_with_timeout(
+    /// Send an LSP request at a specific priority with a custom timeout.
+    async fn request_with_priority(
         &self,
         method: &str,
         params: serde_json::Value,
         timeout_secs: u64,
+        priority: ProviderPriority,
     ) -> Result<serde_json::Value, TypeProviderError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
@@ -132,7 +272,7 @@ impl LspTransport {
         self.pending.lock().await.insert(id, tx);
 
         let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        self.stdin_tx
+        self.tx_for_priority(priority)
             .send(StdinMessage::Frame(frame.into_bytes()))
             .await
             .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
@@ -175,14 +315,13 @@ impl LspTransport {
         }
     }
 
-    /// Send an LSP notification (no response expected).
+    /// Send an LSP notification at a specific priority (no response expected).
     /// Uses `try_send()` to prevent backpressure from blocking the caller.
-    /// If the channel is full, the notification is dropped with a warning —
-    /// the SyncCoordinator will retry on the next cycle.
-    async fn notify(
+    async fn notify_with_priority(
         &self,
         method: &str,
         params: serde_json::Value,
+        priority: ProviderPriority,
     ) -> Result<(), TypeProviderError> {
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -194,7 +333,7 @@ impl LspTransport {
 
         let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         match self
-            .stdin_tx
+            .tx_for_priority(priority)
             .try_send(StdinMessage::Frame(frame.into_bytes()))
         {
             Ok(()) => Ok(()),
@@ -206,6 +345,16 @@ impl LspTransport {
                 Err(TypeProviderError::new("stdin writer closed"))
             }
         }
+    }
+
+    /// Send an LSP notification at Interactive priority (no response expected).
+    async fn notify(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(), TypeProviderError> {
+        self.notify_with_priority(method, params, ProviderPriority::Interactive)
+            .await
     }
 }
 
@@ -240,7 +389,7 @@ async fn read_loop(
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     contents_cache: Arc<Mutex<HashMap<String, String>>>,
-    stdin_tx: mpsc::Sender<StdinMessage>,
+    interactive_tx: mpsc::Sender<StdinMessage>,
     crash_notify: Option<Arc<Notify>>,
 ) {
     let mut reader = BufReader::new(stdout);
@@ -360,7 +509,9 @@ async fn read_loop(
             });
             let body = serde_json::to_string(&reply).unwrap_or_default();
             let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-            let _ = stdin_tx.send(StdinMessage::Frame(frame.into_bytes())).await;
+            let _ = interactive_tx
+                .send(StdinMessage::Frame(frame.into_bytes()))
+                .await;
             continue;
         }
 
@@ -753,11 +904,22 @@ impl TsgoTypeProvider {
         // to prevent the deadlock where read_loop blocks on stdin while request()/notify()
         // also hold it.
         // Buffer 1024 messages to accommodate background file sync bursts without backpressure.
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(1024);
-        tokio::spawn(stdin_writer_loop(stdin, stdin_rx));
+        // Three priority channels: Interactive (hover/completion), Normal (imports),
+        // Background (workspace scan). Buffer 1024 messages for background burst sync.
+        let (interactive_tx, interactive_rx) = mpsc::channel::<StdinMessage>(1024);
+        let (normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(1024);
+        let (background_tx, background_rx) = mpsc::channel::<StdinMessage>(1024);
+        tokio::spawn(stdin_writer_loop(
+            stdin,
+            interactive_rx,
+            normal_rx,
+            background_rx,
+        ));
 
         let transport = Arc::new(LspTransport {
-            stdin_tx: stdin_tx.clone(),
+            interactive_tx: interactive_tx.clone(),
+            normal_tx,
+            background_tx,
             pending: Arc::clone(&pending),
             next_id: AtomicI64::new(1),
             consecutive_failures: AtomicU32::new(0),
@@ -770,13 +932,13 @@ impl TsgoTypeProvider {
         let contents_cache: Arc<Mutex<HashMap<String, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        // Start the read loop in a background task (uses stdin_tx for replying to server requests)
+        // Start the read loop in a background task (uses interactive_tx for auto-replies)
         tokio::spawn(read_loop(
             stdout,
             pending,
             Arc::clone(&diagnostics_cache),
             Arc::clone(&contents_cache),
-            stdin_tx,
+            interactive_tx,
             crash_notify,
         ));
 
@@ -804,7 +966,7 @@ impl TsgoTypeProvider {
 
         // Send initialize request (use longer timeout for cold starts)
         let init_result = transport
-            .request_with_timeout(
+            .request_with_priority(
                 "initialize",
                 serde_json::json!({
                     "processId": std::process::id(),
@@ -816,6 +978,7 @@ impl TsgoTypeProvider {
                     }]
                 }),
                 INITIALIZE_TIMEOUT_SECS,
+                ProviderPriority::Interactive,
             )
             .await?;
 
@@ -838,6 +1001,139 @@ impl TsgoTypeProvider {
     /// Convert a file path to a `file://` URI.
     fn path_to_uri(path: &str) -> String {
         path_to_file_uri_string(path)
+    }
+
+    /// Send `textDocument/didOpen` at a specific priority.
+    fn open_file_with_priority(
+        &self,
+        path: &str,
+        content: &str,
+        priority: ProviderPriority,
+    ) -> ProviderFuture<'_, ()> {
+        let uri = Self::path_to_uri(path);
+        let lang_id = if path.ends_with(".tsx") {
+            "typescriptreact"
+        } else if path.ends_with(".jsx") {
+            "javascriptreact"
+        } else if path.ends_with(".js") {
+            "javascript"
+        } else {
+            "typescript"
+        };
+        let content = rewrite_vue_imports_for_tsgo(content, path);
+        let path_owned = path.to_string();
+        let transport = Arc::clone(&self.transport);
+        let versions = Arc::clone(&self.versions);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            contents_cache
+                .lock()
+                .await
+                .insert(path_owned.clone(), content.clone());
+            versions.lock().await.insert(path_owned, 1);
+            transport
+                .notify_with_priority(
+                    "textDocument/didOpen",
+                    serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": lang_id,
+                            "version": 1,
+                            "text": content,
+                        }
+                    }),
+                    priority,
+                )
+                .await
+        })
+    }
+
+    /// Send `textDocument/didChange` (or `didOpen` if needed) at a specific priority.
+    fn update_file_with_priority(
+        &self,
+        path: &str,
+        content: &str,
+        priority: ProviderPriority,
+    ) -> ProviderFuture<'_, ()> {
+        let uri = Self::path_to_uri(path);
+        let lang_id = if path.ends_with(".tsx") {
+            "typescriptreact"
+        } else if path.ends_with(".jsx") {
+            "javascriptreact"
+        } else if path.ends_with(".js") {
+            "javascript"
+        } else {
+            "typescript"
+        };
+        let content = rewrite_vue_imports_for_tsgo(content, path);
+        let path_owned = path.to_string();
+        let transport = Arc::clone(&self.transport);
+        let versions = Arc::clone(&self.versions);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            contents_cache
+                .lock()
+                .await
+                .insert(path_owned.clone(), content.clone());
+
+            let mut vers = versions.lock().await;
+            if let Some(v) = vers.get_mut(&path_owned) {
+                *v += 1;
+                let version = *v;
+                drop(vers);
+                transport
+                    .notify_with_priority(
+                        "textDocument/didChange",
+                        serde_json::json!({
+                            "textDocument": { "uri": uri, "version": version },
+                            "contentChanges": [{ "text": content }]
+                        }),
+                        priority,
+                    )
+                    .await
+            } else {
+                vers.insert(path_owned, 1);
+                drop(vers);
+                transport
+                    .notify_with_priority(
+                        "textDocument/didOpen",
+                        serde_json::json!({
+                            "textDocument": {
+                                "uri": uri,
+                                "languageId": lang_id,
+                                "version": 1,
+                                "text": content,
+                            }
+                        }),
+                        priority,
+                    )
+                    .await
+            }
+        })
+    }
+
+    /// Send `textDocument/didClose` at a specific priority.
+    fn close_file_with_priority(
+        &self,
+        path: &str,
+        priority: ProviderPriority,
+    ) -> ProviderFuture<'_, ()> {
+        let uri = Self::path_to_uri(path);
+        let path_owned = path.to_string();
+        let transport = Arc::clone(&self.transport);
+        let versions = Arc::clone(&self.versions);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            contents_cache.lock().await.remove(&path_owned);
+            versions.lock().await.remove(&path_owned);
+            transport
+                .notify_with_priority(
+                    "textDocument/didClose",
+                    serde_json::json!({ "textDocument": { "uri": uri } }),
+                    priority,
+                )
+                .await
+        })
     }
 }
 
@@ -1674,7 +1970,7 @@ impl TypeProvider for TsgoTypeProvider {
             })
             .await;
             // Signal the writer task to stop.
-            let _ = transport.stdin_tx.send(StdinMessage::Shutdown).await;
+            let _ = transport.interactive_tx.send(StdinMessage::Shutdown).await;
             Ok(())
         })
     }
@@ -1728,6 +2024,128 @@ impl TypeProvider for TsgoTypeProvider {
 
     fn child_pid(&self) -> Option<u32> {
         self.child.id()
+    }
+
+    // ── Background-priority overrides ────────────────────────────────
+
+    fn open_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file_with_priority(path, content, ProviderPriority::Background)
+    }
+
+    fn load_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        // load_file is local-only (no TSGO notification), priority irrelevant
+        self.load_file(path, content)
+    }
+
+    fn update_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.update_file_with_priority(path, content, ProviderPriority::Background)
+    }
+
+    fn close_file_background(&self, path: &str) -> ProviderFuture<'_, ()> {
+        self.close_file_with_priority(path, ProviderPriority::Background)
+    }
+
+    fn get_diagnostics_background(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+        let uri = Self::path_to_uri(path);
+        let path_owned = path.to_string();
+        let transport = Arc::clone(&self.transport);
+        let contents_cache = Arc::clone(&self.contents);
+        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
+        Box::pin(async move {
+            let result = transport
+                .request_with_priority(
+                    "textDocument/diagnostic",
+                    serde_json::json!({ "textDocument": { "uri": uri } }),
+                    REQUEST_TIMEOUT_SECS,
+                    ProviderPriority::Background,
+                )
+                .await;
+            match result {
+                Ok(val) => {
+                    let items = val
+                        .get("items")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let content = contents_cache.lock().await.get(&path_owned).cloned();
+                    Ok(items
+                        .iter()
+                        .filter_map(|d| parse_lsp_diagnostic(d, content.as_deref()))
+                        .collect())
+                }
+                Err(_) => {
+                    let cache = diagnostics_cache.lock().await;
+                    let normalized = normalize_file_uri(&Self::path_to_uri(&path_owned));
+                    Ok(cache.get(&normalized).cloned().unwrap_or_default())
+                }
+            }
+        })
+    }
+
+    fn configure_paths_background(
+        &self,
+        base_url: &str,
+        paths: serde_json::Value,
+    ) -> ProviderFuture<'_, ()> {
+        let transport = Arc::clone(&self.transport);
+        let base_url = base_url.to_string();
+        Box::pin(async move {
+            transport
+                .notify_with_priority(
+                    "workspace/didChangeConfiguration",
+                    serde_json::json!({
+                        "settings": {
+                            "typescript": {
+                                "tsserver": {
+                                    "compilerOptions": {
+                                        "baseUrl": base_url,
+                                        "paths": paths,
+                                    }
+                                }
+                            }
+                        }
+                    }),
+                    ProviderPriority::Background,
+                )
+                .await
+        })
+    }
+
+    fn update_workspace_folders_background(
+        &self,
+        added: Vec<serde_json::Value>,
+        removed: Vec<serde_json::Value>,
+    ) -> ProviderFuture<'_, ()> {
+        let transport = Arc::clone(&self.transport);
+        Box::pin(async move {
+            transport
+                .notify_with_priority(
+                    "workspace/didChangeWorkspaceFolders",
+                    serde_json::json!({
+                        "event": { "added": added, "removed": removed }
+                    }),
+                    ProviderPriority::Background,
+                )
+                .await
+        })
+    }
+
+    // ── Normal-priority overrides ────────────────────────────────────
+
+    fn open_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file_with_priority(path, content, ProviderPriority::Normal)
+    }
+
+    fn load_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.load_file(path, content)
+    }
+
+    fn update_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.update_file_with_priority(path, content, ProviderPriority::Normal)
+    }
+
+    fn close_file_normal(&self, path: &str) -> ProviderFuture<'_, ()> {
+        self.close_file_with_priority(path, ProviderPriority::Normal)
     }
 }
 
@@ -2140,6 +2558,35 @@ pub fn create_test_project(dir: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use tokio::process::{ChildStdin, ChildStdout};
+
+    /// Create an `LspTransport` for tests using a single channel for all priority lanes.
+    fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
+        LspTransport {
+            interactive_tx: stdin_tx.clone(),
+            normal_tx: stdin_tx.clone(),
+            background_tx: stdin_tx,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
+        }
+    }
+
+    /// Create an `LspTransport` for tests with shared pending map.
+    fn test_transport_with_pending(
+        stdin_tx: mpsc::Sender<StdinMessage>,
+        pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    ) -> LspTransport {
+        LspTransport {
+            interactive_tx: stdin_tx.clone(),
+            normal_tx: stdin_tx.clone(),
+            background_tx: stdin_tx,
+            pending,
+            next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
+        }
+    }
 
     /// rewrite_vue_imports_for_tsgo rewrites .vue imports to .vue.ts for type resolution
     #[test]
@@ -3658,15 +4105,9 @@ const props = withDefaults(defineProps({ bar: String }), {})
 
         // Set up channel-based transport. The writer loop will fail on the dead pipe.
         let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop(stdin, stdin_rx));
+        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
 
-        let transport = LspTransport {
-            stdin_tx,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        };
+        let transport = test_transport(stdin_tx);
 
         let result = transport
             .notify("textDocument/didOpen", serde_json::json!({"test": true}))
@@ -3691,15 +4132,9 @@ const props = withDefaults(defineProps({ bar: String }), {})
         let _ = child.wait().await;
 
         let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop(stdin, stdin_rx));
+        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
 
-        let transport = LspTransport {
-            stdin_tx,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        };
+        let transport = test_transport(stdin_tx);
 
         // With the channel approach, the send succeeds but the writer may fail silently.
         // The request will time out because no response comes. Use a short timeout to avoid
@@ -3736,7 +4171,7 @@ const props = withDefaults(defineProps({ bar: String }), {})
         let contents_cache: Arc<Mutex<HashMap<String, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop(stdin, stdin_rx));
+        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
 
         // The read_loop should exit quickly on EOF, not hang
         let handle = tokio::spawn(read_loop(
@@ -3797,14 +4232,11 @@ const props = withDefaults(defineProps({ bar: String }), {})
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop(stdin, stdin_rx));
-        let transport = Arc::new(LspTransport {
-            stdin_tx: stdin_tx.clone(),
-            pending: Arc::clone(&pending),
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        });
+        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
+        let transport = Arc::new(test_transport_with_pending(
+            stdin_tx.clone(),
+            Arc::clone(&pending),
+        ));
 
         // Start the read_loop (it will exit immediately on EOF)
         let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
@@ -4434,15 +4866,9 @@ const msg = "hi";
         // Construct a minimal TsgoTypeProvider-like setup.
         // We only need the child and transport to test Drop behavior.
         let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop(stdin, stdin_rx));
+        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
 
-        let transport = Arc::new(LspTransport {
-            stdin_tx,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        });
+        let transport = Arc::new(test_transport(stdin_tx));
 
         let provider = TsgoTypeProvider {
             transport,
@@ -4473,15 +4899,9 @@ const msg = "hi";
         let _ = child.wait().await;
 
         let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop(stdin, stdin_rx));
+        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
 
-        let transport = Arc::new(LspTransport {
-            stdin_tx,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        });
+        let transport = Arc::new(test_transport(stdin_tx));
 
         let provider = TsgoTypeProvider {
             transport,
@@ -4544,7 +4964,7 @@ const msg = "hi";
         let (tx, rx) = mpsc::channel::<StdinMessage>(16);
 
         // Spawn the writer loop with the server-side writer
-        let handle = tokio::spawn(stdin_writer_loop(server_writer, rx));
+        let handle = tokio::spawn(stdin_writer_loop_single(server_writer, rx));
 
         // Send a frame and verify it arrives
         tx.send(StdinMessage::Frame(b"hello\n".to_vec()))
@@ -4590,15 +5010,12 @@ const msg = "hi";
 
         // Set up the channel-based writer
         let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
-        tokio::spawn(stdin_writer_loop(mock_stdin_reader, stdin_rx));
+        tokio::spawn(stdin_writer_loop_single(mock_stdin_reader, stdin_rx));
 
-        let transport = Arc::new(LspTransport {
-            stdin_tx: stdin_tx.clone(),
-            pending: Arc::clone(&pending),
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        });
+        let transport = Arc::new(test_transport_with_pending(
+            stdin_tx.clone(),
+            Arc::clone(&pending),
+        ));
 
         // Start the read loop
         tokio::spawn(read_loop(
@@ -4699,13 +5116,7 @@ const msg = "hi";
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let transport = LspTransport {
-            stdin_tx,
-            pending: Arc::clone(&pending),
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        };
+        let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
 
         // Send a request that will time out (nobody reads from the channel to respond)
         // Use a very short timeout by racing with a sleep
@@ -4751,13 +5162,7 @@ const msg = "hi";
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let transport = Arc::new(LspTransport {
-            stdin_tx,
-            pending,
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        });
+        let transport = Arc::new(test_transport_with_pending(stdin_tx, pending));
 
         // Simulate the shutdown path: 3s internal timeout + Shutdown message
         let shutdown_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -4766,7 +5171,7 @@ const msg = "hi";
                 let _ = transport.notify("exit", serde_json::Value::Null).await;
             })
             .await;
-            let _ = transport.stdin_tx.send(StdinMessage::Shutdown).await;
+            let _ = transport.interactive_tx.send(StdinMessage::Shutdown).await;
         })
         .await;
 
@@ -4901,7 +5306,10 @@ const msg = "hi";
         );
 
         let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop(tokio::io::duplex(1024).1, stdin_rx));
+        tokio::spawn(stdin_writer_loop_single(
+            tokio::io::duplex(1024).1,
+            stdin_rx,
+        ));
 
         tokio::spawn(read_loop(
             client_stdout_reader,

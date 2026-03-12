@@ -406,6 +406,26 @@ impl DocumentRegistry {
         Some(resp)
     }
 
+    /// Force-recompile a file and rebuild its PositionMapper from the fresh source map.
+    ///
+    /// Used after blocker hydration or snapshot reconciliation triggers recompilation
+    /// that may have changed the TSX output. Without this, hover would query correct
+    /// TSX with stale position offsets.
+    pub fn recompile_and_refresh_mapper(&self, uri: &Uri) -> Option<IdeResponse> {
+        let canonical_id = self.get_canonical_id(uri)?;
+        let profile = self.tsx_profile.read().clone();
+        self.host.ensure_compiled(&canonical_id, &profile).ok()?;
+        let resp = self.host.get_ide(&canonical_id, &profile)?;
+        // Always rebuild mapper from fresh source map
+        if let Some(mut entry) = self.documents.get_mut(uri.as_str()) {
+            entry.position_mapper = resp
+                .source_map
+                .as_ref()
+                .and_then(|sm| PositionMapper::from_json(sm).ok());
+        }
+        Some(resp)
+    }
+
     /// Check if a document's IDE output is JavaScript (JSX) rather than TypeScript (TSX).
     pub fn is_jsx(&self, uri: &Uri) -> bool {
         self.get_ide(uri).map(|r| r.is_jsx).unwrap_or(false)

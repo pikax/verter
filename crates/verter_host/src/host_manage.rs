@@ -107,6 +107,16 @@ impl VerterHost {
         Some(snapshot)
     }
 
+    /// Returns the semantic hash for a file by canonical ID or alias.
+    ///
+    /// The semantic hash changes when the file's semantically significant content
+    /// changes (script, template, scoped styles). Returns `None` for missing files.
+    pub fn get_semantic_hash(&self, canonical_or_alias: &str) -> Option<Hash16> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let files = read_lock(&self.files);
+        files.get(&canonical).map(|entry| entry.semantic_hash)
+    }
+
     /// Returns the compile-blocking dependencies for a Vue SFC.
     ///
     /// This exposes the SFC's external `src` blocks and macro type dependencies
@@ -1846,5 +1856,33 @@ export { default as Button } from './Button.vue';
             Some("deep.ts"),
             "should trace through two levels to deep.ts"
         );
+    }
+
+    #[test]
+    fn get_semantic_hash_returns_hash_for_loaded_file() {
+        let host = make_host();
+        upsert_vue(&host, "App.vue", "<template><div>hi</div></template>");
+        let hash = host.get_semantic_hash("App.vue");
+        assert!(hash.is_some(), "loaded file should return a semantic hash");
+        assert_ne!(hash.unwrap(), [0u8; 16], "hash should not be all zeros");
+    }
+
+    #[test]
+    fn get_semantic_hash_returns_none_for_missing_file() {
+        let host = make_host();
+        assert!(
+            host.get_semantic_hash("nonexistent.vue").is_none(),
+            "missing file should return None"
+        );
+    }
+
+    #[test]
+    fn get_semantic_hash_changes_on_content_change() {
+        let host = make_host();
+        upsert_vue(&host, "App.vue", "<template><div>a</div></template>");
+        let h1 = host.get_semantic_hash("App.vue").unwrap();
+        upsert_vue(&host, "App.vue", "<template><div>b</div></template>");
+        let h2 = host.get_semantic_hash("App.vue").unwrap();
+        assert_ne!(h1, h2, "semantic hash should change when content changes");
     }
 }
