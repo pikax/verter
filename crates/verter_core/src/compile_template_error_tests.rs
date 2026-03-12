@@ -153,6 +153,14 @@ fn no_error_duplicate_attribute_style_and_v_bind_style() {
 }
 
 #[test]
+fn no_error_duplicate_attribute_class_and_v_bind_class() {
+    // class (static) + :class (directive) should not be treated as duplicates
+    let src = r#"<template><div class="foo" :class="{ bar: true }">hello</div></template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "DuplicateAttribute");
+}
+
+#[test]
 fn no_error_duplicate_attribute_nexus_virtualizer_pattern() {
     // Reproduces the Virtualizer.vue template pattern from nexus-ui
     let src = r#"<script setup lang="ts" generic="T extends Record<string, any>">
@@ -200,20 +208,7 @@ const freeze = false
   </div>
 </template>"#;
     let result = compile_sfc(src);
-    let dup_errors: Vec<_> = result
-        .errors
-        .iter()
-        .filter(|e| e.code == "DuplicateAttribute")
-        .collect();
-    assert!(
-        dup_errors.is_empty(),
-        "Should have no DuplicateAttribute errors but got {}: {:?}",
-        dup_errors.len(),
-        dup_errors
-            .iter()
-            .map(|e| format!("offset={:?}", e.span))
-            .collect::<Vec<_>>()
-    );
+    assert_no_error(&result, "DuplicateAttribute");
 }
 
 #[test]
