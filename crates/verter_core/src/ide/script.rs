@@ -3949,9 +3949,22 @@ fn emit_type_constructs(
     attrs_type: &Option<String>,
     _source: &str,
     options: &IdeScriptOptions<'_>,
-    _has_get_current_instance: bool,
+    has_get_current_instance: bool,
     emit_attributes_type: bool,
 ) {
+    // Emit getCurrentInstance return type override (#11)
+    if has_get_current_instance {
+        if options.is_jsx {
+            buf.push_str(
+                "\n/** @type {function(): import('vue').ComponentInternalInstance | null} */\nvar getCurrentInstance = /** @type {any} */ (undefined);\n",
+            );
+        } else {
+            buf.push_str(
+                "\ntype ___VERTER___ComponentInstance = import('vue').ComponentInternalInstance;\ndeclare function getCurrentInstance(): ___VERTER___ComponentInstance | null;\n",
+            );
+        }
+    }
+
     // Emit ___VERTER___attributes type alias
     if !emit_attributes_type {
         // Skip — caller knows this type won't be referenced
@@ -8812,7 +8825,7 @@ const x = 1
         );
     }
 
-    /// @ai-generated — G27: getCurrentInstance no longer emits CurrentComponentInstance type
+    /// @ai-generated — G27: getCurrentInstance emits ComponentInstance type override
     #[test]
     fn get_current_instance_emits_type() {
         let (_code, _, tc) = gen_tsx_script_full(
@@ -8821,16 +8834,16 @@ import { getCurrentInstance } from 'vue'
 const instance = getCurrentInstance()
 </script>"#,
         );
-        // Negative: CurrentComponentInstance type should no longer be emitted
+        // Positive: should emit ComponentInternalInstance type alias
         assert!(
-            !tc.contains("type ___VERTER___CurrentComponentInstance"),
-            "CurrentComponentInstance type should no longer be emitted: {}",
+            tc.contains("ComponentInternalInstance"),
+            "should emit ComponentInternalInstance type when getCurrentInstance is used: {}",
             tc
         );
-        // Negative: Instance type should no longer be emitted
+        // Positive: should emit declare function override
         assert!(
-            !tc.contains("___VERTER___Instance"),
-            "Instance type should no longer be emitted: {}",
+            tc.contains("declare function getCurrentInstance()"),
+            "should emit getCurrentInstance function override: {}",
             tc
         );
     }
