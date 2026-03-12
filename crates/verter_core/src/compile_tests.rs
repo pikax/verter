@@ -11204,6 +11204,31 @@ const instance = getCurrentInstance()
 }
 
 #[test]
+fn tsx_no_get_current_instance_no_declaration() {
+    // Issue #11: When getCurrentInstance() is NOT called, the declaration must not appear
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Negative: no getCurrentInstance declaration when it's not used
+    assert!(
+        !tsx.code.contains("declare function getCurrentInstance"),
+        "getCurrentInstance declaration must NOT appear when not used, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("___VERTER___Instance"),
+        "Instance type must NOT appear when getCurrentInstance is not used, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_comp_only_for_ref_elements() {
     let result = compile_tsx(
         r#"<script setup lang="ts">

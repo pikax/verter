@@ -5877,3 +5877,59 @@ export default defineComponent({
         tsx.code
     );
 }
+
+// ── Issue #48: $event must not be prefixed with instance ─────────────────
+
+#[test]
+fn dollar_event_standalone_not_prefixed() {
+    let result = gen_tsx_template(r#"<template><div @click="$event">click</div></template>"#);
+    // Positive: $event should appear bare inside the callback
+    assert!(
+        result.contains("$event"),
+        "should contain $event in output: {result}"
+    );
+    // Negative: $event must NOT be prefixed with ___VERTER___instance.
+    assert!(
+        !result.contains("___VERTER___instance.$event"),
+        "$event must NOT be prefixed with instance, got: {result}"
+    );
+}
+
+#[test]
+fn dollar_event_in_inline_expr_not_prefixed() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div @click="handleClick($event)">click</div></template>"#,
+        &[("handleClick", BindingType::SetupConst)],
+    );
+    // Positive: handleClick and $event should both be present
+    assert!(
+        result.contains("handleClick"),
+        "should contain handleClick: {result}"
+    );
+    assert!(result.contains("$event"), "should contain $event: {result}");
+    // Negative: $event must NOT be prefixed
+    assert!(
+        !result.contains("___VERTER___instance.$event"),
+        "$event must NOT be prefixed with instance, got: {result}"
+    );
+}
+
+// ── Issue #46: bare @click (no value) must not emit broken binding ───────
+
+#[test]
+fn bare_event_no_value_removed() {
+    let result = gen_tsx_template(r#"<template><div @click>click</div></template>"#);
+    // Negative: must NOT contain onClick or any broken click binding
+    assert!(
+        !result.contains("onClick"),
+        "bare @click should be removed, must not contain onClick: {result}"
+    );
+    assert!(
+        !result.contains("___VERTER___ctx.click"),
+        "bare @click must not produce ctx.click binding: {result}"
+    );
+    assert!(
+        !result.contains("___VERTER___instance.click"),
+        "bare @click must not produce instance.click binding: {result}"
+    );
+}

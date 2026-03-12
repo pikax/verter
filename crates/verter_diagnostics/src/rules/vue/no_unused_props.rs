@@ -8,6 +8,11 @@ use crate::rules::{LintRule, RuleCategory};
 use verter_analysis::template::TemplateAnalysisSnapshot;
 
 /// Disallow declared props that are unused by both script and template.
+///
+/// NOTE: This rule depends on `TemplateAnalysisSnapshot::prop_definitions` being populated
+/// by the upstream analysis pipeline. Currently `prop_definitions` is always empty in
+/// production (the analysis pipeline doesn't populate it yet), so the rule logic is correct
+/// but will never fire until that data pipeline is wired up (see issue #17).
 pub struct NoUnusedProps;
 
 impl LintRule for NoUnusedProps {

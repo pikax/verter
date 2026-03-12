@@ -211,7 +211,12 @@ impl<'alloc> BindingResolver<'alloc> {
             return match self.bindings.get(ident) {
                 Some(bt) if bt.is_props() => "__props.",
                 Some(_) => "",
-                None if is_global(ident.as_bytes()) || is_keyword(ident.as_bytes()) => "",
+                None if is_global(ident.as_bytes())
+                    || is_keyword(ident.as_bytes())
+                    || ident == "$event" =>
+                {
+                    ""
+                }
                 None => "___VERTER___instance.",
             };
         }
@@ -248,6 +253,8 @@ impl<'alloc> BindingResolver<'alloc> {
                     "$options."
                 }
             }
+            // $event is the arrow function parameter in event handlers, not a ctx property
+            None if ident == "$event" => "",
             None => "_ctx.",
             // unreachable but needed for exhaustiveness since we use guards above
             _ => "_ctx.",
@@ -281,7 +288,10 @@ impl<'alloc> BindingResolver<'alloc> {
             return 0;
         }
         let is_kw = is_keyword(trimmed.as_bytes());
-        if (is_kw && !self.bindings.contains_key(trimmed)) || is_global(trimmed.as_bytes()) {
+        if (is_kw && !self.bindings.contains_key(trimmed))
+            || is_global(trimmed.as_bytes())
+            || trimmed == "$event"
+        {
             return 0;
         }
         let prefix = self.resolve_prefix(trimmed);
@@ -314,8 +324,11 @@ impl<'alloc> BindingResolver<'alloc> {
         let is_kw = is_keyword(trimmed.as_bytes());
 
         // Keywords that are not registered bindings are left unchanged (e.g., `true`, `false`).
-        // Globals are also left unchanged.
-        if (is_kw && !self.bindings.contains_key(trimmed)) || is_global(trimmed.as_bytes()) {
+        // Globals and Vue's $event special variable are also left unchanged.
+        if (is_kw && !self.bindings.contains_key(trimmed))
+            || is_global(trimmed.as_bytes())
+            || trimmed == "$event"
+        {
             return trimmed.to_string();
         }
 
@@ -966,6 +979,28 @@ mod tests {
     fn tsx_known_binding_resolve_simple_expr_bare() {
         let resolver = make_tsx_resolver(&[("count", BindingType::SetupConst)]);
         assert_eq!(resolver.resolve_simple_expr("count"), "count");
+    }
+
+    // ==================== $event special variable (#48) ====================
+
+    #[test]
+    fn tsx_dollar_event_prefix_is_empty() {
+        // $event is a Vue template special variable, must NOT get ___VERTER___instance. prefix
+        let resolver = make_tsx_resolver(&[]);
+        assert_eq!(resolver.resolve_prefix("$event"), "");
+    }
+
+    #[test]
+    fn tsx_dollar_event_resolve_simple_expr_bare() {
+        let resolver = make_tsx_resolver(&[]);
+        assert_eq!(resolver.resolve_simple_expr("$event"), "$event");
+    }
+
+    #[test]
+    fn vdom_dollar_event_prefix_is_empty() {
+        // In VDOM mode, $event should also not get _ctx. prefix
+        let resolver = make_resolver(&[], true);
+        assert_eq!(resolver.resolve_prefix("$event"), "");
     }
 
     // ==================== Const prop overrides ====================

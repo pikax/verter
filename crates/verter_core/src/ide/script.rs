@@ -10666,6 +10666,30 @@ const x = 1
         );
     }
 
+    // ── Issue #28 negative: recursive component NOT used in template ────
+
+    #[test]
+    fn recursive_component_not_used_no_declaration() {
+        let source = r#"<script setup lang="ts">
+const items = [1, 2, 3]
+</script>
+<template><div>{{ items }}</div></template>"#;
+        let (code, bindings, _) =
+            gen_tsx_script_full_with_opts(source, "TreeNode", "TreeNode.vue", vec![]);
+
+        // Negative: TreeNode must NOT be in bindings when not referenced in template
+        assert!(
+            !bindings.contains_key("TreeNode"),
+            "TreeNode must NOT be in bindings when not used in template: {:?}",
+            bindings.keys().collect::<Vec<_>>()
+        );
+        // Negative: no self-reference declaration emitted
+        assert!(
+            !code.contains("const TreeNode"),
+            "self-reference const must NOT be emitted when not used in template:\n{code}"
+        );
+    }
+
     // ── CSS module support (#76) ────────────────────────────────
 
     #[test]
