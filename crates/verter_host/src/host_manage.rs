@@ -85,6 +85,7 @@ impl VerterHost {
                 css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
                 script_binding_occurrences: Arc::new(script_analysis.script_binding_occurrences),
                 export_signatures: Arc::new(export_sigs),
+                options_api: script_analysis.options_api,
             };
             self.resolve_snapshot_imports(&canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
@@ -193,6 +194,7 @@ impl VerterHost {
                 &entry.arc_script_cache.script_binding_occurrences,
             ),
             export_signatures: Arc::new(entry.export_signatures.clone()),
+            options_api: entry.script_analysis.options_api.clone(),
         }
     }
 

@@ -206,6 +206,8 @@ fn build_script_snapshot(
         script_binding_occurrences: analysis.script_binding_occurrences.to_vec(),
         first_await_offset: None,
         type_enhancements: None,
+        options_api: analysis.options_api.clone(),
+        nested_macro_calls: Vec::new(),
     }
 }
 
@@ -3029,6 +3031,8 @@ const count = ref(0)
             script_binding_occurrences: vec![],
             first_await_offset: None,
             type_enhancements: None,
+            options_api: None,
+            nested_macro_calls: Vec::new(),
         };
 
         let quality = scoring::compute_quality_score(Some(&script), None, &[], None);

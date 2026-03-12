@@ -8140,6 +8140,8 @@ mod tests {
             script_binding_occurrences: Vec::new(),
             first_await_offset: None,
             type_enhancements: None,
+            options_api: None,
+            nested_macro_calls: Vec::new(),
         };
 
         let ids = collect_imported_vue_priority_ids(&analysis);

@@ -38,6 +38,7 @@ bitflags::bitflags! {
         const HAS_INJECT              = 1 << 16;
         const HAS_EXTERNAL_TYPE_DEPS  = 1 << 17;
         const HAS_INHERIT_ATTRS_FALSE = 1 << 18;
+        const HAS_OPTIONS_API         = 1 << 19;
     }
 }
 
@@ -99,6 +100,27 @@ pub struct ScriptAnalysisSnapshot {
     /// TODO(type-provider): Enhanced type info populated by TSGO when connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_enhancements: Option<ScriptTypeEnhancements>,
+
+    /// Options API analysis extracted from `export default { ... }` or
+    /// `export default defineComponent({ ... })`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_api: Option<AnalyzedOptionsApi>,
+
+    /// Vue compiler macro calls found inside nested scopes (functions, conditionals, loops).
+    /// These macros must be at root level in `<script setup>` — nested calls are invalid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_macro_calls: Vec<NestedMacroCall>,
+}
+
+/// A Vue compiler macro call found inside a nested scope (not at the root level of `<script setup>`).
+/// These are invalid — macros like `defineProps`, `defineEmits`, etc. must be at the top level.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NestedMacroCall {
+    /// The macro name as written in source (e.g., `"defineProps"`).
+    pub name: String,
+    /// SFC-absolute byte span of the call expression.
+    pub span: Span,
 }
 
 /// A single import declaration extracted from a script block.
@@ -742,6 +764,88 @@ pub struct AnalyzedEmitField {
     pub name: String,
     /// SFC-absolute byte span of the event name in the declaration.
     pub span: Span,
+}
+
+// ── Options API Analysis Types ──
+
+/// Full analysis of an Options API component (`export default { ... }` or
+/// `export default defineComponent({ ... })`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedOptionsApi {
+    /// Whether the export is wrapped in `defineComponent()`.
+    pub is_define_component: bool,
+    /// SFC-absolute byte span of the options object.
+    pub object_span: Span,
+    /// Props declared via `props: [...]` or `props: { ... }`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub props: Vec<AnalyzedOptionsProp>,
+    /// Emits declared via `emits: [...]` or `emits: { ... }`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emits: Vec<AnalyzedEmitField>,
+    /// Fields returned from `data()`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_fields: Vec<AnalyzedOptionsField>,
+    /// Computed properties from `computed: { ... }`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub computed_fields: Vec<AnalyzedOptionsField>,
+    /// Methods from `methods: { ... }`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<AnalyzedOptionsField>,
+    /// Fields from `expose: [...]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose: Vec<AnalyzedOptionsField>,
+    /// Keys from `provide: { ... }` or `provide()`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provide_keys: Vec<AnalyzedOptionsField>,
+    /// Keys from `inject: [...]` or `inject: { ... }`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inject_keys: Vec<AnalyzedOptionsField>,
+    /// Locally registered components from `components: { ... }`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<AnalyzedOptionsComponent>,
+    /// Whether `inheritAttrs: false` is set.
+    pub has_inherit_attrs_false: bool,
+}
+
+/// A single prop from the Options API `props` option.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedOptionsProp {
+    /// Prop name as declared.
+    pub name: String,
+    /// SFC-absolute byte span of the prop key.
+    pub span: Span,
+    /// Vue constructor name if provided (e.g., `"String"`, `"Number"`, `"Array"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_constructor: Option<String>,
+    /// Whether `required: true` is set.
+    pub is_required: bool,
+    /// Whether a `default` value is provided.
+    pub has_default: bool,
+}
+
+/// A named field from an Options API option (data, computed, methods, etc.).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedOptionsField {
+    /// Field name.
+    pub name: String,
+    /// SFC-absolute byte span of the field key.
+    pub span: Span,
+}
+
+/// A locally registered component from the `components` option.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedOptionsComponent {
+    /// Component name as registered (e.g., `"MyComp"` or `"Alias"`).
+    pub name: String,
+    /// SFC-absolute byte span of the component key.
+    pub span: Span,
+    /// Import source if the value is a known imported binding (e.g., `"./MyComp.vue"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_source: Option<String>,
 }
 
 /// A Vue compiler macro call found in `<script setup>` (e.g., `defineProps`, `defineEmits`).

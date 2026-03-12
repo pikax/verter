@@ -728,6 +728,50 @@ fn adjust_analysis_spans(
     if let Some(ref mut offset) = analysis.first_await_offset {
         *offset = map(*offset);
     }
+    if let Some(ref mut opts) = analysis.options_api {
+        opts.object_span.start = map(opts.object_span.start);
+        opts.object_span.end = map(opts.object_span.end);
+        for p in &mut opts.props {
+            p.span.start = map(p.span.start);
+            p.span.end = map(p.span.end);
+        }
+        for e in &mut opts.emits {
+            e.span.start = map(e.span.start);
+            e.span.end = map(e.span.end);
+        }
+        for f in &mut opts.data_fields {
+            f.span.start = map(f.span.start);
+            f.span.end = map(f.span.end);
+        }
+        for f in &mut opts.computed_fields {
+            f.span.start = map(f.span.start);
+            f.span.end = map(f.span.end);
+        }
+        for f in &mut opts.methods {
+            f.span.start = map(f.span.start);
+            f.span.end = map(f.span.end);
+        }
+        for f in &mut opts.expose {
+            f.span.start = map(f.span.start);
+            f.span.end = map(f.span.end);
+        }
+        for f in &mut opts.provide_keys {
+            f.span.start = map(f.span.start);
+            f.span.end = map(f.span.end);
+        }
+        for f in &mut opts.inject_keys {
+            f.span.start = map(f.span.start);
+            f.span.end = map(f.span.end);
+        }
+        for c in &mut opts.components {
+            c.span.start = map(c.span.start);
+            c.span.end = map(c.span.end);
+        }
+    }
+    for nested in &mut analysis.nested_macro_calls {
+        nested.span.start = map(nested.span.start);
+        nested.span.end = map(nested.span.end);
+    }
 }
 
 /// Compute script analysis on demand from SFC source. Used by get_analysis()

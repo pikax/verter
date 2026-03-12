@@ -692,6 +692,8 @@ fn build_script_snapshot(
         script_binding_occurrences: snapshot.script_binding_occurrences.to_vec(),
         first_await_offset: None,
         type_enhancements: None,
+        options_api: snapshot.options_api.clone(),
+        nested_macro_calls: Vec::new(),
     }
 }
 

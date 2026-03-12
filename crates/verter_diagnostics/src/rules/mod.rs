@@ -308,6 +308,7 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(script::RequireSymbolProvide));
     registry.register(Box::new(script::PreferUseTemplateRef));
     registry.register(Box::new(script::NoWatchAfterAwait));
+    registry.register(Box::new(script::DefineMacrosInRoot));
     registry.register(Box::new(script::DefineMacrosOrder));
     registry.register(Box::new(script::RequireDefaultProp));
     registry.register(Box::new(script::NoUnusedEmitDeclarations));

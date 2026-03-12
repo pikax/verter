@@ -3,6 +3,7 @@
 mod component_api_style;
 mod component_definition_name_casing;
 mod define_emits_declaration;
+mod define_macros_in_root;
 mod define_macros_order;
 mod define_props_declaration;
 mod next_tick_style;
@@ -42,6 +43,7 @@ mod require_typed_ref;
 pub use component_api_style::ComponentApiStyle;
 pub use component_definition_name_casing::ComponentDefinitionNameCasing;
 pub use define_emits_declaration::DefineEmitsDeclaration;
+pub use define_macros_in_root::DefineMacrosInRoot;
 pub use define_macros_order::DefineMacrosOrder;
 pub use define_props_declaration::DefinePropsDeclaration;
 pub use next_tick_style::NextTickStyle;

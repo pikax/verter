@@ -26,6 +26,7 @@ mod exports;
 pub mod file_usage;
 mod imports;
 mod macros;
+mod options;
 pub mod project_index;
 pub mod project_resolver;
 pub mod routes;
@@ -81,10 +82,12 @@ pub use types::hash_16;
 pub use types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedEmitField,
     AnalyzedExportedFunction, AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro,
-    AnalyzedMacroKind, AnalyzedModuleReference, AnalyzedPropField, BindingInitializer,
+    AnalyzedMacroKind, AnalyzedModuleReference, AnalyzedOptionsApi, AnalyzedOptionsComponent,
+    AnalyzedOptionsField, AnalyzedOptionsProp, AnalyzedPropField, BindingInitializer,
     ComposableInfo, ComposableReturn, ComposableReturnField, CssVarManipulation,
     CssVarManipulationKind, DomQueryCallSite, DomQueryKind, ExportSignature, FunctionParam, Hash16,
     ImportSourceInfo, LiteralKind, MacroTypeDep, ModuleReferenceAnalyzability,
-    ModuleReferenceSemantics, ModuleReferenceSyntax, ReactivityKind, ResolvedTypeInfo,
-    ReturnReactivity, ScriptAnalysisSnapshot, ScriptTypeEnhancements, VueApiClassification,
+    ModuleReferenceSemantics, ModuleReferenceSyntax, NestedMacroCall, ReactivityKind,
+    ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot, ScriptTypeEnhancements,
+    VueApiClassification,
 };

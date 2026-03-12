@@ -48,6 +48,11 @@ impl ImportBindingMap {
     fn vue_api(&self, name: &str) -> Option<VueApiClassification> {
         self.map.get(name).and_then(|(_, api)| *api)
     }
+
+    /// Iterate over all entries: (local_name, (import_index, vue_api)).
+    fn iter(&self) -> impl Iterator<Item = (&String, &(usize, Option<VueApiClassification>))> {
+        self.map.iter()
+    }
 }
 
 /// Build a comprehensive script analysis from source content.
@@ -99,6 +104,7 @@ pub fn build_script_analysis_with_scope(
     let mut dom_query_calls = Vec::new();
     let mut css_var_manipulations = Vec::new();
     let mut first_await_offset: Option<u32> = None;
+    let mut options_api: Option<AnalyzedOptionsApi> = None;
     let mut const_string_values: FxHashMap<String, Vec<String>> = FxHashMap::default();
     // Track local type → referenced type names (from extends and intersection)
     // e.g., `interface Local extends Base {}` → { "Local": ["Base"] }
@@ -341,6 +347,26 @@ pub fn build_script_analysis_with_scope(
                 }
             }
 
+            // export default { ... } or export default defineComponent({ ... })
+            Statement::ExportDefaultDeclaration(export) => {
+                if let Some(expr) = export.declaration.as_expression() {
+                    // Build an owned source map to avoid borrow conflicts with `imports`
+                    let source_map: FxHashMap<String, String> = import_map
+                        .iter()
+                        .filter_map(|(name, (idx, _))| {
+                            imports
+                                .get(*idx)
+                                .map(|imp| (name.clone(), imp.source.clone()))
+                        })
+                        .collect();
+                    options_api = crate::options::try_extract_options_from_expression(
+                        expr,
+                        content,
+                        &source_map,
+                    );
+                }
+            }
+
             _ => {}
         }
     }
@@ -352,6 +378,9 @@ pub fn build_script_analysis_with_scope(
     let mut flags = derive_flags(&imports, &macros, &bindings, &macro_type_deps);
     if first_await_offset.is_some() {
         flags |= AnalysisFlags::ASYNC_SETUP;
+    }
+    if options_api.is_some() {
+        flags |= AnalysisFlags::HAS_OPTIONS_API;
     }
 
     // ── Exported function analysis (when FUNC_RETURNS scope is active) ──
@@ -369,6 +398,9 @@ pub fn build_script_analysis_with_scope(
             Vec::new()
         };
 
+    // ── Detect nested macro calls (macros inside functions/blocks/conditionals) ──
+    let nested_macro_calls = collect_nested_macro_calls(program, 0);
+
     ScriptAnalysisSnapshot {
         imports,
         module_references,
@@ -383,6 +415,8 @@ pub fn build_script_analysis_with_scope(
         flags,
         exported_functions,
         type_enhancements: None,
+        options_api,
+        nested_macro_calls,
     }
 }
 
@@ -2207,6 +2241,197 @@ fn derive_flags(
     }
 
     flags
+}
+
+// ── Nested macro call detector ──
+
+/// Vue compiler macro names that must be called at the root level of `<script setup>`.
+const COMPILER_MACRO_NAMES: &[&str] = &[
+    "defineProps",
+    "defineEmits",
+    "defineModel",
+    "defineExpose",
+    "defineOptions",
+    "defineSlots",
+    "withDefaults",
+];
+
+/// Walk the entire AST and collect macro calls that are NOT at the top level.
+/// Top-level calls (directly in `program.body`) are excluded — those are valid.
+/// This function recurses into function bodies, blocks, conditionals, loops, etc.
+fn collect_nested_macro_calls(program: &Program<'_>, content_offset: u32) -> Vec<NestedMacroCall> {
+    let mut result = Vec::new();
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(func) => {
+                if let Some(body) = &func.body {
+                    scan_stmts_for_macros(&body.statements, content_offset, &mut result);
+                }
+            }
+            Statement::ExpressionStatement(expr_stmt) => {
+                // Top-level call expressions are valid — recurse into nested scopes only
+                scan_expr_for_nested_scopes(&expr_stmt.expression, content_offset, &mut result);
+            }
+            Statement::VariableDeclaration(var_decl) => {
+                for decl in &var_decl.declarations {
+                    if let Some(init) = &decl.init {
+                        scan_expr_for_nested_scopes(init, content_offset, &mut result);
+                    }
+                }
+            }
+            Statement::IfStatement(if_stmt) => {
+                scan_stmt_for_macros(&if_stmt.consequent, content_offset, &mut result);
+                if let Some(alt) = &if_stmt.alternate {
+                    scan_stmt_for_macros(alt, content_offset, &mut result);
+                }
+            }
+            Statement::ForStatement(for_stmt) => {
+                scan_stmt_for_macros(&for_stmt.body, content_offset, &mut result);
+            }
+            Statement::ForInStatement(for_in) => {
+                scan_stmt_for_macros(&for_in.body, content_offset, &mut result);
+            }
+            Statement::ForOfStatement(for_of) => {
+                scan_stmt_for_macros(&for_of.body, content_offset, &mut result);
+            }
+            Statement::WhileStatement(w) => {
+                scan_stmt_for_macros(&w.body, content_offset, &mut result);
+            }
+            Statement::DoWhileStatement(dw) => {
+                scan_stmt_for_macros(&dw.body, content_offset, &mut result);
+            }
+            Statement::TryStatement(try_stmt) => {
+                scan_stmts_for_macros(&try_stmt.block.body, content_offset, &mut result);
+                if let Some(handler) = &try_stmt.handler {
+                    scan_stmts_for_macros(&handler.body.body, content_offset, &mut result);
+                }
+                if let Some(finalizer) = &try_stmt.finalizer {
+                    scan_stmts_for_macros(&finalizer.body, content_offset, &mut result);
+                }
+            }
+            Statement::BlockStatement(block) => {
+                scan_stmts_for_macros(&block.body, content_offset, &mut result);
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                if let Some(expr) = export.declaration.as_expression() {
+                    scan_expr_for_nested_scopes(expr, content_offset, &mut result);
+                }
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+/// Check a list of statements for macro calls — any macro found here is nested.
+fn scan_stmts_for_macros(stmts: &[Statement<'_>], offset: u32, out: &mut Vec<NestedMacroCall>) {
+    for stmt in stmts {
+        scan_stmt_for_macros(stmt, offset, out);
+    }
+}
+
+/// Check a single statement for macro calls — any macro found here is nested.
+fn scan_stmt_for_macros(stmt: &Statement<'_>, offset: u32, out: &mut Vec<NestedMacroCall>) {
+    match stmt {
+        Statement::ExpressionStatement(expr_stmt) => {
+            check_expr_for_macro_call(&expr_stmt.expression, offset, out);
+            scan_expr_for_nested_scopes(&expr_stmt.expression, offset, out);
+        }
+        Statement::VariableDeclaration(var_decl) => {
+            for decl in &var_decl.declarations {
+                if let Some(init) = &decl.init {
+                    check_expr_for_macro_call(init, offset, out);
+                    scan_expr_for_nested_scopes(init, offset, out);
+                }
+            }
+        }
+        Statement::ReturnStatement(ret) => {
+            if let Some(arg) = &ret.argument {
+                check_expr_for_macro_call(arg, offset, out);
+                scan_expr_for_nested_scopes(arg, offset, out);
+            }
+        }
+        Statement::IfStatement(if_stmt) => {
+            scan_stmt_for_macros(&if_stmt.consequent, offset, out);
+            if let Some(alt) = &if_stmt.alternate {
+                scan_stmt_for_macros(alt, offset, out);
+            }
+        }
+        Statement::BlockStatement(block) => {
+            scan_stmts_for_macros(&block.body, offset, out);
+        }
+        Statement::ForStatement(f) => scan_stmt_for_macros(&f.body, offset, out),
+        Statement::ForInStatement(f) => scan_stmt_for_macros(&f.body, offset, out),
+        Statement::ForOfStatement(f) => scan_stmt_for_macros(&f.body, offset, out),
+        Statement::WhileStatement(w) => scan_stmt_for_macros(&w.body, offset, out),
+        Statement::DoWhileStatement(dw) => scan_stmt_for_macros(&dw.body, offset, out),
+        Statement::TryStatement(try_stmt) => {
+            scan_stmts_for_macros(&try_stmt.block.body, offset, out);
+            if let Some(handler) = &try_stmt.handler {
+                scan_stmts_for_macros(&handler.body.body, offset, out);
+            }
+            if let Some(finalizer) = &try_stmt.finalizer {
+                scan_stmts_for_macros(&finalizer.body, offset, out);
+            }
+        }
+        Statement::FunctionDeclaration(func) => {
+            if let Some(body) = &func.body {
+                scan_stmts_for_macros(&body.statements, offset, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Recurse into expressions that introduce new scopes (arrow functions, function expressions).
+/// Once inside a nested scope, any macro call is invalid.
+fn scan_expr_for_nested_scopes(expr: &Expression<'_>, offset: u32, out: &mut Vec<NestedMacroCall>) {
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => {
+            scan_stmts_for_macros(&arrow.body.statements, offset, out);
+        }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                scan_stmts_for_macros(&body.statements, offset, out);
+            }
+        }
+        Expression::CallExpression(call) => {
+            scan_expr_for_nested_scopes(&call.callee, offset, out);
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    scan_expr_for_nested_scopes(e, offset, out);
+                }
+            }
+        }
+        Expression::ConditionalExpression(cond) => {
+            scan_expr_for_nested_scopes(&cond.consequent, offset, out);
+            scan_expr_for_nested_scopes(&cond.alternate, offset, out);
+        }
+        Expression::ParenthesizedExpression(paren) => {
+            scan_expr_for_nested_scopes(&paren.expression, offset, out);
+        }
+        _ => {}
+    }
+}
+
+/// Check if an expression is a compiler macro call and record it as nested.
+fn check_expr_for_macro_call(expr: &Expression<'_>, offset: u32, out: &mut Vec<NestedMacroCall>) {
+    if let Expression::CallExpression(call) = expr {
+        if let Expression::Identifier(id) = &call.callee {
+            if COMPILER_MACRO_NAMES.contains(&id.name.as_str()) {
+                out.push(NestedMacroCall {
+                    name: id.name.to_string(),
+                    span: Span::new(call.span.start + offset, call.span.end + offset),
+                });
+            }
+        }
+        // Check inside call args: withDefaults(defineProps<...>(), {...})
+        for arg in &call.arguments {
+            if let Some(arg_expr) = arg.as_expression() {
+                check_expr_for_macro_call(arg_expr, offset, out);
+            }
+        }
+    }
 }
 
 // ── Script binding usage collector (second pass) ──

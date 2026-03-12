@@ -451,6 +451,10 @@ pub struct FileAnalysisSnapshot {
     /// Export signatures extracted from the file's script block.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub export_signatures: Arc<Vec<verter_analysis::ExportSignature>>,
+
+    /// Options API analysis (`export default { ... }` or `export default defineComponent({ ... })`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_api: Option<verter_analysis::AnalyzedOptionsApi>,
 }
 
 /// Compile-time dependencies that must be available before a Vue SFC can codegen.
