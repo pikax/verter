@@ -1,0 +1,7 @@
+# Nextest configuration
+# https://nexte.st/docs/configuration/
+
+[profile.ci]
+# Produce JUnit XML for dorny/test-reporter in CI
+[profile.ci.junit]
+path = "junit.xml"

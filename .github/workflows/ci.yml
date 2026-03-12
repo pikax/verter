@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  checks: write
 
 jobs:
   detect-changes:
@@ -157,10 +158,56 @@ jobs:
         run: node scripts/v5-process/validate_manifest.mjs
       - name: Prewarm tsgo cache
         run: npx -y @typescript/native-preview --version
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Rust tests (strict tsgo)
         env:
           VERTER_REQUIRE_TSGO: "1"
-        run: cargo test --workspace --verbose
+        run: cargo nextest run --workspace --profile ci
+      - name: Test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Rust Test Results
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
+          fail-on-error: false
+
+  rust-coverage:
+    name: Rust Coverage
+    needs: [detect-changes, rust-test]
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cov-
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Prewarm tsgo cache
+        run: npx -y @typescript/native-preview --version
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: lcov.info
 
   js-build-test:
     name: JS Build & Test
@@ -180,6 +227,15 @@ jobs:
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Run tests
+        run: pnpm vitest --run --reporter=default --reporter=junit --outputFile=test-results/vitest-junit.xml
+      - name: Test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: JS Test Results
+          path: test-results/vitest-junit.xml
+          reporter: java-junit
+          fail-on-error: false
       - name: Verify package tarballs
         run: node scripts/verify-packages.mjs
 
