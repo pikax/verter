@@ -2433,6 +2433,24 @@ fn class_and_style_merge_combined() {
 }
 
 #[test]
+fn style_object_literal_gets_css_properties_satisfies() {
+    let source = r#"<template><div :style="{ color: 'red' }"/></template>"#;
+    let output = gen_tsx_template(source);
+    // Positive: object literal style should get CSSProperties satisfies annotation
+    assert!(
+        output.contains("satisfies") && output.contains("CSSProperties"),
+        "object literal :style should have satisfies CSSProperties: {output}"
+    );
+    // Negative: non-object-literal style should NOT get satisfies
+    let source2 = r#"<template><div :style="myVar"/></template>"#;
+    let output2 = gen_tsx_template(source2);
+    assert!(
+        !output2.contains("satisfies"),
+        "non-object-literal :style should NOT have satisfies: {output2}"
+    );
+}
+
+#[test]
 fn class_only_static_no_merge() {
     let source = r#"<template><div class="foo"/></template>"#;
     let output = gen_tsx_template(source);

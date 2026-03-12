@@ -238,7 +238,9 @@ pub fn process_element_props<'alloc>(
         }
 
         match dir_name {
-            "bind" => process_v_bind(prop, oxc_prop, source, out, alloc, resolver, v_if_guard),
+            "bind" => process_v_bind(
+                prop, oxc_prop, source, out, alloc, resolver, v_if_guard, is_jsx,
+            ),
             "on" => {
                 // Check if this event name has been seen before (duplicate handler)
                 let use_spread = if prop.is_dynamic != Some(true) {
@@ -395,6 +397,7 @@ fn process_merged_class_or_style<'alloc>(
 /// - `v-bind:prop="expr"` → `prop={expr}`
 /// - `v-bind="obj"` → `{...obj}` (spread)
 /// - `:[key]="val"` → `{...{[key]: val}}` (dynamic key)
+#[allow(clippy::too_many_arguments)]
 fn process_v_bind<'alloc>(
     prop: &NodeProp,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
@@ -403,6 +406,7 @@ fn process_v_bind<'alloc>(
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
     v_if_guard: Option<&str>,
+    is_jsx: bool,
 ) {
     let has_arg = prop.arg_start.is_some();
     let raw_name = &source[prop.start as usize..prop.name_end as usize];
@@ -482,6 +486,21 @@ fn process_v_bind<'alloc>(
 
     // Static key: :prop="expr" → prop={expr}
     let prop_end = get_prop_end(prop);
+
+    // CSSProperties satisfies annotation for :style with object literal (#31).
+    let is_style_object = arg_name == "style" && {
+        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+            source[vs as usize..ve as usize].trim().starts_with('{')
+        } else {
+            false
+        }
+    };
+    let close_brace = if is_style_object && !is_jsx {
+        " satisfies import('vue').CSSProperties}"
+    } else {
+        "}"
+    };
+
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
         let value_expr = &source[vs as usize..ve as usize];
         let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
@@ -504,7 +523,7 @@ fn process_v_bind<'alloc>(
             let tve = ve - trailing_ws as u32;
             out.overwrite(prop.start, arg_start, "");
             out.overwrite(arg_end, tvs, "={");
-            out.overwrite(tve, prop_end, "}");
+            out.overwrite(tve, prop_end, close_brace);
         } else if let Some(prefix) = final_expr.strip_suffix(trimmed_expr) {
             // Prefix-only change (e.g., "___VERTER___instance." + "$attrs").
             // Split overwrite to preserve the original identifier's source map position.
@@ -514,11 +533,16 @@ fn process_v_bind<'alloc>(
             let tve = ve - trailing_ws;
             out.overwrite(prop.start, arg_start, "");
             out.overwrite(arg_end, tvs, &format!("={{{}", prefix));
-            out.overwrite(tve, prop_end, "}");
+            out.overwrite(tve, prop_end, close_brace);
         } else if guarded.is_some() {
             // Guard was injected — the expression was rewritten, can't patch individually
+            let close = if is_style_object && !is_jsx {
+                format!("={{{} satisfies import('vue').CSSProperties}}", final_expr)
+            } else {
+                format!("={{{}}}", final_expr)
+            };
             out.overwrite(prop.start, arg_start, "");
-            out.overwrite(arg_end, prop_end, &format!("={{{}}}", final_expr));
+            out.overwrite(arg_end, prop_end, &close);
         } else {
             // Patch-based: overwrite only boundaries, apply binding patches individually.
             // This preserves source map tokens for each identifier in the expression,
@@ -529,7 +553,7 @@ fn process_v_bind<'alloc>(
             let tve = ve - trailing_ws;
             out.overwrite(prop.start, arg_start, "");
             out.overwrite(arg_end, tvs, "={");
-            out.overwrite(tve, prop_end, "}");
+            out.overwrite(tve, prop_end, close_brace);
             if let Some(oxc_p) = oxc_prop {
                 if let Some(ref exp) = oxc_p.exp {
                     if let Some(ref bindings) = exp.bindings {
