@@ -227,7 +227,9 @@ jobs:
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Run tests
-        run: pnpm vitest --run --reporter=default --reporter=junit --outputFile=test-results/vitest-junit.xml
+        run: |
+          pnpm --filter @verter/core exec vitest --run --reporter=default --reporter=junit --outputFile=../../test-results/vitest-junit.xml
+          pnpm --filter @verter/types test
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v1

@@ -66,7 +66,8 @@ const view = import('./Foo.vue')
     const host = new VerterHost();
     host.upsert({
       inputId: "TypedComponent.vue",
-      source: '<script setup lang="ts">\nconst x: number = 1;\n</script>\n<template><div>{{ x }}</div></template>',
+      source:
+        '<script setup lang="ts">\nconst x: number = 1;\n</script>\n<template><div>{{ x }}</div></template>',
     });
 
     const mainFile = host.getVirtualFile({
@@ -145,20 +146,16 @@ const view = import('./Foo.vue')
     const knownIds = ["src/widget.ts", "src/widget.vue"];
 
     expect(
-      host.resolveKnownModuleReferenceDependencies(
-        "src/App.vue",
-        moduleReferences,
-        knownIds,
-        [".vue", ".ts"],
-      ),
+      host.resolveKnownModuleReferenceDependencies("src/App.vue", moduleReferences, knownIds, [
+        ".vue",
+        ".ts",
+      ]),
     ).toEqual(["src/widget.vue"]);
     expect(
-      host.resolveKnownModuleReferenceDependencies(
-        "src/App.vue",
-        moduleReferences,
-        knownIds,
-        [".ts", ".vue"],
-      ),
+      host.resolveKnownModuleReferenceDependencies("src/App.vue", moduleReferences, knownIds, [
+        ".ts",
+        ".vue",
+      ]),
     ).toEqual(["src/widget.ts"]);
   });
 
@@ -242,7 +239,10 @@ describe("VerterHost type declarations in sync with native binary", () => {
 
   it("every native prototype method should have a TS type declaration", () => {
     const nativeMethods = Object.getOwnPropertyNames(VerterHost.prototype)
-      .filter((name) => name !== "constructor" && typeof (VerterHost.prototype as any)[name] === "function")
+      .filter(
+        (name) =>
+          name !== "constructor" && typeof (VerterHost.prototype as any)[name] === "function",
+      )
       .filter((name) => !INTERNAL_METHODS.has(name))
       .sort();
 
@@ -266,6 +266,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "matchCssSelectors",
       "remove",
       "resolve",
+      "resolveExports",
       "resolveKnownModuleReferenceDependencies",
       "setImportDependencies",
       "upsert",
@@ -273,11 +274,17 @@ describe("VerterHost type declarations in sync with native binary", () => {
 
     // Check for methods in native binary but missing from TS declarations
     const missingFromTs = nativeMethods.filter((m) => !declaredMethods.includes(m));
-    expect(missingFromTs, `Native methods missing from TS type declarations (update index.ts): ${missingFromTs.join(", ")}`).toEqual([]);
+    expect(
+      missingFromTs,
+      `Native methods missing from TS type declarations (update index.ts): ${missingFromTs.join(", ")}`,
+    ).toEqual([]);
 
     // Check for methods in TS declarations but missing from native binary
     const missingFromNative = declaredMethods.filter((m) => !nativeMethods.includes(m));
-    expect(missingFromNative, `TS declarations reference non-existent native methods: ${missingFromNative.join(", ")}`).toEqual([]);
+    expect(
+      missingFromNative,
+      `TS declarations reference non-existent native methods: ${missingFromNative.join(", ")}`,
+    ).toEqual([]);
   });
 
   it("top-level exports should include processStyle and compileBatch", () => {
@@ -289,9 +296,9 @@ describe("VerterHost type declarations in sync with native binary", () => {
 
   it("prefers the canonical verter-native binary when loading from dist", () => {
     const indexPath = require.resolve("./index.js");
-    const nativeNodeModules = Object.keys(require.cache).filter((entry) =>
-      entry.includes(`${sep}packages${sep}native${sep}dist${sep}`) &&
-      entry.endsWith(".node"),
+    const nativeNodeModules = Object.keys(require.cache).filter(
+      (entry) =>
+        entry.includes(`${sep}packages${sep}native${sep}dist${sep}`) && entry.endsWith(".node"),
     );
 
     delete require.cache[indexPath];
@@ -301,9 +308,9 @@ describe("VerterHost type declarations in sync with native binary", () => {
 
     require("./index.js");
 
-    const loadedNodeModules = Object.keys(require.cache).filter((entry) =>
-      entry.includes(`${sep}packages${sep}native${sep}dist${sep}`) &&
-      entry.endsWith(".node"),
+    const loadedNodeModules = Object.keys(require.cache).filter(
+      (entry) =>
+        entry.includes(`${sep}packages${sep}native${sep}dist${sep}`) && entry.endsWith(".node"),
     );
 
     expect(loadedNodeModules).toHaveLength(1);

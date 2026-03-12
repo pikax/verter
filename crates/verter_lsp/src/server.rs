@@ -4552,6 +4552,15 @@ impl LanguageServer for VerterLanguageServer {
         } else if provider_sync_policy.background_api_sync {
             self.sync_api_to_provider_in_background(uri.clone());
         }
+        // Signal coordinator for fresh diagnostics on open (not just on change).
+        // This ensures re-opening a file after external modifications publishes
+        // up-to-date merged diagnostics (Verter lint + type provider).
+        if let Some(coordinator) = &self.sync_coordinator {
+            if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+                coordinator.signal(canonical_id, uri.as_str().to_string());
+            }
+        }
+
         if startup_policy.publish_diagnostics {
             self.publish_full_diagnostics(uri).await;
         }
