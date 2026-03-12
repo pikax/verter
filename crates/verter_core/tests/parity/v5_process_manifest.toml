@@ -1063,21 +1063,48 @@ source_name = "generates Instance_TEST with generics"
 rust_test = "compile::tests::tsx_component_instance_v5_process_parity_matrix"
 
 [[entry]]
-id = "spec:packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts:238:logs-warning-for-non-setup-components"
+id = "spec:packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts:238:generates-instance-type-for-options-api"
 kind = "spec_case"
 status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts"
 source_line = 238
-source_name = "logs warning for non-setup components"
+source_name = "generates Instance type for options API"
 rust_test = "compile::tests::tsx_component_instance_v5_process_parity_matrix"
 
 [[entry]]
-id = "spec:packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts:251:does-not-generate-instance-exports-for-non-setup"
+id = "spec:packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts:248:generates-component-constructor-for-options-api"
 kind = "spec_case"
 status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts"
-source_line = 251
-source_name = "does not generate instance exports for non-setup"
+source_line = 248
+source_name = "generates Component constructor for options API"
+rust_test = "compile::tests::tsx_component_instance_v5_process_parity_matrix"
+
+[[entry]]
+id = "spec:packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts:261:does-not-include-publicinstancefrommacro-for-options-api"
+kind = "spec_case"
+status = "ported"
+source_file = "packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts"
+source_line = 261
+source_name = "does not include PublicInstanceFromMacro for options API"
+rust_test = "compile::tests::tsx_component_instance_v5_process_parity_matrix"
+
+[[entry]]
+id = "spec:packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts:270:handles-bare-object-export-no-definecomponent-wrapper"
+kind = "spec_case"
+status = "ported"
+source_file = "packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts"
+source_line = 270
+source_name = "handles bare object export (no defineComponent wrapper)"
+rust_test = "compile::tests::tsx_component_instance_v5_process_parity_matrix"
+
+[[entry]]
+id = "spec:packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts:278:does-not-generate-generic-declarations-for-options-api"
+kind = "spec_case"
+status = "ported"
+source_file = "packages/core/src/v5/process/script/plugins/component-instance/componentInstance.spec.ts"
+source_line = 278
+source_name = "does not generate generic declarations for options API"
 rust_test = "compile::tests::tsx_component_instance_v5_process_parity_matrix"
 
 [[entry]]
@@ -3133,11 +3160,29 @@ source_name = "handle multi line /* */ comments"
 rust_test = "compile::tests::tsx_script_sfc_cleaner_v5_process_parity_matrix"
 
 [[entry]]
-id = "spec:packages/core/src/v5/process/script/plugins/template-binding/template-binding.spec.ts:110:component"
+id = "spec:packages/core/src/v5/process/script/plugins/template-binding/template-binding.spec.ts:110:options-api-non-setup-uses-instancetype"
 kind = "spec_case"
 status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-binding/template-binding.spec.ts"
 source_line = 110
+source_name = "Options API (non-setup) uses InstanceType"
+rust_test = "compile::tests::tsx_template_binding_plugin_v5_process_parity_matrix"
+
+[[entry]]
+id = "spec:packages/core/src/v5/process/script/plugins/template-binding/template-binding.spec.ts:120:options-api-js-uses-instancetype"
+kind = "spec_case"
+status = "ported"
+source_file = "packages/core/src/v5/process/script/plugins/template-binding/template-binding.spec.ts"
+source_line = 120
+source_name = "Options API JS uses InstanceType"
+rust_test = "compile::tests::tsx_template_binding_plugin_v5_process_parity_matrix"
+
+[[entry]]
+id = "spec:packages/core/src/v5/process/script/plugins/template-binding/template-binding.spec.ts:130:component"
+kind = "spec_case"
+status = "ported"
+source_file = "packages/core/src/v5/process/script/plugins/template-binding/template-binding.spec.ts"
+source_line = 130
 source_name = "Component"
 rust_test = "compile::tests::tsx_template_binding_plugin_v5_process_parity_matrix"
 
