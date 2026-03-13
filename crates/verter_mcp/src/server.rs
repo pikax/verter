@@ -11,9 +11,7 @@ use rmcp::schemars;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
-use verter_analysis::types::{
-    AnalysisFlags, AnalyzedMacroKind, TypeResolutionSource, VueApiClassification,
-};
+use verter_analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
 use verter_diagnostics::{Linter, Severity};
 use verter_host::VerterHost;
 
@@ -3336,6 +3334,7 @@ impl ServerHandler for VerterMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_analysis::types::TypeResolutionSource;
     use verter_host::{HostConfig, UpsertRequest};
 
     fn make_host() -> Arc<VerterHost> {

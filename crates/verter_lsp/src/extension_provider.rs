@@ -372,10 +372,17 @@ impl TypeProvider for ExtensionTypeProvider {
                 )
                 .await?;
 
-            let locs = result
-                .as_array()
-                .map(|arr| arr.iter().filter_map(parse_tsserver_location).collect())
-                .unwrap_or_default();
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
 
             Ok(locs)
         })
@@ -408,10 +415,17 @@ impl TypeProvider for ExtensionTypeProvider {
                 )
                 .await?;
 
-            let locs = result
-                .as_array()
-                .map(|arr| arr.iter().filter_map(parse_tsserver_location).collect())
-                .unwrap_or_default();
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
 
             Ok(locs)
         })
@@ -440,11 +454,18 @@ impl TypeProvider for ExtensionTypeProvider {
                 )
                 .await?;
 
-            let locs = result
-                .get("refs")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(parse_tsserver_location).collect())
-                .unwrap_or_default();
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .get("refs")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
 
             Ok(locs)
         })
@@ -479,32 +500,37 @@ impl TypeProvider for ExtensionTypeProvider {
                 )
                 .await?;
 
-            let locs = result
-                .get("locs")
-                .and_then(|v| v.as_array())
-                .map(|groups| {
-                    groups
-                        .iter()
-                        .flat_map(|group| {
-                            let file_path = group
-                                .get("file")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .replace('\\', "/");
-                            group
-                                .get("locs")
-                                .and_then(|v| v.as_array())
-                                .into_iter()
-                                .flat_map(move |spans| {
-                                    let fp = file_path.clone();
-                                    spans.iter().filter_map(move |span| {
-                                        parse_tsserver_rename_span(span, &fp)
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .get("locs")
+                    .and_then(|v| v.as_array())
+                    .map(|groups| {
+                        groups
+                            .iter()
+                            .flat_map(|group| {
+                                let file_path = group
+                                    .get("file")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .replace('\\', "/");
+                                let content = cache.get(&file_path).map(|s| s.as_str());
+                                group
+                                    .get("locs")
+                                    .and_then(|v| v.as_array())
+                                    .into_iter()
+                                    .flat_map(move |spans| {
+                                        let fp = file_path.clone();
+                                        let c = content;
+                                        spans.iter().filter_map(move |span| {
+                                            parse_tsserver_rename_span(span, &fp, c)
+                                        })
                                     })
-                                })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
 
             Ok(locs)
         })
@@ -665,9 +691,14 @@ impl TypeProvider for ExtensionTypeProvider {
 
             match result {
                 Ok(body) => {
+                    let cache = contents_cache.lock().await;
                     let actions = body
                         .as_array()
-                        .map(|arr| arr.iter().filter_map(parse_tsserver_code_action).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|a| parse_tsserver_code_action(a, &cache))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     Ok(actions)
                 }

@@ -13,6 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
+use tower_lsp_server::ls_types::PositionEncodingKind;
+
 use crate::documents::line_index::LineIndex;
 use crate::tsgo::protocol::*;
 use crate::tsgo::traits::{ProviderFuture, TypeProvider};
@@ -652,15 +654,29 @@ fn pack_position(line: u32, character: u32) -> u32 {
 
 /// Convert an LSP `(line, character)` position to a byte offset in content.
 ///
-/// `character` is interpreted as UTF-16 code units (LSP default encoding).
-/// TSGO uses UTF-16 because we send empty capabilities during initialize.
-fn position_to_offset(content: &str, line: u32, character: u32) -> u32 {
-    let idx = LineIndex::new_utf16(content);
+/// `character` is interpreted according to the given encoding:
+/// - UTF-16: character counts UTF-16 code units (tsserver, TSGO default)
+/// - UTF-8: character counts bytes
+/// - UTF-32: character counts Unicode scalar values
+pub(crate) fn position_to_offset_with_encoding(
+    content: &str,
+    line: u32,
+    character: u32,
+    encoding: PositionEncodingKind,
+) -> u32 {
+    let idx = LineIndex::new(content, encoding);
     idx.position_to_offset(&tower_lsp_server::ls_types::Position { line, character })
         .unwrap_or({
             // Fallback: clamp to content length
             content.len() as u32
         })
+}
+
+/// Convert an LSP `(line, character)` position to a byte offset in content.
+///
+/// `character` is interpreted as UTF-16 code units (used by TSGO and tsserver).
+fn position_to_offset(content: &str, line: u32, character: u32) -> u32 {
+    position_to_offset_with_encoding(content, line, character, PositionEncodingKind::UTF16)
 }
 
 /// Parse an LSP Location JSON value into a `TypeLocation`, using content for offset resolution.
@@ -813,12 +829,18 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
     })
 }
 
-/// Convert a byte offset into an LSP `(line, character)` position.
+/// Convert a byte offset into an LSP `(line, character)` position with explicit encoding.
 ///
-/// Returns `character` as UTF-16 code units (LSP default encoding).
-/// TSGO uses UTF-16 because we send empty capabilities during initialize.
-fn offset_to_position(content: &str, offset: u32) -> (u32, u32) {
-    let idx = LineIndex::new_utf16(content);
+/// Returns `character` according to the given encoding:
+/// - UTF-16: character counts UTF-16 code units (tsserver, TSGO default)
+/// - UTF-8: character counts bytes
+/// - UTF-32: character counts Unicode scalar values
+pub(crate) fn offset_to_position_with_encoding(
+    content: &str,
+    offset: u32,
+    encoding: PositionEncodingKind,
+) -> (u32, u32) {
+    let idx = LineIndex::new(content, encoding);
     match idx.offset_to_position(offset) {
         Some(pos) => (pos.line, pos.character),
         None => {
@@ -829,6 +851,13 @@ fn offset_to_position(content: &str, offset: u32) -> (u32, u32) {
             }
         }
     }
+}
+
+/// Convert a byte offset into an LSP `(line, character)` position.
+///
+/// Returns `character` as UTF-16 code units (used by TSGO and tsserver).
+fn offset_to_position(content: &str, offset: u32) -> (u32, u32) {
+    offset_to_position_with_encoding(content, offset, PositionEncodingKind::UTF16)
 }
 
 /// A `TypeProvider` backed by a real TSGO process (`tsgo --lsp --stdio`).

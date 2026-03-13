@@ -16,8 +16,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
+use tower_lsp_server::ls_types::PositionEncodingKind;
+
 use crate::tsgo::protocol::*;
 use crate::tsgo::traits::{ProviderFuture, TypeProvider};
+
+/// Shorthand for UTF-16 encoding (tsserver protocol encoding).
+const UTF16: PositionEncodingKind = PositionEncodingKind::UTF16;
 
 /// Environment variables to strip from child processes to prevent VS Code/Electron
 /// debugger inheritance (F5 sessions set these, causing "Debugger listening" noise).
@@ -341,39 +346,25 @@ pub(crate) fn parse_tsserver_diagnostic(
 }
 
 /// Convert a byte offset to tsserver's 1-based (line, offset) position.
+///
+/// tsserver uses 1-based line and offset, where offset counts UTF-16 code units.
+/// Uses `LineIndex` for correct UTF-16 column calculation with non-ASCII chars.
 pub(crate) fn byte_offset_to_tsserver_pos(content: &str, offset: u32) -> (u32, u32) {
-    let offset = offset as usize;
-    let bytes = content.as_bytes();
-    let mut line = 1u32;
-    let mut line_start = 0usize;
-    for (i, &b) in bytes.iter().enumerate() {
-        if i == offset {
-            return (line, (offset - line_start + 1) as u32);
-        }
-        if b == b'\n' {
-            line += 1;
-            line_start = i + 1;
-        }
-    }
-    (line, (offset.min(bytes.len()) - line_start + 1) as u32)
+    let (line, char) = crate::tsgo::ipc::offset_to_position_with_encoding(content, offset, UTF16);
+    (line + 1, char + 1) // tsserver is 1-based
 }
 
 /// Convert tsserver's 1-based (line, offset) position to a byte offset.
+///
+/// tsserver uses 1-based line and offset, where offset counts UTF-16 code units.
+/// Uses `LineIndex` for correct byte offset calculation with non-ASCII chars.
 pub(crate) fn tsserver_pos_to_byte_offset(content: &str, line: u32, offset: u32) -> u32 {
-    let target_line = line.saturating_sub(1) as usize;
-    let target_col = offset.saturating_sub(1) as usize;
-    let mut current_line = 0usize;
-    let mut byte_offset = 0usize;
-    let bytes = content.as_bytes();
-
-    while current_line < target_line && byte_offset < bytes.len() {
-        if bytes[byte_offset] == b'\n' {
-            current_line += 1;
-        }
-        byte_offset += 1;
-    }
-
-    (byte_offset + target_col).min(bytes.len()) as u32
+    crate::tsgo::ipc::position_to_offset_with_encoding(
+        content,
+        line.saturating_sub(1),
+        offset.saturating_sub(1),
+        UTF16,
+    )
 }
 
 /// A `TypeProvider` backed by a tsserver process (`node tsserver.js`).
@@ -916,10 +907,17 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await?;
 
-            let locs = result
-                .as_array()
-                .map(|arr| arr.iter().filter_map(parse_tsserver_location).collect())
-                .unwrap_or_default();
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
 
             Ok(locs)
         })
@@ -953,10 +951,17 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await?;
 
-            let locs = result
-                .as_array()
-                .map(|arr| arr.iter().filter_map(parse_tsserver_location).collect())
-                .unwrap_or_default();
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
 
             Ok(locs)
         })
@@ -986,11 +991,18 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await?;
 
-            let locs = result
-                .get("refs")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(parse_tsserver_location).collect())
-                .unwrap_or_default();
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .get("refs")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
 
             Ok(locs)
         })
@@ -1026,32 +1038,37 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await?;
 
-            let locs = result
-                .get("locs")
-                .and_then(|v| v.as_array())
-                .map(|groups| {
-                    groups
-                        .iter()
-                        .flat_map(|group| {
-                            let file_path = group
-                                .get("file")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .replace('\\', "/");
-                            group
-                                .get("locs")
-                                .and_then(|v| v.as_array())
-                                .into_iter()
-                                .flat_map(move |spans| {
-                                    let fp = file_path.clone();
-                                    spans.iter().filter_map(move |span| {
-                                        parse_tsserver_rename_span(span, &fp)
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .get("locs")
+                    .and_then(|v| v.as_array())
+                    .map(|groups| {
+                        groups
+                            .iter()
+                            .flat_map(|group| {
+                                let file_path = group
+                                    .get("file")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .replace('\\', "/");
+                                let content = cache.get(&file_path).map(|s| s.as_str());
+                                group
+                                    .get("locs")
+                                    .and_then(|v| v.as_array())
+                                    .into_iter()
+                                    .flat_map(move |spans| {
+                                        let fp = file_path.clone();
+                                        let c = content;
+                                        spans.iter().filter_map(move |span| {
+                                            parse_tsserver_rename_span(span, &fp, c)
+                                        })
                                     })
-                                })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
 
             Ok(locs)
         })
@@ -1214,9 +1231,14 @@ impl TypeProvider for TsserverTypeProvider {
 
             match result {
                 Ok(body) => {
+                    let cache = contents_cache.lock().await;
                     let actions = body
                         .as_array()
-                        .map(|arr| arr.iter().filter_map(parse_tsserver_code_action).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|a| parse_tsserver_code_action(a, &cache))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     Ok(actions)
                 }
@@ -1607,7 +1629,14 @@ pub(crate) fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Comp
 /// Parse a tsserver location (used in definition/references responses).
 ///
 /// tsserver locations have: `{ file, start: {line, offset}, end: {line, offset} }`
-pub(crate) fn parse_tsserver_location(loc: &serde_json::Value) -> Option<TypeLocation> {
+/// where line and offset are 1-based, and offset counts UTF-16 code units.
+///
+/// When content is available in `contents_cache`, positions are converted to proper
+/// byte offsets. Otherwise, falls back to packed 0-based `(line << 16) | col` format.
+pub(crate) fn parse_tsserver_location(
+    loc: &serde_json::Value,
+    contents_cache: &HashMap<String, String>,
+) -> Option<TypeLocation> {
     let file = loc
         .get("file")
         .and_then(|v| v.as_str())
@@ -1620,9 +1649,18 @@ pub(crate) fn parse_tsserver_location(loc: &serde_json::Value) -> Option<TypeLoc
     let el = end.get("line")?.as_u64()? as u32;
     let eo = end.get("offset")?.as_u64()? as u32;
 
-    // Convert 1-based to packed 0-based offsets
-    let s = ((sl.saturating_sub(1)) << 16) | ((so.saturating_sub(1)) & 0xFFFF);
-    let e = ((el.saturating_sub(1)) << 16) | ((eo.saturating_sub(1)) & 0xFFFF);
+    let (s, e) = if let Some(content) = contents_cache.get(&file) {
+        (
+            tsserver_pos_to_byte_offset(content, sl, so),
+            tsserver_pos_to_byte_offset(content, el, eo),
+        )
+    } else {
+        // Fallback: store packed 0-based positions
+        (
+            ((sl.saturating_sub(1)) << 16) | ((so.saturating_sub(1)) & 0xFFFF),
+            ((el.saturating_sub(1)) << 16) | ((eo.saturating_sub(1)) & 0xFFFF),
+        )
+    };
 
     Some(TypeLocation {
         path: file,
@@ -1632,9 +1670,13 @@ pub(crate) fn parse_tsserver_location(loc: &serde_json::Value) -> Option<TypeLoc
 }
 
 /// Parse a tsserver rename span into a RenameLocation.
+///
+/// When `content` is provided, converts 1-based tsserver positions to byte offsets.
+/// Otherwise, falls back to packed 0-based `(line << 16) | col` format.
 pub(crate) fn parse_tsserver_rename_span(
     span: &serde_json::Value,
     file: &str,
+    content: Option<&str>,
 ) -> Option<RenameLocation> {
     let start = span.get("start")?;
     let end = span.get("end")?;
@@ -1643,8 +1685,17 @@ pub(crate) fn parse_tsserver_rename_span(
     let el = end.get("line")?.as_u64()? as u32;
     let eo = end.get("offset")?.as_u64()? as u32;
 
-    let s = ((sl.saturating_sub(1)) << 16) | ((so.saturating_sub(1)) & 0xFFFF);
-    let e = ((el.saturating_sub(1)) << 16) | ((eo.saturating_sub(1)) & 0xFFFF);
+    let (s, e) = if let Some(c) = content {
+        (
+            tsserver_pos_to_byte_offset(c, sl, so),
+            tsserver_pos_to_byte_offset(c, el, eo),
+        )
+    } else {
+        (
+            ((sl.saturating_sub(1)) << 16) | ((so.saturating_sub(1)) & 0xFFFF),
+            ((el.saturating_sub(1)) << 16) | ((eo.saturating_sub(1)) & 0xFFFF),
+        )
+    };
 
     Some(RenameLocation {
         path: file.to_string(),
@@ -1654,7 +1705,13 @@ pub(crate) fn parse_tsserver_rename_span(
 }
 
 /// Parse a tsserver code action / code fix.
-pub(crate) fn parse_tsserver_code_action(action: &serde_json::Value) -> Option<TypeCodeAction> {
+///
+/// When content is available in `contents_cache`, converts 1-based tsserver positions
+/// to byte offsets. Otherwise, falls back to packed 0-based format.
+pub(crate) fn parse_tsserver_code_action(
+    action: &serde_json::Value,
+    contents_cache: &HashMap<String, String>,
+) -> Option<TypeCodeAction> {
     let description = action.get("description")?.as_str()?.to_string();
     let changes = action.get("changes")?.as_array()?;
 
@@ -1665,6 +1722,7 @@ pub(crate) fn parse_tsserver_code_action(action: &serde_json::Value) -> Option<T
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .replace('\\', "/");
+        let content = contents_cache.get(&file);
         if let Some(text_changes) = change.get("textChanges").and_then(|v| v.as_array()) {
             for tc in text_changes {
                 let start = tc.get("start")?;
@@ -1675,8 +1733,17 @@ pub(crate) fn parse_tsserver_code_action(action: &serde_json::Value) -> Option<T
                 let el = end.get("line")?.as_u64()? as u32;
                 let eo = end.get("offset")?.as_u64()? as u32;
 
-                let s = ((sl.saturating_sub(1)) << 16) | ((so.saturating_sub(1)) & 0xFFFF);
-                let e = ((el.saturating_sub(1)) << 16) | ((eo.saturating_sub(1)) & 0xFFFF);
+                let (s, e) = if let Some(c) = content {
+                    (
+                        tsserver_pos_to_byte_offset(c, sl, so),
+                        tsserver_pos_to_byte_offset(c, el, eo),
+                    )
+                } else {
+                    (
+                        ((sl.saturating_sub(1)) << 16) | ((so.saturating_sub(1)) & 0xFFFF),
+                        ((el.saturating_sub(1)) << 16) | ((eo.saturating_sub(1)) & 0xFFFF),
+                    )
+                };
 
                 edits.push(TypeCodeEdit {
                     path: file.clone(),
@@ -2003,6 +2070,129 @@ mod tests {
         let result = format_quickinfo_hover("const", "const x: string", "A string variable");
         assert!(result.contains("(const) const x: string"));
         assert!(result.contains("A string variable"));
+    }
+
+    #[test]
+    fn test_parse_tsserver_location_with_content() {
+        let content = "const x = 1;\nconst y = 2;\nconst z = 3;";
+        let mut cache = HashMap::new();
+        cache.insert("d:/test/file.ts".to_string(), content.to_string());
+
+        let loc = serde_json::json!({
+            "file": "d:/test/file.ts",
+            "start": { "line": 2, "offset": 7 },
+            "end": { "line": 2, "offset": 8 },
+        });
+
+        let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+        assert_eq!(parsed.path, "d:/test/file.ts");
+        // "y" is at byte 19 (line 2, col 7 in 1-based = byte 13 + 6 = 19)
+        assert_eq!(parsed.start, 19, "start should be byte offset, not packed");
+        assert_eq!(parsed.end, 20, "end should be byte offset, not packed");
+        // Negative: must NOT be a packed position
+        assert!(
+            parsed.start < 100,
+            "start must be a byte offset, not packed (1 << 16 = 65536)"
+        );
+    }
+
+    #[test]
+    fn test_parse_tsserver_location_without_content() {
+        let cache = HashMap::new();
+
+        let loc = serde_json::json!({
+            "file": "d:/test/file.ts",
+            "start": { "line": 2, "offset": 7 },
+            "end": { "line": 2, "offset": 8 },
+        });
+
+        let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+        // Without content, should use packed fallback (0-based)
+        let expected_start = ((2 - 1) << 16) | ((7 - 1) & 0xFFFF);
+        assert_eq!(
+            parsed.start, expected_start,
+            "without content, should use packed fallback"
+        );
+    }
+
+    #[test]
+    fn test_parse_tsserver_location_line_10_not_packed() {
+        let mut lines = Vec::new();
+        for i in 0..15 {
+            lines.push(format!("line{i:02}_content"));
+        }
+        let content = lines.join("\n");
+        let mut cache = HashMap::new();
+        cache.insert("d:/test/file.ts".to_string(), content.clone());
+
+        let loc = serde_json::json!({
+            "file": "d:/test/file.ts",
+            "start": { "line": 10, "offset": 1 },
+            "end": { "line": 10, "offset": 5 },
+        });
+
+        let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+        // With content, byte offset for line 10 should be reasonable (< 200 bytes)
+        assert!(
+            parsed.start < (10 << 16),
+            "start must NOT be a packed position for line 10+"
+        );
+        assert!(parsed.start < 200, "start should be a small byte offset");
+    }
+
+    #[test]
+    fn test_parse_tsserver_rename_span_with_content() {
+        let content = "const x = 1;\nconst y = 2;";
+        let span = serde_json::json!({
+            "start": { "line": 2, "offset": 7 },
+            "end": { "line": 2, "offset": 8 },
+        });
+
+        let parsed = parse_tsserver_rename_span(&span, "d:/test/file.ts", Some(content)).unwrap();
+        assert_eq!(parsed.start, 19, "start should be byte offset");
+        assert_eq!(parsed.end, 20, "end should be byte offset");
+        assert!(parsed.start < 100, "must not be packed");
+    }
+
+    #[test]
+    fn test_parse_tsserver_location_non_ascii() {
+        // tsserver uses UTF-16 code units for offset
+        // "café" = 5 bytes UTF-8 (c=1, a=1, f=1, é=2), 4 UTF-16 code units
+        let content = "café\nworld";
+        let mut cache = HashMap::new();
+        cache.insert("d:/test/file.ts".to_string(), content.to_string());
+
+        let loc = serde_json::json!({
+            "file": "d:/test/file.ts",
+            "start": { "line": 2, "offset": 1 },
+            "end": { "line": 2, "offset": 6 },
+        });
+
+        let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+        // "café\n" = 6 bytes (c=1, a=1, f=1, é=2, \n=1)
+        // "world" starts at byte 6
+        assert_eq!(parsed.start, 6, "start of 'world' should be byte 6");
+        // "world" ends at byte 11
+        assert_eq!(parsed.end, 11, "end of 'world' should be byte 11");
+    }
+
+    #[test]
+    fn test_byte_offset_to_tsserver_pos_non_ascii() {
+        // "café\nworld" — 'é' is 2 bytes UTF-8, 1 UTF-16 code unit
+        let content = "café\nworld";
+        // byte 6 = start of "world" = line 2, col 1 in 1-based
+        let (line, col) = byte_offset_to_tsserver_pos(content, 6);
+        assert_eq!(line, 2, "should be line 2");
+        assert_eq!(col, 1, "should be col 1 (UTF-16)");
+    }
+
+    #[test]
+    fn test_tsserver_pos_to_byte_offset_non_ascii() {
+        // "café\nworld" — 'é' is 2 bytes UTF-8, 1 UTF-16 code unit
+        let content = "café\nworld";
+        // line 2, offset 1 (1-based) → byte 6 ("world" starts there)
+        let offset = tsserver_pos_to_byte_offset(content, 2, 1);
+        assert_eq!(offset, 6, "line 2, col 1 should be byte 6");
     }
 
     async fn send_success_response(
