@@ -92,6 +92,8 @@ mod tests {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: Span::new(start, end),
         }
     }

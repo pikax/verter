@@ -11,7 +11,9 @@ use rmcp::schemars;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
-use verter_analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
+use verter_analysis::types::{
+    AnalysisFlags, AnalyzedMacroKind, TypeResolutionSource, VueApiClassification,
+};
 use verter_diagnostics::{Linter, Severity};
 use verter_host::VerterHost;
 
@@ -3546,6 +3548,8 @@ const count = ref(0)
                         type_annotation: None,
                         description: None,
                         tags: vec![],
+                        resolution_source: TypeResolutionSource::Rust,
+                        resolution_error: None,
                     },
                     verter_analysis::types::AnalyzedPropField {
                         name: "b".into(),
@@ -3554,6 +3558,8 @@ const count = ref(0)
                         type_annotation: None,
                         description: None,
                         tags: vec![],
+                        resolution_source: TypeResolutionSource::Rust,
+                        resolution_error: None,
                     },
                     verter_analysis::types::AnalyzedPropField {
                         name: "c".into(),
@@ -3562,12 +3568,16 @@ const count = ref(0)
                         type_annotation: None,
                         description: None,
                         tags: vec![],
+                        resolution_source: TypeResolutionSource::Rust,
+                        resolution_error: None,
                     },
                 ],
                 emit_fields: vec![],
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: verter_span::Span::new(0, 100),
             }],
             bindings: vec![],

@@ -492,9 +492,24 @@ class Parser {
 
       if (this.peek().kind === TokenKind.RBrace) break;
 
-      // Index signature `[key: string]: Type` — fallback to unknown
+      // Index signature `[key: string]: Type` — skip and continue
       if (this.peek().kind === TokenKind.LBracket) {
-        return unknown(this.input);
+        // Skip everything until we find the matching `]`
+        this.advance(); // consume `[`
+        let depth = 1;
+        while (depth > 0 && this.peek().kind !== TokenKind.EOF) {
+          if (this.peek().kind === TokenKind.LBracket) depth++;
+          else if (this.peek().kind === TokenKind.RBracket) depth--;
+          this.advance();
+        }
+        // After `]`, expect `:` then type then separator
+        if (this.match(TokenKind.Colon)) {
+          this.parseUnion(); // consume the value type
+        }
+        if (!this.match(TokenKind.Semicolon)) {
+          this.match(TokenKind.Comma);
+        }
+        continue;
       }
 
       const propName = this.parsePropertyName();

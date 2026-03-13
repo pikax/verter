@@ -195,7 +195,9 @@ mod tests {
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
     use verter_analysis::template::*;
-    use verter_analysis::types::{AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField};
+    use verter_analysis::types::{
+        AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, TypeResolutionSource,
+    };
     use verter_analysis::ScriptAnalysisSnapshot;
     use verter_span::Span;
 
@@ -217,12 +219,16 @@ mod tests {
                         type_annotation: None,
                         description: None,
                         tags: vec![],
+                        resolution_source: TypeResolutionSource::Rust,
+                        resolution_error: None,
                     })
                     .collect(),
                 emit_fields: vec![],
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: Span::new(0, 50),
             }],
             ..Default::default()

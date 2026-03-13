@@ -82,7 +82,7 @@ pub use template::{
 };
 pub use types::hash_16;
 pub use types::{
-    AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedEmitField,
+    AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedDefaultValue, AnalyzedEmitField,
     AnalyzedExportedFunction, AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro,
     AnalyzedMacroKind, AnalyzedModuleReference, AnalyzedOptionsApi, AnalyzedOptionsComponent,
     AnalyzedOptionsField, AnalyzedOptionsProp, AnalyzedPropField, AnalyzedSlotField,
@@ -90,7 +90,7 @@ pub use types::{
     CssVarManipulation, CssVarManipulationKind, DomQueryCallSite, DomQueryKind, ExportSignature,
     FunctionParam, Hash16, ImportSourceInfo, LiteralKind, MacroTypeDep,
     ModuleReferenceAnalyzability, ModuleReferenceSemantics, ModuleReferenceSyntax, NestedMacroCall,
-    ReactivityKind, ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot,
+    ReactivityKind, ResolvedLocalType, ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot,
     ScriptTypeEnhancements, StoreApiClassification, StoreDefinition, StoreUsage,
-    VueApiClassification,
+    TypeResolutionSource, VueApiClassification,
 };

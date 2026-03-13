@@ -104,6 +104,8 @@ fn add_prop_to_type_based_define_props() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(24, 56),
         }])
         .into(),
@@ -240,6 +242,8 @@ fn no_action_for_runtime_based_define_props() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(15, 35),
         }])
         .into(),

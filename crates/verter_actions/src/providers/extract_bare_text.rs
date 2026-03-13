@@ -1626,12 +1626,16 @@ mod tests {
                     type_annotation: None,
                     description: None,
                     tags: vec![],
+                    resolution_source: TypeResolutionSource::Rust,
+                    resolution_error: None,
                 })
                 .collect(),
             emit_fields: vec![],
             slot_fields: vec![],
             default_keys: vec![],
+            default_values: Vec::new(),
             expose_fields: vec![],
+            resolved_local_types: Vec::new(),
             span,
         }
     }

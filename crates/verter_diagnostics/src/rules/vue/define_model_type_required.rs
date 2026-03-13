@@ -89,6 +89,8 @@ mod tests {
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: Span::new(20, 34),
             }],
             ..Default::default()
@@ -125,6 +127,8 @@ mod tests {
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: Span::new(20, 42),
             }],
             ..Default::default()
@@ -152,6 +156,8 @@ mod tests {
                     slot_fields: vec![],
                     default_keys: vec![],
                     expose_fields: vec![],
+                    default_values: Vec::new(),
+                    resolved_local_types: Vec::new(),
                     span: Span::new(20, 42),
                 },
                 AnalyzedMacro {
@@ -166,6 +172,8 @@ mod tests {
                     slot_fields: vec![],
                     default_keys: vec![],
                     expose_fields: vec![],
+                    default_values: Vec::new(),
+                    resolved_local_types: Vec::new(),
                     span: Span::new(50, 72),
                 },
             ],
@@ -194,6 +202,8 @@ mod tests {
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: Span::new(20, 40),
             }],
             ..Default::default()

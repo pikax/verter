@@ -12,7 +12,7 @@
 import { readFileSync } from "node:fs";
 import { resolve, dirname, basename, extname } from "node:path";
 import { createNapiAdapter } from "../host-adapter.js";
-import { extractComponentMeta } from "../extractor.js";
+import { extractComponentMeta, buildTypeRegistry } from "../extractor.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 import type { PropertyMeta, VolarComponentMeta, MetaCheckerOptions } from "./types.js";
@@ -21,19 +21,23 @@ import { typeDescriptorToSchema, typeDescriptorToString } from "./schema.js";
 /**
  * Map a Verter PropMeta to Volar PropertyMeta.
  */
-export function mapPropMeta(prop: PropMeta, options?: MetaCheckerOptions): PropertyMeta {
+export function mapPropMeta(
+  prop: PropMeta,
+  options?: MetaCheckerOptions,
+  typeRegistry?: Map<string, string>,
+): PropertyMeta {
   return {
     name: prop.name,
     description: prop.description ?? "",
     type: prop.rawType ?? typeDescriptorToString(prop.type),
     required: prop.required,
     global: false,
-    default: undefined,
+    default: prop.default,
     tags: (prop.tags ?? []).map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
     })),
-    schema: typeDescriptorToSchema(prop.type, options),
+    schema: typeDescriptorToSchema(prop.type, options, typeRegistry),
   };
 }
 
@@ -98,10 +102,11 @@ export function mapExposedMeta(exposed: ExposedMeta, options?: MetaCheckerOption
 export function mapComponentMeta(
   meta: ComponentMeta,
   options?: MetaCheckerOptions,
+  typeRegistry?: Map<string, string>,
 ): VolarComponentMeta {
   return {
     type: 0,
-    props: meta.props.map((p) => mapPropMeta(p, options)),
+    props: meta.props.map((p) => mapPropMeta(p, options, typeRegistry)),
     events: meta.events.map((e) => mapEventMeta(e, options)),
     slots: meta.slots.map((s) => mapSlotMeta(s, options)),
     exposed: meta.exposed.map((e) => mapExposedMeta(e, options)),
@@ -132,6 +137,9 @@ export class ComponentMetaChecker {
   getComponentMeta(filePath: string, _exportName?: string): VolarComponentMeta {
     const absPath = resolve(this.projectRoot, filePath);
     this.ensureFile(absPath);
+    // Build type registry from raw snapshot for ref resolution
+    const rawSnapshot = this.adapter.getAnalysis(absPath);
+    const typeRegistry = rawSnapshot ? buildTypeRegistry(rawSnapshot) : undefined;
     const meta = extractComponentMeta(this.adapter, absPath, absPath);
     if (!meta) {
       return {
@@ -142,7 +150,7 @@ export class ComponentMetaChecker {
         exposed: [],
       };
     }
-    return mapComponentMeta(meta, this.options);
+    return mapComponentMeta(meta, this.options, typeRegistry);
   }
 
   /**

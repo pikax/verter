@@ -306,3 +306,61 @@ fn props_mixed_shorthand_and_full() {
     assert_eq!(opts.props[2].name, "bare");
     assert_eq!(opts.props[2].type_constructor.as_deref(), Some("Boolean"));
 }
+
+// ── Default values ──
+
+#[test]
+fn props_default_value_string() {
+    let snap = analyze("export default { props: { message: { type: String, default: 'Hello' } } }");
+    let opts = snap.options_api.unwrap();
+    assert_eq!(opts.props.len(), 1);
+    assert!(opts.props[0].has_default);
+    assert_eq!(opts.props[0].default_value.as_deref(), Some("Hello"));
+}
+
+#[test]
+fn props_default_value_number() {
+    let snap = analyze("export default { props: { count: { type: Number, default: 42 } } }");
+    let opts = snap.options_api.unwrap();
+    assert!(opts.props[0].has_default);
+    assert_eq!(opts.props[0].default_value.as_deref(), Some("42"));
+}
+
+#[test]
+fn props_default_value_boolean() {
+    let snap = analyze("export default { props: { active: { type: Boolean, default: false } } }");
+    let opts = snap.options_api.unwrap();
+    assert!(opts.props[0].has_default);
+    assert_eq!(opts.props[0].default_value.as_deref(), Some("false"));
+}
+
+#[test]
+fn props_no_default_returns_none() {
+    let snap = analyze("export default { props: { title: { type: String, required: true } } }");
+    let opts = snap.options_api.unwrap();
+    assert!(!opts.props[0].has_default);
+    assert!(opts.props[0].default_value.is_none());
+}
+
+// ── TSAsExpression (PropType) ──
+
+#[test]
+fn props_ts_as_prop_type() {
+    let snap = analyze(
+        "export default { props: { canvas: { type: Object as PropType<HTMLCanvasElement> } } }",
+    );
+    let opts = snap.options_api.unwrap();
+    assert_eq!(opts.props[0].type_constructor.as_deref(), Some("Object"));
+    assert_eq!(
+        opts.props[0].type_annotation.as_deref(),
+        Some("HTMLCanvasElement")
+    );
+}
+
+#[test]
+fn props_ts_as_prop_type_without_annotation() {
+    let snap = analyze("export default { props: { count: { type: Number } } }");
+    let opts = snap.options_api.unwrap();
+    assert_eq!(opts.props[0].type_constructor.as_deref(), Some("Number"));
+    assert!(opts.props[0].type_annotation.is_none());
+}

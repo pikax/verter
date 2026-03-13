@@ -230,6 +230,8 @@ mod tests {
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: verter_span::Span::new(24, 60),
             }])
             .into(),
@@ -409,6 +411,8 @@ mod tests {
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: verter_span::Span::new(24, 57), // past the closing `)`
             }])
             .into(),
@@ -444,6 +448,8 @@ mod tests {
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: verter_span::Span::new(15, 35),
             }])
             .into(),

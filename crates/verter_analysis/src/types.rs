@@ -845,6 +845,16 @@ pub struct AnalyzedPropField {
     /// JSDoc tags (e.g., `@default`, `@deprecated`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<JsdocTag>,
+    /// How this prop's type was resolved.
+    #[serde(default, skip_serializing_if = "is_rust_resolution")]
+    pub resolution_source: TypeResolutionSource,
+    /// If `resolution_source` is `Unresolved`, explains why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_error: Option<String>,
+}
+
+fn is_rust_resolution(src: &TypeResolutionSource) -> bool {
+    matches!(src, TypeResolutionSource::Rust)
 }
 
 /// An individual emit field from `defineEmits`.
@@ -959,6 +969,12 @@ pub struct AnalyzedOptionsProp {
     pub is_required: bool,
     /// Whether a `default` value is provided.
     pub has_default: bool,
+    /// Default value source text (e.g., `"'Hello'"` or `"42"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+    /// Type annotation from `PropType<T>` (e.g., `"HTMLCanvasElement"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
 }
 
 /// A named field from an Options API option (data, computed, methods, etc.).
@@ -994,6 +1010,43 @@ pub struct AnalyzedExposeField {
     pub span: Span,
 }
 
+/// How a prop type was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TypeResolutionSource {
+    /// Resolved entirely by the Rust analyzer (inline types, simple references).
+    #[default]
+    Rust,
+    /// Resolved with help from the TypeScript type checker.
+    TypeScript,
+    /// Could not be resolved; see `resolution_error` for details.
+    Unresolved,
+}
+
+/// A default value extracted from `withDefaults()` second argument.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedDefaultValue {
+    /// The prop name this default applies to.
+    pub key: String,
+    /// The source text of the default value expression.
+    pub value: String,
+    /// SFC-absolute byte span of the value expression.
+    pub span: Span,
+}
+
+/// A locally resolved type expansion referenced by macro type parameters.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedLocalType {
+    /// The type name as referenced in the macro (e.g., `"Props"`).
+    pub name: String,
+    /// The expanded type text (e.g., `"{ count: number; label?: string }"`).
+    pub expanded: String,
+    /// SFC-absolute byte span of the type declaration.
+    pub span: Span,
+}
+
 /// A Vue compiler macro call found in `<script setup>` (e.g., `defineProps`, `defineEmits`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedMacro {
@@ -1021,9 +1074,13 @@ pub struct AnalyzedMacro {
     /// Object property key names from the `withDefaults()` second argument.
     /// Only populated for `WithDefaults` macros.
     pub default_keys: Vec<String>,
+    /// Default values from `withDefaults()` second argument, with key-value pairs.
+    pub default_values: Vec<AnalyzedDefaultValue>,
     /// Individual exposed fields from `defineExpose({ ... })`.
     /// Only populated for `DefineExpose` macros with an object literal argument.
     pub expose_fields: Vec<AnalyzedExposeField>,
+    /// Locally resolved type expansions referenced by macro type parameters.
+    pub resolved_local_types: Vec<ResolvedLocalType>,
     /// SFC-absolute byte span of the macro call.
     pub span: Span,
 }
@@ -1037,7 +1094,9 @@ impl serde::Serialize for AnalyzedMacro {
             + usize::from(!self.emit_fields.is_empty())
             + usize::from(!self.slot_fields.is_empty())
             + usize::from(!self.default_keys.is_empty())
-            + usize::from(!self.expose_fields.is_empty());
+            + usize::from(!self.default_values.is_empty())
+            + usize::from(!self.expose_fields.is_empty())
+            + usize::from(!self.resolved_local_types.is_empty());
         let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("isTypeBased", &self.is_type_based)?;
@@ -1059,8 +1118,14 @@ impl serde::Serialize for AnalyzedMacro {
         if !self.default_keys.is_empty() {
             s.serialize_field("defaultKeys", &self.default_keys)?;
         }
+        if !self.default_values.is_empty() {
+            s.serialize_field("defaultValues", &self.default_values)?;
+        }
         if !self.expose_fields.is_empty() {
             s.serialize_field("exposeFields", &self.expose_fields)?;
+        }
+        if !self.resolved_local_types.is_empty() {
+            s.serialize_field("resolvedLocalTypes", &self.resolved_local_types)?;
         }
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
@@ -1090,7 +1155,11 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             #[serde(default)]
             default_keys: Vec<String>,
             #[serde(default)]
+            default_values: Vec<AnalyzedDefaultValue>,
+            #[serde(default)]
             expose_fields: Vec<AnalyzedExposeField>,
+            #[serde(default)]
+            resolved_local_types: Vec<ResolvedLocalType>,
             #[serde(default)]
             span_start: u32,
             #[serde(default)]
@@ -1108,7 +1177,9 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             emit_fields: w.emit_fields,
             slot_fields: w.slot_fields,
             default_keys: w.default_keys,
+            default_values: w.default_values,
             expose_fields: w.expose_fields,
+            resolved_local_types: w.resolved_local_types,
             span: Span::new(w.span_start, w.span_end),
         })
     }

@@ -2,9 +2,12 @@ use oxc_ast::ast::*;
 use oxc_ast::{Comment, CommentContent};
 use oxc_span::GetSpan;
 
+use rustc_hash::{FxHashMap, FxHashSet};
+
 use crate::types::{
-    AnalyzedEmitField, AnalyzedExposeField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField,
-    AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag,
+    AnalyzedDefaultValue, AnalyzedEmitField, AnalyzedExposeField, AnalyzedMacro, AnalyzedMacroKind,
+    AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag, ResolvedLocalType,
+    TypeResolutionSource,
 };
 
 /// Classify a callee name as a Vue compiler macro.
@@ -207,7 +210,545 @@ fn analyze_macros_from_program(program: &Program<'_>, source: &str) -> Vec<Analy
         }
     }
 
+    // Post-processing: resolve local type references in prop fields
+    resolve_macro_type_references(program, &mut macros, source);
+
     macros
+}
+
+// ── Local type registry for resolving TSTypeReference in defineProps ──
+
+/// A local type declaration found in the same script block.
+enum LocalTypeDecl<'a> {
+    Interface {
+        body: &'a TSInterfaceBody<'a>,
+        extends: &'a [TSInterfaceHeritage<'a>],
+    },
+    Alias(&'a TSType<'a>),
+    Class,
+}
+
+/// Build a registry of local type declarations from the program.
+fn build_local_type_registry<'a>(program: &'a Program<'a>) -> FxHashMap<String, LocalTypeDecl<'a>> {
+    let mut registry = FxHashMap::default();
+    for stmt in &program.body {
+        match stmt {
+            Statement::TSInterfaceDeclaration(decl) => {
+                let extends: &[TSInterfaceHeritage<'_>] = &decl.extends;
+                registry.insert(
+                    decl.id.name.to_string(),
+                    LocalTypeDecl::Interface {
+                        body: &decl.body,
+                        extends,
+                    },
+                );
+            }
+            Statement::TSTypeAliasDeclaration(decl) => {
+                registry.insert(
+                    decl.id.name.to_string(),
+                    LocalTypeDecl::Alias(&decl.type_annotation),
+                );
+            }
+            Statement::ClassDeclaration(decl) => {
+                if let Some(ref id) = decl.id {
+                    registry.insert(id.name.to_string(), LocalTypeDecl::Class);
+                }
+            }
+            _ => {}
+        }
+    }
+    registry
+}
+
+/// Extract prop fields from an interface body.
+fn extract_fields_from_interface_body(
+    body: &TSInterfaceBody<'_>,
+    source: &str,
+    comments: &[Comment],
+) -> Vec<AnalyzedPropField> {
+    body.body
+        .iter()
+        .filter_map(|member| {
+            if let TSSignature::TSPropertySignature(prop) = member {
+                let key_name = match &prop.key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                    _ => None,
+                };
+                let type_annotation = prop.type_annotation.as_ref().and_then(|ta| {
+                    let start = ta.type_annotation.span().start as usize;
+                    let end = ta.type_annotation.span().end as usize;
+                    if end <= source.len() {
+                        let text = source[start..end].trim();
+                        if !text.is_empty() {
+                            Some(text.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+                let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
+                key_name.map(|name| AnalyzedPropField {
+                    name,
+                    is_optional: prop.optional,
+                    span: prop.key.span().into(),
+                    type_annotation,
+                    description,
+                    tags,
+                    resolution_source: TypeResolutionSource::Rust,
+                    resolution_error: None,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Resolve prop fields from a TSType using the local type registry.
+/// Returns `None` if the type cannot be resolved locally (triggers TS fallback).
+fn resolve_type_to_prop_fields(
+    ts_type: &TSType<'_>,
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+    visited: &mut FxHashSet<String>,
+) -> Option<Vec<AnalyzedPropField>> {
+    match ts_type {
+        TSType::TSTypeLiteral(literal) => Some(extract_fields_from_interface_body_like(
+            &literal.members,
+            source,
+            comments,
+        )),
+        TSType::TSTypeReference(ref_type) => {
+            let name = type_name_to_string(&ref_type.type_name);
+
+            // Recursion guard
+            if visited.contains(&name) {
+                return Some(Vec::new());
+            }
+
+            // Check for known utility types
+            if let Some(ref type_args) = ref_type.type_arguments {
+                match name.as_str() {
+                    "Partial" => {
+                        if let Some(first) = type_args.params.first() {
+                            visited.insert(name.clone());
+                            let result = resolve_type_to_prop_fields(
+                                first, registry, source, comments, visited,
+                            );
+                            visited.remove(&name);
+                            return result.map(|fields| {
+                                fields
+                                    .into_iter()
+                                    .map(|mut f| {
+                                        f.is_optional = true;
+                                        f
+                                    })
+                                    .collect()
+                            });
+                        }
+                    }
+                    "Required" => {
+                        if let Some(first) = type_args.params.first() {
+                            visited.insert(name.clone());
+                            let result = resolve_type_to_prop_fields(
+                                first, registry, source, comments, visited,
+                            );
+                            visited.remove(&name);
+                            return result.map(|fields| {
+                                fields
+                                    .into_iter()
+                                    .map(|mut f| {
+                                        f.is_optional = false;
+                                        f
+                                    })
+                                    .collect()
+                            });
+                        }
+                    }
+                    "Pick" | "Omit" | "ReturnType" | "InstanceType" | "Record" | "Extract"
+                    | "Exclude" | "NonNullable" => {
+                        return None; // Unresolvable by Rust
+                    }
+                    _ => {}
+                }
+            }
+
+            // Look up in local registry
+            visited.insert(name.clone());
+            let result = match registry.get(&name) {
+                Some(LocalTypeDecl::Interface { body, extends }) => {
+                    // Resolve extends chain first via direct registry lookup
+                    let mut all_fields = Vec::new();
+                    let mut seen_names = FxHashSet::default();
+                    for heritage in *extends {
+                        let Some(parent_name) = heritage_name(&heritage.expression) else {
+                            continue;
+                        };
+                        if let Some(parent_decl) = registry.get(&parent_name) {
+                            if let Some(parent_fields) = resolve_interface_decl(
+                                &parent_name,
+                                parent_decl,
+                                registry,
+                                source,
+                                comments,
+                                visited,
+                            ) {
+                                for field in parent_fields {
+                                    if seen_names.insert(field.name.clone()) {
+                                        all_fields.push(field);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Add own fields (child overrides parent)
+                    let own_fields = extract_fields_from_interface_body(body, source, comments);
+                    for field in own_fields {
+                        if seen_names.insert(field.name.clone()) {
+                            all_fields.push(field);
+                        }
+                    }
+                    Some(all_fields)
+                }
+                Some(LocalTypeDecl::Alias(aliased_type)) => {
+                    resolve_type_to_prop_fields(aliased_type, registry, source, comments, visited)
+                }
+                Some(LocalTypeDecl::Class) => None, // Unresolvable
+                None => None,                       // Not found locally
+            };
+            visited.remove(&name);
+            result
+        }
+        TSType::TSIntersectionType(intersection) => {
+            let mut all_fields = Vec::new();
+            let mut seen_names = FxHashSet::default();
+            for t in &intersection.types {
+                match resolve_type_to_prop_fields(t, registry, source, comments, visited) {
+                    Some(fields) => {
+                        for field in fields {
+                            if seen_names.insert(field.name.clone()) {
+                                all_fields.push(field);
+                            }
+                        }
+                    }
+                    None => {
+                        // One branch unresolvable — mark the entire intersection as unresolvable
+                        return None;
+                    }
+                }
+            }
+            Some(all_fields)
+        }
+        TSType::TSUnionType(_) => None, // Union types aren't prop field sources
+        _ => None,
+    }
+}
+
+/// Extract prop fields from TSSignature members (shared between TSTypeLiteral and interface bodies).
+fn extract_fields_from_interface_body_like(
+    members: &[TSSignature<'_>],
+    source: &str,
+    comments: &[Comment],
+) -> Vec<AnalyzedPropField> {
+    members
+        .iter()
+        .filter_map(|member| {
+            if let TSSignature::TSPropertySignature(prop) = member {
+                let key_name = match &prop.key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                    _ => None,
+                };
+                let type_annotation = prop.type_annotation.as_ref().and_then(|ta| {
+                    let start = ta.type_annotation.span().start as usize;
+                    let end = ta.type_annotation.span().end as usize;
+                    if end <= source.len() {
+                        let text = source[start..end].trim();
+                        if !text.is_empty() {
+                            Some(text.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+                let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
+                key_name.map(|name| AnalyzedPropField {
+                    name,
+                    is_optional: prop.optional,
+                    span: prop.key.span().into(),
+                    type_annotation,
+                    description,
+                    tags,
+                    resolution_source: TypeResolutionSource::Rust,
+                    resolution_error: None,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Convert a `TSTypeName` to a string.
+fn type_name_to_string(type_name: &TSTypeName<'_>) -> String {
+    match type_name {
+        TSTypeName::IdentifierReference(id) => id.name.to_string(),
+        TSTypeName::QualifiedName(qualified) => {
+            format!(
+                "{}.{}",
+                type_name_to_string(&qualified.left),
+                qualified.right.name
+            )
+        }
+        _ => String::new(),
+    }
+}
+
+/// Extract an identifier name from an expression (for `extends` heritage).
+fn heritage_name(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.to_string()),
+        _ => None,
+    }
+}
+
+/// Post-process macros to resolve local type references in prop fields.
+///
+/// For `defineProps<Props>()` where `Props` is a local interface, this resolves
+/// the interface members into prop fields. Also populates `resolved_local_types`
+/// for the schema layer.
+pub(crate) fn resolve_macro_type_references(
+    program: &Program<'_>,
+    macros: &mut [AnalyzedMacro],
+    source: &str,
+) {
+    let registry = build_local_type_registry(program);
+    if registry.is_empty() {
+        return;
+    }
+
+    // Collect type param AST nodes for each defineProps macro by matching spans
+    let type_params = collect_define_props_type_params(program);
+
+    for mac in macros.iter_mut() {
+        if mac.kind != AnalyzedMacroKind::DefineProps || !mac.is_type_based {
+            continue;
+        }
+
+        // Skip if no type references to resolve
+        if mac.type_references.is_empty() {
+            continue;
+        }
+
+        // Check if any type references are in our registry (need resolution)
+        let has_local_refs = mac
+            .type_references
+            .iter()
+            .any(|r| registry.contains_key(r.as_str()));
+        if !has_local_refs {
+            continue;
+        }
+
+        let mut visited = FxHashSet::default();
+        let mut resolved_types = Vec::new();
+
+        // Try to find the actual type param AST and resolve the full type
+        let mac_start = mac.span.start;
+        if let Some(type_param) = type_params.iter().find(|tp| tp.0 == mac_start) {
+            if let Some(fields) = resolve_type_to_prop_fields(
+                type_param.1,
+                &registry,
+                source,
+                &program.comments,
+                &mut visited,
+            ) {
+                // Build resolved_local_types for each type reference
+                for type_ref in &mac.type_references {
+                    if let Some(decl) = registry.get(type_ref.as_str()) {
+                        visited.clear();
+                        if let Some(ref_fields) = resolve_interface_decl(
+                            type_ref,
+                            decl,
+                            &registry,
+                            source,
+                            &program.comments,
+                            &mut visited,
+                        ) {
+                            let expanded = build_expanded_type_text(&ref_fields);
+                            let span = match decl {
+                                LocalTypeDecl::Interface { body, .. } => body.span.into(),
+                                LocalTypeDecl::Alias(t) => t.span().into(),
+                                LocalTypeDecl::Class => verter_span::Span::default(),
+                            };
+                            resolved_types.push(ResolvedLocalType {
+                                name: type_ref.clone(),
+                                expanded,
+                                span,
+                            });
+                        }
+                    }
+                }
+                mac.prop_fields = fields;
+            }
+        } else {
+            // Fallback: resolve individual type references (single ref case)
+            visited.clear();
+            if mac.type_references.len() == 1 {
+                let type_ref = &mac.type_references[0];
+                if let Some(decl) = registry.get(type_ref.as_str()) {
+                    if let Some(fields) = resolve_interface_decl(
+                        type_ref,
+                        decl,
+                        &registry,
+                        source,
+                        &program.comments,
+                        &mut visited,
+                    ) {
+                        let expanded = build_expanded_type_text(&fields);
+                        let span = match decl {
+                            LocalTypeDecl::Interface { body, .. } => body.span.into(),
+                            LocalTypeDecl::Alias(t) => t.span().into(),
+                            LocalTypeDecl::Class => verter_span::Span::default(),
+                        };
+                        resolved_types.push(ResolvedLocalType {
+                            name: type_ref.clone(),
+                            expanded,
+                            span,
+                        });
+                        mac.prop_fields = fields;
+                    }
+                }
+            }
+        }
+
+        mac.resolved_local_types = resolved_types;
+    }
+}
+
+/// Collect the type parameter AST nodes for all `defineProps<T>()` calls in the program.
+/// Returns `(call_span_start, &TSType)` pairs.
+fn collect_define_props_type_params<'a>(program: &'a Program<'a>) -> Vec<(u32, &'a TSType<'a>)> {
+    let mut result = Vec::new();
+    for stmt in &program.body {
+        collect_define_props_from_stmt(stmt, &mut result);
+    }
+    result
+}
+
+fn collect_define_props_from_stmt<'a>(
+    stmt: &'a Statement<'a>,
+    result: &mut Vec<(u32, &'a TSType<'a>)>,
+) {
+    match stmt {
+        Statement::ExpressionStatement(es) => {
+            collect_define_props_from_expr(&es.expression, result);
+        }
+        Statement::VariableDeclaration(decl) => {
+            for d in &decl.declarations {
+                if let Some(init) = &d.init {
+                    collect_define_props_from_expr(init, result);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_define_props_from_expr<'a>(
+    expr: &'a Expression<'a>,
+    result: &mut Vec<(u32, &'a TSType<'a>)>,
+) {
+    if let Expression::CallExpression(call) = expr {
+        let is_define_props =
+            matches!(&call.callee, Expression::Identifier(id) if id.name == "defineProps");
+        if is_define_props {
+            if let Some(ref type_args) = call.type_arguments {
+                if let Some(first) = type_args.params.first() {
+                    result.push((call.span.start, first));
+                }
+            }
+        }
+        // Also check for withDefaults(defineProps<T>(), ...)
+        if let Some(first_arg) = call.arguments.first() {
+            if let Some(inner_expr) = first_arg.as_expression() {
+                collect_define_props_from_expr(inner_expr, result);
+            }
+        }
+    }
+}
+
+/// Resolve an interface declaration to prop fields (recursive helper).
+fn resolve_interface_decl(
+    name: &str,
+    decl: &LocalTypeDecl<'_>,
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+    visited: &mut FxHashSet<String>,
+) -> Option<Vec<AnalyzedPropField>> {
+    if visited.contains(name) {
+        return Some(Vec::new());
+    }
+    visited.insert(name.to_string());
+    let result = match decl {
+        LocalTypeDecl::Interface { body, extends } => {
+            let mut fields = Vec::new();
+            let mut seen_names = FxHashSet::default();
+
+            for heritage in *extends {
+                let Some(parent_name) = heritage_name(&heritage.expression) else {
+                    continue;
+                };
+                if let Some(parent_decl) = registry.get(&parent_name) {
+                    if let Some(parent_fields) = resolve_interface_decl(
+                        &parent_name,
+                        parent_decl,
+                        registry,
+                        source,
+                        comments,
+                        visited,
+                    ) {
+                        for field in parent_fields {
+                            if seen_names.insert(field.name.clone()) {
+                                fields.push(field);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let own_fields = extract_fields_from_interface_body(body, source, comments);
+            for field in own_fields {
+                if seen_names.insert(field.name.clone()) {
+                    fields.push(field);
+                }
+            }
+            Some(fields)
+        }
+        LocalTypeDecl::Alias(aliased_type) => {
+            resolve_type_to_prop_fields(aliased_type, registry, source, comments, visited)
+        }
+        LocalTypeDecl::Class => None,
+    };
+    visited.remove(name);
+    result
+}
+
+/// Build an expanded type text like `"{ title: string; isbn: string }"` from prop fields.
+fn build_expanded_type_text(fields: &[AnalyzedPropField]) -> String {
+    let mut parts = Vec::new();
+    for f in fields {
+        let opt = if f.is_optional { "?" } else { "" };
+        let ty = f.type_annotation.as_deref().unwrap_or("unknown");
+        parts.push(format!("{}{}: {}", f.name, opt, ty));
+    }
+    format!("{{ {} }}", parts.join("; "))
 }
 
 /// Try to extract macros from an expression statement.
@@ -313,13 +854,22 @@ fn try_extract_macro(
             let has_inherit_attrs_false =
                 kind == AnalyzedMacroKind::DefineOptions && has_inherit_attrs_false_in_args(call);
 
-            let prop_fields = if kind == AnalyzedMacroKind::DefineProps {
+            let prop_extraction = if kind == AnalyzedMacroKind::DefineProps {
                 extract_prop_fields(call, source, comments)
             } else if kind == AnalyzedMacroKind::DefineModel {
-                extract_define_model_type(call, source, &model_name)
+                PropFieldExtraction {
+                    fields: extract_define_model_type(call, source, &model_name),
+                    default_keys: Vec::new(),
+                    default_values: Vec::new(),
+                }
             } else {
-                Vec::new()
+                PropFieldExtraction {
+                    fields: Vec::new(),
+                    default_keys: Vec::new(),
+                    default_values: Vec::new(),
+                }
             };
+            let prop_fields = prop_extraction.fields;
 
             let emit_fields = if kind == AnalyzedMacroKind::DefineEmits {
                 extract_emit_fields(call, comments, source)
@@ -335,6 +885,15 @@ fn try_extract_macro(
 
             let default_keys = if kind == AnalyzedMacroKind::WithDefaults {
                 extract_with_defaults_keys(call)
+            } else if kind == AnalyzedMacroKind::DefineProps {
+                prop_extraction.default_keys
+            } else {
+                Vec::new()
+            };
+            let default_values = if kind == AnalyzedMacroKind::WithDefaults {
+                extract_with_defaults_values(call, source)
+            } else if kind == AnalyzedMacroKind::DefineProps {
+                prop_extraction.default_values
             } else {
                 Vec::new()
             };
@@ -357,6 +916,8 @@ fn try_extract_macro(
                 slot_fields,
                 default_keys,
                 expose_fields,
+                default_values,
+                resolved_local_types: Vec::new(),
                 span: call.span.into(),
             })
         }
@@ -397,7 +958,16 @@ fn extract_define_model_type(
         type_annotation: Some(type_text.to_string()),
         description: None,
         tags: Vec::new(),
+        resolution_source: TypeResolutionSource::Rust,
+        resolution_error: None,
     }]
+}
+
+/// Result of extracting prop fields from a `defineProps` call.
+struct PropFieldExtraction {
+    fields: Vec<AnalyzedPropField>,
+    default_keys: Vec<String>,
+    default_values: Vec<AnalyzedDefaultValue>,
 }
 
 /// Extract individual prop field names and spans from a `defineProps` call.
@@ -410,22 +980,35 @@ fn extract_prop_fields(
     call: &CallExpression<'_>,
     source: &str,
     comments: &[Comment],
-) -> Vec<AnalyzedPropField> {
+) -> PropFieldExtraction {
     // Type-based: extract from type parameters
     if let Some(ref type_args) = call.type_arguments {
         if let Some(first) = type_args.params.first() {
-            return extract_prop_fields_from_type(first, source, comments);
+            return PropFieldExtraction {
+                fields: extract_prop_fields_from_type(first, source, comments),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+            };
         }
     }
 
     // Runtime: extract from first argument
     if let Some(first_arg) = call.arguments.first() {
         if let Some(expr) = first_arg.as_expression() {
-            return extract_prop_fields_from_runtime(expr);
+            let rt = extract_prop_fields_from_runtime(expr, source);
+            return PropFieldExtraction {
+                fields: rt.fields,
+                default_keys: rt.default_keys,
+                default_values: rt.default_values,
+            };
         }
     }
 
-    Vec::new()
+    PropFieldExtraction {
+        fields: Vec::new(),
+        default_keys: Vec::new(),
+        default_values: Vec::new(),
+    }
 }
 
 /// Extract prop fields from a TypeScript type parameter (e.g., `{ count: number }`).
@@ -470,6 +1053,8 @@ fn extract_prop_fields_from_type(
                         type_annotation,
                         description,
                         tags,
+                        resolution_source: TypeResolutionSource::Rust,
+                        resolution_error: None,
                     })
                 } else {
                     None
@@ -492,51 +1077,141 @@ fn extract_prop_fields_from_type(
     }
 }
 
+/// Result of extracting prop fields from a runtime defineProps argument.
+struct RuntimePropExtraction {
+    fields: Vec<AnalyzedPropField>,
+    default_keys: Vec<String>,
+    default_values: Vec<AnalyzedDefaultValue>,
+}
+
+/// Map a runtime constructor name to its TypeScript type string.
+fn constructor_to_ts_type(name: &str) -> Option<&'static str> {
+    match name {
+        "String" => Some("string"),
+        "Number" => Some("number"),
+        "Boolean" => Some("boolean"),
+        "Array" => Some("Array<any>"),
+        "Object" => Some("object"),
+        "Function" => Some("Function"),
+        "Symbol" => Some("symbol"),
+        "Date" => Some("Date"),
+        "RegExp" => Some("RegExp"),
+        "Promise" => Some("Promise<any>"),
+        _ => None,
+    }
+}
+
 /// Extract prop fields from a runtime argument (object or array).
-fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropField> {
+///
+/// For object form, detects both shorthand (`name: String`) and expanded
+/// (`name: { type: String, default: 'Hello' }`) property definitions.
+fn extract_prop_fields_from_runtime(expr: &Expression<'_>, source: &str) -> RuntimePropExtraction {
     match expr {
-        Expression::ObjectExpression(obj) => obj
-            .properties
-            .iter()
-            .filter_map(|prop| {
-                if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                    let key_name = match &p.key {
-                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
-                        _ => None,
-                    };
-                    key_name.map(|name| AnalyzedPropField {
-                        name,
-                        is_optional: false,
-                        span: p.key.span().into(),
-                        type_annotation: None,
-                        description: None,
-                        tags: Vec::new(),
-                    })
-                } else {
-                    None
+        Expression::ObjectExpression(obj) => {
+            let mut fields = Vec::new();
+            let mut default_keys = Vec::new();
+            let mut default_values = Vec::new();
+
+            for prop in &obj.properties {
+                let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                    continue;
+                };
+                let key_name = match &p.key {
+                    PropertyKey::StaticIdentifier(id) => id.name.to_string(),
+                    PropertyKey::StringLiteral(lit) => lit.value.to_string(),
+                    _ => continue,
+                };
+
+                let mut type_annotation = None;
+
+                // Check if value is a constructor (shorthand: `name: String`)
+                if let Expression::Identifier(id) = &p.value {
+                    type_annotation = constructor_to_ts_type(&id.name).map(String::from);
                 }
-            })
-            .collect(),
-        Expression::ArrayExpression(arr) => arr
-            .elements
-            .iter()
-            .filter_map(|elem| {
-                if let ArrayExpressionElement::StringLiteral(lit) = elem {
-                    Some(AnalyzedPropField {
-                        name: lit.value.to_string(),
-                        is_optional: false,
-                        span: lit.span.into(),
-                        type_annotation: None,
-                        description: None,
-                        tags: Vec::new(),
-                    })
-                } else {
-                    None
+
+                // Check if value is an expanded object: `name: { type: String, default: 'Hello' }`
+                if let Expression::ObjectExpression(val_obj) = &p.value {
+                    for sub_prop in &val_obj.properties {
+                        let ObjectPropertyKind::ObjectProperty(sp) = sub_prop else {
+                            continue;
+                        };
+                        let sub_key = match &sp.key {
+                            PropertyKey::StaticIdentifier(id) => id.name.as_str(),
+                            _ => continue,
+                        };
+                        match sub_key {
+                            "type" => {
+                                // Unwrap `X as PropType<T>` to get the base identifier
+                                let expr = match &sp.value {
+                                    Expression::TSAsExpression(ts_as) => &ts_as.expression,
+                                    other => other,
+                                };
+                                if let Expression::Identifier(id) = expr {
+                                    type_annotation =
+                                        constructor_to_ts_type(&id.name).map(String::from);
+                                }
+                            }
+                            "default" => {
+                                let val_text = extract_default_value_text(&sp.value, source);
+                                default_keys.push(key_name.clone());
+                                default_values.push(AnalyzedDefaultValue {
+                                    key: key_name.clone(),
+                                    value: val_text,
+                                    span: sp.value.span().into(),
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-            })
-            .collect(),
-        _ => Vec::new(),
+
+                fields.push(AnalyzedPropField {
+                    name: key_name,
+                    is_optional: false,
+                    span: p.key.span().into(),
+                    type_annotation,
+                    description: None,
+                    tags: Vec::new(),
+                    resolution_source: TypeResolutionSource::Rust,
+                    resolution_error: None,
+                });
+            }
+
+            RuntimePropExtraction {
+                fields,
+                default_keys,
+                default_values,
+            }
+        }
+        Expression::ArrayExpression(arr) => RuntimePropExtraction {
+            fields: arr
+                .elements
+                .iter()
+                .filter_map(|elem| {
+                    if let ArrayExpressionElement::StringLiteral(lit) = elem {
+                        Some(AnalyzedPropField {
+                            name: lit.value.to_string(),
+                            is_optional: false,
+                            span: lit.span.into(),
+                            type_annotation: None,
+                            description: None,
+                            tags: Vec::new(),
+                            resolution_source: TypeResolutionSource::Rust,
+                            resolution_error: None,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+        },
+        _ => RuntimePropExtraction {
+            fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+        },
     }
 }
 
@@ -738,6 +1413,66 @@ fn extract_with_defaults_keys(call: &CallExpression<'_>) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Extract default value key-value pairs from `withDefaults(defineProps<T>(), { key: value })`.
+fn extract_with_defaults_values(
+    call: &CallExpression<'_>,
+    source: &str,
+) -> Vec<AnalyzedDefaultValue> {
+    let Some(second_arg) = call.arguments.get(1) else {
+        return Vec::new();
+    };
+    let Some(Expression::ObjectExpression(obj)) = second_arg.as_expression() else {
+        return Vec::new();
+    };
+    obj.properties
+        .iter()
+        .filter_map(|prop| {
+            if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                let key = match &p.key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                    _ => None,
+                }?;
+                let value = extract_default_value_text(&p.value, source);
+                Some(AnalyzedDefaultValue {
+                    key,
+                    value,
+                    span: p.value.span().into(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Extract default value source text. For string literals, extracts the inner value.
+fn extract_default_value_text(expr: &Expression<'_>, source: &str) -> String {
+    match expr {
+        Expression::StringLiteral(s) => s.value.to_string(),
+        Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_) => {
+            let start = expr.span().start as usize;
+            let end = expr.span().end as usize;
+            if end <= source.len() {
+                source[start..end].to_string()
+            } else {
+                String::new()
+            }
+        }
+        _ => {
+            let start = expr.span().start as usize;
+            let end = expr.span().end as usize;
+            if end <= source.len() {
+                source[start..end].to_string()
+            } else {
+                String::new()
+            }
+        }
+    }
 }
 
 /// Extract exposed field names from `defineExpose({ foo, bar })`.
@@ -1084,6 +1819,14 @@ mod tests {
     use oxc_span::SourceType;
 
     use super::*;
+
+    fn parse_and_extract<'a>(alloc: &'a Allocator, source: &str) -> Vec<AnalyzedMacro> {
+        let parser =
+            Parser::new(alloc, source, SourceType::ts()).with_options(ParseOptions::default());
+        let result = parser.parse();
+        assert!(!result.panicked, "failed to parse: {source}");
+        analyze_macros_from_program(&result.program, source)
+    }
 
     fn parse_type_refs(type_annotation: &str) -> Vec<String> {
         // Parse as a type annotation inside a variable declaration
@@ -1606,15 +2349,13 @@ defineExpose({ props })
     }
 
     #[test]
-    fn prop_field_type_annotation_runtime_is_none() {
+    fn prop_field_type_annotation_runtime_constructor() {
         let code = "defineProps({ count: Number })";
         let macros = parse_macros(code);
         let field = &macros[0].prop_fields[0];
         assert_eq!(field.name, "count");
-        assert!(
-            field.type_annotation.is_none(),
-            "runtime props should not have type annotation"
-        );
+        // Runtime constructor shorthand is mapped to TS type
+        assert_eq!(field.type_annotation.as_deref(), Some("number"));
     }
 
     #[test]
@@ -2109,6 +2850,25 @@ defineExpose({ props })
         );
     }
 
+    #[test]
+    fn with_defaults_extracts_default_values() {
+        let code = r#"withDefaults(defineProps<{ foo: string, bar: number, baz: boolean }>(), { foo: 'hello', baz: true })"#;
+        let macros = parse_macros(code);
+        let wd = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::WithDefaults)
+            .unwrap();
+        assert_eq!(
+            wd.default_values.len(),
+            2,
+            "should extract 2 default values"
+        );
+        let foo_val = wd.default_values.iter().find(|d| d.key == "foo").unwrap();
+        assert_eq!(foo_val.value, "hello", "string default should strip quotes");
+        let baz_val = wd.default_values.iter().find(|d| d.key == "baz").unwrap();
+        assert_eq!(baz_val.value, "true");
+    }
+
     // =========================================================================
     // Issue 4: defineExpose expose_fields
     // =========================================================================
@@ -2332,5 +3092,235 @@ defineExpose({ props })
             macros[0].prop_fields.is_empty(),
             "defineModel without type param should have no prop_fields"
         );
+    }
+
+    // ── Type resolution tests ──
+
+    #[test]
+    fn resolve_local_interface_in_define_props() {
+        let source = r#"
+            interface Props { title: string; count: number; active?: boolean }
+            defineProps<Props>()
+        "#;
+        let alloc = Allocator::default();
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        assert_eq!(
+            dp.prop_fields.len(),
+            3,
+            "should resolve 3 fields from local interface"
+        );
+        assert_eq!(dp.prop_fields[0].name, "title");
+        assert_eq!(dp.prop_fields[0].type_annotation.as_deref(), Some("string"));
+        assert!(!dp.prop_fields[0].is_optional);
+        assert_eq!(dp.prop_fields[1].name, "count");
+        assert_eq!(dp.prop_fields[1].type_annotation.as_deref(), Some("number"));
+        assert_eq!(dp.prop_fields[2].name, "active");
+        assert!(dp.prop_fields[2].is_optional);
+        assert!(
+            !dp.prop_fields.iter().any(|f| f.resolution_error.is_some()),
+            "all fields should be resolved without errors"
+        );
+    }
+
+    #[test]
+    fn resolve_local_type_alias_in_define_props() {
+        let source = r#"
+            type MyProps = { name: string; age?: number }
+            defineProps<MyProps>()
+        "#;
+        let alloc = Allocator::default();
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        assert_eq!(
+            dp.prop_fields.len(),
+            2,
+            "should resolve 2 fields from type alias"
+        );
+        assert_eq!(dp.prop_fields[0].name, "name");
+        assert!(dp.prop_fields[1].is_optional);
+    }
+
+    #[test]
+    fn resolve_interface_extends_chain() {
+        let source = r#"
+            interface Base { id: number; name: string }
+            interface Extended extends Base { email: string; active?: boolean }
+            defineProps<Extended>()
+        "#;
+        let alloc = Allocator::default();
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        assert_eq!(
+            dp.prop_fields.len(),
+            4,
+            "should have all 4 fields (2 inherited + 2 own)"
+        );
+        let names: Vec<&str> = dp.prop_fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"id"), "should have inherited 'id'");
+        assert!(names.contains(&"name"), "should have inherited 'name'");
+        assert!(names.contains(&"email"), "should have own 'email'");
+        assert!(names.contains(&"active"), "should have own 'active'");
+    }
+
+    #[test]
+    fn resolve_mixed_intersection_type() {
+        let source = r#"
+            interface Identifiable { id: number }
+            type Named = { name: string; label?: string }
+            defineProps<Identifiable & Named & { extra: boolean }>()
+        "#;
+        let alloc = Allocator::default();
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        assert_eq!(
+            dp.prop_fields.len(),
+            4,
+            "should merge all 4 fields from intersection"
+        );
+        let names: Vec<&str> = dp.prop_fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"id"));
+        assert!(names.contains(&"name"));
+        assert!(names.contains(&"label"));
+        assert!(names.contains(&"extra"));
+        let label = dp.prop_fields.iter().find(|f| f.name == "label").unwrap();
+        assert!(label.is_optional, "label should be optional");
+    }
+
+    #[test]
+    fn resolve_partial_wrapping_local_interface() {
+        let source = r#"
+            interface Props { title: string; count: number }
+            defineProps<Partial<Props>>()
+        "#;
+        let alloc = Allocator::default();
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        assert_eq!(dp.prop_fields.len(), 2);
+        assert!(
+            dp.prop_fields.iter().all(|f| f.is_optional),
+            "Partial should make all fields optional"
+        );
+    }
+
+    #[test]
+    fn unresolvable_class_type_returns_empty() {
+        let source = r#"
+            class UserModel { constructor(public id: number) {} }
+            defineProps<{ model: UserModel }>()
+        "#;
+        let alloc = Allocator::default();
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        // The inline literal has one field "model" with type "UserModel"
+        assert_eq!(dp.prop_fields.len(), 1);
+        assert_eq!(dp.prop_fields[0].name, "model");
+    }
+
+    #[test]
+    fn resolved_local_types_populated_for_interface() {
+        let source = r#"
+            interface Props { title: string; count: number }
+            defineProps<Props>()
+        "#;
+        let alloc = Allocator::default();
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        assert_eq!(
+            dp.resolved_local_types.len(),
+            1,
+            "should have one resolved local type"
+        );
+        assert_eq!(dp.resolved_local_types[0].name, "Props");
+        assert!(
+            dp.resolved_local_types[0]
+                .expanded
+                .contains("title: string"),
+            "expanded text should contain field definitions"
+        );
+    }
+
+    #[test]
+    fn pick_omit_return_none_unresolvable() {
+        let source = r#"
+            interface Full { id: number; name: string; password: string }
+            defineProps<{ display: Pick<Full, 'id' | 'name'> }>()
+        "#;
+        let alloc = Allocator::default();
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        // The inline literal extracts "display" field but cannot resolve Pick<Full,...>
+        assert_eq!(dp.prop_fields.len(), 1);
+        assert_eq!(dp.prop_fields[0].name, "display");
+    }
+
+    #[test]
+    fn runtime_define_props_extracts_type_and_default() {
+        let source = r#"defineProps({ message: { type: String, default: 'Hello from JS' }, count: Number, active: { type: Boolean, default: true } })"#;
+        let alloc = Allocator::default();
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+
+        // Should extract 3 prop fields
+        assert_eq!(dp.prop_fields.len(), 3);
+
+        // message: { type: String, default: 'Hello from JS' }
+        let msg = dp.prop_fields.iter().find(|f| f.name == "message").unwrap();
+        assert_eq!(msg.type_annotation.as_deref(), Some("string"));
+
+        // count: Number (shorthand)
+        let cnt = dp.prop_fields.iter().find(|f| f.name == "count").unwrap();
+        assert_eq!(cnt.type_annotation.as_deref(), Some("number"));
+
+        // active: { type: Boolean, default: true }
+        let act = dp.prop_fields.iter().find(|f| f.name == "active").unwrap();
+        assert_eq!(act.type_annotation.as_deref(), Some("boolean"));
+
+        // Should have default keys
+        assert!(dp.default_keys.contains(&"message".to_string()));
+        assert!(dp.default_keys.contains(&"active".to_string()));
+        assert!(!dp.default_keys.contains(&"count".to_string()));
+
+        // Should have default values
+        let msg_default = dp
+            .default_values
+            .iter()
+            .find(|d| d.key == "message")
+            .unwrap();
+        assert_eq!(msg_default.value, "Hello from JS");
+
+        let act_default = dp
+            .default_values
+            .iter()
+            .find(|d| d.key == "active")
+            .unwrap();
+        assert_eq!(act_default.value, "true");
     }
 }

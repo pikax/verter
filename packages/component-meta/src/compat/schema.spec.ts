@@ -140,11 +140,17 @@ describe("typeDescriptorToSchema", () => {
     expect(schema).toBe("(x: string) => void");
   });
 
-  it("converts refs to string", () => {
-    expect(typeDescriptorToSchema(ref("MyType"))).toBe("MyType");
-    expect(typeDescriptorToSchema(ref("Map", [primitive("string"), primitive("number")]))).toBe(
-      "Map<string, number>",
-    );
+  it("converts refs to structured object schema", () => {
+    expect(typeDescriptorToSchema(ref("MyType"))).toEqual({
+      kind: "object",
+      type: "MyType",
+      schema: {},
+    });
+    expect(typeDescriptorToSchema(ref("Map", [primitive("string"), primitive("number")]))).toEqual({
+      kind: "object",
+      type: "Map<string, number>",
+      schema: {},
+    });
   });
 
   it("converts unknown to rawType string", () => {

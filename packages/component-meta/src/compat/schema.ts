@@ -5,6 +5,7 @@
  */
 
 import type { TypeDescriptor } from "../type-ir.js";
+import { parseType } from "../resolver.js";
 import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
 
 /**
@@ -12,10 +13,12 @@ import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
  *
  * @param td       The type descriptor to convert
  * @param options  Checker options controlling schema generation
+ * @param typeRegistry  Optional registry mapping type names to expanded type text
  */
 export function typeDescriptorToSchema(
   td: TypeDescriptor,
   options?: MetaCheckerOptions,
+  typeRegistry?: Map<string, string>,
 ): PropertyMetaSchema {
   if (options?.schema === false) {
     return "unknown";
@@ -23,10 +26,15 @@ export function typeDescriptorToSchema(
 
   const ignore = typeof options?.schema === "object" ? options.schema.ignore : undefined;
 
-  return convertType(td, ignore);
+  return convertType(td, ignore, typeRegistry, new Set());
 }
 
-function convertType(td: TypeDescriptor, ignore?: (type: string) => boolean): PropertyMetaSchema {
+function convertType(
+  td: TypeDescriptor,
+  ignore?: (type: string) => boolean,
+  typeRegistry?: Map<string, string>,
+  visited?: Set<string>,
+): PropertyMetaSchema {
   switch (td.kind) {
     case "primitive":
       return td.name;
@@ -40,7 +48,7 @@ function convertType(td: TypeDescriptor, ignore?: (type: string) => boolean): Pr
       return {
         kind: "enum",
         type,
-        schema: td.types.map((t) => convertType(t, ignore)),
+        schema: td.types.map((t) => convertType(t, ignore, typeRegistry, visited)),
       };
     }
 
@@ -50,7 +58,7 @@ function convertType(td: TypeDescriptor, ignore?: (type: string) => boolean): Pr
       return {
         kind: "object",
         type,
-        schema: td.types.map((t) => convertType(t, ignore)),
+        schema: td.types.map((t) => convertType(t, ignore, typeRegistry, visited)),
       };
     }
 
@@ -60,7 +68,7 @@ function convertType(td: TypeDescriptor, ignore?: (type: string) => boolean): Pr
       return {
         kind: "array",
         type,
-        schema: [convertType(td.element, ignore)],
+        schema: [convertType(td.element, ignore, typeRegistry, visited)],
       };
     }
 
@@ -70,7 +78,7 @@ function convertType(td: TypeDescriptor, ignore?: (type: string) => boolean): Pr
       return {
         kind: "array",
         type,
-        schema: td.elements.map((t) => convertType(t, ignore)),
+        schema: td.elements.map((t) => convertType(t, ignore, typeRegistry, visited)),
       };
     }
 
@@ -80,7 +88,7 @@ function convertType(td: TypeDescriptor, ignore?: (type: string) => boolean): Pr
       return {
         kind: "object",
         type,
-        schema: td.properties.map((p) => convertType(p.type, ignore)),
+        schema: td.properties.map((p) => convertType(p.type, ignore, typeRegistry, visited)),
       };
     }
 
@@ -104,7 +112,20 @@ function convertType(td: TypeDescriptor, ignore?: (type: string) => boolean): Pr
       const name = td.typeArguments
         ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
         : td.name;
-      return name;
+      if (ignore?.(name)) return name;
+      // Try to resolve from type registry
+      if (typeRegistry && !visited?.has(td.name)) {
+        const expanded = typeRegistry.get(td.name);
+        if (expanded) {
+          visited?.add(td.name);
+          const resolved = parseType(expanded);
+          const result = convertType(resolved, ignore, typeRegistry, visited);
+          visited?.delete(td.name);
+          return result;
+        }
+      }
+      // Unresolved ref → structured object with empty schema (matches Volar for browser/external types)
+      return { kind: "object" as const, type: name, schema: {} };
     }
 
     case "unknown":

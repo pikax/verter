@@ -14,7 +14,8 @@ use crate::exports::extract_export_signatures_from_program;
 use crate::imports::analyze_import_declaration;
 
 use crate::macros::{
-    collect_type_references, try_extract_macro_from_expr, try_extract_macro_from_var_decl,
+    collect_type_references, resolve_macro_type_references, try_extract_macro_from_expr,
+    try_extract_macro_from_var_decl,
 };
 use crate::scope::AnalysisScope;
 use crate::types::*;
@@ -446,6 +447,9 @@ pub fn build_script_analysis_with_scope(
             _ => {}
         }
     }
+
+    // ── Post-process: resolve local type references in defineProps macros ──
+    resolve_macro_type_references(program, &mut macros, content);
 
     // ── Derive: macro type deps ──
     let macro_type_deps = derive_macro_type_deps(&macros, &imports, &import_map, &local_type_deps);

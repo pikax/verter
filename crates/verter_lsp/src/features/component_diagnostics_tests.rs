@@ -490,6 +490,8 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: verter_span::Span::new(0, 30),
             })
             .collect::<Vec<_>>()
@@ -756,7 +758,7 @@ fn aria_attr_not_flagged_on_non_fragment_component() {
 
 /// Helper: child with DefineProps macro prop_fields, NO template.prop_definitions.
 fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
-    use verter_analysis::types::AnalyzedPropField;
+    use verter_analysis::types::{AnalyzedPropField, TypeResolutionSource};
 
     FileAnalysisSnapshot {
         macros: vec![AnalyzedMacro {
@@ -775,12 +777,16 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                     is_optional: false,
                     description: None,
                     tags: vec![],
+                    resolution_source: TypeResolutionSource::Rust,
+                    resolution_error: None,
                 })
                 .collect(),
             emit_fields: vec![],
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(0, 30),
         }]
         .into(),
@@ -833,7 +839,7 @@ fn macro_fallback_unknown_prop_flagged() {
 #[test]
 fn macro_fallback_with_defaults_pattern() {
     // withDefaults wraps defineProps — the inner DefineProps macro has the real props
-    use verter_analysis::types::AnalyzedPropField;
+    use verter_analysis::types::{AnalyzedPropField, TypeResolutionSource};
 
     let child = FileAnalysisSnapshot {
         macros: vec![
@@ -849,6 +855,8 @@ fn macro_fallback_with_defaults_pattern() {
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: verter_span::Span::new(0, 50),
             },
             AnalyzedMacro {
@@ -866,6 +874,8 @@ fn macro_fallback_with_defaults_pattern() {
                         is_optional: false,
                         description: None,
                         tags: vec![],
+                        resolution_source: TypeResolutionSource::Rust,
+                        resolution_error: None,
                     },
                     AnalyzedPropField {
                         name: "count".to_string(),
@@ -874,12 +884,16 @@ fn macro_fallback_with_defaults_pattern() {
                         is_optional: false,
                         description: None,
                         tags: vec![],
+                        resolution_source: TypeResolutionSource::Rust,
+                        resolution_error: None,
                     },
                 ],
                 emit_fields: vec![],
                 slot_fields: vec![],
                 default_keys: vec![],
                 expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
                 span: verter_span::Span::new(10, 40),
             },
         ]
@@ -983,6 +997,8 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
                 .collect(),
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(0, 30),
         }]
         .into(),

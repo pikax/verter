@@ -151,6 +151,8 @@ fn b1_no_action_when_define_slots_exists() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(24, 42),
         }],
     );
@@ -277,6 +279,8 @@ fn b2_no_action_when_all_emits_declared() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -332,6 +336,8 @@ fn b4_add_missing_emit_to_existing_type_based() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -403,6 +409,8 @@ fn b4_add_missing_emit_to_runtime_array() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(24, 57),
         }],
     );
@@ -853,6 +861,8 @@ fn b3_detects_missing_slot() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(24, 68),
         }],
     );
@@ -932,6 +942,8 @@ fn b3_no_action_when_all_present() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(24, 92),
         }],
     );
@@ -982,6 +994,8 @@ fn b5_missing_prop_detected() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(24, 80),
         }],
     );
@@ -1035,6 +1049,8 @@ fn b5_no_action_when_props_match() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(24, 80),
         }],
     );
@@ -1159,6 +1175,8 @@ fn cursor_on_define_slots_macro_shows_augmentation_actions() {
             slot_fields: vec![],
             default_keys: vec![],
             expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );

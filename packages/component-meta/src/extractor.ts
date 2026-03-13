@@ -69,9 +69,21 @@ interface RawMacro {
   emitFields?: RawEmitField[];
   slotFields?: RawSlotField[];
   defaultKeys?: string[];
+  defaultValues?: RawDefaultValue[];
   exposeFields?: RawExposeField[];
+  resolvedLocalTypes?: RawResolvedLocalType[];
   spanStart: number;
   spanEnd: number;
+}
+
+interface RawDefaultValue {
+  key: string;
+  value: string;
+}
+
+interface RawResolvedLocalType {
+  name: string;
+  expanded: string;
 }
 
 interface RawExposeField {
@@ -99,6 +111,8 @@ interface RawPropField {
   typeAnnotation?: string | null;
   description?: string | null;
   tags?: RawJsdocTag[];
+  resolutionSource?: string;
+  resolutionError?: string | null;
   spanStart: number;
   spanEnd: number;
 }
@@ -194,6 +208,8 @@ interface RawOptionsProp {
   typeConstructor?: string | null;
   isRequired: boolean;
   hasDefault: boolean;
+  defaultValue?: string | null;
+  typeAnnotation?: string | null;
 }
 
 interface RawOptionsField {
@@ -274,6 +290,21 @@ export function extractComponentMeta(
   const raw = adapter.getAnalysis(fileId) as RawSnapshot | null;
   if (!raw) return null;
   return snapshotToMeta(raw, filePath ?? fileId);
+}
+
+/**
+ * Build a type registry mapping type names to their expanded text.
+ * Used by the schema layer to resolve `ref` types.
+ */
+export function buildTypeRegistry(snapshot: unknown): Map<string, string> {
+  const raw = snapshot as RawSnapshot;
+  const registry = new Map<string, string>();
+  for (const macro of raw.macros) {
+    for (const rlt of macro.resolvedLocalTypes ?? []) {
+      registry.set(rlt.name, rlt.expanded);
+    }
+  }
+  return registry;
 }
 
 /**
@@ -399,9 +430,21 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
     defMap.set(def.name, def);
   }
 
-  // Build set of default keys from withDefaults macro
+  // Build set of default keys and values from withDefaults macro or runtime defineProps defaults
   const withDefaults = macros.find((m) => m.kind === "WithDefaults");
-  const defaultKeys = new Set<string>(withDefaults?.defaultKeys ?? []);
+  const defaultKeys = new Set<string>([
+    ...(withDefaults?.defaultKeys ?? []),
+    ...(defineProps.defaultKeys ?? []),
+  ]);
+  const defaultValueMap = new Map<string, string>();
+  for (const dv of withDefaults?.defaultValues ?? []) {
+    defaultValueMap.set(dv.key, dv.value);
+  }
+  for (const dv of defineProps.defaultValues ?? []) {
+    if (!defaultValueMap.has(dv.key)) {
+      defaultValueMap.set(dv.key, dv.value);
+    }
+  }
 
   return propFields.map((field): PropMeta => {
     const templateDef = defMap.get(field.name);
@@ -426,6 +469,8 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
         ? (templateDef.isRequired ?? !templateDef.hasDefault)
         : !isOptional && !hasDefault;
 
+    const defaultValue = defaultValueMap.get(field.name);
+
     return {
       name: field.name,
       type: isBoolean && type.kind === "unknown" ? primitive("boolean") : type,
@@ -434,6 +479,7 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
       ...(rawType && { rawType }),
       ...(description && { description }),
       ...(tags && tags.length > 0 && { tags }),
+      ...(defaultValue != null && { default: defaultValue }),
     };
   });
 }
@@ -642,7 +688,10 @@ function extractOptionsProps(optionsApi: RawOptionsApi | null | undefined): Prop
     let type: TypeDescriptor;
     const runtimeTypes: string[] = [];
 
-    if (prop.typeConstructor) {
+    if (prop.typeAnnotation) {
+      // Use PropType<T> annotation if available (e.g., `Object as PropType<HTMLCanvasElement>`)
+      type = parseType(prop.typeAnnotation);
+    } else if (prop.typeConstructor) {
       runtimeTypes.push(prop.typeConstructor);
       type = runtimeTypeToDescriptor(prop.typeConstructor);
     } else {
@@ -655,6 +704,8 @@ function extractOptionsProps(optionsApi: RawOptionsApi | null | undefined): Prop
       required: prop.isRequired,
       hasDefault: prop.hasDefault,
       ...(runtimeTypes.length > 0 && { runtimeTypes }),
+      ...(prop.typeAnnotation && { rawType: prop.typeAnnotation }),
+      ...(prop.defaultValue != null && { default: prop.defaultValue }),
     };
   });
 }

@@ -4,6 +4,7 @@
 //! `export default defineComponent({ ... })` for cross-component type resolution.
 
 use oxc_ast::ast::*;
+use oxc_span::GetSpan;
 use verter_span::Span;
 
 use crate::types::{
@@ -81,7 +82,7 @@ fn extract_options_api(
         let Some(key) = key_name else { continue };
 
         match key {
-            "props" => result.props = extract_options_props(&p.value),
+            "props" => result.props = extract_options_props(&p.value, _source),
             "emits" => result.emits = extract_options_emits(&p.value),
             "data" => result.data_fields = extract_data_fields(&p.value),
             "computed" => result.computed_fields = extract_object_keys(&p.value),
@@ -102,7 +103,7 @@ fn extract_options_api(
 
 // ── Props ──
 
-fn extract_options_props(value: &Expression<'_>) -> Vec<AnalyzedOptionsProp> {
+fn extract_options_props(value: &Expression<'_>, source: &str) -> Vec<AnalyzedOptionsProp> {
     match value {
         // props: ['foo', 'bar']
         Expression::ArrayExpression(arr) => arr
@@ -116,6 +117,8 @@ fn extract_options_props(value: &Expression<'_>) -> Vec<AnalyzedOptionsProp> {
                         type_constructor: None,
                         is_required: false,
                         has_default: false,
+                        default_value: None,
+                        type_annotation: None,
                     })
                 } else {
                     None
@@ -142,12 +145,16 @@ fn extract_options_props(value: &Expression<'_>) -> Vec<AnalyzedOptionsProp> {
                         type_constructor: Some(id.name.to_string()),
                         is_required: false,
                         has_default: false,
+                        default_value: None,
+                        type_annotation: None,
                     }),
                     // Full object: `foo: { type: String, required: true, default: 'x' }`
                     Expression::ObjectExpression(sub_obj) => {
                         let mut type_constructor = None;
+                        let mut type_annotation = None;
                         let mut is_required = false;
                         let mut has_default = false;
+                        let mut default_value = None;
 
                         for sub_prop in &sub_obj.properties {
                             let ObjectPropertyKind::ObjectProperty(sp) = sub_prop else {
@@ -158,7 +165,19 @@ fn extract_options_props(value: &Expression<'_>) -> Vec<AnalyzedOptionsProp> {
                             };
                             match sub_key.as_str() {
                                 "type" => {
-                                    if let Expression::Identifier(id) = &sp.value {
+                                    // Unwrap `X as PropType<T>` to get the base identifier
+                                    let expr = match &sp.value {
+                                        Expression::TSAsExpression(ts_as) => {
+                                            // Extract PropType<T> type argument
+                                            type_annotation = extract_prop_type_annotation(
+                                                &ts_as.type_annotation,
+                                                source,
+                                            );
+                                            &ts_as.expression
+                                        }
+                                        other => other,
+                                    };
+                                    if let Expression::Identifier(id) = expr {
                                         type_constructor = Some(id.name.to_string());
                                     }
                                 }
@@ -167,6 +186,7 @@ fn extract_options_props(value: &Expression<'_>) -> Vec<AnalyzedOptionsProp> {
                                 }
                                 "default" => {
                                     has_default = true;
+                                    default_value = extract_default_value(&sp.value, source);
                                 }
                                 _ => {}
                             }
@@ -178,6 +198,8 @@ fn extract_options_props(value: &Expression<'_>) -> Vec<AnalyzedOptionsProp> {
                             type_constructor,
                             is_required,
                             has_default,
+                            default_value,
+                            type_annotation,
                         })
                     }
                     // Array form for multiple types: `foo: [String, Number]` — treat as no single constructor
@@ -187,6 +209,8 @@ fn extract_options_props(value: &Expression<'_>) -> Vec<AnalyzedOptionsProp> {
                         type_constructor: None,
                         is_required: false,
                         has_default: false,
+                        default_value: None,
+                        type_annotation: None,
                     }),
                     _ => Some(AnalyzedOptionsProp {
                         name,
@@ -194,6 +218,8 @@ fn extract_options_props(value: &Expression<'_>) -> Vec<AnalyzedOptionsProp> {
                         type_constructor: None,
                         is_required: false,
                         has_default: false,
+                        default_value: None,
+                        type_annotation: None,
                     }),
                 }
             })
@@ -473,4 +499,55 @@ fn unwrap_parens<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
         Expression::ParenthesizedExpression(p) => unwrap_parens(&p.expression),
         _ => expr,
     }
+}
+
+/// Extract default value source text from a property value expression.
+/// For string literals, extracts the inner value (strips quotes) to match Volar.
+fn extract_default_value(expr: &Expression<'_>, source: &str) -> Option<String> {
+    match expr {
+        Expression::StringLiteral(s) => Some(s.value.to_string()),
+        Expression::NumericLiteral(n) => {
+            let start = n.span.start as usize;
+            let end = n.span.end as usize;
+            if end <= source.len() {
+                Some(source[start..end].to_string())
+            } else {
+                None
+            }
+        }
+        Expression::BooleanLiteral(b) => Some(if b.value { "true" } else { "false" }.to_string()),
+        Expression::NullLiteral(_) => Some("null".to_string()),
+        // For functions/arrows/objects, extract source text
+        _ => {
+            let start = expr.span().start as usize;
+            let end = expr.span().end as usize;
+            if end <= source.len() {
+                Some(source[start..end].to_string())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Extract the type argument from `PropType<T>` in a TSAsExpression.
+fn extract_prop_type_annotation(ts_type: &TSType<'_>, source: &str) -> Option<String> {
+    if let TSType::TSTypeReference(ref_type) = ts_type {
+        let name = match &ref_type.type_name {
+            TSTypeName::IdentifierReference(id) => id.name.as_str(),
+            _ => return None,
+        };
+        if name == "PropType" {
+            if let Some(ref type_args) = ref_type.type_arguments {
+                if let Some(first) = type_args.params.first() {
+                    let start = first.span().start as usize;
+                    let end = first.span().end as usize;
+                    if end <= source.len() {
+                        return Some(source[start..end].to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }

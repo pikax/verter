@@ -76,6 +76,8 @@ export interface PropMeta {
   description?: string;
   /** JSDoc tags (e.g. `@default`, `@deprecated`). */
   tags?: JsdocTag[];
+  /** Default value text (from `withDefaults` or Options API `default`). */
+  default?: string;
 }
 
 /** Metadata for a single component event. */
