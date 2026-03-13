@@ -405,8 +405,14 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
 
   return propFields.map((field): PropMeta => {
     const templateDef = defMap.get(field.name);
-    const rawType = field.typeAnnotation ?? templateDef?.typeAnnotation ?? undefined;
-    const type = rawType ? parseType(rawType) : unknown("unknown");
+    const baseRawType = field.typeAnnotation ?? templateDef?.typeAnnotation ?? undefined;
+    const isOptional = field.isOptional ?? false;
+    const rawType = isOptional && baseRawType ? `${baseRawType} | undefined` : baseRawType;
+    const baseType = baseRawType ? parseType(baseRawType) : unknown("unknown");
+    const type =
+      isOptional && baseType.kind !== "unknown"
+        ? union([baseType, primitive("undefined")])
+        : baseType;
     const isBoolean = templateDef?.isBoolean ?? false;
     const description = field.description ?? undefined;
     const tags = field.tags?.map((t) => ({
@@ -415,7 +421,6 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
     }));
 
     const hasDefault = templateDef?.hasDefault ?? defaultKeys.has(field.name);
-    const isOptional = field.isOptional ?? false;
     const required =
       templateDef != null
         ? (templateDef.isRequired ?? !templateDef.hasDefault)

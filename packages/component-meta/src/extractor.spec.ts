@@ -17,7 +17,7 @@ function makeSnapshot(overrides: Record<string, unknown> = {}) {
 }
 
 function makeCompositionSnapshot(
-  propFields: Array<{ name: string; typeAnnotation?: string }> = [],
+  propFields: Array<{ name: string; typeAnnotation?: string; isOptional?: boolean }> = [],
   emitFields: Array<{ name: string }> = [],
   template: Record<string, unknown> | null = null,
   extraMacros: unknown[] = [],
@@ -34,6 +34,7 @@ function makeCompositionSnapshot(
             propFields: propFields.map((f) => ({
               name: f.name,
               typeAnnotation: f.typeAnnotation ?? null,
+              ...(f.isOptional != null && { isOptional: f.isOptional }),
               spanStart: 0,
               spanEnd: 0,
             })),
@@ -1585,6 +1586,95 @@ describe("snapshotToMeta", () => {
   });
 
   // ── Issues 6+7: Model props and events ────────────────────────
+
+  // ── Gap B: Optional props should include | undefined ──────────
+
+  describe("optional prop | undefined (Gap B)", () => {
+    it("optional prop type includes undefined in union", () => {
+      const snapshot = makeCompositionSnapshot([
+        { name: "title", typeAnnotation: "string", isOptional: true },
+      ]);
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      const prop = meta.props.find((p) => p.name === "title")!;
+      expect(prop.type).toEqual({
+        kind: "union",
+        types: [
+          { kind: "primitive", name: "string" },
+          { kind: "primitive", name: "undefined" },
+        ],
+      });
+      expect(prop.rawType).toBe("string | undefined");
+      expect(prop.required).toBe(false);
+    });
+
+    it("required prop type does NOT include undefined", () => {
+      const snapshot = makeCompositionSnapshot([
+        { name: "count", typeAnnotation: "number", isOptional: false },
+      ]);
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      const prop = meta.props.find((p) => p.name === "count")!;
+      expect(prop.type).toEqual({ kind: "primitive", name: "number" });
+      expect(prop.rawType).toBe("number");
+      // Negative: should NOT contain undefined
+      expect(prop.rawType).not.toContain("undefined");
+      expect(prop.required).toBe(true);
+    });
+
+    it("optional prop without type annotation stays unknown", () => {
+      const snapshot = makeCompositionSnapshot([{ name: "foo", isOptional: true }]);
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      const prop = meta.props.find((p) => p.name === "foo")!;
+      // unknown props should not get | undefined wrapping
+      expect(prop.type).toEqual({ kind: "unknown", rawType: "unknown" });
+      expect(prop.required).toBe(false);
+    });
+  });
+
+  // ── Gap A: defineModel type propagation ──────────────────────
+
+  describe("defineModel type extraction (Gap A)", () => {
+    it("defineModel<string> prop has string type, not unknown", () => {
+      const snapshot = makeSnapshot({
+        macros: [
+          {
+            kind: "DefineProps",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            propFields: [],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+          {
+            kind: "DefineModel",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            propFields: [
+              { name: "modelValue", typeAnnotation: "string", spanStart: 0, spanEnd: 0 },
+            ],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        scriptFlags: (1 << 1) | (1 << 3),
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      const modelProp = meta.props.find((p) => p.name === "modelValue")!;
+      expect(modelProp).toBeDefined();
+      expect(modelProp.type).toEqual({ kind: "primitive", name: "string" });
+      // Negative: should NOT be unknown
+      expect(modelProp.type.kind).not.toBe("unknown");
+
+      // update event should also have string type
+      const updateEvent = meta.events.find((e) => e.name === "update:modelValue")!;
+      expect(updateEvent).toBeDefined();
+      expect(updateEvent.payload).toEqual({ kind: "primitive", name: "string" });
+      expect(updateEvent.payload.kind).not.toBe("unknown");
+    });
+  });
 
   describe("model props and events (Issues 6+7)", () => {
     it("synthesizes prop from defineModel", () => {

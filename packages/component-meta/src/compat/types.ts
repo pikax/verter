@@ -65,4 +65,6 @@ export interface MetaCheckerOptions {
   schema?: boolean | { ignore?: (type: string) => boolean };
   /** Printer options (unused in Verter, kept for Volar compat). */
   printer?: unknown;
+  /** Force TypeScript usage (no-op in Verter — always uses TS). Kept for Volar compat. */
+  forceUseTs?: boolean;
 }

@@ -315,6 +315,8 @@ fn try_extract_macro(
 
             let prop_fields = if kind == AnalyzedMacroKind::DefineProps {
                 extract_prop_fields(call, source, comments)
+            } else if kind == AnalyzedMacroKind::DefineModel {
+                extract_define_model_type(call, source, &model_name)
             } else {
                 Vec::new()
             };
@@ -360,6 +362,42 @@ fn try_extract_macro(
         }
         _ => None,
     }
+}
+
+/// Extract the type parameter from `defineModel<T>()` as a single `AnalyzedPropField`.
+///
+/// Unlike `defineProps<{ count: number }>()` where the type param is a `TSTypeLiteral`,
+/// `defineModel<string>()` has a single type (e.g., `TSStringKeyword`, `TSTypeReference`).
+/// We extract the source text of the first type param as the `type_annotation`.
+fn extract_define_model_type(
+    call: &CallExpression<'_>,
+    source: &str,
+    model_name: &Option<String>,
+) -> Vec<AnalyzedPropField> {
+    let Some(ref type_args) = call.type_arguments else {
+        return Vec::new();
+    };
+    let Some(first) = type_args.params.first() else {
+        return Vec::new();
+    };
+    let start = first.span().start as usize;
+    let end = first.span().end as usize;
+    if end > source.len() {
+        return Vec::new();
+    }
+    let type_text = source[start..end].trim();
+    if type_text.is_empty() {
+        return Vec::new();
+    }
+    let name = model_name.as_deref().unwrap_or("modelValue").to_string();
+    vec![AnalyzedPropField {
+        name,
+        is_optional: false,
+        span: first.span().into(),
+        type_annotation: Some(type_text.to_string()),
+        description: None,
+        tags: Vec::new(),
+    }]
 }
 
 /// Extract individual prop field names and spans from a `defineProps` call.
@@ -2231,5 +2269,68 @@ defineExpose({ props })
         assert_eq!(tags[0].text.as_deref(), Some("name - the name"));
         assert_eq!(tags[1].name, "returns");
         assert_eq!(tags[1].text.as_deref(), Some("nothing"));
+    }
+
+    // =========================================================================
+    // defineModel type extraction
+    // =========================================================================
+
+    #[test]
+    fn define_model_type_string() {
+        let code = "defineModel<string>()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        assert_eq!(macros[0].kind, AnalyzedMacroKind::DefineModel);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(
+            fields.len(),
+            1,
+            "defineModel<string> should produce 1 prop field"
+        );
+        assert_eq!(fields[0].name, "modelValue");
+        assert_eq!(
+            fields[0].type_annotation.as_deref(),
+            Some("string"),
+            "type_annotation should be 'string'"
+        );
+        assert!(!fields[0].is_optional);
+    }
+
+    #[test]
+    fn define_model_named_with_type() {
+        let code = "defineModel<number>('count')";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(fields.len(), 1);
+        assert_eq!(
+            fields[0].name, "count",
+            "named model should use the name argument"
+        );
+        assert_eq!(fields[0].type_annotation.as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn define_model_complex_type() {
+        let code = "defineModel<string | number>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "modelValue");
+        assert_eq!(
+            fields[0].type_annotation.as_deref(),
+            Some("string | number")
+        );
+    }
+
+    #[test]
+    fn define_model_no_type_param() {
+        let code = "defineModel()";
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        assert!(
+            macros[0].prop_fields.is_empty(),
+            "defineModel without type param should have no prop_fields"
+        );
     }
 }
