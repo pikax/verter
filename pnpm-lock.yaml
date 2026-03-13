@@ -322,6 +322,9 @@ importers:
 
   packages/playground:
     dependencies:
+      '@verter/component-meta':
+        specifier: workspace:*
+        version: link:../component-meta
       '@verter/types':
         specifier: workspace:*
         version: link:../types
