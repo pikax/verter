@@ -99,6 +99,66 @@ console.log(meta);
 // }
 ```
 
+## JSDoc Extraction
+
+Props, events, and slots automatically extract JSDoc comments:
+
+```ts
+adapter.upsert({
+  inputId: "MyButton.vue",
+  source: `
+<script setup lang="ts">
+defineProps<{
+  /**
+   * The button label.
+   * @default "Submit"
+   * @deprecated Use \`text\` instead
+   */
+  label: string
+}>()
+</script>
+<template><button>{{ label }}</button></template>
+`,
+});
+
+const meta = extractComponentMeta(adapter, "MyButton.vue");
+meta.props[0].description; // "The button label."
+meta.props[0].tags;
+// [
+//   { name: "default", text: "\"Submit\"" },
+//   { name: "deprecated", text: "Use `text` instead" },
+// ]
+```
+
+Works with both type-based (`defineProps<{}>()`) and runtime (`defineProps({})`) declarations.
+
+## Volar Compatibility (`./compat`)
+
+Drop-in replacement for Volar's `vue-component-meta`. Consumers like `nuxt-component-meta` and Nuxt UI docs can swap with zero code changes:
+
+```diff
+- import { createChecker } from 'vue-component-meta'
++ import { createChecker } from '@verter/component-meta/compat'
+```
+
+```ts
+import { createChecker } from "@verter/component-meta/compat";
+
+const checker = createChecker("./tsconfig.json");
+const meta = checker.getComponentMeta("./src/MyButton.vue");
+
+// Volar-compatible shape
+meta.props;   // PropertyMeta[] (name, description, type, required, tags, schema)
+meta.events;  // PropertyMeta[]
+meta.slots;   // PropertyMeta[]
+meta.exposed; // PropertyMeta[]
+
+// Verter extension (opt-in)
+meta._verter; // Full ComponentMeta with models, components, styles, flags, etc.
+```
+
+See the [compat API docs](https://verterjs.dev/api/component-meta#compat) for full details.
+
 ## Slots
 
 Slot metadata is extracted from `<slot>` elements in the template. Named slots, scoped slots, and default slots are all captured:
@@ -350,6 +410,20 @@ const adapter = wrapNapiHost(host);
 | `StyleMeta` | Style block analysis |
 | `SelectorMeta` | CSS selector with specificity |
 | `ComponentFlags` | Boolean component characteristics |
+| `JsdocTag` | JSDoc tag (`{ name, text? }`) |
+
+### Compat (Volar Drop-in)
+
+| Export path | Symbol | Description |
+|-------------|--------|-------------|
+| `./compat` | `createChecker(tsconfig, options?)` | Create a checker from a tsconfig path |
+| `./compat` | `createCheckerByJson(root, config, options?)` | Create a checker from a JSON config object |
+| `./compat` | `ComponentMetaChecker` | Checker class |
+| `./compat` | `PropertyMeta` | Volar-compatible property metadata type |
+| `./compat` | `PropertyMetaSchema` | Recursive schema type |
+| `./compat` | `MetaCheckerOptions` | Checker options |
+| `./compat` | `typeDescriptorToString(td)` | TypeDescriptor → human-readable string |
+| `./compat` | `typeDescriptorToSchema(td, options?)` | TypeDescriptor → PropertyMetaSchema |
 
 ### Adapters
 

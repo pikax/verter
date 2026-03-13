@@ -94,6 +94,22 @@ These features are behind opt-in flags and may change or be removed in any relea
 | Conditional Root Narrowing | `verter.experimental.conditionalRootNarrowing` | Narrows component root element type based on prop values |
 | Expose Bindings Testing | `verter.experimental.exposeBindingsTesting` | Exposes binding type information for testing |
 
+### `@verter/component-meta/compat` (Volar Drop-in)
+
+| API | Status |
+|-----|--------|
+| `createChecker(tsconfig, options?)` | Stable |
+| `createCheckerByJson(root, config, options?)` | Stable |
+| `checker.getComponentMeta(filePath)` | Stable |
+| `checker.getExportNames(filePath)` | Stable |
+| `checker.updateFile(path, content)` | Stable |
+| `checker.deleteFile(path)` | Stable |
+| `checker.reload()` / `clearCache()` | Stable |
+| `PropertyMeta` shape | Stable (matches Volar) |
+| `PropertyMetaSchema` shape | Stable (matches Volar) |
+| `MetaCheckerOptions` | Stable |
+| `VolarComponentMeta._verter` | Experimental (opt-in Verter extension) |
+
 ## Internal / Unstable
 
 The following are explicitly **not** part of the public API and may change at any time:
