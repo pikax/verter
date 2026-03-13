@@ -110,6 +110,8 @@ mod tests {
             prop_fields: vec![],
             emit_fields: vec![],
             slot_fields: vec![],
+            default_keys: vec![],
+            expose_fields: vec![],
             span: Span::new(span_start, span_end),
         }
     }
@@ -228,6 +230,8 @@ mod tests {
                 prop_fields: vec![],
                 emit_fields: vec![],
                 slot_fields: vec![],
+                default_keys: vec![],
+                expose_fields: vec![],
                 span: Span::new(10, 30),
             }],
             ..Default::default()

@@ -9498,11 +9498,11 @@ function handleCustom(payload: string) {
         )
         .expect("write nested dependency");
 
-        let workspace_id = workspace.to_string_lossy().replace('\\', "/");
-        let app_id = workspace
-            .join("src/App.vue")
+        let workspace_id = std::fs::canonicalize(&workspace)
+            .expect("canonical workspace path")
             .to_string_lossy()
             .replace('\\', "/");
+        let app_id = format!("{workspace_id}/src/App.vue");
         let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
 
         let host = Arc::new(VerterHost::new(HostConfig::default()));

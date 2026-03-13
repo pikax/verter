@@ -488,6 +488,8 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
                 prop_fields: vec![],
                 emit_fields: vec![],
                 slot_fields: vec![],
+                default_keys: vec![],
+                expose_fields: vec![],
                 span: verter_span::Span::new(0, 30),
             })
             .collect::<Vec<_>>()
@@ -770,10 +772,15 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                     name: name.to_string(),
                     span: verter_span::Span::new(0, 0),
                     type_annotation: None,
+                    is_optional: false,
+                    description: None,
+                    tags: vec![],
                 })
                 .collect(),
             emit_fields: vec![],
             slot_fields: vec![],
+            default_keys: vec![],
+            expose_fields: vec![],
             span: verter_span::Span::new(0, 30),
         }]
         .into(),
@@ -840,6 +847,8 @@ fn macro_fallback_with_defaults_pattern() {
                 prop_fields: vec![],
                 emit_fields: vec![],
                 slot_fields: vec![],
+                default_keys: vec![],
+                expose_fields: vec![],
                 span: verter_span::Span::new(0, 50),
             },
             AnalyzedMacro {
@@ -854,15 +863,23 @@ fn macro_fallback_with_defaults_pattern() {
                         name: "msg".to_string(),
                         span: verter_span::Span::new(0, 0),
                         type_annotation: None,
+                        is_optional: false,
+                        description: None,
+                        tags: vec![],
                     },
                     AnalyzedPropField {
                         name: "count".to_string(),
                         span: verter_span::Span::new(0, 0),
                         type_annotation: None,
+                        is_optional: false,
+                        description: None,
+                        tags: vec![],
                     },
                 ],
                 emit_fields: vec![],
                 slot_fields: vec![],
+                default_keys: vec![],
+                expose_fields: vec![],
                 span: verter_span::Span::new(10, 40),
             },
         ]
@@ -960,8 +977,12 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
                     is_required: *required,
                     span: verter_span::Span::new(0, 10),
                     bindings: vec![],
+                    description: None,
+                    tags: vec![],
                 })
                 .collect(),
+            default_keys: vec![],
+            expose_fields: vec![],
             span: verter_span::Span::new(0, 30),
         }]
         .into(),

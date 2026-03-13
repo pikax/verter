@@ -1,12 +1,15 @@
 {
   "name": "@verter/types",
   "version": "0.0.1-alpha.3",
-  "types": "index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "types": "dist/index.d.ts",
   "type": "module",
   "sideEffects": false,
   "exports": {
     ".": {
-      "types": "./index.d.ts"
+      "types": "./dist/index.d.ts"
     },
     "./string": {
       "types": "./dist/string-export.d.ts",

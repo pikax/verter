@@ -1621,12 +1621,17 @@ mod tests {
                 .iter()
                 .map(|n| AnalyzedPropField {
                     name: n.to_string(),
+                    is_optional: false,
                     span: Span::new(0, 0),
                     type_annotation: None,
+                    description: None,
+                    tags: vec![],
                 })
                 .collect(),
             emit_fields: vec![],
             slot_fields: vec![],
+            default_keys: vec![],
+            expose_fields: vec![],
             span,
         }
     }

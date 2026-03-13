@@ -545,6 +545,8 @@ mod tests {
                 prop_fields: vec![],
                 emit_fields: vec![],
                 slot_fields: vec![],
+                default_keys: vec![],
+                expose_fields: vec![],
                 span: verter_span::Span::new(0, 0),
             }],
         );

@@ -228,6 +228,8 @@ mod tests {
                 prop_fields: vec![],
                 emit_fields: vec![],
                 slot_fields: vec![],
+                default_keys: vec![],
+                expose_fields: vec![],
                 span: verter_span::Span::new(24, 60),
             }])
             .into(),
@@ -405,6 +407,8 @@ mod tests {
                 prop_fields: vec![],
                 emit_fields: vec![],
                 slot_fields: vec![],
+                default_keys: vec![],
+                expose_fields: vec![],
                 span: verter_span::Span::new(24, 57), // past the closing `)`
             }])
             .into(),
@@ -438,6 +442,8 @@ mod tests {
                 prop_fields: vec![],
                 emit_fields: vec![],
                 slot_fields: vec![],
+                default_keys: vec![],
+                expose_fields: vec![],
                 span: verter_span::Span::new(15, 35),
             }])
             .into(),
