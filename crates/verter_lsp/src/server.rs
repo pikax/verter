@@ -531,9 +531,6 @@ pub struct VerterLanguageServer {
     /// Set by did_change and by the interactive path (when API is deferred).
     /// Cleared by the coordinator's debounced sync after a resolver snapshot exists.
     needs_deferred_sync: Arc<DashSet<String>>,
-    /// Legacy alias — kept so the coordinator still has a single dirty set to drain.
-    /// Points to the same `DashSet` as `needs_deferred_sync`.
-    needs_provider_sync: Arc<DashSet<String>>,
     /// Source IDs whose provider sync depends on a resolver snapshot that is not ready yet.
     /// Drained after background initialization commits a new snapshot.
     pending_snapshot_provider_sync: Arc<DashSet<String>>,
@@ -595,8 +592,6 @@ impl VerterLanguageServer {
 
         let needs_ide_sync = Arc::new(DashSet::new());
         let needs_deferred_sync = Arc::new(DashSet::new());
-        // Legacy alias: coordinator drains from needs_deferred_sync
-        let needs_provider_sync = Arc::clone(&needs_deferred_sync);
         let documents = Arc::new(DocumentRegistry::new(config.host));
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
@@ -615,7 +610,7 @@ impl VerterLanguageServer {
                 crate::sync_coordinator::SyncCoordinatorDeps {
                     documents: Arc::clone(&documents),
                     project_sync: ps.clone(),
-                    needs_provider_sync: Arc::clone(&needs_provider_sync),
+                    needs_provider_sync: Arc::clone(&needs_deferred_sync),
                     client: client.clone(),
                     type_provider: config.type_provider.clone(),
                     cached_verter_diags: Arc::clone(&cached_verter_diags),
@@ -652,7 +647,6 @@ impl VerterLanguageServer {
             completion_generation: std::sync::atomic::AtomicU64::new(0),
             needs_ide_sync,
             needs_deferred_sync,
-            needs_provider_sync,
             pending_snapshot_provider_sync,
             sync_coordinator,
             last_change_ms: std::sync::atomic::AtomicU64::new(0),
@@ -5017,6 +5011,20 @@ impl LanguageServer for VerterLanguageServer {
                 if let Some(coordinator) = &self.sync_coordinator {
                     coordinator.signal(canonical_id, uri.as_str().to_string());
                 }
+
+                // Eager TSX sync — send fresh TSX to type provider immediately.
+                // sync_tsx is fire-and-forget (~1ms), so this adds negligible latency.
+                // This ensures ALL subsequent requests (completion, hover, definition)
+                // see fresh content without needing per-handler inline sync.
+                if let Some(sync) = &self.project_sync {
+                    if let Some(ide) = self.documents.get_ide(&uri) {
+                        if let Some(ide_path) = self.ide_path_for_uri(&uri) {
+                            if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
+                                tracing::warn!("did_change: eager tsx sync failed: {e}");
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -5720,20 +5728,8 @@ impl LanguageServer for VerterLanguageServer {
                 tracing::debug!("completion: no ide_context for {}", uri.as_str());
             }
             if let Some(ctx) = ctx {
-                // Inline sync: if this file hasn't been synced to TSGO yet, send
-                // the current TSX now so TSGO has fresh content for completions.
-                // This prevents stale completions (e.g., typing `c.` after `let c = 23;`
-                // returning global types instead of number methods).
-                if let Some(sync) = &self.project_sync {
-                    if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
-                        if self.needs_provider_sync.remove(&canonical_id).is_some() {
-                            tracing::debug!("completion: inline sync for {}", ctx.tsx_path);
-                            if let Err(e) = sync.sync_tsx(&ctx.tsx_path, &ctx.tsx_content).await {
-                                tracing::warn!("completion: inline sync failed: {e}");
-                            }
-                        }
-                    }
-                }
+                // TSX is always fresh in the type provider — synced eagerly in did_change.
+                // Only DTS sync and diagnostics publishing are debounced (300ms via SyncCoordinator).
 
                 let tsx_offset = merge::vue_position_to_tsx_offset_validated(
                     position,
