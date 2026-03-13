@@ -134,30 +134,110 @@ Works with both type-based (`defineProps<{}>()`) and runtime (`defineProps({})`)
 
 ## Volar Compatibility (`./compat`)
 
-Drop-in replacement for Volar's `vue-component-meta`. Consumers like `nuxt-component-meta` and Nuxt UI docs can swap with zero code changes:
+Drop-in replacement for Volar's `vue-component-meta`. Consumers like `nuxt-component-meta` and Nuxt UI docs can swap with zero code changes.
+
+### Migration
 
 ```diff
 - import { createChecker } from 'vue-component-meta'
 + import { createChecker } from '@verter/component-meta/compat'
 ```
 
+That's it — the API surface is identical.
+
+### Usage
+
 ```ts
 import { createChecker } from "@verter/component-meta/compat";
 
+// Create a checker from your tsconfig.json — discovers and loads all .vue files
 const checker = createChecker("./tsconfig.json");
+
+// Get component metadata in Volar-compatible shape
 const meta = checker.getComponentMeta("./src/MyButton.vue");
 
-// Volar-compatible shape
-meta.props;   // PropertyMeta[] (name, description, type, required, tags, schema)
-meta.events;  // PropertyMeta[]
-meta.slots;   // PropertyMeta[]
-meta.exposed; // PropertyMeta[]
+// PropertyMeta[] — same shape as Volar
+for (const prop of meta.props) {
+  console.log(prop.name);        // "label"
+  console.log(prop.type);        // "string" (human-readable string)
+  console.log(prop.required);    // true
+  console.log(prop.description); // "Button label text." (from JSDoc)
+  console.log(prop.tags);        // [{ name: "default", text: "\"Submit\"" }]
+  console.log(prop.schema);      // "string" or { kind: "enum", type: "...", schema: [...] }
+}
 
-// Verter extension (opt-in)
-meta._verter; // Full ComponentMeta with models, components, styles, flags, etc.
+// Events, slots, exposed — all PropertyMeta[]
+meta.events;  // [{ name: "click", type: "(payload: MouseEvent) => void", ... }]
+meta.slots;   // [{ name: "default", type: "{}", ... }]
+meta.exposed; // [{ name: "focus", type: "() => void", ... }]
+
+// Verter extension — full native metadata (opt-in)
+if (meta._verter) {
+  meta._verter.models;       // defineModel declarations (not in Volar)
+  meta._verter.components;   // child component usage analysis
+  meta._verter.templateRefs; // template ref analysis
+  meta._verter.styles;       // CSS class/selector/specificity analysis
+  meta._verter.flags;        // { hasReactiveState, hasComputed, ... }
+  meta._verter.bindings;     // script bindings with reactivity classification
+  meta._verter.vueApiCalls;  // lifecycle hook / watcher / provide call sites
+}
 ```
 
-See the [compat API docs](https://verterjs.dev/api/component-meta#compat) for full details.
+### Checker API
+
+```ts
+// Hot-reload a file
+checker.updateFile("./src/MyButton.vue", newSource);
+
+// Remove a file
+checker.deleteFile("./src/MyButton.vue");
+
+// Re-read all tracked files from disk
+checker.reload();
+
+// Clear internal caches (alias for reload)
+checker.clearCache();
+
+// Get export names (always ["default"] for SFCs)
+checker.getExportNames("./src/MyButton.vue"); // ["default"]
+
+// Create from JSON config instead of tsconfig path
+import { createCheckerByJson } from "@verter/component-meta/compat";
+const checker2 = createCheckerByJson("/project/root", {
+  include: ["src/**/*.vue"],
+  compilerOptions: { strict: true },
+});
+```
+
+### Schema Options
+
+```ts
+// Disable schema generation (all schemas return "unknown")
+const checker = createChecker("./tsconfig.json", { schema: false });
+
+// Ignore specific types in schema expansion
+const checker = createChecker("./tsconfig.json", {
+  schema: { ignore: (type) => type.includes("HTMLElement") },
+});
+```
+
+### Native API vs Compat: When to Use Which
+
+| | **Native API** (`@verter/component-meta`) | **Compat API** (`./compat`) |
+|---|---|---|
+| **Use when** | Building new tooling, need rich metadata | Replacing `vue-component-meta` in existing code |
+| **API style** | Functional: `createAdapter()` → `upsert()` → `extractComponentMeta()` | Class-based: `createChecker(tsconfig)` → `checker.getComponentMeta()` |
+| **Type system** | `TypeDescriptor` (11-kind discriminated union, JSON-serializable) | `PropertyMetaSchema` (recursive `string \| { kind, type, schema }`) |
+| **Props type** | `PropMeta` with `type: TypeDescriptor`, `hasDefault`, `runtimeTypes` | `PropertyMeta` with `type: string`, `schema: PropertyMetaSchema` |
+| **Events type** | `EventMeta` with `payload: TypeDescriptor`, `hasValidator`, `isDeclared` | `PropertyMeta` with `type: string` (same shape as props) |
+| **Models** | First-class `ModelMeta[]` | Not available at top level (access via `_verter`) |
+| **Template analysis** | Components, template refs, bindings, Vue API calls | Not available at top level (access via `_verter`) |
+| **Style analysis** | Classes, selectors, specificity, `v-bind()`, CSS custom properties | Not available at top level (access via `_verter`) |
+| **Component flags** | `flags: { hasReactiveState, hasComputed, hasWatchers, ... }` | Not available at top level (access via `_verter`) |
+| **File management** | Manual `adapter.upsert()` | Auto-discovers from tsconfig, `updateFile()` / `deleteFile()` |
+| **Environment** | Node.js (NAPI) or Browser (WASM) | Node.js only (NAPI, reads files from disk) |
+
+**Summary**: Use the native API for new projects — it's more expressive and works in both Node.js and browser. Use the compat API when you need to swap out `vue-component-meta` with zero code changes (e.g., in `nuxt-component-meta` or Nuxt UI docs).
 
 ## Slots
 
