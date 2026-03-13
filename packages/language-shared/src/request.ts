@@ -31,6 +31,15 @@ export enum RequestType {
   GetRouteTree = "$/verter/getRouteTree",
 }
 
+/** Server → client request method for forwarding TypeScript queries to the
+ * extension's in-process `ts.createLanguageService()` (Experiment E). */
+export const TsQueryMethod = "$/verter/tsQuery" as const;
+
+export interface TsQueryParams {
+  command: string;
+  arguments: Record<string, unknown>;
+}
+
 export interface StyleOverrideParam {
   index: number;
   code: string;

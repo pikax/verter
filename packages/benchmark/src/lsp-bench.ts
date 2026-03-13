@@ -58,6 +58,7 @@ class LspClient {
     { resolve: (v: any) => void; reject: (e: Error) => void }
   >();
   private notificationHandlers = new Map<string, ((params: any) => void)[]>();
+  private requestHandlers = new Map<string, (params: any) => unknown>();
   private name: string;
 
   constructor(name: string, command: string, args: string[], cwd?: string) {
@@ -149,8 +150,24 @@ class LspClient {
         }
       }
     } else if ("method" in msg && "id" in msg) {
-      // Server-to-client request — auto-respond to common ones
-      if (
+      // Server-to-client request — check registered handlers first
+      const handler = this.requestHandlers.get(msg.method);
+      if (handler) {
+        try {
+          const result = handler(msg.params);
+          const body = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result });
+          const header = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n`;
+          this.process.stdin!.write(header + body);
+        } catch (err: any) {
+          const body = JSON.stringify({
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: { code: -32603, message: err.message },
+          });
+          const header = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n`;
+          this.process.stdin!.write(header + body);
+        }
+      } else if (
         msg.method === "window/workDoneProgress/create" ||
         msg.method === "client/registerCapability"
       ) {
@@ -189,6 +206,11 @@ class LspClient {
     const handlers = this.notificationHandlers.get(method) || [];
     handlers.push(handler);
     this.notificationHandlers.set(method, handlers);
+  }
+
+  /** Register a handler for server-to-client requests. */
+  onRequest(method: string, handler: (params: any) => unknown) {
+    this.requestHandlers.set(method, handler);
   }
 
   waitForNotification(
@@ -291,6 +313,16 @@ interface BenchmarkResult {
 async function benchmarkVerter(label: string, typeProvider: string): Promise<BenchmarkResult> {
   const args = [WORKSPACE_ROOT, `--type-provider=${typeProvider}`];
   const client = new LspClient(label, VERTER_BIN, args);
+
+  // For extension type provider, the benchmark runner acts as the extension host.
+  // Register a $/verter/tsQuery handler backed by an in-process TS language service.
+  if (typeProvider === "extension") {
+    const { ExtensionTsService } = await import("../../vue-vscode/src/extensionTsService");
+    const tsService = new ExtensionTsService(resolve(WORKSPACE_ROOT));
+    client.onRequest("$/verter/tsQuery", (params: { command: string; arguments: Record<string, unknown> }) => {
+      return tsService.handleQuery(params.command, params.arguments);
+    });
+  }
 
   const rootUri = pathToFileURL(resolve(WORKSPACE_ROOT)).toString();
   const fileUri = pathToFileURL(resolve(TEST_FILE)).toString();
@@ -580,7 +612,7 @@ async function main() {
   const fileContent = readFileSync(TEST_FILE, "utf-8");
   const testFileLines = fileContent.split("\n").length;
   const vueFileCount = countVueFiles(WORKSPACE_ROOT);
-  const totalSteps = SKIP_VOLAR ? 2 : 3;
+  const totalSteps = SKIP_VOLAR ? 4 : 5;
 
   console.log(`LSP Benchmark: Verter vs Volar on ${PROJECT_NAME}`);
   console.log("Workspace:", WORKSPACE_ROOT, `(${vueFileCount} .vue files)`);
@@ -610,9 +642,27 @@ async function main() {
     console.error("  FAILED:", err.message);
   }
 
-  // Config 3: Volar (optional)
+  // Config 3: Verter with extension type provider (Experiment E)
+  console.log(`[3/${totalSteps}] Benchmarking Verter (type-provider=extension)...`);
+  try {
+    results["Verter (extension)"] = await benchmarkVerter("Verter (extension)", "extension");
+    console.log("  Done.");
+  } catch (err: any) {
+    console.error("  FAILED:", err.message);
+  }
+
+  // Config 4: Verter with TSGO
+  console.log(`[4/${totalSteps}] Benchmarking Verter (type-provider=tsgo)...`);
+  try {
+    results["Verter (tsgo)"] = await benchmarkVerter("Verter (tsgo)", "tsgo");
+    console.log("  Done.");
+  } catch (err: any) {
+    console.error("  FAILED:", err.message);
+  }
+
+  // Config 5: Volar (optional)
   if (!SKIP_VOLAR) {
-    console.log(`[3/${totalSteps}] Benchmarking Volar...`);
+    console.log(`[${totalSteps}/${totalSteps}] Benchmarking Volar...`);
     try {
       results["Volar"] = await benchmarkVolar();
       console.log("  Done.");

@@ -215,6 +215,23 @@ pub struct TypeProviderStatusParams {
     pub reason: Option<String>,
 }
 
+/// Server → client request: forward a TypeScript query to the extension's
+/// in-process `ts.createLanguageService()`. Uses tsserver command format so
+/// existing response parsers work unchanged.
+pub enum TsQuery {}
+
+impl tower_lsp_server::ls_types::request::Request for TsQuery {
+    type Params = TsQueryParams;
+    type Result = serde_json::Value;
+    const METHOD: &'static str = "$/verter/tsQuery";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TsQueryParams {
+    pub command: String,
+    pub arguments: serde_json::Value,
+}
+
 /// Params for `$/onDidChangeTsOrJsFile` notification.
 #[derive(Debug, Deserialize)]
 pub struct OnDidChangeTsOrJsFileParams {

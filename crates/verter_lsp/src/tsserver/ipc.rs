@@ -292,7 +292,7 @@ async fn handle_message(
 ///
 /// tsserver diagnostics use `{start: {line, offset}, end: {line, offset}}` format
 /// where line and offset are 1-based.
-fn parse_tsserver_diagnostic(
+pub(crate) fn parse_tsserver_diagnostic(
     d: &serde_json::Value,
     content: Option<&str>,
 ) -> Option<TypeDiagnostic> {
@@ -341,7 +341,7 @@ fn parse_tsserver_diagnostic(
 }
 
 /// Convert a byte offset to tsserver's 1-based (line, offset) position.
-fn byte_offset_to_tsserver_pos(content: &str, offset: u32) -> (u32, u32) {
+pub(crate) fn byte_offset_to_tsserver_pos(content: &str, offset: u32) -> (u32, u32) {
     let offset = offset as usize;
     let bytes = content.as_bytes();
     let mut line = 1u32;
@@ -359,7 +359,7 @@ fn byte_offset_to_tsserver_pos(content: &str, offset: u32) -> (u32, u32) {
 }
 
 /// Convert tsserver's 1-based (line, offset) position to a byte offset.
-fn tsserver_pos_to_byte_offset(content: &str, line: u32, offset: u32) -> u32 {
+pub(crate) fn tsserver_pos_to_byte_offset(content: &str, line: u32, offset: u32) -> u32 {
     let target_line = line.saturating_sub(1) as usize;
     let target_col = offset.saturating_sub(1) as usize;
     let mut current_line = 0usize;
@@ -1543,7 +1543,7 @@ impl TypeProvider for TsserverTypeProvider {
 // ── Helper functions ─────────────────────────────────────────────────
 
 /// Parse a tsserver completion entry into our Completion type.
-fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion> {
+pub(crate) fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion> {
     let name = item.get("name")?.as_str()?.to_string();
     let kind_str = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     // IMPORTANT: This mapping MUST match VS Code's official TypeScript extension
@@ -1607,7 +1607,7 @@ fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion> {
 /// Parse a tsserver location (used in definition/references responses).
 ///
 /// tsserver locations have: `{ file, start: {line, offset}, end: {line, offset} }`
-fn parse_tsserver_location(loc: &serde_json::Value) -> Option<TypeLocation> {
+pub(crate) fn parse_tsserver_location(loc: &serde_json::Value) -> Option<TypeLocation> {
     let file = loc
         .get("file")
         .and_then(|v| v.as_str())
@@ -1632,7 +1632,10 @@ fn parse_tsserver_location(loc: &serde_json::Value) -> Option<TypeLocation> {
 }
 
 /// Parse a tsserver rename span into a RenameLocation.
-fn parse_tsserver_rename_span(span: &serde_json::Value, file: &str) -> Option<RenameLocation> {
+pub(crate) fn parse_tsserver_rename_span(
+    span: &serde_json::Value,
+    file: &str,
+) -> Option<RenameLocation> {
     let start = span.get("start")?;
     let end = span.get("end")?;
     let sl = start.get("line")?.as_u64()? as u32;
@@ -1651,7 +1654,7 @@ fn parse_tsserver_rename_span(span: &serde_json::Value, file: &str) -> Option<Re
 }
 
 /// Parse a tsserver code action / code fix.
-fn parse_tsserver_code_action(action: &serde_json::Value) -> Option<TypeCodeAction> {
+pub(crate) fn parse_tsserver_code_action(action: &serde_json::Value) -> Option<TypeCodeAction> {
     let description = action.get("description")?.as_str()?.to_string();
     let changes = action.get("changes")?.as_array()?;
 
@@ -1693,7 +1696,7 @@ fn parse_tsserver_code_action(action: &serde_json::Value) -> Option<TypeCodeActi
 }
 
 /// Concatenate tsserver display parts into a single string.
-fn concat_display_parts(parts: &[serde_json::Value]) -> String {
+pub(crate) fn concat_display_parts(parts: &[serde_json::Value]) -> String {
     parts
         .iter()
         .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
@@ -1705,7 +1708,7 @@ fn concat_display_parts(parts: &[serde_json::Value]) -> String {
 ///
 /// tsserver's `displayString` may already include a `({kind})` prefix for certain
 /// symbol kinds (e.g., `(alias) const Foo`). This function avoids duplicating it.
-fn format_quickinfo_hover(kind: &str, display: &str, docs: &str) -> String {
+pub(crate) fn format_quickinfo_hover(kind: &str, display: &str, docs: &str) -> String {
     let display_with_kind = if kind.is_empty() {
         display.to_string()
     } else {

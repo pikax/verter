@@ -895,6 +895,26 @@ export async function activateVueLanguageServer(
 
   registerHeartbeatMonitor(client);
 
+  // ── Extension-hosted TypeScript language service (Experiment E) ──
+  // When --type-provider=extension is used, the Rust LSP sends $/verter/tsQuery
+  // requests back to the extension. We lazily create the in-process TS service.
+  let tsService: import("./extensionTsService").ExtensionTsService | undefined;
+  function registerTsQueryHandler(lc: LanguageClient) {
+    lc.onRequest(
+      "$/verter/tsQuery",
+      (params: { command: string; arguments: Record<string, unknown> }) => {
+        if (!tsService) {
+          const { ExtensionTsService } = require("./extensionTsService") as typeof import("./extensionTsService");
+          const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
+          if (!wsRoot) throw new Error("No workspace root for extension TS service");
+          tsService = new ExtensionTsService(wsRoot);
+        }
+        return tsService.handleQuery(params.command, params.arguments);
+      },
+    );
+  }
+  registerTsQueryHandler(client);
+
   // CSS validation diagnostics — update on document change (debounced per URI)
   const cssDiagTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const updateCssDiagnostics = async (document: TextDocument) => {
@@ -997,6 +1017,8 @@ export async function activateVueLanguageServer(
           registerViteConfigTrustHandler(client);
           registerTypeProviderStatusHandler(client);
           registerTsgoLimitationHandler(client);
+          tsService = undefined; // Reset TS service on restart
+          registerTsQueryHandler(client);
           await client.start();
         },
         killTrackedTypeProvider,

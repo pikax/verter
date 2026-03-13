@@ -263,6 +263,7 @@
             "auto",
             "tsgo",
             "tsserver",
+            "extension",
             "off"
           ],
           "default": "auto",
@@ -270,6 +271,7 @@
             "Use workspace TypeScript if available, fall back to TSGO (recommended)",
             "Use TSGO only (faster, but re-exported .vue components may lose typing)",
             "Use workspace TypeScript version (tsserver)",
+            "Host TypeScript language service in the extension process (experimental)",
             "Disable TypeScript type checking"
           ],
           "description": "TypeScript type provider for Vue files. Changing this setting restarts the server."

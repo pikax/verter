@@ -268,6 +268,22 @@ async fn create_type_provider(
                 }
             }
         }
+        "extension" => {
+            // Experiment E: extension-hosted TypeScript language service.
+            // The extension runs ts.createLanguageService() in-process and
+            // responds to $/verter/tsQuery requests over the existing LSP pipe.
+            tracing::info!("type provider: extension-hosted (Experiment E)");
+            let provider = verter_lsp::extension_provider::ExtensionTypeProvider::new(
+                Arc::clone(client_cell),
+                &ws_canonical,
+            );
+            (
+                Some(Arc::new(provider) as Arc<dyn TypeProvider>),
+                TypeProviderKind::Tsserver,
+                false,
+                None,
+            )
+        }
         _ => {
             // "auto" (default): if TS 5.x/6.x installed, use tsserver; else try TSGO.
             // Also prefer tsserver when composite tsconfigs are detected (TSGO upstream
