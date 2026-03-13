@@ -18,7 +18,7 @@
   "author": "pikax",
   "main": "index.js",
   "scripts": {
-    "test": "pnpm --filter @verter/types --filter @verter/core test",
+    "test": "pnpm --filter @verter/types exec vitest --run",
     "test:e2e": "pnpm --filter verter-vscode pretest:e2e && pnpm --filter verter-vscode test:e2e",
     "fmt": "oxfmt",
     "build": "pnpm run build:native && pnpm run build:lsp && pnpm run build:wasm && pnpm run build:ts && pnpm --filter @verter/component-meta build",

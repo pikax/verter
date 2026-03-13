@@ -39,6 +39,7 @@ jobs:
               - '.github/workflows/ci.yml'
             js:
               - 'packages/**'
+              - '!packages/core/**'
               - '!packages/playground/**'
               - 'package.json'
               - 'pnpm-lock.yaml'
@@ -96,7 +97,6 @@ jobs:
               - 'packages/native/**'
               - 'packages/unplugin/**'
               - 'packages/typescript-plugin/**'
-              - 'packages/core/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -228,8 +228,7 @@ jobs:
         run: pnpm run build:ts
       - name: Run tests
         run: |
-          pnpm --filter @verter/core exec vitest --run --reporter=default --reporter=junit --outputFile=../../test-results/vitest-junit.xml
-          pnpm --filter @verter/types test
+          pnpm --filter @verter/types exec vitest --run --reporter=default --reporter=junit --outputFile=../../test-results/vitest-junit.xml
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v1

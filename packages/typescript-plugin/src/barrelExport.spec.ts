@@ -90,6 +90,7 @@ function createVirtualProgram(
     noEmit: true,
     esModuleInterop: true,
     allowSyntheticDefaultImports: true,
+    types: [],
   };
 
   const host = ts.createCompilerHost(options);
