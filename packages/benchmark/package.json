@@ -12,12 +12,15 @@
     "bench:ffi": "node --import tsx src/ffi-bench.ts",
     "bench:edit-ops": "node --import tsx src/edit-ops-bench.ts",
     "bench:apple": "node --import tsx src/apple-to-apple.ts",
-    "bench:type-check": "node --import tsx src/type-check-bench.ts"
+    "bench:type-check": "node --import tsx src/type-check-bench.ts",
+    "bench:lsp": "node --import tsx src/lsp-bench.ts",
+    "bench:lsp:json": "node --import tsx src/lsp-bench.ts --json"
   },
   "dependencies": {
     "@verter/native": "workspace:*",
     "@verter/wasm": "workspace:*",
     "@vue/compiler-sfc": "^3.5.30",
+    "@vue/language-server": "^2.2.10",
     "magic-string": "^0.30.21",
     "tinybench": "^6.0.0"
   },

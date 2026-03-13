@@ -1,0 +1,307 @@
+name: LSP Benchmark
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or commit to benchmark'
+        required: false
+        default: 'main'
+      save-results:
+        description: 'Commit results to benchmark-results branch for tracking'
+        required: false
+        default: false
+        type: boolean
+
+  # PR comment trigger: /lsp-benchmark
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  # Check if workflow should run (for PR comments)
+  check-trigger:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/lsp-benchmark')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+      pr-number: ${{ steps.get-pr.outputs.pr-number }}
+      pr-sha: ${{ steps.get-pr.outputs.pr-sha }}
+      pr-ref: ${{ steps.get-pr.outputs.pr-ref }}
+    steps:
+      - name: Check comment author
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment;
+            const commentBody = comment.body.trim();
+
+            // Check if comment is exactly "/lsp-benchmark" or starts with "/lsp-benchmark "
+            if (!commentBody.startsWith('/lsp-benchmark')) {
+              console.log('Comment does not start with /lsp-benchmark');
+              core.setOutput('should-run', 'false');
+              return;
+            }
+
+            // Check if commenter has write access
+            const { data: collaborator } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: comment.user.login
+            });
+
+            const hasPermission = ['admin', 'write'].includes(collaborator.permission);
+            core.setOutput('should-run', hasPermission ? 'true' : 'false');
+
+            if (!hasPermission) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `@${comment.user.login} Sorry, you don't have permission to trigger LSP benchmarks. Only collaborators with write access can use this command.`
+              });
+            } else {
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment.id,
+                content: 'rocket'
+              });
+            }
+
+      - name: Get PR details
+        if: steps.check.outputs.should-run == 'true'
+        id: get-pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            core.setOutput('pr-number', context.issue.number);
+            core.setOutput('pr-sha', pr.head.sha);
+            core.setOutput('pr-ref', pr.head.ref);
+
+  # Run LSP benchmarks
+  lsp-benchmark:
+    needs: check-trigger
+    if: |
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: write
+    outputs:
+      result-json: ${{ steps.run-bench.outputs.result-json }}
+    steps:
+      - name: Determine checkout ref
+        id: checkout-ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "ref=refs/pull/${{ needs.check-trigger.outputs.pr-number }}/head" >> $GITHUB_OUTPUT
+          else
+            echo "ref=main" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.checkout-ref.outputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lsp-release
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build LSP binary (release)
+        run: cargo build --release -p verter_lsp
+
+      - name: Clone PrimeVue
+        run: git clone --depth 1 https://github.com/primefaces/primevue.git test-project
+
+      - name: Run LSP benchmark
+        id: run-bench
+        run: |
+          pnpm --silent --filter @verter/benchmark bench:lsp:json \
+            --workspace=test-project/packages/primevue \
+            --verter-bin=target/release/verter-lsp \
+            --skip-volar > lsp-benchmark-results.json
+
+          RESULT_JSON=$(cat lsp-benchmark-results.json)
+
+          echo "result-json<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESULT_JSON" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "Benchmark complete."
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-benchmark-results
+          path: lsp-benchmark-results.json
+          retention-days: 30
+
+      - name: Save results to branch
+        if: inputs.save-results == true
+        run: |
+          REF="${{ steps.checkout-ref.outputs.ref }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -f lsp-benchmark-results.json
+          if git log -1 --pretty=%s | grep -q "^ci: lsp benchmark results$"; then
+            git commit --amend --no-edit -- lsp-benchmark-results.json
+            git push --force-with-lease origin "$REF"
+          else
+            git commit -m "ci: lsp benchmark results" -- lsp-benchmark-results.json
+            git push origin "$REF"
+          fi
+
+  # Post results to PR
+  report:
+    needs: [check-trigger, lsp-benchmark]
+    if: |
+      always() &&
+      needs.lsp-benchmark.result != 'cancelled' &&
+      needs.lsp-benchmark.outputs.result-json != '' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      checks: write
+    steps:
+      - name: Generate report
+        id: generate-comment
+        uses: actions/github-script@v7
+        env:
+          RESULT_JSON: ${{ needs.lsp-benchmark.outputs.result-json }}
+        with:
+          script: |
+            const resultJson = JSON.parse(process.env.RESULT_JSON);
+            const { project, vueFileCount, testFile, testFileLines, configs, timestamp } = resultJson;
+
+            const fmtMs = (ms) => {
+              if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+              if (ms < 1) return `${ms.toFixed(2)}ms`;
+              return `${Math.round(ms)}ms`;
+            };
+
+            const configNames = Object.keys(configs);
+
+            let c = `## LSP Benchmark Results\n\n`;
+            c += `**${project}** (${vueFileCount.toLocaleString()} .vue files) — \`${testFile}\` (${testFileLines.toLocaleString()} lines)\n\n`;
+
+            // Table header
+            c += `| Phase |`;
+            for (const name of configNames) c += ` ${name} |`;
+            c += `\n|-------|`;
+            for (const _ of configNames) c += `--------|`;
+            c += `\n`;
+
+            // Rows
+            const phases = [
+              { key: 'initialize', label: 'Initialize' },
+              { key: 'workspaceScan', label: 'Workspace Scan' },
+              { key: 'didOpenToHover', label: 'didOpen → Hover' },
+              { key: 'hoverWarm', label: 'Hover (warm)' },
+              { key: 'hoverMedian', label: 'Hover (median)' },
+            ];
+
+            for (const phase of phases) {
+              c += `| ${phase.label} |`;
+              for (const name of configNames) {
+                const val = configs[name][phase.key];
+                c += ` ${fmtMs(val)} |`;
+              }
+              c += `\n`;
+            }
+
+            c += `\n<sub>Generated at ${timestamp}</sub>\n`;
+
+            core.setOutput('comment', c);
+
+      - name: Post PR comment
+        if: github.event_name == 'issue_comment' && needs.check-trigger.outputs.pr-number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `${{ steps.generate-comment.outputs.comment }}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ needs.check-trigger.outputs.pr-number }},
+              body: comment
+            });
+
+      - name: Create check run
+        if: github.event_name == 'issue_comment' && needs.check-trigger.outputs.pr-sha
+        uses: actions/github-script@v7
+        env:
+          RESULT_JSON: ${{ needs.lsp-benchmark.outputs.result-json }}
+        with:
+          script: |
+            const resultJson = JSON.parse(process.env.RESULT_JSON);
+            const configNames = Object.keys(resultJson.configs);
+            const summary = configNames.map(n => {
+              const c = resultJson.configs[n];
+              return `${n}: init=${c.initialize}ms hover=${c.hoverMedian}ms`;
+            }).join(', ');
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'LSP Benchmark Results',
+              head_sha: '${{ needs.check-trigger.outputs.pr-sha }}',
+              status: 'completed',
+              conclusion: 'success',
+              output: {
+                title: summary,
+                summary: `${{ steps.generate-comment.outputs.comment }}`
+              }
+            });
+
+      - name: Summary
+        run: |
+          echo "${{ steps.generate-comment.outputs.comment }}" >> $GITHUB_STEP_SUMMARY
