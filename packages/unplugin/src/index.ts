@@ -224,52 +224,6 @@ function detectNuxt(root: string): boolean {
   return false;
 }
 
-/**
- * Resolve Nuxt-specific aliases (#imports, #components, #app, etc.)
- * to their generated type stubs in the .nuxt/ directory.
- */
-function resolveNuxtAlias(id: string, root: string): string | null {
-  const fs = require("fs");
-  const path = require("path");
-  const nuxtDir = path.join(root, ".nuxt");
-
-  const aliasMap: Record<string, string> = {
-    "#imports": path.join(nuxtDir, "imports.d.ts"),
-    "#components": path.join(nuxtDir, "components.d.ts"),
-    "#app": path.join(nuxtDir, "nuxt.d.ts"),
-    "#app/composables": path.join(nuxtDir, "imports.d.ts"),
-    "#build": nuxtDir,
-  };
-
-  // Direct match
-  if (aliasMap[id]) {
-    try {
-      if (fs.existsSync(aliasMap[id])) return aliasMap[id];
-    } catch {
-      /* ignore */
-    }
-  }
-
-  // Prefix match for #ui/*, #internal/*, etc.
-  for (const [prefix, target] of Object.entries(aliasMap)) {
-    if (id.startsWith(prefix + "/")) {
-      const rest = id.slice(prefix.length + 1);
-      const resolved = path.join(path.dirname(target), rest);
-      // Try with extensions
-      for (const ext of ["", ".ts", ".d.ts", ".js", ".mjs"]) {
-        const full = resolved + ext;
-        try {
-          if (fs.existsSync(full)) return full;
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-  }
-
-  return null;
-}
-
 /** Check if a file is a Nuxt server component (*.server.vue). */
 function isServerComponent(filename: string): boolean {
   return filename.endsWith(".server.vue");
@@ -342,9 +296,9 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       if (query.vue) {
         return id;
       }
-      // Resolve Nuxt-specific aliases (#imports, #components, etc.)
-      if (isNuxt && projectRoot && id.startsWith("#")) {
-        const resolved = resolveNuxtAlias(id, projectRoot);
+      // Pluggable alias resolution (used by @verter/nuxt for #-prefixed imports)
+      if (opts.resolveAlias) {
+        const resolved = opts.resolveAlias(id);
         if (resolved) return resolved;
       }
     },

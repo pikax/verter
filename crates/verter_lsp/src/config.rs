@@ -3196,6 +3196,100 @@ export default defineConfig(({ mode }) => ({
         assert!(!registry.is_ssr_context("/other/Comp.vue"));
     }
 
+    /// Resolver follows Nuxt's `extends: "./.nuxt/tsconfig.json"` chain
+    /// and picks up #-prefixed path aliases from the generated tsconfig.
+    #[test]
+    fn test_path_resolver_nuxt_extends_hash_aliases() {
+        let tmp_dir = std::env::temp_dir().join("verter_test_nuxt_extends");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        // Create .nuxt directory with types subdirectory
+        let nuxt_dir = tmp_dir.join(".nuxt");
+        std::fs::create_dir_all(&nuxt_dir).unwrap();
+
+        // Create target files
+        let types_dir = nuxt_dir.join("types");
+        std::fs::create_dir_all(&types_dir).unwrap();
+        std::fs::write(types_dir.join("imports.d.ts"), "export {}").unwrap();
+
+        let ui_dir = tmp_dir
+            .join("node_modules")
+            .join("@nuxt")
+            .join("ui")
+            .join("runtime");
+        std::fs::create_dir_all(&ui_dir).unwrap();
+        let ui_components = ui_dir.join("components");
+        std::fs::create_dir_all(&ui_components).unwrap();
+        std::fs::write(
+            ui_components.join("Button.vue"),
+            "<template><button/></template>",
+        )
+        .unwrap();
+
+        let shared_dir = tmp_dir.join("shared");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+        std::fs::write(shared_dir.join("utils.ts"), "export const x = 1;").unwrap();
+
+        // .nuxt/tsconfig.json with Nuxt-generated #-prefixed aliases
+        let ui_abs = tmp_dir
+            .join("node_modules/@nuxt/ui")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let nuxt_tsconfig = format!(
+            "{{\n  \"compilerOptions\": {{\n    \"baseUrl\": \"..\",\n    \"paths\": {{\n      \"#imports\": [\"./.nuxt/types/imports.d.ts\"],\n      \"#ui/{star}\": [\"{ui_abs}/runtime/{star}\"],\n      \"#shared/{star}\": [\"./shared/{star}\"]\n    }}\n  }}\n}}",
+            star = "*",
+            ui_abs = ui_abs,
+        );
+        std::fs::write(nuxt_dir.join("tsconfig.json"), &nuxt_tsconfig).unwrap();
+
+        // Root tsconfig.json extending .nuxt/tsconfig.json
+        std::fs::write(
+            tmp_dir.join("tsconfig.json"),
+            r#"{ "extends": "./.nuxt/tsconfig.json" }"#,
+        )
+        .unwrap();
+
+        let resolver = TsConfigPathResolver::from_tsconfig(&tmp_dir.join("tsconfig.json"));
+        assert!(
+            !resolver.is_empty(),
+            "resolver should have aliases from .nuxt/tsconfig.json"
+        );
+
+        // Exact match: #imports
+        let result = resolver.resolve("#imports");
+        assert!(
+            result.is_some(),
+            "should resolve #imports; aliases: {:?}",
+            resolver.aliases
+        );
+
+        // Wildcard match: #ui/components/Button.vue
+        let result2 = resolver.resolve("#ui/components/Button.vue");
+        assert!(
+            result2.is_some(),
+            "should resolve #ui/components/Button.vue; aliases: {:?}",
+            resolver.aliases
+        );
+
+        // Wildcard match: #shared/utils
+        let result3 = resolver.resolve("#shared/utils");
+        assert!(
+            result3.is_some(),
+            "should resolve #shared/utils; aliases: {:?}",
+            resolver.aliases
+        );
+
+        // Negative: unknown alias
+        let result4 = resolver.resolve("#nonexistent");
+        assert!(result4.is_none(), "#nonexistent should not resolve");
+
+        // Negative: unknown sub-path
+        let result5 = resolver.resolve("#ui/nonexistent/Nope");
+        assert!(result5.is_none(), "#ui/nonexistent/Nope should not resolve");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
     #[test]
     fn verterrc_ssr_config_roundtrip() {
         let json = r#"{"lint":{"enabled":true},"ssr":{"enabled":true}}"#;
