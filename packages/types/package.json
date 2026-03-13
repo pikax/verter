@@ -1,1 +1,28 @@
-{"name":"@verter/types","types":"index.d.ts"}
+{
+  "name": "@verter/types",
+  "version": "0.0.1-alpha.3",
+  "types": "index.d.ts",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./index.d.ts"
+    },
+    "./string": {
+      "types": "./dist/string-export.d.ts",
+      "import": "./dist/string-export.js",
+      "default": "./dist/string-export.js"
+    },
+    "./tsx-string": {
+      "types": "./dist/tsx-string-export.d.ts",
+      "import": "./dist/tsx-string-export.js",
+      "default": "./dist/tsx-string-export.js"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build-string.mjs && node scripts/build-tsx.mjs"
+  },
+  "devDependencies": {
+    "typescript": "6.0.0-beta"
+  }
+}
