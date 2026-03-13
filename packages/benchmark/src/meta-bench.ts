@@ -15,6 +15,7 @@ import { Bench } from "tinybench";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { formatDuration, formatBytes } from "./utils/stats.js";
 import {
@@ -27,6 +28,7 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const _require = createRequire(import.meta.url);
 const JSON_MODE = process.argv.includes("--json");
 
 // ─── Fixture Loading ────────────────────────────────────────────────────────
@@ -83,10 +85,10 @@ logln("\n" + "=".repeat(74));
 logln(" Component Meta Benchmark: Verter vs Volar (vue-component-meta)");
 logln("=".repeat(74));
 
-// Initialize Verter checker
+// Initialize Verter checker — use createRequire to avoid ESM/CJS conflicts
 log("\n  Initializing Verter checker...");
 const verterInitStart = performance.now();
-const { createChecker: createVerterChecker } = await import("@verter/component-meta/compat");
+const { createChecker: createVerterChecker } = _require("@verter/component-meta/compat");
 const verterChecker = createVerterChecker(TSCONFIG_PATH);
 const verterInitMs = performance.now() - verterInitStart;
 logln(` done (${formatDuration(verterInitMs)})`);
@@ -96,7 +98,7 @@ log("  Initializing Volar checker...");
 const volarInitStart = performance.now();
 let volarChecker: any;
 try {
-  const volarMeta = await import("vue-component-meta");
+  const volarMeta = _require("vue-component-meta");
   volarChecker = volarMeta.createChecker(TSCONFIG_PATH);
 } catch (e: any) {
   console.error(`\n  Failed to initialize Volar checker: ${e.message}`);
@@ -207,7 +209,12 @@ logln("-".repeat(74));
 const INMEM_COUNT = 1250;
 const INMEM_TOTAL = INMEM_COUNT * fixtures.length;
 
-// Pre-register all files with both checkers
+let verterStressMs = 0;
+let volarStressMs = 0;
+let inMemVerterFps = 0;
+let inMemVolarFps = 0;
+
+// Pre-register all files with Verter (always works)
 log("\n  Registering files with Verter...");
 const verterRegStart = performance.now();
 const inMemFiles: Array<{ name: string; absPath: string }> = [];
@@ -220,46 +227,57 @@ for (let i = 0; i < INMEM_COUNT; i++) {
 }
 logln(` done (${formatDuration(performance.now() - verterRegStart)})`);
 
-log("  Registering files with Volar...");
-const volarRegStart = performance.now();
-for (const entry of inMemFiles) {
-  const fixture = fixtures.find((f) => f.name === entry.name)!;
-  volarChecker.updateFile(entry.absPath, fixture.source);
-}
-logln(` done (${formatDuration(performance.now() - volarRegStart)})`);
-
 // Verter stress
 log(`  Running Verter (${INMEM_TOTAL} getComponentMeta calls)...`);
 const verterStressStart = performance.now();
 for (const entry of inMemFiles) {
   verterChecker.getComponentMeta(entry.absPath);
 }
-const verterStressMs = performance.now() - verterStressStart;
-logln(` done — ${formatDuration(verterStressMs)}`);
+verterStressMs = performance.now() - verterStressStart;
+inMemVerterFps = Math.round((INMEM_TOTAL / verterStressMs) * 1000);
+logln(` done — ${formatDuration(verterStressMs)} (${inMemVerterFps.toLocaleString()} files/s)`);
 
-// Volar stress
-log(`  Running Volar  (${INMEM_TOTAL} getComponentMeta calls)...`);
-const volarStressStart = performance.now();
-for (const entry of inMemFiles) {
-  volarChecker.getComponentMeta(entry.absPath);
+// Volar stress — may fail/crash on large file counts
+try {
+  log("  Registering files with Volar...");
+  const volarRegStart = performance.now();
+  for (const entry of inMemFiles) {
+    const fixture = fixtures.find((f) => f.name === entry.name)!;
+    volarChecker.updateFile(entry.absPath, fixture.source);
+  }
+  logln(` done (${formatDuration(performance.now() - volarRegStart)})`);
+
+  log(`  Running Volar  (${INMEM_TOTAL} getComponentMeta calls)...`);
+  const volarStressStart = performance.now();
+  for (const entry of inMemFiles) {
+    volarChecker.getComponentMeta(entry.absPath);
+  }
+  volarStressMs = performance.now() - volarStressStart;
+  inMemVolarFps = Math.round((INMEM_TOTAL / volarStressMs) * 1000);
+  logln(` done — ${formatDuration(volarStressMs)} (${inMemVolarFps.toLocaleString()} files/s)`);
+} catch (e: any) {
+  logln(`  Volar crashed during stress test: ${e.message ?? e}`);
+  volarStressMs = -1;
 }
-const volarStressMs = performance.now() - volarStressStart;
-logln(` done — ${formatDuration(volarStressMs)}`);
 
-const inMemVerterFps = Math.round((INMEM_TOTAL / verterStressMs) * 1000);
-const inMemVolarFps = Math.round((INMEM_TOTAL / volarStressMs) * 1000);
-const inMemSpeedup = (volarStressMs / verterStressMs).toFixed(1) + "x";
-
-logln(
-  `\n  ${col("Checker", 14, false)}  ${col("Time", 10)}  ${col("Files/s", 10)}  ${col("Speedup", 10)}`,
-);
-logln("  " + "-".repeat(50));
-logln(
-  `  ${col("Verter", 14, false)}  ${col(formatDuration(verterStressMs), 10)}  ${col(inMemVerterFps.toLocaleString(), 10)}  ${col(inMemSpeedup, 10)}`,
-);
-logln(
-  `  ${col("Volar", 14, false)}  ${col(formatDuration(volarStressMs), 10)}  ${col(inMemVolarFps.toLocaleString(), 10)}  ${col("1.0x", 10)}`,
-);
+if (volarStressMs > 0) {
+  const inMemSpeedup = (volarStressMs / verterStressMs).toFixed(1) + "x";
+  logln(
+    `\n  ${col("Checker", 14, false)}  ${col("Time", 10)}  ${col("Files/s", 10)}  ${col("Speedup", 10)}`,
+  );
+  logln("  " + "-".repeat(50));
+  logln(
+    `  ${col("Verter", 14, false)}  ${col(formatDuration(verterStressMs), 10)}  ${col(inMemVerterFps.toLocaleString(), 10)}  ${col(inMemSpeedup, 10)}`,
+  );
+  logln(
+    `  ${col("Volar", 14, false)}  ${col(formatDuration(volarStressMs), 10)}  ${col(inMemVolarFps.toLocaleString(), 10)}  ${col("1.0x", 10)}`,
+  );
+} else {
+  logln(
+    `\n  Verter: ${formatDuration(verterStressMs)} (${inMemVerterFps.toLocaleString()} files/s)`,
+  );
+  logln("  Volar:  crashed (unable to handle 10K virtual files)");
+}
 logln("");
 
 // Cleanup virtual files
@@ -313,19 +331,19 @@ writeFileSync(
 
 logln(`\n  Written ${DISK_TOTAL} files to temp dir`);
 
-// Initialize fresh checkers for disk test
+let verterDiskInitMs = 0;
+let volarDiskInitMs = 0;
+let verterDiskRunMs = 0;
+let volarDiskRunMs = 0;
+let diskVerterFps = 0;
+let diskVolarFps = 0;
+
+// Initialize fresh Verter checker for disk test
 log("  Initializing Verter (disk)...");
 const verterDiskStart = performance.now();
 const verterDiskChecker = createVerterChecker(join(TEMP_DIR, "tsconfig.json"));
-const verterDiskInitMs = performance.now() - verterDiskStart;
+verterDiskInitMs = performance.now() - verterDiskStart;
 logln(` done (${formatDuration(verterDiskInitMs)})`);
-
-log("  Initializing Volar (disk)...");
-const volarDiskStart = performance.now();
-const { createChecker: createVolarDiskChecker } = await import("vue-component-meta");
-const volarDiskChecker = createVolarDiskChecker(join(TEMP_DIR, "tsconfig.json"));
-const volarDiskInitMs = performance.now() - volarDiskStart;
-logln(` done (${formatDuration(volarDiskInitMs)})`);
 
 // Verter scan
 log(`  Running Verter (${DISK_TOTAL} files from disk)...`);
@@ -333,32 +351,50 @@ const verterDiskRunStart = performance.now();
 for (const filePath of diskFiles) {
   verterDiskChecker.getComponentMeta(filePath);
 }
-const verterDiskRunMs = performance.now() - verterDiskRunStart;
-logln(` done — ${formatDuration(verterDiskRunMs)}`);
+verterDiskRunMs = performance.now() - verterDiskRunStart;
+diskVerterFps = Math.round((DISK_TOTAL / verterDiskRunMs) * 1000);
+logln(` done — ${formatDuration(verterDiskRunMs)} (${diskVerterFps.toLocaleString()} files/s)`);
 
-// Volar scan
-log(`  Running Volar  (${DISK_TOTAL} files from disk)...`);
-const volarDiskRunStart = performance.now();
-for (const filePath of diskFiles) {
-  volarDiskChecker.getComponentMeta(filePath);
+// Volar disk test — may be slow or crash on 5K files
+try {
+  log("  Initializing Volar (disk)...");
+  const volarDiskStart = performance.now();
+  const volarDiskMeta = _require("vue-component-meta");
+  const volarDiskChecker = volarDiskMeta.createChecker(join(TEMP_DIR, "tsconfig.json"));
+  volarDiskInitMs = performance.now() - volarDiskStart;
+  logln(` done (${formatDuration(volarDiskInitMs)})`);
+
+  log(`  Running Volar  (${DISK_TOTAL} files from disk)...`);
+  const volarDiskRunStart = performance.now();
+  for (const filePath of diskFiles) {
+    volarDiskChecker.getComponentMeta(filePath);
+  }
+  volarDiskRunMs = performance.now() - volarDiskRunStart;
+  diskVolarFps = Math.round((DISK_TOTAL / volarDiskRunMs) * 1000);
+  logln(` done — ${formatDuration(volarDiskRunMs)} (${diskVolarFps.toLocaleString()} files/s)`);
+} catch (e: any) {
+  logln(`  Volar crashed during disk stress test: ${e.message ?? e}`);
+  volarDiskRunMs = -1;
 }
-const volarDiskRunMs = performance.now() - volarDiskRunStart;
-logln(` done — ${formatDuration(volarDiskRunMs)}`);
 
-const diskVerterFps = Math.round((DISK_TOTAL / verterDiskRunMs) * 1000);
-const diskVolarFps = Math.round((DISK_TOTAL / volarDiskRunMs) * 1000);
-const diskSpeedup = (volarDiskRunMs / verterDiskRunMs).toFixed(1) + "x";
-
-logln(
-  `\n  ${col("Checker", 14, false)}  ${col("Init", 10)}  ${col("Scan", 10)}  ${col("Files/s", 10)}  ${col("Speedup", 10)}`,
-);
-logln("  " + "-".repeat(60));
-logln(
-  `  ${col("Verter", 14, false)}  ${col(formatDuration(verterDiskInitMs), 10)}  ${col(formatDuration(verterDiskRunMs), 10)}  ${col(diskVerterFps.toLocaleString(), 10)}  ${col(diskSpeedup, 10)}`,
-);
-logln(
-  `  ${col("Volar", 14, false)}  ${col(formatDuration(volarDiskInitMs), 10)}  ${col(formatDuration(volarDiskRunMs), 10)}  ${col(diskVolarFps.toLocaleString(), 10)}  ${col("1.0x", 10)}`,
-);
+if (volarDiskRunMs > 0) {
+  const diskSpeedup = (volarDiskRunMs / verterDiskRunMs).toFixed(1) + "x";
+  logln(
+    `\n  ${col("Checker", 14, false)}  ${col("Init", 10)}  ${col("Scan", 10)}  ${col("Files/s", 10)}  ${col("Speedup", 10)}`,
+  );
+  logln("  " + "-".repeat(60));
+  logln(
+    `  ${col("Verter", 14, false)}  ${col(formatDuration(verterDiskInitMs), 10)}  ${col(formatDuration(verterDiskRunMs), 10)}  ${col(diskVerterFps.toLocaleString(), 10)}  ${col(diskSpeedup, 10)}`,
+  );
+  logln(
+    `  ${col("Volar", 14, false)}  ${col(formatDuration(volarDiskInitMs), 10)}  ${col(formatDuration(volarDiskRunMs), 10)}  ${col(diskVolarFps.toLocaleString(), 10)}  ${col("1.0x", 10)}`,
+  );
+} else {
+  logln(
+    `\n  Verter: init ${formatDuration(verterDiskInitMs)}, scan ${formatDuration(verterDiskRunMs)} (${diskVerterFps.toLocaleString()} files/s)`,
+  );
+  logln("  Volar:  crashed");
+}
 logln("");
 
 // Cleanup temp dir
@@ -434,20 +470,22 @@ const report: MetaBenchmarkReport & {
     inMemory: {
       files: number;
       verterMs: number;
-      volarMs: number;
+      volarMs: number | null;
       verterFps: number;
-      volarFps: number;
-      speedup: number;
+      volarFps: number | null;
+      speedup: number | null;
+      volarCrashed: boolean;
     };
     disk: {
       files: number;
       verterInitMs: number;
-      volarInitMs: number;
+      volarInitMs: number | null;
       verterMs: number;
-      volarMs: number;
+      volarMs: number | null;
       verterFps: number;
-      volarFps: number;
-      speedup: number;
+      volarFps: number | null;
+      speedup: number | null;
+      volarCrashed: boolean;
     };
   };
   init: { verterMs: number; volarMs: number };
@@ -457,20 +495,22 @@ const report: MetaBenchmarkReport & {
     inMemory: {
       files: INMEM_TOTAL,
       verterMs: verterStressMs,
-      volarMs: volarStressMs,
+      volarMs: volarStressMs > 0 ? volarStressMs : null,
       verterFps: inMemVerterFps,
-      volarFps: inMemVolarFps,
-      speedup: volarStressMs / verterStressMs,
+      volarFps: volarStressMs > 0 ? inMemVolarFps : null,
+      speedup: volarStressMs > 0 ? volarStressMs / verterStressMs : null,
+      volarCrashed: volarStressMs <= 0,
     },
     disk: {
       files: DISK_TOTAL,
       verterInitMs: verterDiskInitMs,
-      volarInitMs: volarDiskInitMs,
+      volarInitMs: volarDiskRunMs > 0 ? volarDiskInitMs : null,
       verterMs: verterDiskRunMs,
-      volarMs: volarDiskRunMs,
+      volarMs: volarDiskRunMs > 0 ? volarDiskRunMs : null,
       verterFps: diskVerterFps,
-      volarFps: diskVolarFps,
-      speedup: volarDiskRunMs / verterDiskRunMs,
+      volarFps: volarDiskRunMs > 0 ? diskVolarFps : null,
+      speedup: volarDiskRunMs > 0 ? volarDiskRunMs / verterDiskRunMs : null,
+      volarCrashed: volarDiskRunMs <= 0,
     },
   },
   init: {
