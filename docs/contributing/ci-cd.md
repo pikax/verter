@@ -22,6 +22,10 @@ All jobs run independently -- one failing does not block others.
 
 Triggered via `/benchmark` PR comment or manual dispatch. Compares Verter compilation performance against Vue's official compiler.
 
+### LSP Benchmark (`lsp-benchmark.yml`)
+
+Triggered via `/lsp-benchmark` PR comment or manual dispatch. Runs the Verter-vs-Volar LSP benchmark on Linux, macOS, and Windows and reports per-OS values.
+
 ### Integration Test (`integration-test.yml`)
 
 Tests Verter against real-world open-source Vue projects to validate compatibility.

@@ -38,6 +38,55 @@ pnpm bench
 pnpm bench:json
 ```
 
+## LSP Benchmark
+
+The package also includes an LSP benchmark for comparing Verter and Volar:
+
+```bash
+# Repo-local smoke benchmark (works on macOS and Windows)
+pnpm --filter @verter/benchmark bench:lsp
+
+# JSON output
+pnpm --filter @verter/benchmark bench:lsp:json
+```
+
+By default, the LSP benchmark uses the checked-in example workspace:
+
+- Workspace: `packages/example`
+- File: `Test.vue`
+- Hover target: line `2`, char `9` (1-based)
+
+This keeps the benchmark runnable out of the box on both macOS and Windows. For a
+real-world comparison, point it at a larger Vue workspace:
+
+```bash
+pnpm --filter @verter/benchmark bench:lsp \
+  --workspace=/path/to/primevue/packages/primevue \
+  --file=src/datatable/DataTable.vue \
+  --hover-line=19 \
+  --hover-char=20
+```
+
+Supported flags:
+
+- `--json` - output structured JSON to stdout
+- `--skip-volar` - run only the Verter configurations
+- `--workspace=<path>` - workspace root to open
+- `--file=<path>` - benchmark target file; relative paths are resolved from the workspace root
+- `--hover-line=<n>` - 1-based hover line
+- `--hover-char=<n>` - 1-based hover character
+- `--verter-bin=<path>` - override the Verter LSP binary path
+- `--volar-script=<path>` - override Volar's `vue-language-server.js`
+- `--tsdk=<path>` - override the TypeScript SDK directory used by Volar
+
+Binary resolution is platform-aware:
+
+- Verter: checks `target/release/verter-lsp(.exe)` first, then `target/debug/verter-lsp(.exe)`
+- Volar: resolves `@vue/language-server` from the benchmark package installation
+- TypeScript SDK: prefers `<workspace>/node_modules/typescript/lib`, then `<repo>/node_modules/typescript/lib`, then the benchmark package installation
+
+CI uses a separate `/lsp-benchmark` workflow that runs the PrimeVue target on Linux, macOS, and Windows so the report shows per-OS values instead of a single runner's numbers.
+
 ## CI Integration
 
 Triggered via PR comment `/benchmark` or manually through GitHub Actions.

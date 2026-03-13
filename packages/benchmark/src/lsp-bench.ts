@@ -1,40 +1,30 @@
 /**
- * LSP Benchmark: Verter vs Volar on PrimeVue
+ * LSP benchmark runner for Verter vs Volar.
  *
- * Measures initialization, workspace scan, diagnostics, and hover latency
- * for both Verter LSP (with and without type provider) and Volar.
- *
- * Usage:
- *   pnpm --filter @verter/benchmark bench:lsp
- *   pnpm --filter @verter/benchmark bench:lsp:json
- *
- * CLI flags:
- *   --json            Output structured JSON to stdout (no table)
- *   --workspace=<p>   Override workspace root path
- *   --verter-bin=<p>  Override Verter LSP binary path
- *   --skip-volar      Skip Volar benchmark
+ * Measures initialization, workspace scan, didOpen-to-hover latency, and warm
+ * hover latency for both Verter LSP and Volar.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
-import { resolve, join, dirname, basename } from "node:path";
+import { resolve, join, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
+
+import { parseLspBenchConfig } from "./lsp-bench.config";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 // Repo root: packages/benchmark/src/ → ../../..
 const REPO_ROOT = resolve(__dirname, "../../..");
-
-// ─── CLI flags ───────────────────────────────────────────────────────
-
-function getFlag(name: string): string | undefined {
-  const prefix = `--${name}=`;
-  const arg = process.argv.find((a) => a.startsWith(prefix));
-  return arg ? arg.slice(prefix.length) : undefined;
-}
-
-const JSON_MODE = process.argv.includes("--json");
-const SKIP_VOLAR = process.argv.includes("--skip-volar");
+const BENCH_CONFIG = parseLspBenchConfig({
+  argv: process.argv,
+  cwd: process.cwd(),
+  env: process.env,
+  platform: process.platform,
+  repoRoot: REPO_ROOT,
+});
+const JSON_MODE = BENCH_CONFIG.jsonMode;
+const SKIP_VOLAR = BENCH_CONFIG.skipVolar;
 
 // In JSON mode, redirect console.log to stderr so only JSON goes to stdout
 if (JSON_MODE) {
@@ -45,18 +35,13 @@ if (JSON_MODE) {
 
 // ─── Configuration ───────────────────────────────────────────────────
 
-const DEFAULT_WORKSPACE = "D:/dev/github/verter-test-repos/primevue/packages/primevue";
-const WORKSPACE_ROOT = getFlag("workspace") ? resolve(getFlag("workspace")!) : DEFAULT_WORKSPACE;
-const VERTER_BIN = getFlag("verter-bin")
-  ? resolve(getFlag("verter-bin")!)
-  : resolve(REPO_ROOT, "target/release/verter-lsp.exe");
-const TEST_FILE_REL = "src/datatable/DataTable.vue";
-const TEST_FILE = resolve(WORKSPACE_ROOT, TEST_FILE_REL);
-
-// Hover target: `d_rows` on line 19 (0-indexed: line 18, char 19)
-// Template line: `:rows="d_rows"`
-const HOVER_LINE = 18;
-const HOVER_CHAR = 19;
+const WORKSPACE_ROOT = BENCH_CONFIG.workspaceRoot;
+const VERTER_BIN = BENCH_CONFIG.verterBin;
+const TEST_FILE_REL = BENCH_CONFIG.testFileRel;
+const TEST_FILE = BENCH_CONFIG.testFile;
+const HOVER_LINE = BENCH_CONFIG.hoverLine;
+const HOVER_CHAR = BENCH_CONFIG.hoverChar;
+const PROJECT_NAME = BENCH_CONFIG.projectName;
 
 const PHASE_TIMEOUT = 120_000; // 120s for workspace scan
 const SHORT_TIMEOUT = 30_000; // 30s for other phases
@@ -261,7 +246,7 @@ function formatMs(ms: number): string {
 
 // ─── Initialize params ───────────────────────────────────────────────
 
-function makeInitializeParams(rootUri: string, initializationOptions?: any) {
+function makeInitializeParams(rootUri: string, workspaceName: string, initializationOptions?: any) {
   return {
     processId: process.pid,
     capabilities: {
@@ -286,7 +271,7 @@ function makeInitializeParams(rootUri: string, initializationOptions?: any) {
     workspaceFolders: [
       {
         uri: rootUri,
-        name: "primevue",
+        name: workspaceName,
       },
     ],
     ...(initializationOptions ? { initializationOptions } : {}),
@@ -314,7 +299,11 @@ async function benchmarkVerter(label: string, typeProvider: string): Promise<Ben
   try {
     // Phase 1: Initialize
     const t0 = hrMs();
-    await client.sendRequest("initialize", makeInitializeParams(rootUri), SHORT_TIMEOUT);
+    await client.sendRequest(
+      "initialize",
+      makeInitializeParams(rootUri, PROJECT_NAME),
+      SHORT_TIMEOUT,
+    );
     client.sendNotification("initialized", {});
     const initTime = hrMs() - t0;
 
@@ -389,11 +378,11 @@ async function benchmarkVerter(label: string, typeProvider: string): Promise<Ben
 }
 
 async function benchmarkVolar(): Promise<BenchmarkResult> {
-  // Volar: run via node since pnpm doesn't hoist the .bin shim to workspace root
-  const volarScript = resolve(
-    __dirname,
-    "../node_modules/@vue/language-server/bin/vue-language-server.js",
-  );
+  const volarScript = BENCH_CONFIG.volarScript;
+  const tsdkPath = BENCH_CONFIG.tsdkPath;
+  if (!volarScript || !tsdkPath) {
+    throw new Error("Volar benchmark requires a resolved Volar script and TypeScript SDK.");
+  }
   const client = new LspClient("Volar", process.execPath, [volarScript, "--stdio"]);
 
   const rootUri = pathToFileURL(resolve(WORKSPACE_ROOT)).toString();
@@ -401,8 +390,6 @@ async function benchmarkVolar(): Promise<BenchmarkResult> {
   const fileContent = readFileSync(TEST_FILE, "utf-8");
 
   try {
-    // Find TypeScript SDK for Volar (needs tsdk pointing to typescript/lib)
-    const tsdkPath = resolve(REPO_ROOT, "examples/node_modules/typescript/lib");
     const volarInitOptions = {
       typescript: {
         tsdk: tsdkPath,
@@ -413,7 +400,7 @@ async function benchmarkVolar(): Promise<BenchmarkResult> {
     const t0 = hrMs();
     await client.sendRequest(
       "initialize",
-      makeInitializeParams(rootUri, volarInitOptions),
+      makeInitializeParams(rootUri, PROJECT_NAME, volarInitOptions),
       SHORT_TIMEOUT,
     );
     client.sendNotification("initialized", {});
@@ -507,9 +494,13 @@ function countVueFiles(dir: string): number {
 
 // ─── Output formatting ───────────────────────────────────────────────
 
-function printResults(results: Record<string, BenchmarkResult>, vueFileCount: number) {
+function printResults(
+  results: Record<string, BenchmarkResult>,
+  projectName: string,
+  vueFileCount: number,
+) {
   console.log();
-  console.log(`LSP Benchmark: PrimeVue (${vueFileCount} .vue files)`);
+  console.log(`LSP Benchmark: ${projectName} (${vueFileCount} .vue files)`);
   console.log("═".repeat(70));
   console.log();
 
@@ -527,7 +518,7 @@ function printResults(results: Record<string, BenchmarkResult>, vueFileCount: nu
     { key: "initialize", label: "Initialize" },
     { key: "workspaceScan", label: "Workspace Scan" },
     { key: "didOpenToHover", label: "didOpen → Hover" },
-    { key: "hoverCold", label: "Hover (warm)" },
+    { key: "hoverCold", label: "Hover (cold)" },
     { key: "hoverWarmMedian", label: "Hover (median of 5)" },
   ];
 
@@ -548,6 +539,7 @@ function printResults(results: Record<string, BenchmarkResult>, vueFileCount: nu
 
 function outputJson(
   results: Record<string, BenchmarkResult>,
+  projectName: string,
   vueFileCount: number,
   testFileLines: number,
 ) {
@@ -557,16 +549,19 @@ function outputJson(
       initialize: round2(r.initialize),
       workspaceScan: round2(r.workspaceScan),
       didOpenToHover: round2(r.didOpenToHover),
-      hoverWarm: round2(r.hoverCold),
-      hoverMedian: round2(r.hoverWarmMedian),
+      hoverCold: round2(r.hoverCold),
+      hoverWarmMedian: round2(r.hoverWarmMedian),
     };
   }
 
   const json = {
-    project: basename(WORKSPACE_ROOT),
+    project: projectName,
     vueFileCount,
     testFile: TEST_FILE_REL,
     testFileLines,
+    platform: process.platform,
+    arch: process.arch,
+    nodeVersion: process.version,
     configs,
     timestamp: new Date().toISOString(),
   };
@@ -587,11 +582,11 @@ async function main() {
   const vueFileCount = countVueFiles(WORKSPACE_ROOT);
   const totalSteps = SKIP_VOLAR ? 2 : 3;
 
-  console.log("LSP Benchmark: Verter vs Volar on PrimeVue");
+  console.log(`LSP Benchmark: Verter vs Volar on ${PROJECT_NAME}`);
   console.log("Workspace:", WORKSPACE_ROOT, `(${vueFileCount} .vue files)`);
   console.log("Verter binary:", VERTER_BIN);
   console.log("Test file:", TEST_FILE_REL, `(${testFileLines} lines)`);
-  console.log("Hover target: line", HOVER_LINE + 1, "char", HOVER_CHAR + 1);
+  console.log("Hover target:", `line ${HOVER_LINE + 1}, char ${HOVER_CHAR + 1}`);
   if (SKIP_VOLAR) console.log("Skipping Volar benchmark.");
   console.log();
 
@@ -632,9 +627,9 @@ async function main() {
   }
 
   if (JSON_MODE) {
-    outputJson(results, vueFileCount, testFileLines);
+    outputJson(results, PROJECT_NAME, vueFileCount, testFileLines);
   } else {
-    printResults(results, vueFileCount);
+    printResults(results, PROJECT_NAME, vueFileCount);
   }
 }
 
