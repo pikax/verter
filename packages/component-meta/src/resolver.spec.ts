@@ -144,6 +144,31 @@ describe("parseType", () => {
     expect(parseType("[]")).toEqual({ kind: "tuple", elements: [] });
   });
 
+  it("parses labeled tuples", () => {
+    const result = parseType("[id: number, name: string]");
+    expect(result.kind).toBe("tuple");
+    expect(result.kind === "tuple" && result.elements).toEqual([
+      { kind: "primitive", name: "number" },
+      { kind: "primitive", name: "string" },
+    ]);
+    // Should NOT be unknown
+    expect(result.kind).not.toBe("unknown");
+  });
+
+  it("parses single labeled tuple element", () => {
+    const result = parseType("[id: number]");
+    expect(result.kind).toBe("tuple");
+    expect(result.kind === "tuple" && result.elements).toEqual([
+      { kind: "primitive", name: "number" },
+    ]);
+  });
+
+  it("parses mixed labeled and unlabeled tuple elements", () => {
+    // TypeScript actually doesn't allow mixing, but we should handle gracefully
+    const result = parseType("[id: number, string]");
+    expect(result.kind).toBe("tuple");
+  });
+
   // ── Objects ─────────────────────────────────────────────────
 
   it("parses object types", () => {

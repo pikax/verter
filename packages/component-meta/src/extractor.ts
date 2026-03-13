@@ -68,6 +68,14 @@ interface RawMacro {
   propFields?: RawPropField[];
   emitFields?: RawEmitField[];
   slotFields?: RawSlotField[];
+  defaultKeys?: string[];
+  exposeFields?: RawExposeField[];
+  spanStart: number;
+  spanEnd: number;
+}
+
+interface RawExposeField {
+  name: string;
   spanStart: number;
   spanEnd: number;
 }
@@ -87,6 +95,7 @@ interface RawJsdocTag {
 
 interface RawPropField {
   name: string;
+  isOptional?: boolean;
   typeAnnotation?: string | null;
   description?: string | null;
   tags?: RawJsdocTag[];
@@ -96,6 +105,7 @@ interface RawPropField {
 
 interface RawEmitField {
   name: string;
+  payloadType?: string | null;
   description?: string | null;
   tags?: RawJsdocTag[];
   spanStart: number;
@@ -293,6 +303,36 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
     slots = extractSlots(raw.template, raw.macros, raw.bindings);
     models = extractModels(raw.macros);
     exposed = extractExpose(raw.macros, raw.bindings);
+
+    // Synthesize implicit props and events from defineModel macros
+    const modelMacros = raw.macros.filter((m) => m.kind === "DefineModel");
+    for (const m of modelMacros) {
+      const modelName = m.modelName ?? "modelValue";
+      // Add model prop if not already in props list
+      if (!props.some((p) => p.name === modelName)) {
+        const propField = m.propFields?.[0];
+        const rawType = propField?.typeAnnotation ?? undefined;
+        props.push({
+          name: modelName,
+          type: rawType ? parseType(rawType) : unknown("unknown"),
+          required: false,
+          hasDefault: false,
+          ...(rawType && { rawType }),
+        });
+      }
+      // Add update:modelName event if not already in events list
+      const updateEventName = `update:${modelName}`;
+      if (!events.some((e) => e.name === updateEventName)) {
+        const propField = m.propFields?.[0];
+        const rawType = propField?.typeAnnotation ?? undefined;
+        events.push({
+          name: updateEventName,
+          payload: rawType ? parseType(rawType) : unknown("unknown"),
+          hasValidator: false,
+          isDeclared: true,
+        });
+      }
+    }
   }
 
   return {
@@ -359,8 +399,9 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
     defMap.set(def.name, def);
   }
 
-  // Also check withDefaults macro
+  // Build set of default keys from withDefaults macro
   const withDefaults = macros.find((m) => m.kind === "WithDefaults");
+  const defaultKeys = new Set<string>(withDefaults?.defaultKeys ?? []);
 
   return propFields.map((field): PropMeta => {
     const templateDef = defMap.get(field.name);
@@ -373,11 +414,18 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
       ...(t.text != null && { text: t.text }),
     }));
 
+    const hasDefault = templateDef?.hasDefault ?? defaultKeys.has(field.name);
+    const isOptional = field.isOptional ?? false;
+    const required =
+      templateDef != null
+        ? (templateDef.isRequired ?? !templateDef.hasDefault)
+        : !isOptional && !hasDefault;
+
     return {
       name: field.name,
       type: isBoolean && type.kind === "unknown" ? primitive("boolean") : type,
-      required: templateDef?.isRequired ?? !templateDef?.hasDefault,
-      hasDefault: templateDef?.hasDefault ?? withDefaults != null,
+      required,
+      hasDefault,
       ...(rawType && { rawType }),
       ...(description && { description }),
       ...(tags && tags.length > 0 && { tags }),
@@ -400,15 +448,18 @@ function extractCompositionEmits(macros: RawMacro[], template: RawTemplate | nul
   return emitFields.map((field): EventMeta => {
     const templateDef = defMap.get(field.name);
     const description = field.description ?? undefined;
+    const rawPayload = field.payloadType ?? undefined;
+    const payload = rawPayload ? parseType(rawPayload) : unknown("unknown");
     const tags = field.tags?.map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
     }));
     return {
       name: field.name,
-      payload: unknown("unknown"),
+      payload,
       hasValidator: templateDef?.hasValidator ?? false,
       isDeclared: templateDef?.isDeclared ?? true,
+      ...(rawPayload && { rawSignature: rawPayload }),
       ...(description && { description }),
       ...(tags && tags.length > 0 && { tags }),
     };
@@ -420,7 +471,38 @@ function extractSlots(
   macros: RawMacro[],
   scriptBindings?: RawBinding[],
 ): SlotMeta[] {
-  if (!template?.definedSlots) return [];
+  // If template has no <slot> tags but defineSlots exists, use it as primary source
+  if (!template?.definedSlots || template.definedSlots.length === 0) {
+    const defineSlotsM = macros.find(
+      (m) => m.kind === "DefineSlots" && m.slotFields && m.slotFields.length > 0,
+    );
+    if (defineSlotsM?.slotFields) {
+      return defineSlotsM.slotFields.map((sf): SlotMeta => {
+        const bindings: SlotBinding[] = (sf.bindings ?? []).map((b): SlotBinding => {
+          const rawType = b.typeAnnotation ?? undefined;
+          return {
+            name: b.name,
+            type: rawType ? parseType(rawType) : unknown("unknown"),
+            ...(rawType && { rawType }),
+          };
+        });
+        const desc = sf.description ?? undefined;
+        const sfTags = sf.tags?.map((t) => ({
+          name: t.name,
+          ...(t.text != null && { text: t.text }),
+        }));
+        return {
+          name: sf.name,
+          isScoped: (sf.bindings ?? []).length > 0,
+          bindings,
+          ...(sf.isRequired != null && { isRequired: sf.isRequired }),
+          ...(desc && { description: desc }),
+          ...(sfTags && sfTags.length > 0 && { tags: sfTags }),
+        };
+      });
+    }
+    return [];
+  }
 
   // Build maps from defineSlots macro: isRequired + binding types + jsdoc per slot
   const requiredMap = new Map<string, boolean>();
@@ -525,10 +607,24 @@ function extractExpose(macros: RawMacro[], bindings: RawBinding[]): ExposedMeta[
   const defineExpose = macros.find((m) => m.kind === "DefineExpose");
   if (!defineExpose) return [];
 
-  // defineExpose does not list individual fields in the macro analysis.
-  // The exposed bindings are the ones passed to the macro call.
-  // For now, we return an empty list — this will be populated in Phase 2
-  // when a dedicated `getComponentMeta()` Rust API can return them.
+  const exposeFields = defineExpose.exposeFields ?? [];
+  if (exposeFields.length > 0) {
+    // Build type lookup from script bindings
+    const bindingTypes = new Map<string, string>();
+    for (const b of bindings) {
+      if (b.typeAnnotation) {
+        bindingTypes.set(b.name, b.typeAnnotation);
+      }
+    }
+    return exposeFields.map((field): ExposedMeta => {
+      const rawType = bindingTypes.get(field.name);
+      return {
+        name: field.name,
+        type: rawType ? parseType(rawType) : unknown("unknown"),
+      };
+    });
+  }
+
   return [];
 }
 

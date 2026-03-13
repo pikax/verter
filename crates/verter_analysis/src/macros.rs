@@ -3,8 +3,8 @@ use oxc_ast::{Comment, CommentContent};
 use oxc_span::GetSpan;
 
 use crate::types::{
-    AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
-    AnalyzedSlotFieldBinding, JsdocTag,
+    AnalyzedEmitField, AnalyzedExposeField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField,
+    AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag,
 };
 
 /// Classify a callee name as a Vue compiler macro.
@@ -331,6 +331,18 @@ fn try_extract_macro(
                 Vec::new()
             };
 
+            let default_keys = if kind == AnalyzedMacroKind::WithDefaults {
+                extract_with_defaults_keys(call)
+            } else {
+                Vec::new()
+            };
+
+            let expose_fields = if kind == AnalyzedMacroKind::DefineExpose {
+                extract_expose_fields(call)
+            } else {
+                Vec::new()
+            };
+
             Some(AnalyzedMacro {
                 kind,
                 is_type_based,
@@ -341,6 +353,8 @@ fn try_extract_macro(
                 prop_fields,
                 emit_fields,
                 slot_fields,
+                default_keys,
+                expose_fields,
                 span: call.span.into(),
             })
         }
@@ -413,6 +427,7 @@ fn extract_prop_fields_from_type(
                         extract_jsdoc_for(comments, prop.span().start, source);
                     key_name.map(|name| AnalyzedPropField {
                         name,
+                        is_optional: prop.optional,
                         span: prop.key.span().into(),
                         type_annotation,
                         description,
@@ -454,6 +469,7 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropFi
                     };
                     key_name.map(|name| AnalyzedPropField {
                         name,
+                        is_optional: false,
                         span: p.key.span().into(),
                         type_annotation: None,
                         description: None,
@@ -471,6 +487,7 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropFi
                 if let ArrayExpressionElement::StringLiteral(lit) = elem {
                     Some(AnalyzedPropField {
                         name: lit.value.to_string(),
+                        is_optional: false,
                         span: lit.span.into(),
                         type_annotation: None,
                         description: None,
@@ -536,11 +553,27 @@ fn extract_emit_fields_from_type(
                         PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                         _ => None,
                     };
+                    // Extract payload type from the value type annotation
+                    let payload_type = prop.type_annotation.as_ref().and_then(|ta| {
+                        let start = ta.type_annotation.span().start as usize;
+                        let end = ta.type_annotation.span().end as usize;
+                        if end <= source.len() {
+                            let text = source[start..end].trim();
+                            if !text.is_empty() {
+                                Some(text.to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
                     let (description, tags) =
                         extract_jsdoc_for(comments, prop.span().start, source);
                     key_name.map(|name| AnalyzedEmitField {
                         name,
                         span: prop.key.span().into(),
+                        payload_type,
                         description,
                         tags,
                     })
@@ -552,11 +585,31 @@ fn extract_emit_fields_from_type(
                     let type_ann = first_param.type_annotation.as_ref()?;
                     if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
                         if let TSLiteral::StringLiteral(s) = &lit.literal {
+                            // Extract payload params (all params after the event name)
+                            let payload_type = {
+                                let extra_params: Vec<String> = call_sig
+                                    .params
+                                    .items
+                                    .iter()
+                                    .skip(1)
+                                    .map(|p| {
+                                        let start = p.span().start as usize;
+                                        let end = p.span().end as usize;
+                                        if end <= source.len() {
+                                            source[start..end].to_string()
+                                        } else {
+                                            "unknown".to_string()
+                                        }
+                                    })
+                                    .collect();
+                                Some(format!("[{}]", extra_params.join(", ")))
+                            };
                             let (description, tags) =
                                 extract_jsdoc_for(comments, call_sig.span().start, source);
                             return Some(AnalyzedEmitField {
                                 name: s.value.to_string(),
                                 span: s.span.into(),
+                                payload_type,
                                 description,
                                 tags,
                             });
@@ -593,6 +646,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     key_name.map(|name| AnalyzedEmitField {
                         name,
                         span: p.key.span().into(),
+                        payload_type: None,
                         description: None,
                         tags: Vec::new(),
                     })
@@ -609,6 +663,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     Some(AnalyzedEmitField {
                         name: lit.value.to_string(),
                         span: lit.span.into(),
+                        payload_type: None,
                         description: None,
                         tags: Vec::new(),
                     })
@@ -619,6 +674,63 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Extract object property key names from the second argument of `withDefaults()`.
+///
+/// `withDefaults(defineProps<{...}>(), { foo: 'bar', baz: 42 })` → `["foo", "baz"]`
+fn extract_with_defaults_keys(call: &CallExpression<'_>) -> Vec<String> {
+    let Some(second_arg) = call.arguments.get(1) else {
+        return Vec::new();
+    };
+    let Some(Expression::ObjectExpression(obj)) = second_arg.as_expression() else {
+        return Vec::new();
+    };
+    obj.properties
+        .iter()
+        .filter_map(|prop| {
+            if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                match &p.key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Extract exposed field names from `defineExpose({ foo, bar })`.
+///
+/// Only parses object literal arguments. Identifier args (e.g., `defineExpose(myObj)`)
+/// return empty since we can't resolve the value statically.
+fn extract_expose_fields(call: &CallExpression<'_>) -> Vec<AnalyzedExposeField> {
+    let Some(first_arg) = call.arguments.first() else {
+        return Vec::new();
+    };
+    let Some(Expression::ObjectExpression(obj)) = first_arg.as_expression() else {
+        return Vec::new();
+    };
+    obj.properties
+        .iter()
+        .filter_map(|prop| {
+            if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                let key_name = match &p.key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
+                    _ => None,
+                };
+                key_name.map(|name| AnalyzedExposeField {
+                    name,
+                    span: p.key.span().into(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Extract individual slot field names, required status, bindings, and spans from a `defineSlots` call.
@@ -1873,6 +1985,220 @@ defineExpose({ props })
         assert_eq!(fields.len(), 1);
         assert!(fields[0].description.is_none());
         assert!(fields[0].tags.is_empty());
+    }
+
+    // =========================================================================
+    // Issue 1: Prop field is_optional
+    // =========================================================================
+
+    #[test]
+    fn prop_field_optional_type_based() {
+        let code = "defineProps<{ name?: string, count: number }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(fields.len(), 2);
+        assert!(fields[0].is_optional, "name? should be optional");
+        assert!(
+            !fields[1].is_optional,
+            "count (no ?) should NOT be optional"
+        );
+    }
+
+    #[test]
+    fn prop_field_optional_runtime_always_false() {
+        let code = "defineProps({ count: Number })";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert!(
+            !field.is_optional,
+            "runtime props should default to is_optional=false"
+        );
+    }
+
+    #[test]
+    fn prop_field_optional_array_always_false() {
+        let code = "defineProps(['count'])";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert!(
+            !field.is_optional,
+            "array props should default to is_optional=false"
+        );
+    }
+
+    // =========================================================================
+    // Issue 2: withDefaults default_keys
+    // =========================================================================
+
+    #[test]
+    fn with_defaults_extracts_default_keys() {
+        let code = r#"withDefaults(defineProps<{ foo: string, bar: number, baz: boolean }>(), { foo: 'hello', baz: true })"#;
+        let macros = parse_macros(code);
+        let wd = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::WithDefaults)
+            .unwrap();
+        let mut keys = wd.default_keys.clone();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["baz", "foo"],
+            "should extract default keys from object literal"
+        );
+        // Negative: defineProps should NOT have default_keys
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .unwrap();
+        assert!(
+            dp.default_keys.is_empty(),
+            "defineProps should have empty default_keys"
+        );
+    }
+
+    #[test]
+    fn with_defaults_no_object_arg_empty_keys() {
+        // withDefaults with non-object second arg (rare, but should not crash)
+        let code = "withDefaults(defineProps<{ foo: string }>(), defaults)";
+        let macros = parse_macros(code);
+        let wd = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::WithDefaults)
+            .unwrap();
+        assert!(
+            wd.default_keys.is_empty(),
+            "non-object second arg should yield empty default_keys"
+        );
+    }
+
+    // =========================================================================
+    // Issue 4: defineExpose expose_fields
+    // =========================================================================
+
+    #[test]
+    fn define_expose_extracts_fields() {
+        let code = "defineExpose({ foo, bar, baz: computed(() => 1) })";
+        let macros = parse_macros(code);
+        let de = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineExpose)
+            .unwrap();
+        assert_eq!(de.expose_fields.len(), 3, "should extract 3 expose fields");
+        assert_eq!(de.expose_fields[0].name, "foo");
+        assert_eq!(de.expose_fields[1].name, "bar");
+        assert_eq!(de.expose_fields[2].name, "baz");
+    }
+
+    #[test]
+    fn define_expose_empty_object() {
+        let code = "defineExpose({})";
+        let macros = parse_macros(code);
+        let de = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineExpose)
+            .unwrap();
+        assert!(
+            de.expose_fields.is_empty(),
+            "empty object should yield empty expose_fields"
+        );
+    }
+
+    #[test]
+    fn define_expose_no_args() {
+        let code = "defineExpose()";
+        let macros = parse_macros(code);
+        let de = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineExpose)
+            .unwrap();
+        assert!(
+            de.expose_fields.is_empty(),
+            "no args should yield empty expose_fields"
+        );
+    }
+
+    #[test]
+    fn define_expose_identifier_arg_empty() {
+        let code = "defineExpose(myObj)";
+        let macros = parse_macros(code);
+        let de = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineExpose)
+            .unwrap();
+        assert!(
+            de.expose_fields.is_empty(),
+            "identifier arg should yield empty expose_fields (can't resolve)"
+        );
+    }
+
+    #[test]
+    fn expose_fields_not_on_other_macros() {
+        let code = "defineProps<{ count: number }>()";
+        let macros = parse_macros(code);
+        assert!(
+            macros[0].expose_fields.is_empty(),
+            "defineProps should not have expose_fields"
+        );
+    }
+
+    // =========================================================================
+    // Issue 5: Emit field payload_type
+    // =========================================================================
+
+    #[test]
+    fn emit_field_payload_type_property_signature() {
+        let code = "defineEmits<{ change: [id: number]; click: [] }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].emit_fields;
+        assert_eq!(fields.len(), 2);
+        assert_eq!(
+            fields[0].payload_type.as_deref(),
+            Some("[id: number]"),
+            "change should have payload type"
+        );
+        assert_eq!(
+            fields[1].payload_type.as_deref(),
+            Some("[]"),
+            "click should have empty tuple payload"
+        );
+    }
+
+    #[test]
+    fn emit_field_payload_type_call_signature() {
+        let code = "defineEmits<{ (e: 'change', id: number): void }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].emit_fields;
+        assert_eq!(fields.len(), 1);
+        assert_eq!(
+            fields[0].payload_type.as_deref(),
+            Some("[id: number]"),
+            "call signature should extract params after event name as tuple"
+        );
+    }
+
+    #[test]
+    fn emit_field_payload_type_call_signature_no_payload() {
+        let code = "defineEmits<{ (e: 'click'): void }>()";
+        let macros = parse_macros(code);
+        let fields = &macros[0].emit_fields;
+        assert_eq!(fields.len(), 1);
+        assert_eq!(
+            fields[0].payload_type.as_deref(),
+            Some("[]"),
+            "call signature with no extra params should have empty tuple"
+        );
+    }
+
+    #[test]
+    fn emit_field_payload_type_runtime_none() {
+        let code = "defineEmits(['click'])";
+        let macros = parse_macros(code);
+        let fields = &macros[0].emit_fields;
+        assert_eq!(fields.len(), 1);
+        assert!(
+            fields[0].payload_type.is_none(),
+            "runtime emits should have no payload type"
+        );
     }
 
     #[test]

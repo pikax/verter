@@ -717,9 +717,17 @@ fn adjust_analysis_spans(
             pf.span.start = map(pf.span.start);
             pf.span.end = map(pf.span.end);
         }
+        for ef in &mut mac.emit_fields {
+            ef.span.start = map(ef.span.start);
+            ef.span.end = map(ef.span.end);
+        }
         for sf in &mut mac.slot_fields {
             sf.span.start = map(sf.span.start);
             sf.span.end = map(sf.span.end);
+        }
+        for xf in &mut mac.expose_fields {
+            xf.span.start = map(xf.span.start);
+            xf.span.end = map(xf.span.end);
         }
     }
     for call in &mut analysis.vue_api_calls {

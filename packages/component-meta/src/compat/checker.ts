@@ -83,7 +83,7 @@ export function mapSlotMeta(slot: SlotMeta, options?: MetaCheckerOptions): Prope
 export function mapExposedMeta(exposed: ExposedMeta, options?: MetaCheckerOptions): PropertyMeta {
   return {
     name: exposed.name,
-    description: "",
+    description: exposed.description ?? "",
     type: typeDescriptorToString(exposed.type),
     required: false,
     global: false,

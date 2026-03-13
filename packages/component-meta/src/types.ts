@@ -140,6 +140,8 @@ export interface ExposedMeta {
   name: string;
   /** Type descriptor for the exposed value. */
   type: TypeDescriptor;
+  /** JSDoc description from the leading `/** ... *​/` comment. */
+  description?: string;
 }
 
 // ── Template usage types ───────────────────────────────────────────

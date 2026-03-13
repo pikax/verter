@@ -829,6 +829,9 @@ pub struct JsdocTag {
 pub struct AnalyzedPropField {
     /// Prop name as declared (e.g., `"count"` from `defineProps<{ count: number }>()`).
     pub name: String,
+    /// Whether the prop is optional (`?` in type param). Always `false` for runtime props.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_optional: bool,
     /// SFC-absolute byte span of the prop name in the declaration.
     pub span: Span,
     /// TypeScript type annotation text (e.g., `"'primary' | 'secondary'"` from
@@ -852,6 +855,12 @@ pub struct AnalyzedEmitField {
     pub name: String,
     /// SFC-absolute byte span of the event name in the declaration.
     pub span: Span,
+    /// Payload type text extracted from the type declaration.
+    /// For property signatures: the value type (e.g., `"[id: number]"`).
+    /// For call signatures: params after event name as tuple (e.g., `"[id: number]"`).
+    /// `None` for runtime emits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_type: Option<String>,
     /// JSDoc description extracted from the leading `/** ... */` comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -975,6 +984,16 @@ pub struct AnalyzedOptionsComponent {
     pub import_source: Option<String>,
 }
 
+/// An individual exposed field from `defineExpose`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedExposeField {
+    /// Field name as declared (e.g., `"foo"` from `defineExpose({ foo })`).
+    pub name: String,
+    /// SFC-absolute byte span of the field key.
+    pub span: Span,
+}
+
 /// A Vue compiler macro call found in `<script setup>` (e.g., `defineProps`, `defineEmits`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedMacro {
@@ -999,6 +1018,12 @@ pub struct AnalyzedMacro {
     /// Individual slot fields from `defineSlots` (type-based).
     /// Each field has the slot name, whether it's required, and the SFC-absolute span.
     pub slot_fields: Vec<AnalyzedSlotField>,
+    /// Object property key names from the `withDefaults()` second argument.
+    /// Only populated for `WithDefaults` macros.
+    pub default_keys: Vec<String>,
+    /// Individual exposed fields from `defineExpose({ ... })`.
+    /// Only populated for `DefineExpose` macros with an object literal argument.
+    pub expose_fields: Vec<AnalyzedExposeField>,
     /// SFC-absolute byte span of the macro call.
     pub span: Span,
 }
@@ -1010,7 +1035,9 @@ impl serde::Serialize for AnalyzedMacro {
             + usize::from(self.model_name.is_some())
             + usize::from(!self.prop_fields.is_empty())
             + usize::from(!self.emit_fields.is_empty())
-            + usize::from(!self.slot_fields.is_empty());
+            + usize::from(!self.slot_fields.is_empty())
+            + usize::from(!self.default_keys.is_empty())
+            + usize::from(!self.expose_fields.is_empty());
         let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("isTypeBased", &self.is_type_based)?;
@@ -1028,6 +1055,12 @@ impl serde::Serialize for AnalyzedMacro {
         }
         if !self.slot_fields.is_empty() {
             s.serialize_field("slotFields", &self.slot_fields)?;
+        }
+        if !self.default_keys.is_empty() {
+            s.serialize_field("defaultKeys", &self.default_keys)?;
+        }
+        if !self.expose_fields.is_empty() {
+            s.serialize_field("exposeFields", &self.expose_fields)?;
         }
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
@@ -1055,6 +1088,10 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             #[serde(default)]
             slot_fields: Vec<AnalyzedSlotField>,
             #[serde(default)]
+            default_keys: Vec<String>,
+            #[serde(default)]
+            expose_fields: Vec<AnalyzedExposeField>,
+            #[serde(default)]
             span_start: u32,
             #[serde(default)]
             span_end: u32,
@@ -1070,6 +1107,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             prop_fields: w.prop_fields,
             emit_fields: w.emit_fields,
             slot_fields: w.slot_fields,
+            default_keys: w.default_keys,
+            expose_fields: w.expose_fields,
             span: Span::new(w.span_start, w.span_end),
         })
     }

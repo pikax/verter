@@ -242,7 +242,7 @@ describe("snapshotToMeta", () => {
       expect(meta.props).toEqual([]);
     });
 
-    it("marks props as hasDefault when withDefaults macro is present", () => {
+    it("marks props as hasDefault only for keys listed in withDefaults defaultKeys", () => {
       const snapshot = makeCompositionSnapshot(
         [
           { name: "msg", typeAnnotation: "string" },
@@ -269,6 +269,7 @@ describe("snapshotToMeta", () => {
             typeReferences: [],
             bindingName: null,
             hasInheritAttrsFalse: false,
+            defaultKeys: ["count"],
             spanStart: 0,
             spanEnd: 0,
           },
@@ -281,9 +282,10 @@ describe("snapshotToMeta", () => {
       expect(meta.props[0].required).toBe(true);
       expect(meta.props[0].hasDefault).toBe(false);
 
-      // count has no propDefinition, so withDefaults presence sets hasDefault
+      // count is in defaultKeys → hasDefault: true, not required
       expect(meta.props[1].name).toBe("count");
       expect(meta.props[1].hasDefault).toBe(true);
+      expect(meta.props[1].required).toBe(false);
     });
   });
 
@@ -1369,6 +1371,319 @@ describe("snapshotToMeta", () => {
 
       expect(meta.flags.hasWatchers).toBe(true);
       expect(meta.flags.hasStoreUsage).toBe(true);
+    });
+  });
+
+  // ── Issue 1+2: Prop required/optional + withDefaults ─────────
+
+  describe("prop required logic (Issues 1+2)", () => {
+    it("optional prop (?) is not required", () => {
+      const snapshot = makeSnapshot({
+        macros: [
+          {
+            kind: "DefineProps",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            propFields: [
+              { name: "title", isOptional: true, spanStart: 0, spanEnd: 0 },
+              { name: "count", isOptional: false, spanStart: 0, spanEnd: 0 },
+            ],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        scriptFlags: 1 << 1,
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.props).toHaveLength(2);
+      expect(meta.props[0].name).toBe("title");
+      expect(meta.props[0].required).toBe(false);
+      expect(meta.props[1].name).toBe("count");
+      expect(meta.props[1].required).toBe(true);
+    });
+
+    it("withDefaults marks individual props as hasDefault", () => {
+      const snapshot = makeSnapshot({
+        macros: [
+          {
+            kind: "DefineProps",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            propFields: [
+              { name: "msg", isOptional: false, spanStart: 0, spanEnd: 0 },
+              { name: "count", isOptional: false, spanStart: 0, spanEnd: 0 },
+            ],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+          {
+            kind: "WithDefaults",
+            isTypeBased: false,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            defaultKeys: ["msg"],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        scriptFlags: 1 << 1,
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.props).toHaveLength(2);
+      // msg has a default → not required, hasDefault: true
+      const msg = meta.props.find((p) => p.name === "msg")!;
+      expect(msg.hasDefault).toBe(true);
+      expect(msg.required).toBe(false);
+      // count has no default → required, hasDefault: false
+      const count = meta.props.find((p) => p.name === "count")!;
+      expect(count.hasDefault).toBe(false);
+      expect(count.required).toBe(true);
+    });
+  });
+
+  // ── Issue 3: defineSlots-only ──────────────────────────────────
+
+  describe("defineSlots-only (Issue 3)", () => {
+    it("extracts slots from defineSlots when template has no <slot> tags", () => {
+      const snapshot = makeSnapshot({
+        macros: [
+          {
+            kind: "DefineSlots",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            slotFields: [
+              {
+                name: "default",
+                isRequired: true,
+                bindings: [{ name: "item", typeAnnotation: "string" }],
+              },
+              { name: "header", isRequired: false, bindings: [] },
+            ],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        scriptFlags: 1 << 6,
+        template: { definedSlots: [] },
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.slots).toHaveLength(2);
+      expect(meta.slots[0].name).toBe("default");
+      expect(meta.slots[0].isRequired).toBe(true);
+      expect(meta.slots[0].bindings).toHaveLength(1);
+      expect(meta.slots[0].bindings[0].name).toBe("item");
+      expect(meta.slots[1].name).toBe("header");
+      expect(meta.slots[1].isRequired).toBe(false);
+    });
+
+    it("still uses template slots when they exist", () => {
+      const snapshot = makeCompositionSnapshot(
+        [{ name: "x" }],
+        [],
+        {
+          definedSlots: [{ name: "default", hasBindings: false }],
+        },
+        [
+          {
+            kind: "DefineSlots",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            slotFields: [{ name: "default", isRequired: true, bindings: [] }],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+      );
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.slots).toHaveLength(1);
+      expect(meta.slots[0].name).toBe("default");
+    });
+  });
+
+  // ── Issue 4: defineExpose ──────────────────────────────────────
+
+  describe("defineExpose (Issue 4)", () => {
+    it("extracts expose fields from macro", () => {
+      const snapshot = makeSnapshot({
+        macros: [
+          {
+            kind: "DefineExpose",
+            isTypeBased: false,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            exposeFields: [
+              { name: "foo", spanStart: 0, spanEnd: 0 },
+              { name: "bar", spanStart: 0, spanEnd: 0 },
+            ],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        scriptFlags: 1 << 4,
+        bindings: [],
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.exposed).toHaveLength(2);
+      expect(meta.exposed[0].name).toBe("foo");
+      expect(meta.exposed[1].name).toBe("bar");
+    });
+  });
+
+  // ── Issue 5: Emit payload types ──────────────────────────────
+
+  describe("emit payload types (Issue 5)", () => {
+    it("uses payload type from Rust analysis", () => {
+      const snapshot = makeSnapshot({
+        macros: [
+          {
+            kind: "DefineEmits",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            emitFields: [
+              { name: "change", payloadType: "[id: number]", spanStart: 0, spanEnd: 0 },
+              { name: "click", payloadType: "[]", spanStart: 0, spanEnd: 0 },
+              { name: "input", payloadType: "string", spanStart: 0, spanEnd: 0 },
+            ],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        scriptFlags: 1 << 2,
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.events).toHaveLength(3);
+      // rawSignature should be set from payloadType
+      expect(meta.events[0].name).toBe("change");
+      expect(meta.events[0].rawSignature).toBe("[id: number]");
+      expect(meta.events[0].payload.kind).toBe("tuple"); // labeled tuple now parsed
+      expect(meta.events[1].name).toBe("click");
+      expect(meta.events[1].rawSignature).toBe("[]");
+      expect(meta.events[1].payload.kind).toBe("tuple"); // empty tuple
+      // Simple type should parse correctly
+      expect(meta.events[2].name).toBe("input");
+      expect(meta.events[2].payload.kind).toBe("primitive");
+      expect(meta.events[2].rawSignature).toBe("string");
+    });
+
+    it("falls back to unknown when no payloadType", () => {
+      const snapshot = makeCompositionSnapshot([], [{ name: "click" }]);
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.events[0].payload.kind).toBe("unknown");
+    });
+  });
+
+  // ── Issues 6+7: Model props and events ────────────────────────
+
+  describe("model props and events (Issues 6+7)", () => {
+    it("synthesizes prop from defineModel", () => {
+      const snapshot = makeSnapshot({
+        macros: [
+          {
+            kind: "DefineProps",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            propFields: [],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+          {
+            kind: "DefineModel",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            modelName: "title",
+            hasInheritAttrsFalse: false,
+            propFields: [{ name: "title", typeAnnotation: "string", spanStart: 0, spanEnd: 0 }],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        scriptFlags: (1 << 1) | (1 << 3),
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      // Should have a prop named "title" from defineModel
+      const titleProp = meta.props.find((p) => p.name === "title");
+      expect(titleProp).toBeDefined();
+      expect(titleProp!.required).toBe(false);
+    });
+
+    it("synthesizes update:modelName event from defineModel", () => {
+      const snapshot = makeSnapshot({
+        macros: [
+          {
+            kind: "DefineEmits",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            emitFields: [],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+          {
+            kind: "DefineModel",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            modelName: "title",
+            hasInheritAttrsFalse: false,
+            propFields: [{ name: "title", typeAnnotation: "string", spanStart: 0, spanEnd: 0 }],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        scriptFlags: (1 << 2) | (1 << 3),
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      const updateEvent = meta.events.find((e) => e.name === "update:title");
+      expect(updateEvent).toBeDefined();
+      expect(updateEvent!.isDeclared).toBe(true);
+    });
+
+    it("uses modelValue as default model name", () => {
+      const snapshot = makeSnapshot({
+        macros: [
+          {
+            kind: "DefineProps",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            propFields: [],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+          {
+            kind: "DefineModel",
+            isTypeBased: true,
+            typeReferences: [],
+            bindingName: null,
+            hasInheritAttrsFalse: false,
+            propFields: [
+              { name: "modelValue", typeAnnotation: "string", spanStart: 0, spanEnd: 0 },
+            ],
+            spanStart: 0,
+            spanEnd: 0,
+          },
+        ],
+        scriptFlags: (1 << 1) | (1 << 3),
+      });
+      const meta = snapshotToMeta(snapshot, "Comp.vue");
+      expect(meta.props.find((p) => p.name === "modelValue")).toBeDefined();
     });
   });
 });

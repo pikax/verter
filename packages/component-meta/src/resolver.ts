@@ -453,6 +453,25 @@ class Parser {
     const elements: TypeDescriptor[] = [];
 
     while (this.peek().kind !== TokenKind.RBracket && this.peek().kind !== TokenKind.EOF) {
+      // Handle labeled tuple elements: `name: Type` or `name?: Type`
+      if (this.peek().kind === TokenKind.Identifier && this.pos + 1 < this.tokens.length) {
+        const next = this.tokens[this.pos + 1];
+        // Check for `label:` or `label?:` pattern
+        if (next.kind === TokenKind.Colon) {
+          // Skip label and colon
+          this.advance(); // label
+          this.advance(); // :
+        } else if (
+          next.kind === TokenKind.Question &&
+          this.pos + 2 < this.tokens.length &&
+          this.tokens[this.pos + 2].kind === TokenKind.Colon
+        ) {
+          // Skip label, ?, and colon
+          this.advance(); // label
+          this.advance(); // ?
+          this.advance(); // :
+        }
+      }
       elements.push(this.parseUnion());
       if (!this.match(TokenKind.Comma)) break;
     }
