@@ -1,9 +1,10 @@
 use oxc_ast::ast::*;
+use oxc_ast::{Comment, CommentContent};
 use oxc_span::GetSpan;
 
 use crate::types::{
     AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
-    AnalyzedSlotFieldBinding,
+    AnalyzedSlotFieldBinding, JsdocTag,
 };
 
 /// Classify a callee name as a Vue compiler macro.
@@ -190,11 +191,16 @@ fn analyze_macros_from_program(program: &Program<'_>, source: &str) -> Vec<Analy
     for stmt in &program.body {
         match stmt {
             Statement::ExpressionStatement(expr_stmt) => {
-                try_extract_macro_from_expr(&expr_stmt.expression, &mut macros, source);
+                try_extract_macro_from_expr(
+                    &expr_stmt.expression,
+                    &mut macros,
+                    source,
+                    &program.comments,
+                );
             }
             Statement::VariableDeclaration(var_decl) => {
                 for decl in &var_decl.declarations {
-                    try_extract_macro_from_var_decl(decl, &mut macros, source);
+                    try_extract_macro_from_var_decl(decl, &mut macros, source, &program.comments);
                 }
             }
             _ => {}
@@ -210,10 +216,11 @@ pub(crate) fn try_extract_macro_from_expr(
     expression: &Expression<'_>,
     macros: &mut Vec<AnalyzedMacro>,
     source: &str,
+    comments: &[Comment],
 ) {
-    if let Some(m) = try_extract_macro(expression, None, source) {
+    if let Some(m) = try_extract_macro(expression, None, source, comments) {
         if m.kind == AnalyzedMacroKind::WithDefaults {
-            try_extract_inner_macro(expression, macros, source);
+            try_extract_inner_macro(expression, macros, source, comments);
         }
         macros.push(m);
     }
@@ -225,6 +232,7 @@ pub(crate) fn try_extract_macro_from_var_decl(
     decl: &VariableDeclarator<'_>,
     macros: &mut Vec<AnalyzedMacro>,
     source: &str,
+    comments: &[Comment],
 ) {
     if let Some(ref init) = decl.init {
         let binding_name = if let BindingPattern::BindingIdentifier(id) = &decl.id {
@@ -232,9 +240,9 @@ pub(crate) fn try_extract_macro_from_var_decl(
         } else {
             None
         };
-        if let Some(m) = try_extract_macro(init, binding_name, source) {
+        if let Some(m) = try_extract_macro(init, binding_name, source, comments) {
             if m.kind == AnalyzedMacroKind::WithDefaults {
-                try_extract_inner_macro(init, macros, source);
+                try_extract_inner_macro(init, macros, source, comments);
             }
             macros.push(m);
         }
@@ -243,11 +251,16 @@ pub(crate) fn try_extract_macro_from_var_decl(
 
 /// For `withDefaults(defineProps<...>(), {...})`, extract the inner macro
 /// (e.g. `defineProps`) from the first argument.
-fn try_extract_inner_macro(expr: &Expression<'_>, macros: &mut Vec<AnalyzedMacro>, source: &str) {
+fn try_extract_inner_macro(
+    expr: &Expression<'_>,
+    macros: &mut Vec<AnalyzedMacro>,
+    source: &str,
+    comments: &[Comment],
+) {
     if let Expression::CallExpression(call) = expr {
         if let Some(first_arg) = call.arguments.first() {
             if let Some(inner_expr) = first_arg.as_expression() {
-                if let Some(m) = try_extract_macro(inner_expr, None, source) {
+                if let Some(m) = try_extract_macro(inner_expr, None, source, comments) {
                     macros.push(m);
                 }
             }
@@ -260,6 +273,7 @@ fn try_extract_macro(
     expr: &Expression<'_>,
     binding_name: Option<String>,
     source: &str,
+    comments: &[Comment],
 ) -> Option<AnalyzedMacro> {
     match expr {
         Expression::CallExpression(call) => {
@@ -300,19 +314,19 @@ fn try_extract_macro(
                 kind == AnalyzedMacroKind::DefineOptions && has_inherit_attrs_false_in_args(call);
 
             let prop_fields = if kind == AnalyzedMacroKind::DefineProps {
-                extract_prop_fields(call, source)
+                extract_prop_fields(call, source, comments)
             } else {
                 Vec::new()
             };
 
             let emit_fields = if kind == AnalyzedMacroKind::DefineEmits {
-                extract_emit_fields(call)
+                extract_emit_fields(call, comments, source)
             } else {
                 Vec::new()
             };
 
             let slot_fields = if kind == AnalyzedMacroKind::DefineSlots {
-                extract_slot_fields(call, source)
+                extract_slot_fields(call, source, comments)
             } else {
                 Vec::new()
             };
@@ -340,11 +354,15 @@ fn try_extract_macro(
 /// - Type-based: `defineProps<{ count: number, name: string }>()`
 /// - Runtime object: `defineProps({ count: { type: Number }, name: String })`
 /// - Runtime array: `defineProps(['count', 'name'])`
-fn extract_prop_fields(call: &CallExpression<'_>, source: &str) -> Vec<AnalyzedPropField> {
+fn extract_prop_fields(
+    call: &CallExpression<'_>,
+    source: &str,
+    comments: &[Comment],
+) -> Vec<AnalyzedPropField> {
     // Type-based: extract from type parameters
     if let Some(ref type_args) = call.type_arguments {
         if let Some(first) = type_args.params.first() {
-            return extract_prop_fields_from_type(first, source);
+            return extract_prop_fields_from_type(first, source, comments);
         }
     }
 
@@ -359,7 +377,11 @@ fn extract_prop_fields(call: &CallExpression<'_>, source: &str) -> Vec<AnalyzedP
 }
 
 /// Extract prop fields from a TypeScript type parameter (e.g., `{ count: number }`).
-fn extract_prop_fields_from_type(ts_type: &TSType<'_>, source: &str) -> Vec<AnalyzedPropField> {
+fn extract_prop_fields_from_type(
+    ts_type: &TSType<'_>,
+    source: &str,
+    comments: &[Comment],
+) -> Vec<AnalyzedPropField> {
     match ts_type {
         TSType::TSTypeLiteral(literal) => literal
             .members
@@ -386,10 +408,15 @@ fn extract_prop_fields_from_type(ts_type: &TSType<'_>, source: &str) -> Vec<Anal
                             None
                         }
                     });
+                    // Extract JSDoc from leading comment
+                    let (description, tags) =
+                        extract_jsdoc_for(comments, prop.span().start, source);
                     key_name.map(|name| AnalyzedPropField {
                         name,
                         span: prop.key.span().into(),
                         type_annotation,
+                        description,
+                        tags,
                     })
                 } else {
                     None
@@ -405,7 +432,7 @@ fn extract_prop_fields_from_type(ts_type: &TSType<'_>, source: &str) -> Vec<Anal
             intersection
                 .types
                 .iter()
-                .flat_map(|t| extract_prop_fields_from_type(t, source))
+                .flat_map(|t| extract_prop_fields_from_type(t, source, comments))
                 .collect()
         }
         _ => Vec::new(),
@@ -429,6 +456,8 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropFi
                         name,
                         span: p.key.span().into(),
                         type_annotation: None,
+                        description: None,
+                        tags: Vec::new(),
                     })
                 } else {
                     None
@@ -444,6 +473,8 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropFi
                         name: lit.value.to_string(),
                         span: lit.span.into(),
                         type_annotation: None,
+                        description: None,
+                        tags: Vec::new(),
                     })
                 } else {
                     None
@@ -461,11 +492,15 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedPropFi
 /// - Type-based call-signature: `defineEmits<{ (e: 'change', id: number): void }>()`
 /// - Runtime array: `defineEmits(['custom', 'click'])`
 /// - Runtime object: `defineEmits({ custom: null })`
-fn extract_emit_fields(call: &CallExpression<'_>) -> Vec<AnalyzedEmitField> {
+fn extract_emit_fields(
+    call: &CallExpression<'_>,
+    comments: &[Comment],
+    source: &str,
+) -> Vec<AnalyzedEmitField> {
     // Type-based: extract from type parameters
     if let Some(ref type_args) = call.type_arguments {
         if let Some(first) = type_args.params.first() {
-            return extract_emit_fields_from_type(first);
+            return extract_emit_fields_from_type(first, comments, source);
         }
     }
 
@@ -484,7 +519,11 @@ fn extract_emit_fields(call: &CallExpression<'_>) -> Vec<AnalyzedEmitField> {
 /// Handles two TSTypeLiteral member shapes:
 /// 1. `TSPropertySignature` — key name is the event name (e.g., `custom: [payload: string]`)
 /// 2. `TSCallSignatureDeclaration` — first param's string literal type is the event name
-fn extract_emit_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedEmitField> {
+fn extract_emit_fields_from_type(
+    ts_type: &TSType<'_>,
+    comments: &[Comment],
+    source: &str,
+) -> Vec<AnalyzedEmitField> {
     match ts_type {
         TSType::TSTypeLiteral(literal) => literal
             .members
@@ -497,21 +536,29 @@ fn extract_emit_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedEmitField>
                         PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                         _ => None,
                     };
+                    let (description, tags) =
+                        extract_jsdoc_for(comments, prop.span().start, source);
                     key_name.map(|name| AnalyzedEmitField {
                         name,
                         span: prop.key.span().into(),
+                        description,
+                        tags,
                     })
                 }
                 // Call signature: `(e: 'change', id: number): void`
-                TSSignature::TSCallSignatureDeclaration(call) => {
+                TSSignature::TSCallSignatureDeclaration(call_sig) => {
                     // First param should be string literal type: `e: 'change'`
-                    let first_param = call.params.items.first()?;
+                    let first_param = call_sig.params.items.first()?;
                     let type_ann = first_param.type_annotation.as_ref()?;
                     if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
                         if let TSLiteral::StringLiteral(s) = &lit.literal {
+                            let (description, tags) =
+                                extract_jsdoc_for(comments, call_sig.span().start, source);
                             return Some(AnalyzedEmitField {
                                 name: s.value.to_string(),
                                 span: s.span.into(),
+                                description,
+                                tags,
                             });
                         }
                     }
@@ -524,7 +571,7 @@ fn extract_emit_fields_from_type(ts_type: &TSType<'_>) -> Vec<AnalyzedEmitField>
         TSType::TSIntersectionType(intersection) => intersection
             .types
             .iter()
-            .flat_map(|t| extract_emit_fields_from_type(t))
+            .flat_map(|t| extract_emit_fields_from_type(t, comments, source))
             .collect(),
         _ => Vec::new(),
     }
@@ -546,6 +593,8 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     key_name.map(|name| AnalyzedEmitField {
                         name,
                         span: p.key.span().into(),
+                        description: None,
+                        tags: Vec::new(),
                     })
                 } else {
                     None
@@ -560,6 +609,8 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     Some(AnalyzedEmitField {
                         name: lit.value.to_string(),
                         span: lit.span.into(),
+                        description: None,
+                        tags: Vec::new(),
                     })
                 } else {
                     None
@@ -575,10 +626,14 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
 /// Handles:
 /// - Type-based: `defineSlots<{ default(props: { item: string }): any; header?(props: {}): any }>()`
 /// - Empty / no type params → empty vec
-fn extract_slot_fields(call: &CallExpression<'_>, source: &str) -> Vec<AnalyzedSlotField> {
+fn extract_slot_fields(
+    call: &CallExpression<'_>,
+    source: &str,
+    comments: &[Comment],
+) -> Vec<AnalyzedSlotField> {
     if let Some(ref type_args) = call.type_arguments {
         if let Some(first) = type_args.params.first() {
-            return extract_slot_fields_from_type(first, source);
+            return extract_slot_fields_from_type(first, source, comments);
         }
     }
     Vec::new()
@@ -590,7 +645,11 @@ fn extract_slot_fields(call: &CallExpression<'_>, source: &str) -> Vec<AnalyzedS
 /// - `TSPropertySignature`: `default: (props: { row: MyItem }) => any`
 /// - `TSMethodSignature`: `default(props: { item: string }): any`
 /// - `TSIntersectionType`: merges fields from all branches
-fn extract_slot_fields_from_type(ts_type: &TSType<'_>, source: &str) -> Vec<AnalyzedSlotField> {
+fn extract_slot_fields_from_type(
+    ts_type: &TSType<'_>,
+    source: &str,
+    comments: &[Comment],
+) -> Vec<AnalyzedSlotField> {
     match ts_type {
         TSType::TSTypeLiteral(literal) => literal
             .members
@@ -608,11 +667,15 @@ fn extract_slot_fields_from_type(ts_type: &TSType<'_>, source: &str) -> Vec<Anal
                         .as_ref()
                         .map(|ta| extract_slot_bindings_from_fn_type(&ta.type_annotation, source))
                         .unwrap_or_default();
+                    let (description, tags) =
+                        extract_jsdoc_for(comments, prop.span().start, source);
                     key_name.map(|name| AnalyzedSlotField {
                         name,
                         is_required: !prop.optional,
                         span: prop.key.span().into(),
                         bindings,
+                        description,
+                        tags,
                     })
                 }
                 TSSignature::TSMethodSignature(method) => {
@@ -622,11 +685,15 @@ fn extract_slot_fields_from_type(ts_type: &TSType<'_>, source: &str) -> Vec<Anal
                         _ => None,
                     };
                     let bindings = extract_slot_bindings_from_params(&method.params, source);
+                    let (description, tags) =
+                        extract_jsdoc_for(comments, method.span().start, source);
                     key_name.map(|name| AnalyzedSlotField {
                         name,
                         is_required: !method.optional,
                         span: method.key.span().into(),
                         bindings,
+                        description,
+                        tags,
                     })
                 }
                 _ => None,
@@ -636,7 +703,7 @@ fn extract_slot_fields_from_type(ts_type: &TSType<'_>, source: &str) -> Vec<Anal
         TSType::TSIntersectionType(intersection) => intersection
             .types
             .iter()
-            .flat_map(|t| extract_slot_fields_from_type(t, source))
+            .flat_map(|t| extract_slot_fields_from_type(t, source, comments))
             .collect(),
         _ => Vec::new(),
     }
@@ -739,6 +806,125 @@ fn has_inherit_attrs_false_in_args(call: &CallExpression<'_>) -> bool {
         }
     }
     false
+}
+
+// ── JSDoc extraction helpers ─────────────────────────────────────────
+
+/// Find a leading JSDoc comment for a declaration at the given byte offset.
+///
+/// OXC's `Comment.attached_to` is the byte offset of the token the comment precedes.
+fn find_leading_jsdoc<'a>(
+    comments: &[Comment],
+    target_start: u32,
+    source: &'a str,
+) -> Option<&'a str> {
+    for comment in comments {
+        if comment.attached_to == target_start
+            && comment.is_block()
+            && matches!(
+                comment.content,
+                CommentContent::Jsdoc | CommentContent::JsdocLegal
+            )
+        {
+            let start = comment.span.start as usize;
+            let end = comment.span.end as usize;
+            if end <= source.len() {
+                return Some(&source[start..end]);
+            }
+        }
+    }
+    None
+}
+
+/// Parse a raw JSDoc comment text into a description and a list of tags.
+///
+/// Input is the full comment including `/**` and `*/` delimiters.
+/// Returns `(description, tags)`.
+fn parse_jsdoc(raw: &str) -> (Option<String>, Vec<JsdocTag>) {
+    // Strip /** and */ delimiters
+    let inner = raw
+        .strip_prefix("/**")
+        .unwrap_or(raw)
+        .strip_suffix("*/")
+        .unwrap_or(raw);
+
+    // Clean up each line: strip leading whitespace and `*`
+    let lines: Vec<&str> = inner
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            trimmed.strip_prefix('*').unwrap_or(trimmed).trim()
+        })
+        .collect();
+
+    let mut description_parts = Vec::new();
+    let mut tags = Vec::new();
+    let mut current_tag: Option<(String, Vec<String>)> = None;
+
+    for line in &lines {
+        if let Some(rest) = line.strip_prefix('@') {
+            // Flush current tag
+            if let Some((name, text_parts)) = current_tag.take() {
+                let text = text_parts.join(" ");
+                tags.push(JsdocTag {
+                    name,
+                    text: if text.is_empty() { None } else { Some(text) },
+                });
+            }
+            // Parse new tag
+            let (tag_name, tag_text) =
+                if let Some(space_idx) = rest.find(|c: char| c.is_whitespace()) {
+                    (&rest[..space_idx], rest[space_idx..].trim())
+                } else {
+                    (rest.trim(), "")
+                };
+            current_tag = Some((
+                tag_name.to_string(),
+                if tag_text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![tag_text.to_string()]
+                },
+            ));
+        } else if let Some(ref mut tag) = current_tag {
+            // Continuation of a tag
+            if !line.is_empty() {
+                tag.1.push(line.to_string());
+            }
+        } else if !line.is_empty() {
+            // Part of description
+            description_parts.push(*line);
+        }
+    }
+
+    // Flush last tag
+    if let Some((name, text_parts)) = current_tag {
+        let text = text_parts.join(" ");
+        tags.push(JsdocTag {
+            name,
+            text: if text.is_empty() { None } else { Some(text) },
+        });
+    }
+
+    let description = if description_parts.is_empty() {
+        None
+    } else {
+        Some(description_parts.join(" "))
+    };
+
+    (description, tags)
+}
+
+/// Extract JSDoc description and tags for a given AST node position.
+fn extract_jsdoc_for(
+    comments: &[Comment],
+    target_start: u32,
+    source: &str,
+) -> (Option<String>, Vec<JsdocTag>) {
+    match find_leading_jsdoc(comments, target_start, source) {
+        Some(raw) => parse_jsdoc(raw),
+        None => (None, Vec::new()),
+    }
 }
 
 #[cfg(test)]
@@ -1565,5 +1751,159 @@ defineExpose({ props })
             fields[1].bindings[0].type_annotation.as_deref(),
             Some("number")
         );
+    }
+
+    // ── JSDoc extraction tests ───────────────────────────────────
+
+    #[test]
+    fn jsdoc_on_prop_fields() {
+        let code = r#"defineProps<{
+            /** The display label */
+            label: string
+            /** Size variant
+             * @default 'md'
+             */
+            size: string
+            noDoc: number
+        }>()"#;
+        let macros = parse_macros(code);
+        let fields = &macros[0].prop_fields;
+
+        assert_eq!(fields.len(), 3);
+
+        // label has description, no tags
+        assert_eq!(fields[0].description.as_deref(), Some("The display label"));
+        assert!(fields[0].tags.is_empty());
+
+        // size has description and @default tag
+        assert_eq!(fields[1].description.as_deref(), Some("Size variant"));
+        assert_eq!(fields[1].tags.len(), 1);
+        assert_eq!(fields[1].tags[0].name, "default");
+        assert_eq!(fields[1].tags[0].text.as_deref(), Some("'md'"));
+
+        // noDoc has no JSDoc
+        assert!(fields[2].description.is_none());
+        assert!(fields[2].tags.is_empty());
+    }
+
+    #[test]
+    fn jsdoc_on_emit_fields() {
+        let code = r#"defineEmits<{
+            /** Fired on click */
+            click: []
+            /** @deprecated use 'input' instead */
+            change: [value: string]
+        }>()"#;
+        let macros = parse_macros(code);
+        let fields = &macros[0].emit_fields;
+
+        assert_eq!(fields.len(), 2);
+
+        assert_eq!(fields[0].description.as_deref(), Some("Fired on click"));
+        assert!(fields[0].tags.is_empty());
+
+        assert!(
+            fields[1].description.is_none(),
+            "tag-only JSDoc should not have description"
+        );
+        assert_eq!(fields[1].tags.len(), 1);
+        assert_eq!(fields[1].tags[0].name, "deprecated");
+        assert_eq!(
+            fields[1].tags[0].text.as_deref(),
+            Some("use 'input' instead")
+        );
+    }
+
+    #[test]
+    fn jsdoc_on_slot_fields() {
+        let code = r#"defineSlots<{
+            /** The main content area */
+            default(props: { item: string }): any
+        }>()"#;
+        let macros = parse_macros(code);
+        let fields = &macros[0].slot_fields;
+
+        assert_eq!(fields.len(), 1);
+        assert_eq!(
+            fields[0].description.as_deref(),
+            Some("The main content area")
+        );
+        assert!(fields[0].tags.is_empty());
+    }
+
+    #[test]
+    fn jsdoc_with_multiple_tags() {
+        let code = r#"defineProps<{
+            /**
+             * User identifier
+             * @param {string} id - The user ID
+             * @deprecated Use userId instead
+             * @see https://example.com
+             */
+            id: string
+        }>()"#;
+        let macros = parse_macros(code);
+        let fields = &macros[0].prop_fields;
+
+        assert_eq!(fields[0].description.as_deref(), Some("User identifier"));
+        assert_eq!(fields[0].tags.len(), 3);
+        assert_eq!(fields[0].tags[0].name, "param");
+        assert_eq!(
+            fields[0].tags[0].text.as_deref(),
+            Some("{string} id - The user ID")
+        );
+        assert_eq!(fields[0].tags[1].name, "deprecated");
+        assert_eq!(
+            fields[0].tags[1].text.as_deref(),
+            Some("Use userId instead")
+        );
+        assert_eq!(fields[0].tags[2].name, "see");
+        assert_eq!(
+            fields[0].tags[2].text.as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn no_jsdoc_produces_none_and_empty() {
+        let code = r#"defineProps<{ count: number }>()"#;
+        let macros = parse_macros(code);
+        let fields = &macros[0].prop_fields;
+
+        assert_eq!(fields.len(), 1);
+        assert!(fields[0].description.is_none());
+        assert!(fields[0].tags.is_empty());
+    }
+
+    #[test]
+    fn parse_jsdoc_unit_tests() {
+        // Simple description
+        let (desc, tags) = parse_jsdoc("/** Hello world */");
+        assert_eq!(desc.as_deref(), Some("Hello world"));
+        assert!(tags.is_empty());
+
+        // Tag only
+        let (desc, tags) = parse_jsdoc("/** @deprecated */");
+        assert!(desc.is_none());
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "deprecated");
+        assert!(tags[0].text.is_none());
+
+        // Tag with text
+        let (desc, tags) = parse_jsdoc("/** @default 'hello' */");
+        assert!(desc.is_none());
+        assert_eq!(tags[0].name, "default");
+        assert_eq!(tags[0].text.as_deref(), Some("'hello'"));
+
+        // Multi-line
+        let (desc, tags) = parse_jsdoc(
+            "/**\n * A description\n * @param name - the name\n * @returns nothing\n */",
+        );
+        assert_eq!(desc.as_deref(), Some("A description"));
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].name, "param");
+        assert_eq!(tags[0].text.as_deref(), Some("name - the name"));
+        assert_eq!(tags[1].name, "returns");
+        assert_eq!(tags[1].text.as_deref(), Some("nothing"));
     }
 }

@@ -50,6 +50,14 @@ export interface ComponentMeta {
   flags: ComponentFlags;
 }
 
+/** A single JSDoc tag. */
+export interface JsdocTag {
+  /** Tag name without the `@` prefix (e.g. `"param"`, `"deprecated"`, `"default"`). */
+  name: string;
+  /** Tag text after the tag name, if any. */
+  text?: string;
+}
+
 /** Metadata for a single component prop. */
 export interface PropMeta {
   /** Prop name as declared in `defineProps` or Options API. */
@@ -64,6 +72,10 @@ export interface PropMeta {
   rawType?: string;
   /** Vue runtime constructor names (e.g. `["String", "Number"]`). */
   runtimeTypes?: string[];
+  /** JSDoc description from the leading `/** ... *​/` comment. */
+  description?: string;
+  /** JSDoc tags (e.g. `@default`, `@deprecated`). */
+  tags?: JsdocTag[];
 }
 
 /** Metadata for a single component event. */
@@ -78,6 +90,10 @@ export interface EventMeta {
   isDeclared: boolean;
   /** Original emit signature string. */
   rawSignature?: string;
+  /** JSDoc description from the leading `/** ... *​/` comment. */
+  description?: string;
+  /** JSDoc tags (e.g. `@deprecated`). */
+  tags?: JsdocTag[];
 }
 
 /** Metadata for a single template slot. */
@@ -92,6 +108,10 @@ export interface SlotMeta {
   isRequired?: boolean;
   /** Whether the `<slot>` element has fallback content. */
   hasFallbackContent?: boolean;
+  /** JSDoc description from the leading `/** ... *​/` comment. */
+  description?: string;
+  /** JSDoc tags (e.g. `@deprecated`). */
+  tags?: JsdocTag[];
 }
 
 /** A single binding exposed by a scoped slot. */

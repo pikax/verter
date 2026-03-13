@@ -15,6 +15,7 @@ export type {
   SlotBinding,
   ModelMeta,
   ExposedMeta,
+  JsdocTag,
   ComponentPropUsage,
   ComponentUsage,
   TemplateRefMeta,

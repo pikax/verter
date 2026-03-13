@@ -53,12 +53,18 @@ const activeFlagChips = computed<string[]>(() => {
       <details v-if="meta.props.length > 0" class="analysis-section" open>
         <summary class="section-title">Props ({{ meta.props.length }})</summary>
         <div class="import-list">
-          <div v-for="(p, i) in meta.props" :key="i" class="binding-item">
-            <code class="binding-name">{{ p.name }}</code>
-            <span class="badge badge-type">{{ formatTypeDescriptor(p.type) }}</span>
-            <span v-if="p.required" class="badge badge-reactive">required</span>
-            <span v-if="p.hasDefault" class="badge badge-vue">default</span>
-            <span v-if="p.rawType" class="binding-init">raw: {{ p.rawType }}</span>
+          <div v-for="(p, i) in meta.props" :key="i" class="import-item">
+            <div class="binding-item">
+              <code class="binding-name">{{ p.name }}</code>
+              <span class="badge badge-type">{{ formatTypeDescriptor(p.type) }}</span>
+              <span v-if="p.required" class="badge badge-reactive">required</span>
+              <span v-if="p.hasDefault" class="badge badge-vue">default</span>
+              <span v-if="p.rawType" class="binding-init">raw: {{ p.rawType }}</span>
+            </div>
+            <div v-if="p.description" class="jsdoc-description">{{ p.description }}</div>
+            <div v-if="p.tags?.length" class="jsdoc-tags">
+              <span v-for="(tag, j) in p.tags" :key="j" class="jsdoc-tag">@{{ tag.name }}<span v-if="tag.text"> {{ tag.text }}</span></span>
+            </div>
           </div>
         </div>
       </details>
@@ -67,11 +73,17 @@ const activeFlagChips = computed<string[]>(() => {
       <details v-if="meta.events.length > 0" class="analysis-section" open>
         <summary class="section-title">Events ({{ meta.events.length }})</summary>
         <div class="import-list">
-          <div v-for="(e, i) in meta.events" :key="i" class="binding-item">
-            <code class="binding-name">{{ e.name }}</code>
-            <span class="badge badge-type">{{ formatTypeDescriptor(e.payload) }}</span>
-            <span v-if="e.hasValidator" class="badge badge-reactive">validator</span>
-            <span v-if="e.isDeclared" class="badge badge-vue">declared</span>
+          <div v-for="(e, i) in meta.events" :key="i" class="import-item">
+            <div class="binding-item">
+              <code class="binding-name">{{ e.name }}</code>
+              <span class="badge badge-type">{{ formatTypeDescriptor(e.payload) }}</span>
+              <span v-if="e.hasValidator" class="badge badge-reactive">validator</span>
+              <span v-if="e.isDeclared" class="badge badge-vue">declared</span>
+            </div>
+            <div v-if="e.description" class="jsdoc-description">{{ e.description }}</div>
+            <div v-if="e.tags?.length" class="jsdoc-tags">
+              <span v-for="(tag, j) in e.tags" :key="j" class="jsdoc-tag">@{{ tag.name }}<span v-if="tag.text"> {{ tag.text }}</span></span>
+            </div>
           </div>
         </div>
       </details>
@@ -86,6 +98,10 @@ const activeFlagChips = computed<string[]>(() => {
               <span v-if="s.isScoped" class="badge badge-reactive">scoped</span>
               <span v-if="s.isRequired" class="badge badge-vue">required</span>
               <span v-if="s.hasFallbackContent" class="badge badge-kind">fallback</span>
+            </div>
+            <div v-if="s.description" class="jsdoc-description">{{ s.description }}</div>
+            <div v-if="s.tags?.length" class="jsdoc-tags">
+              <span v-for="(tag, j) in s.tags" :key="j" class="jsdoc-tag">@{{ tag.name }}<span v-if="tag.text"> {{ tag.text }}</span></span>
             </div>
             <div v-if="s.bindings.length > 0" class="import-bindings">
               <span v-for="(b, j) in s.bindings" :key="j" class="binding-tag">
@@ -366,6 +382,29 @@ const activeFlagChips = computed<string[]>(() => {
   padding: 1px 4px;
   background: var(--bg-tertiary);
   border-radius: 2px;
+}
+
+.jsdoc-description {
+  padding: 2px 0 2px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.jsdoc-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 0 2px 12px;
+}
+
+.jsdoc-tag {
+  font-size: 11px;
+  padding: 1px 5px;
+  background: rgba(234, 179, 8, 0.12);
+  color: #eab308;
+  border-radius: 3px;
+  font-weight: 500;
 }
 
 code {

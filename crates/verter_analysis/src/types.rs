@@ -812,6 +812,17 @@ pub enum AnalyzedBindingKind {
     Class,
 }
 
+/// A single JSDoc tag extracted from a `/** ... */` comment.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsdocTag {
+    /// Tag name without the `@` prefix (e.g., `"param"`, `"deprecated"`, `"default"`).
+    pub name: String,
+    /// Tag text after the tag name, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
 /// An individual prop field from `defineProps`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -825,6 +836,12 @@ pub struct AnalyzedPropField {
     /// Only populated for type-based `defineProps` with inline type literals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
+    /// JSDoc description extracted from the leading `/** ... */` comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// JSDoc tags (e.g., `@default`, `@deprecated`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<JsdocTag>,
 }
 
 /// An individual emit field from `defineEmits`.
@@ -835,6 +852,12 @@ pub struct AnalyzedEmitField {
     pub name: String,
     /// SFC-absolute byte span of the event name in the declaration.
     pub span: Span,
+    /// JSDoc description extracted from the leading `/** ... */` comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// JSDoc tags (e.g., `@deprecated`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<JsdocTag>,
 }
 
 /// An individual slot field from `defineSlots`.
@@ -851,6 +874,12 @@ pub struct AnalyzedSlotField {
     /// E.g., `default(props: { item: string })` → `[{name: "item", type_annotation: Some("string")}]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<AnalyzedSlotFieldBinding>,
+    /// JSDoc description extracted from the leading `/** ... */` comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// JSDoc tags (e.g., `@deprecated`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<JsdocTag>,
 }
 
 /// A single binding property from a slot function parameter type.

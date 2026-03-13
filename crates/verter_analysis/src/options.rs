@@ -216,6 +216,8 @@ fn extract_options_emits(value: &Expression<'_>) -> Vec<AnalyzedEmitField> {
                     Some(AnalyzedEmitField {
                         name: s.value.to_string(),
                         span: Span::from(s.span),
+                        description: None,
+                        tags: Vec::new(),
                     })
                 } else {
                     None
@@ -235,6 +237,8 @@ fn extract_options_emits(value: &Expression<'_>) -> Vec<AnalyzedEmitField> {
                 Some(AnalyzedEmitField {
                     name,
                     span: key_span(&p.key),
+                    description: None,
+                    tags: Vec::new(),
                 })
             })
             .collect(),

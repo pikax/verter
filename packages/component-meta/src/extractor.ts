@@ -76,17 +76,28 @@ interface RawSlotField {
   name: string;
   isRequired: boolean;
   bindings?: Array<{ name: string; typeAnnotation?: string | null }>;
+  description?: string | null;
+  tags?: RawJsdocTag[];
+}
+
+interface RawJsdocTag {
+  name: string;
+  text?: string | null;
 }
 
 interface RawPropField {
   name: string;
   typeAnnotation?: string | null;
+  description?: string | null;
+  tags?: RawJsdocTag[];
   spanStart: number;
   spanEnd: number;
 }
 
 interface RawEmitField {
   name: string;
+  description?: string | null;
+  tags?: RawJsdocTag[];
   spanStart: number;
   spanEnd: number;
 }
@@ -356,6 +367,11 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
     const rawType = field.typeAnnotation ?? templateDef?.typeAnnotation ?? undefined;
     const type = rawType ? parseType(rawType) : unknown("unknown");
     const isBoolean = templateDef?.isBoolean ?? false;
+    const description = field.description ?? undefined;
+    const tags = field.tags?.map((t) => ({
+      name: t.name,
+      ...(t.text != null && { text: t.text }),
+    }));
 
     return {
       name: field.name,
@@ -363,6 +379,8 @@ function extractCompositionProps(macros: RawMacro[], template: RawTemplate | nul
       required: templateDef?.isRequired ?? !templateDef?.hasDefault,
       hasDefault: templateDef?.hasDefault ?? withDefaults != null,
       ...(rawType && { rawType }),
+      ...(description && { description }),
+      ...(tags && tags.length > 0 && { tags }),
     };
   });
 }
@@ -381,11 +399,18 @@ function extractCompositionEmits(macros: RawMacro[], template: RawTemplate | nul
 
   return emitFields.map((field): EventMeta => {
     const templateDef = defMap.get(field.name);
+    const description = field.description ?? undefined;
+    const tags = field.tags?.map((t) => ({
+      name: t.name,
+      ...(t.text != null && { text: t.text }),
+    }));
     return {
       name: field.name,
       payload: unknown("unknown"),
       hasValidator: templateDef?.hasValidator ?? false,
       isDeclared: templateDef?.isDeclared ?? true,
+      ...(description && { description }),
+      ...(tags && tags.length > 0 && { tags }),
     };
   });
 }
@@ -397,13 +422,28 @@ function extractSlots(
 ): SlotMeta[] {
   if (!template?.definedSlots) return [];
 
-  // Build maps from defineSlots macro: isRequired + binding types per slot
+  // Build maps from defineSlots macro: isRequired + binding types + jsdoc per slot
   const requiredMap = new Map<string, boolean>();
+  const slotJsdocMap = new Map<
+    string,
+    { description?: string; tags?: { name: string; text?: string }[] }
+  >();
   const slotBindingMap = new Map<string, Map<string, string>>();
   for (const m of macros) {
     if (m.kind === "DefineSlots" && m.slotFields) {
       for (const sf of m.slotFields) {
         requiredMap.set(sf.name, sf.isRequired);
+        const desc = sf.description ?? undefined;
+        const sfTags = sf.tags?.map((t) => ({
+          name: t.name,
+          ...(t.text != null && { text: t.text }),
+        }));
+        if (desc || (sfTags && sfTags.length > 0)) {
+          slotJsdocMap.set(sf.name, {
+            ...(desc && { description: desc }),
+            ...(sfTags && sfTags.length > 0 && { tags: sfTags }),
+          });
+        }
         if (sf.bindings && sf.bindings.length > 0) {
           const bindingTypeMap = new Map<string, string>();
           for (const b of sf.bindings) {
@@ -453,12 +493,15 @@ function extractSlots(
       };
     });
 
+    const jsdoc = slotJsdocMap.get(slot.name);
     return {
       name: slot.name,
       isScoped: slot.hasBindings,
       bindings,
       ...(requiredMap.has(slot.name) && { isRequired: requiredMap.get(slot.name) }),
       ...(slot.hasFallbackContent && { hasFallbackContent: true }),
+      ...(jsdoc?.description && { description: jsdoc.description }),
+      ...(jsdoc?.tags && jsdoc.tags.length > 0 && { tags: jsdoc.tags }),
     };
   });
 }

@@ -50,6 +50,11 @@
       "types": "./dist/adapters/json-schema.d.ts",
       "import": "./dist/adapters/json-schema.js",
       "default": "./dist/adapters/json-schema.js"
+    },
+    "./compat": {
+      "types": "./dist/compat/index.d.ts",
+      "import": "./dist/compat/index.js",
+      "default": "./dist/compat/index.js"
     }
   },
   "scripts": {
