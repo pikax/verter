@@ -3969,6 +3969,10 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 }
             }
         }
+
+        // Layer 2: Re-open all files with correct projectRootPath now that
+        // workspace folders and tsconfig paths are configured.
+        let _ = tp.resync_open_files().await;
     }
 
     // 3. Merge lint options
@@ -4748,6 +4752,26 @@ impl LanguageServer for VerterLanguageServer {
                 .send_notification::<McpReady>(McpReadyParams { port })
                 .await;
             tracing::info!("Sent $/verter/mcpReady with port {port}");
+        }
+
+        // C0. Eagerly populate type provider workspace roots so that
+        // did_open (which can fire before background_init completes) sends
+        // a reasonable projectRootPath to tsserver.
+        if let Some(tp) = &self.type_provider {
+            let roots = self.workspace_roots.lock().await;
+            if !roots.is_empty() {
+                let added: Vec<serde_json::Value> = roots
+                    .iter()
+                    .map(|uri| {
+                        serde_json::json!({
+                            "uri": uri,
+                            "name": uri.rsplit('/').next().unwrap_or(uri)
+                        })
+                    })
+                    .collect();
+                drop(roots);
+                let _ = tp.update_workspace_folders(added, vec![]).await;
+            }
         }
 
         // C. Spawn background init (fire-and-forget)

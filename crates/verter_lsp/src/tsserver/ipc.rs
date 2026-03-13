@@ -1528,6 +1528,51 @@ impl TypeProvider for TsserverTypeProvider {
         })
     }
 
+    fn resync_open_files(&self) -> ProviderFuture<'_, ()> {
+        let transport = Arc::clone(&self.transport);
+        let opened_files = Arc::clone(&self.opened_files);
+        let contents_cache = Arc::clone(&self.contents);
+        let project_roots = Arc::clone(&self.project_roots);
+        let workspace_root = self.workspace_root.clone();
+        Box::pin(async move {
+            let files: Vec<String> = opened_files.lock().await.iter().cloned().collect();
+            let contents = contents_cache.lock().await;
+            for file in &files {
+                let Some(content) = contents.get(file).cloned() else {
+                    continue;
+                };
+                // Close the file so tsserver forgets its project association
+                transport
+                    .command_no_response("close", serde_json::json!({ "file": file }))
+                    .await?;
+                // Re-open with fresh projectRootPath from the now-populated project_roots
+                let project_root = {
+                    let roots = project_roots.read();
+                    roots
+                        .iter()
+                        .find(|r| file.starts_with(r.as_str()))
+                        .cloned()
+                        .unwrap_or_else(|| workspace_root.clone())
+                };
+                transport
+                    .command_no_response(
+                        "open",
+                        serde_json::json!({
+                            "file": file,
+                            "fileContent": content,
+                            "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                                else if file.ends_with(".jsx") { "JSX" }
+                                else if file.ends_with(".js") { "JS" }
+                                else { "TS" },
+                            "projectRootPath": project_root,
+                        }),
+                    )
+                    .await?;
+            }
+            Ok(())
+        })
+    }
+
     fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
         let transport = Arc::clone(&self.transport);
         let base_url = base_url.to_string();

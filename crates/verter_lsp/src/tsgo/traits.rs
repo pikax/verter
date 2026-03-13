@@ -135,6 +135,14 @@ pub trait TypeProvider: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    /// Close and re-open all files in the provider to refresh project associations.
+    /// Used after workspace folder or path configuration changes so that tsserver
+    /// re-discovers each file's project using the updated `projectRootPath`.
+    /// Default: no-op (TSGO handles this via workspace/didChangeWorkspaceFolders).
+    fn resync_open_files(&self) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Notify the provider about workspace folder changes (for multi-root support).
     ///
     /// For TSGO, forwards the `workspace/didChangeWorkspaceFolders` notification.

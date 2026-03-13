@@ -502,6 +502,15 @@ where
         })
     }
 
+    fn resync_open_files(&self) -> ProviderFuture<'_, ()> {
+        Box::pin(async move {
+            match self.get_inner().await {
+                Ok(provider) => provider.resync_open_files().await,
+                Err(_) => Ok(()),
+            }
+        })
+    }
+
     fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
         let base_url = base_url.to_string();
         let cached_paths = paths.clone();
