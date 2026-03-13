@@ -6,7 +6,14 @@
     "strict": true,
     "jsx": "preserve",
     "skipLibCheck": true,
-    "paths": {}
+    "lib": ["ESNext", "DOM"],
+    "typeRoots": ["../../node_modules/@types"],
+    "paths": {
+      "vue": ["../../node_modules/vue"]
+    }
   },
-  "include": ["*.vue"]
+  "include": ["*.vue"],
+  "vueCompilerOptions": {
+    "target": 3.5
+  }
 }

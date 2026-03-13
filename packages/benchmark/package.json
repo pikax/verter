@@ -26,6 +26,7 @@
     "@vue/language-server": "^2.2.10",
     "magic-string": "^0.30.21",
     "tinybench": "^6.0.0",
+    "vue": "^3.5.30",
     "vue-component-meta": "^2.2.10"
   },
   "devDependencies": {

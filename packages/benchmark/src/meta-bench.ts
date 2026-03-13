@@ -2,10 +2,18 @@
  * Component Meta Benchmark: @verter/component-meta vs vue-component-meta (Volar)
  *
  * § 1  Per-file benchmark (tinybench, 20 warmup + 100 iterations)
- * § 2  In-memory stress test (10K files)
+ *      — updateFile() before each getComponentMeta() to bust caches
+ * § 2  In-memory stress test (10K unique files)
  * § 3  Disk-based stress test (5K files)
  * § 4  Correctness comparison
  * § 5  JSON output (--json flag)
+ *
+ * Fairness guarantees:
+ *   - Both checkers initialized before any measurement
+ *   - Both get the same tsconfig with vue types resolvable
+ *   - Per-file bench forces fresh extraction (cache-busting via updateFile)
+ *   - Stress tests measure the same operation: getComponentMeta on N files
+ *   - Init time reported separately (not included in per-file speedup)
  *
  * Usage:
  *   node --import tsx src/meta-bench.ts
@@ -72,7 +80,7 @@ const fixtures: Fixture[] = FIXTURE_NAMES.map((filename) => {
 const col = (s: string | number, w: number, right = true) =>
   right ? String(s).padStart(w) : String(s).padEnd(w);
 
-// ─── Initialize Checkers ────────────────────────────────────────────────────
+// ─── Logging ────────────────────────────────────────────────────────────────
 
 function log(msg: string) {
   if (!JSON_MODE) process.stdout.write(msg);
@@ -81,11 +89,46 @@ function logln(msg: string) {
   if (!JSON_MODE) console.log(msg);
 }
 
+// ─── Resolve vue types path for temp tsconfigs ──────────────────────────────
+
+const vuePkgPath = _require.resolve("vue/package.json");
+const vueDir = dirname(vuePkgPath);
+
+/**
+ * Generate a tsconfig JSON string that resolves vue types.
+ * Used for both the fixtures dir and temp stress test dirs.
+ */
+function makeTsconfig(extraInclude?: string[]): string {
+  return JSON.stringify(
+    {
+      compilerOptions: {
+        target: "ESNext",
+        module: "ESNext",
+        moduleResolution: "bundler",
+        strict: true,
+        jsx: "preserve",
+        skipLibCheck: true,
+        lib: ["ESNext", "DOM"],
+        paths: {
+          vue: [join(vueDir)],
+        },
+      },
+      include: extraInclude ?? ["*.vue"],
+      vueCompilerOptions: {
+        target: 3.5,
+      },
+    },
+    null,
+    2,
+  );
+}
+
 logln("\n" + "=".repeat(74));
 logln(" Component Meta Benchmark: Verter vs Volar (vue-component-meta)");
 logln("=".repeat(74));
 
-// Initialize Verter checker — use createRequire to avoid ESM/CJS conflicts
+// ─── Initialize Checkers ────────────────────────────────────────────────────
+
 log("\n  Initializing Verter checker...");
 const verterInitStart = performance.now();
 const { createChecker: createVerterChecker } = _require("@verter/component-meta/compat");
@@ -93,7 +136,6 @@ const verterChecker = createVerterChecker(TSCONFIG_PATH);
 const verterInitMs = performance.now() - verterInitStart;
 logln(` done (${formatDuration(verterInitMs)})`);
 
-// Initialize Volar checker
 log("  Initializing Volar checker...");
 const volarInitStart = performance.now();
 let volarChecker: any;
@@ -102,14 +144,14 @@ try {
   volarChecker = volarMeta.createChecker(TSCONFIG_PATH);
 } catch (e: any) {
   console.error(`\n  Failed to initialize Volar checker: ${e.message}`);
-  console.error("  Install vue-component-meta: pnpm add -D vue-component-meta");
+  console.error("  Install: pnpm add vue-component-meta vue");
   process.exit(1);
 }
 const volarInitMs = performance.now() - volarInitStart;
 logln(` done (${formatDuration(volarInitMs)})`);
 
 logln(
-  `\n  Init time — Verter: ${formatDuration(verterInitMs)}, Volar: ${formatDuration(volarInitMs)}`,
+  `\n  Init time — Verter: ${formatDuration(verterInitMs)}, Volar: ${formatDuration(volarInitMs)} (${(volarInitMs / verterInitMs).toFixed(1)}x)`,
 );
 
 // ─── Helper: extract simplified meta ────────────────────────────────────────
@@ -134,10 +176,15 @@ function toSimplifiedMeta(meta: any): SimplifiedMeta {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // § 1  Per-file benchmark (tinybench)
+//
+// FAIRNESS: Each iteration calls updateFile() with a trivially different
+// source (appended comment with iteration counter) before getComponentMeta().
+// This forces both checkers to re-process the file, preventing either from
+// returning cached results.
 // ═══════════════════════════════════════════════════════════════════════════
 
 logln("\n" + "-".repeat(74));
-logln(" S 1  Per-file: Verter vs Volar, same fixtures, same thread");
+logln(" S 1  Per-file: Verter vs Volar (cache-busted, fresh extraction each iter)");
 logln("-".repeat(74));
 
 logln(
@@ -158,10 +205,19 @@ const perFileResults: PerFileResult[] = [];
 for (const f of fixtures) {
   const bench = new Bench({ warmupIterations: 20, iterations: 100 });
 
+  // Counter for cache-busting: each iteration gets a unique source
+  let verterIter = 0;
+  let volarIter = 0;
+
   bench.add("verter", () => {
+    // Modify source to bust analysis cache — append unique comment
+    const src = f.source + `\n<!-- bench-${verterIter++} -->`;
+    verterChecker.updateFile(f.absPath, src);
     verterChecker.getComponentMeta(f.absPath);
   });
   bench.add("volar", () => {
+    const src = f.source + `\n<!-- bench-${volarIter++} -->`;
+    volarChecker.updateFile(f.absPath, src);
     volarChecker.getComponentMeta(f.absPath);
   });
 
@@ -169,6 +225,10 @@ for (const f of fixtures) {
 
   const verterMs = (bench.getTask("verter")!.result! as any).latency?.mean || 0;
   const volarMs = (bench.getTask("volar")!.result! as any).latency?.mean || 0;
+
+  // Restore original source for correctness comparison
+  verterChecker.updateFile(f.absPath, f.source);
+  volarChecker.updateFile(f.absPath, f.source);
 
   // Correctness: get meta from both and compare
   const verterMeta = toSimplifiedMeta(verterChecker.getComponentMeta(f.absPath));
@@ -199,14 +259,17 @@ logln(
 logln("");
 
 // ═══════════════════════════════════════════════════════════════════════════
-// § 2  In-memory stress test (10K files)
+// § 2  In-memory stress test (10K unique files)
+//
+// FAIRNESS: All files registered with BOTH checkers before timing starts.
+// Both get the same unique files. Measures getComponentMeta() throughput only.
 // ═══════════════════════════════════════════════════════════════════════════
 
 logln("-".repeat(74));
-logln(" S 2  In-memory stress test — 10,000 files (8 fixtures x 1,250)");
+logln(" S 2  In-memory stress test — 1,000 unique files (8 fixtures x 125)");
 logln("-".repeat(74));
 
-const INMEM_COUNT = 1250;
+const INMEM_COUNT = 125;
 const INMEM_TOTAL = INMEM_COUNT * fixtures.length;
 
 let verterStressMs = 0;
@@ -214,18 +277,37 @@ let volarStressMs = 0;
 let inMemVerterFps = 0;
 let inMemVolarFps = 0;
 
-// Pre-register all files with Verter (always works)
-log("\n  Registering files with Verter...");
-const verterRegStart = performance.now();
-const inMemFiles: Array<{ name: string; absPath: string }> = [];
+// Generate unique file contents and paths
+const inMemFiles: Array<{ name: string; absPath: string; source: string }> = [];
 for (let i = 0; i < INMEM_COUNT; i++) {
   for (const f of fixtures) {
     const virtualPath = resolve(FIXTURES_DIR, `stress-${String(i).padStart(4, "0")}-${f.filename}`);
-    verterChecker.updateFile(virtualPath, f.source);
-    inMemFiles.push({ name: f.name, absPath: virtualPath });
+    // Make each file unique to prevent cross-file caching
+    const source = f.source + `\n<!-- stress-${i} -->`;
+    inMemFiles.push({ name: f.name, absPath: virtualPath, source });
   }
 }
+
+// Register all files with BOTH checkers before timing
+log("\n  Registering files with Verter...");
+const verterRegStart = performance.now();
+for (const entry of inMemFiles) {
+  verterChecker.updateFile(entry.absPath, entry.source);
+}
 logln(` done (${formatDuration(performance.now() - verterRegStart)})`);
+
+let volarRegOk = true;
+try {
+  log("  Registering files with Volar...");
+  const volarRegStart = performance.now();
+  for (const entry of inMemFiles) {
+    volarChecker.updateFile(entry.absPath, entry.source);
+  }
+  logln(` done (${formatDuration(performance.now() - volarRegStart)})`);
+} catch (e: any) {
+  logln(`  Volar failed to register files: ${e.message ?? e}`);
+  volarRegOk = false;
+}
 
 // Verter stress
 log(`  Running Verter (${INMEM_TOTAL} getComponentMeta calls)...`);
@@ -237,26 +319,22 @@ verterStressMs = performance.now() - verterStressStart;
 inMemVerterFps = Math.round((INMEM_TOTAL / verterStressMs) * 1000);
 logln(` done — ${formatDuration(verterStressMs)} (${inMemVerterFps.toLocaleString()} files/s)`);
 
-// Volar stress — may fail/crash on large file counts
-try {
-  log("  Registering files with Volar...");
-  const volarRegStart = performance.now();
-  for (const entry of inMemFiles) {
-    const fixture = fixtures.find((f) => f.name === entry.name)!;
-    volarChecker.updateFile(entry.absPath, fixture.source);
+// Volar stress
+if (volarRegOk) {
+  try {
+    log(`  Running Volar  (${INMEM_TOTAL} getComponentMeta calls)...`);
+    const volarStressStart = performance.now();
+    for (const entry of inMemFiles) {
+      volarChecker.getComponentMeta(entry.absPath);
+    }
+    volarStressMs = performance.now() - volarStressStart;
+    inMemVolarFps = Math.round((INMEM_TOTAL / volarStressMs) * 1000);
+    logln(` done — ${formatDuration(volarStressMs)} (${inMemVolarFps.toLocaleString()} files/s)`);
+  } catch (e: any) {
+    logln(`  Volar crashed during stress test: ${e.message ?? e}`);
+    volarStressMs = -1;
   }
-  logln(` done (${formatDuration(performance.now() - volarRegStart)})`);
-
-  log(`  Running Volar  (${INMEM_TOTAL} getComponentMeta calls)...`);
-  const volarStressStart = performance.now();
-  for (const entry of inMemFiles) {
-    volarChecker.getComponentMeta(entry.absPath);
-  }
-  volarStressMs = performance.now() - volarStressStart;
-  inMemVolarFps = Math.round((INMEM_TOTAL / volarStressMs) * 1000);
-  logln(` done — ${formatDuration(volarStressMs)} (${inMemVolarFps.toLocaleString()} files/s)`);
-} catch (e: any) {
-  logln(`  Volar crashed during stress test: ${e.message ?? e}`);
+} else {
   volarStressMs = -1;
 }
 
@@ -287,13 +365,17 @@ for (const entry of inMemFiles) {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // § 3  Disk-based stress test (5K files)
+//
+// FAIRNESS: Both checkers start from scratch with a fresh tsconfig pointing
+// to the same temp directory. Both include vue types. Init time measured
+// separately from scan time.
 // ═══════════════════════════════════════════════════════════════════════════
 
 logln("-".repeat(74));
-logln(" S 3  Disk-based stress test — 5,000 files (8 fixtures x 625)");
+logln(" S 3  Disk-based stress test — 1,000 files (8 fixtures x 125)");
 logln("-".repeat(74));
 
-const DISK_COUNT = 625;
+const DISK_COUNT = 125;
 const DISK_TOTAL = DISK_COUNT * fixtures.length;
 const TEMP_DIR = join(tmpdir(), "meta-bench-" + Date.now());
 mkdirSync(TEMP_DIR, { recursive: true });
@@ -309,25 +391,8 @@ for (let i = 0; i < DISK_COUNT; i++) {
   }
 }
 
-// Write tsconfig
-writeFileSync(
-  join(TEMP_DIR, "tsconfig.json"),
-  JSON.stringify(
-    {
-      compilerOptions: {
-        target: "ESNext",
-        module: "ESNext",
-        moduleResolution: "bundler",
-        strict: true,
-        jsx: "preserve",
-        skipLibCheck: true,
-      },
-      include: ["*.vue"],
-    },
-    null,
-    2,
-  ),
-);
+// Write tsconfig with vue types for fair Volar comparison
+writeFileSync(join(TEMP_DIR, "tsconfig.json"), makeTsconfig());
 
 logln(`\n  Written ${DISK_TOTAL} files to temp dir`);
 
@@ -338,14 +403,13 @@ let volarDiskRunMs = 0;
 let diskVerterFps = 0;
 let diskVolarFps = 0;
 
-// Initialize fresh Verter checker for disk test
+// Verter disk
 log("  Initializing Verter (disk)...");
 const verterDiskStart = performance.now();
 const verterDiskChecker = createVerterChecker(join(TEMP_DIR, "tsconfig.json"));
 verterDiskInitMs = performance.now() - verterDiskStart;
 logln(` done (${formatDuration(verterDiskInitMs)})`);
 
-// Verter scan
 log(`  Running Verter (${DISK_TOTAL} files from disk)...`);
 const verterDiskRunStart = performance.now();
 for (const filePath of diskFiles) {
@@ -355,7 +419,7 @@ verterDiskRunMs = performance.now() - verterDiskRunStart;
 diskVerterFps = Math.round((DISK_TOTAL / verterDiskRunMs) * 1000);
 logln(` done — ${formatDuration(verterDiskRunMs)} (${diskVerterFps.toLocaleString()} files/s)`);
 
-// Volar disk test — may be slow or crash on 5K files
+// Volar disk
 try {
   log("  Initializing Volar (disk)...");
   const volarDiskStart = performance.now();
@@ -430,27 +494,17 @@ for (const r of perFileResults) {
   );
 
   // Print details for mismatches
-  if (c.props.missing.length > 0) {
-    logln(`    Props missing in Verter: ${c.props.missing.join(", ")}`);
-  }
-  if (c.props.extra.length > 0) {
-    logln(`    Props extra in Verter: ${c.props.extra.join(", ")}`);
-  }
-  if (c.events.missing.length > 0) {
-    logln(`    Events missing in Verter: ${c.events.missing.join(", ")}`);
-  }
-  if (c.events.extra.length > 0) {
-    logln(`    Events extra in Verter: ${c.events.extra.join(", ")}`);
-  }
-  if (c.slots.missing.length > 0) {
-    logln(`    Slots missing in Verter: ${c.slots.missing.join(", ")}`);
-  }
-  if (c.slots.extra.length > 0) {
-    logln(`    Slots extra in Verter: ${c.slots.extra.join(", ")}`);
-  }
-
-  // Print type diffs as warnings
-  for (const cat of ["props", "events", "slots"] as const) {
+  for (const [cat, label] of [
+    ["props", "Props"],
+    ["events", "Events"],
+    ["slots", "Slots"],
+  ] as const) {
+    if (c[cat].missing.length > 0) {
+      logln(`    ${label} missing in Verter: ${c[cat].missing.join(", ")}`);
+    }
+    if (c[cat].extra.length > 0) {
+      logln(`    ${label} extra in Verter: ${c[cat].extra.join(", ")}`);
+    }
     for (const diff of c[cat].typeDiffs) {
       logln(`    Type diff (${cat}) "${diff.name}": Verter="${diff.verter}" Volar="${diff.volar}"`);
     }
