@@ -1718,6 +1718,58 @@ const nested = reactive({ deep: { value: 'hello', count: 1 } })
 }
 
 #[test]
+fn validated_tsx_offset_marks_scoped_slot_local_start_as_identifier_context() {
+    let source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
+    let tsx_li = crate::documents::line_index::LineIndex::new_utf16(&tsx.code);
+
+    let source_offset = source.find("slotItem.name").unwrap();
+    let line = source[..source_offset].matches('\n').count() as u32;
+    let line_start = source[..source_offset]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let position = Position {
+        line,
+        character: (source_offset - line_start) as u32,
+    };
+
+    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+        &position,
+        &doc.line_index,
+        &mapper,
+        &tsx_li,
+    )
+    .expect("scoped-slot local should map to TSX");
+
+    let tsx_suffix = &tsx.code[tsx_offset as usize..tsx.code.len().min(tsx_offset as usize + 16)];
+    assert!(
+        tsx_suffix.starts_with("slotItem"),
+        "mapped TSX offset should land on the slot local start, found {:?}\nTSX code:\n{}",
+        tsx_suffix,
+        tsx.code
+    );
+}
+
+#[test]
 fn validated_tsx_offset_marks_scoped_slot_member_access_start_as_member_context() {
     let source = r#"<script setup lang="ts">
 import TypedSlotComp from './TypedSlotComp.vue'

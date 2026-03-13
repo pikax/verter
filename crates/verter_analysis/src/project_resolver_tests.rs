@@ -485,10 +485,7 @@ fn resolve_project_references_after_local_tsconfig_options() {
     );
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
     assert_eq!(resolved.provider_id, expected_provider_id);
-    assert_eq!(
-        resolved.provider_specifier,
-        "shared"
-    );
+    assert_eq!(resolved.provider_specifier, "shared");
     assert_eq!(
         resolved.owner_tsconfig_path.as_deref(),
         Some("/workspace/packages/shared/tsconfig.json")

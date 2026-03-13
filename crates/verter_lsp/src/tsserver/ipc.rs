@@ -433,6 +433,7 @@ async fn configure_tsserver_session(
                         "moduleResolution": "bundler",
                         "jsx": "preserve",
                         "jsxImportSource": "vue",
+                        "allowImportingTsExtensions": true,
                         "allowJs": true,
                         "checkJs": true,
                         "strict": true,
@@ -1599,6 +1600,7 @@ impl TypeProvider for TsserverTypeProvider {
                 "moduleResolution": "bundler",
                 "jsx": "preserve",
                 "jsxImportSource": "vue",
+                "allowImportingTsExtensions": true,
                 "allowJs": true,
                 "checkJs": true,
                 "strict": true,
@@ -1884,7 +1886,8 @@ mod tests {
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
                     if name_str.starts_with("typescript@") && !name_str.contains("node_modules") {
-                        let candidate = entry.path().join("node_modules/typescript/lib/tsserver.js");
+                        let candidate =
+                            entry.path().join("node_modules/typescript/lib/tsserver.js");
                         if candidate.exists() {
                             found = Some(candidate);
                             break;
@@ -1910,11 +1913,44 @@ mod tests {
 
     fn create_test_project_with_workspace_node_modules(dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir.join("src"))?;
-        let node_modules = workspace_node_modules().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "workspace node_modules not found")
+        let workspace_node_modules = workspace_node_modules().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "workspace node_modules not found",
+            )
+        })?;
+        let node_modules_dst = dir.join("node_modules");
+        std::fs::create_dir_all(&node_modules_dst)?;
+        refresh_generated_verter_types_stub(&node_modules_dst)?;
+
+        let vue_path = if workspace_node_modules.join("vue/dist/vue.d.ts").exists() {
+            workspace_node_modules.join("vue").canonicalize()?
+        } else {
+            let pnpm_dir = workspace_node_modules.join(".pnpm");
+            let mut found = None;
+            if pnpm_dir.exists() {
+                for entry in std::fs::read_dir(&pnpm_dir)? {
+                    let entry = entry?;
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("vue@") && !name_str.contains("node_modules") {
+                        let candidate = entry.path().join("node_modules/vue");
+                        if candidate.join("dist/vue.d.ts").exists() {
+                            found = Some(candidate.canonicalize()?);
+                            break;
+                        }
+                    }
+                }
+            }
+            found.ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "vue types not found")
+            })?
+        };
+        let vue_parent = vue_path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "vue package parent not found")
         })?;
 
-        let node_modules_dst = dir.join("node_modules");
+        let vue_dst = node_modules_dst.join("vue");
         #[cfg(windows)]
         {
             let _ = std::process::Command::new("cmd")
@@ -1922,14 +1958,35 @@ mod tests {
                     "/C",
                     "mklink",
                     "/J",
-                    &node_modules_dst.to_string_lossy(),
-                    &node_modules.to_string_lossy(),
+                    &vue_dst.to_string_lossy(),
+                    &vue_path.to_string_lossy(),
                 ])
                 .output();
         }
         #[cfg(not(windows))]
         {
-            let _ = std::os::unix::fs::symlink(&node_modules, &node_modules_dst);
+            let _ = std::os::unix::fs::symlink(&vue_path, &vue_dst);
+        }
+
+        let at_vue_src = vue_parent.join("@vue");
+        if at_vue_src.exists() {
+            let at_vue_dst = node_modules_dst.join("@vue");
+            #[cfg(windows)]
+            {
+                let _ = std::process::Command::new("cmd")
+                    .args([
+                        "/C",
+                        "mklink",
+                        "/J",
+                        &at_vue_dst.to_string_lossy(),
+                        &at_vue_src.to_string_lossy(),
+                    ])
+                    .output();
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = std::os::unix::fs::symlink(&at_vue_src, &at_vue_dst);
+            }
         }
 
         let tsconfig = r#"{
@@ -1939,11 +1996,41 @@ mod tests {
     "moduleResolution": "bundler",
     "strict": true,
     "jsx": "preserve",
-    "jsxImportSource": "vue"
+    "jsxImportSource": "vue",
+    "allowImportingTsExtensions": true
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"]
 }"#;
         std::fs::write(dir.join("tsconfig.json"), tsconfig)?;
+        Ok(())
+    }
+
+    fn refresh_generated_verter_types_stub(node_modules_root: &Path) -> std::io::Result<()> {
+        let types_dir = node_modules_root.join("@verter/types");
+        let index_path = types_dir.join("index.d.ts");
+        let pkg_path = types_dir.join("package.json");
+
+        let existing_index = std::fs::read_to_string(&index_path).ok();
+        let existing_pkg = std::fs::read_to_string(&pkg_path).ok();
+        let is_generated_stub = existing_index
+            .as_deref()
+            .map(|index| index.starts_with("// Auto-generated by verter-lsp"))
+            .unwrap_or(false)
+            || existing_pkg
+                .as_deref()
+                .map(|pkg| pkg.contains(r#""types":"index.d.ts""#))
+                .unwrap_or(false);
+
+        if existing_index.is_some() && !is_generated_stub {
+            return Ok(());
+        }
+
+        std::fs::create_dir_all(&types_dir)?;
+        std::fs::write(&index_path, verter_host::VERTER_TYPES_STANDALONE_DTS)?;
+        std::fs::write(
+            &pkg_path,
+            r#"{"name":"@verter/types","types":"index.d.ts"}"#,
+        )?;
         Ok(())
     }
 

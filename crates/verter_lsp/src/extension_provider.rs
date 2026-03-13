@@ -930,6 +930,7 @@ impl TypeProvider for ExtensionTypeProvider {
                 "moduleResolution": "bundler",
                 "jsx": "preserve",
                 "jsxImportSource": "vue",
+                "allowImportingTsExtensions": true,
                 "allowJs": true,
                 "checkJs": true,
                 "strict": true,

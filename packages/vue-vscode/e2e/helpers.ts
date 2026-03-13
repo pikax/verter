@@ -11,7 +11,8 @@ import { computeStartupSegments } from "../src/startupOptimizations";
 export const FIXTURE_NAME = readE2eEnv("FIXTURE") || "single-project";
 export const TYPE_PROVIDER = readE2eEnv("TYPE_PROVIDER");
 export const LOG_FILE = readE2eEnv("LOG_FILE") || path.join(os.tmpdir(), "verter-e2e.log");
-export const TIMING_FILE = readE2eEnv("TIMING_FILE") || path.join(os.tmpdir(), "verter-e2e-timing.json");
+export const TIMING_FILE =
+  readE2eEnv("TIMING_FILE") || path.join(os.tmpdir(), "verter-e2e-timing.json");
 
 export interface StartupTiming {
   activationStartMs?: number;
@@ -61,9 +62,7 @@ export async function waitForExtensionReady(timeoutMs = 45_000): Promise<void> {
     const appVuePath = getAppVuePath();
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (workspaceFolders && workspaceFolders.length > 0) {
-      const fileUri = vscode.Uri.file(
-        path.join(workspaceFolders[0].uri.fsPath, appVuePath),
-      );
+      const fileUri = vscode.Uri.file(path.join(workspaceFolders[0].uri.fsPath, appVuePath));
       if (fs.existsSync(fileUri.fsPath)) {
         const doc = await vscode.workspace.openTextDocument(fileUri);
         await vscode.window.showTextDocument(doc);
@@ -96,9 +95,7 @@ export async function openVueFile(relativePath: string): Promise<vscode.TextDocu
   const workspaceFolders = vscode.workspace.workspaceFolders;
   assert.ok(workspaceFolders && workspaceFolders.length > 0, "Workspace should have folders");
 
-  const fileUri = vscode.Uri.file(
-    path.join(workspaceFolders[0].uri.fsPath, relativePath),
-  );
+  const fileUri = vscode.Uri.file(path.join(workspaceFolders[0].uri.fsPath, relativePath));
   const doc = await vscode.workspace.openTextDocument(fileUri);
   await vscode.window.showTextDocument(doc);
   return doc;
@@ -200,7 +197,7 @@ export async function waitForFileReady(
 
   console.log(
     `    waitForFileReady: timed out waiting for "${expectedLabel}" ` +
-    `to get typed completions (${timeoutMs}ms)`,
+      `to get typed completions (${timeoutMs}ms)`,
   );
 }
 
@@ -253,7 +250,12 @@ export function getCompVuePath(): string | undefined {
  */
 export async function waitForDiagnostics(
   uri: vscode.Uri,
-  options: { source?: string; timeoutMs?: number; minCount?: number; predicate?: (d: vscode.Diagnostic) => boolean } = {},
+  options: {
+    source?: string;
+    timeoutMs?: number;
+    minCount?: number;
+    predicate?: (d: vscode.Diagnostic) => boolean;
+  } = {},
 ): Promise<vscode.Diagnostic[]> {
   const { source, timeoutMs = 30_000, minCount = 0, predicate } = options;
 
@@ -312,13 +314,7 @@ export async function waitForNoDiagnosticsMatching(
     predicate: (d: vscode.Diagnostic) => boolean;
   },
 ): Promise<vscode.Diagnostic[]> {
-  const {
-    source,
-    timeoutMs = 30_000,
-    intervalMs = 150,
-    stableMs = 400,
-    predicate,
-  } = options;
+  const { source, timeoutMs = 30_000, intervalMs = 150, stableMs = 400, predicate } = options;
 
   const getFiltered = () => {
     let diags = vscode.languages.getDiagnostics(uri);
@@ -349,7 +345,6 @@ export async function waitForNoDiagnosticsMatching(
 
   return getFiltered();
 }
-
 
 /**
  * Execute the decoration state command (only available in E2E test mode).
@@ -383,14 +378,70 @@ export async function measureHover(
   uri: vscode.Uri,
   position: vscode.Position,
 ): Promise<{ hovers: vscode.Hover[]; latencyMs: number }> {
+  const timeoutMs = 20_000;
+  const intervalMs = 150;
+  const deadline = Date.now() + timeoutMs;
+
+  let latest: vscode.Hover[] = [];
+  let latestLatencyMs = 0;
+
+  while (Date.now() < deadline) {
+    const start = Date.now();
+    latest =
+      (await vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        uri,
+        position,
+      )) || [];
+    latestLatencyMs = Date.now() - start;
+
+    if (latest.length > 0) {
+      return { hovers: latest, latencyMs: latestLatencyMs };
+    }
+
+    await sleep(intervalMs);
+  }
+
+  return { hovers: latest, latencyMs: latestLatencyMs };
+}
+
+export async function waitForHoverMatching(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  options: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    stableMs?: number;
+    predicate: (hovers: readonly vscode.Hover[]) => boolean;
+  },
+): Promise<vscode.Hover[]> {
+  const { timeoutMs = 20_000, intervalMs = 150, stableMs = 400, predicate } = options;
+
   const start = Date.now();
-  const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
-    "vscode.executeHoverProvider",
-    uri,
-    position,
-  );
-  const latencyMs = Date.now() - start;
-  return { hovers: hovers || [], latencyMs };
+  let matchedSince: number | undefined;
+  let latest: vscode.Hover[] = [];
+
+  while (Date.now() - start < timeoutMs) {
+    latest =
+      (await vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        uri,
+        position,
+      )) || [];
+
+    if (predicate(latest)) {
+      matchedSince ??= Date.now();
+      if (Date.now() - matchedSince >= stableMs) {
+        return latest;
+      }
+    } else {
+      matchedSince = undefined;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  return latest;
 }
 
 export function hoverText(hover: vscode.Hover): string {
@@ -399,19 +450,22 @@ export function hoverText(hover: vscode.Hover): string {
     .join("\n");
 }
 
-export async function getHoverText(
-  uri: vscode.Uri,
-  position: vscode.Position,
-): Promise<string> {
+export async function getHoverText(uri: vscode.Uri, position: vscode.Position): Promise<string> {
   const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
     "vscode.executeHoverProvider",
     uri,
     position,
   );
 
-  assert.ok(hovers && hovers.length > 0, `Expected hover results at ${uri.toString()} ${position.line}:${position.character}`);
+  assert.ok(
+    hovers && hovers.length > 0,
+    `Expected hover results at ${uri.toString()} ${position.line}:${position.character}`,
+  );
   const text = hoverText(hovers[0]);
-  assert.ok(text.trim().length > 0, `Expected non-empty hover text at ${uri.toString()} ${position.line}:${position.character}`);
+  assert.ok(
+    text.trim().length > 0,
+    `Expected non-empty hover text at ${uri.toString()} ${position.line}:${position.character}`,
+  );
   return text;
 }
 
@@ -480,16 +534,14 @@ export function assertLogContains(needle: string, message?: string): void {
   const log = readTestLog();
   assert.ok(
     log.includes(needle),
-    message || `Expected log to contain "${needle}" but it did not. Log length: ${log.length} chars`,
+    message ||
+      `Expected log to contain "${needle}" but it did not. Log length: ${log.length} chars`,
   );
 }
 
 export function assertLogNotContains(needle: string, message?: string): void {
   const log = readTestLog();
-  assert.ok(
-    !log.includes(needle),
-    message || `Expected log NOT to contain "${needle}" but it did`,
-  );
+  assert.ok(!log.includes(needle), message || `Expected log NOT to contain "${needle}" but it did`);
 }
 
 // ── Timing helpers ─────────────────────────────────────────────
@@ -501,21 +553,15 @@ export function assertLogNotContains(needle: string, message?: string): void {
 export function parseStartupTiming(): StartupTiming {
   const log = readTestLog();
   const activationMatch = log.match(/\[TIMING\] activation_start (\d+)/);
-  const typeProviderMatch = log.match(
-    /\[TIMING\] type_provider_started (\d+) (tsgo|tsserver)/,
-  );
+  const typeProviderMatch = log.match(/\[TIMING\] type_provider_started (\d+) (tsgo|tsserver)/);
   const readyMatch = log.match(/\[TIMING\] ready (\d+)/);
   const typedCompletionMatch = log.match(
     /\[TIMING\] first_typed_completion (\d+) ([^\s]+) ([^\s]+)/,
   );
   const firstDiagnosticMatch = log.match(/\[TIMING\] first_diagnostic (\d+)/);
 
-  const activationStartMs = activationMatch
-    ? parseInt(activationMatch[1], 10)
-    : undefined;
-  const typeProviderStartedMs = typeProviderMatch
-    ? parseInt(typeProviderMatch[1], 10)
-    : undefined;
+  const activationStartMs = activationMatch ? parseInt(activationMatch[1], 10) : undefined;
+  const typeProviderStartedMs = typeProviderMatch ? parseInt(typeProviderMatch[1], 10) : undefined;
   const lspReadyMs = readyMatch ? parseInt(readyMatch[1], 10) : undefined;
   const firstTypedCompletionMs = typedCompletionMatch
     ? parseInt(typedCompletionMatch[1], 10)
@@ -639,10 +685,7 @@ export function expectCompletionHas(
   return item!;
 }
 
-export function expectCompletionMissing(
-  completions: vscode.CompletionList,
-  label: string,
-): void {
+export function expectCompletionMissing(completions: vscode.CompletionList, label: string): void {
   const item = getCompletionItem(completions, label);
   assert.ok(!item, `Expected completion "${label}" to be absent`);
 }
@@ -685,11 +728,7 @@ export async function getPrepareRename(
   position: vscode.Position,
 ): Promise<vscode.Range | { range: vscode.Range; placeholder: string } | undefined> {
   try {
-    return await vscode.commands.executeCommand(
-      "vscode.prepareRename",
-      uri,
-      position,
-    );
+    return await vscode.commands.executeCommand("vscode.prepareRename", uri, position);
   } catch {
     return undefined;
   }
@@ -811,13 +850,7 @@ export async function waitForCodeActionsMatching(
     predicate: (items: readonly (vscode.CodeAction | vscode.Command)[]) => boolean;
   },
 ): Promise<(vscode.CodeAction | vscode.Command)[]> {
-  const {
-    kind,
-    timeoutMs = 20_000,
-    intervalMs = 150,
-    stableMs = 400,
-    predicate,
-  } = options;
+  const { kind, timeoutMs = 20_000, intervalMs = 150, stableMs = 400, predicate } = options;
 
   const start = Date.now();
   let matchedSince: number | undefined;

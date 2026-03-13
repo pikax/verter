@@ -11,6 +11,7 @@ import {
   findPosition,
   findNthPosition,
   hoverText,
+  waitForHoverMatching,
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
@@ -186,7 +187,10 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on bound count: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "bound expression hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "bound expression hover should have content").to.be.greaterThan(0);
+    expect(
+      hovers[0].contents.length,
+      "bound expression hover should have content",
+    ).to.be.greaterThan(0);
 
     const content = hoverText(hovers[0]);
     expect(content, "bound expression hover should mention count").to.include("count");
@@ -211,7 +215,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on <MyComp: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "component tag hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     expect(content, "component hover should mention foo").to.include("foo");
@@ -258,7 +264,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on increment handler: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "event handler hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "event handler hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "event handler hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     expect(content, "event handler hover should mention increment").to.include("increment");
@@ -312,7 +320,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on #header: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "slot consumer hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "slot consumer hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "slot consumer hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     expect(content, "slot consumer hover should mention slot").to.match(/\bslot\b/i);
@@ -369,13 +379,16 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
 
     const content = hoverText(hovers[0]);
     const hasNamedType = content.includes("Action");
-    const hasExpandedType = content.includes("label") && content.includes("disabled") && content.includes("handler");
+    const hasExpandedType =
+      content.includes("label") && content.includes("disabled") && content.includes("handler");
     if (hasNamedType && !hasExpandedType) {
       console.log("    Note: v-for hover shows named type only (Action), not expanded properties");
     } else if (!hasNamedType && hasExpandedType) {
       console.log("    Note: v-for hover shows expanded type only, not named type (Action)");
     }
-    expect(hasNamedType || hasExpandedType, `unexpected v-for local hover:\n${content}`).to.equal(true);
+    expect(hasNamedType || hasExpandedType, `unexpected v-for local hover:\n${content}`).to.equal(
+      true,
+    );
     expect(content, "v-for local hover should not degrade to any").to.not.match(/:\s*any\b/);
   });
 
@@ -396,7 +409,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on action.disabled: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "v-for member hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "v-for member hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "v-for member hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     expect(content, "v-for member hover should mention disabled").to.include("disabled");
@@ -421,17 +436,24 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on nested user: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "nested v-for hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "nested v-for hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "nested v-for hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     const hasNamedType = content.includes("User");
-    const hasExpandedType = content.includes("name") && content.includes("email") && content.includes("age");
+    const hasExpandedType =
+      content.includes("name") && content.includes("email") && content.includes("age");
     if (hasNamedType && !hasExpandedType) {
-      console.log("    Note: nested v-for hover shows named type only (User), not expanded properties");
+      console.log(
+        "    Note: nested v-for hover shows named type only (User), not expanded properties",
+      );
     } else if (!hasNamedType && hasExpandedType) {
       console.log("    Note: nested v-for hover shows expanded type only, not named type (User)");
     }
-    expect(hasNamedType || hasExpandedType, `unexpected nested v-for hover:\n${content}`).to.equal(true);
+    expect(hasNamedType || hasExpandedType, `unexpected nested v-for hover:\n${content}`).to.equal(
+      true,
+    );
     expect(content, "nested v-for hover should not degrade to any").to.not.match(/:\s*any\b/);
   });
 
@@ -477,7 +499,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on imported MyComp: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "import binding hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "import binding hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "import binding hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     expect(content, "import binding hover should mention foo").to.include("foo");
@@ -505,9 +529,17 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     expect(localPos, "should find slot local").to.exist;
     expect(memberPos, "should find slot member").to.exist;
 
+    const localHovers = await waitForHoverMatching(slotDoc.uri, localPos!, {
+      predicate: (hovers) => hovers.length > 0 && hoverText(hovers[0]).includes("slotItem"),
+    });
+    const memberHovers = await waitForHoverMatching(slotDoc.uri, memberPos!, {
+      predicate: (hovers) => hovers.length > 0 && hoverText(hovers[0]).includes("name"),
+    });
     const localHover = await measureHover(slotDoc.uri, localPos!);
     const memberHover = await measureHover(slotDoc.uri, memberPos!);
 
+    expect(localHovers.length, "slot local hover should exist").to.be.greaterThan(0);
+    expect(memberHovers.length, "slot member hover should exist").to.be.greaterThan(0);
     expect(localHover.hovers.length, "slot local hover should exist").to.be.greaterThan(0);
     expect(memberHover.hovers.length, "slot member hover should exist").to.be.greaterThan(0);
 
@@ -643,7 +675,10 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     }
 
     expect(hovers.length, "destructured param hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "destructured param hover should have content").to.be.greaterThan(0);
+    expect(
+      hovers[0].contents.length,
+      "destructured param hover should have content",
+    ).to.be.greaterThan(0);
 
     const content = hoverText(hovers[0]);
     expect(content, "destructured param hover should mention name").to.include("name");
@@ -682,7 +717,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const pos = findPosition(doc, 'handleInput($event)', 12);
+    const pos = findPosition(doc, "handleInput($event)", 12);
     if (!pos) {
       this.skip();
       return;
@@ -792,7 +827,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on <SharedComp: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "component tag hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     expect(content, "component hover should mention foo").to.include("foo");
@@ -824,7 +861,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
 
     // Without a type provider, cross-package imports may degrade to `any`
     if (!TYPE_PROVIDER && content.match(/:\s*any\b/)) {
-      console.log("    Verter-only: cross-package import type degrades to any (needs type provider)");
+      console.log(
+        "    Verter-only: cross-package import type degrades to any (needs type provider)",
+      );
       return;
     }
 
@@ -857,7 +896,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on <HelloWorld: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "component tag hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     expect(content, "component hover should mention msg").to.include("msg");
@@ -883,7 +924,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on <MyComp: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "component tag hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     expect(content, "component hover should mention foo").to.include("foo");
@@ -909,7 +952,9 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     console.log(`    Hover on <MyComp: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     expect(hovers.length, "component tag hover should exist").to.be.greaterThan(0);
-    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(0);
+    expect(hovers[0].contents.length, "component tag hover should have content").to.be.greaterThan(
+      0,
+    );
 
     const content = hoverText(hovers[0]);
     expect(content, "component hover should mention foo").to.include("foo");

@@ -65,12 +65,9 @@ pub fn vue_position_to_tsx_offset_validated(
     tsx_line_index: &LineIndex,
 ) -> Option<u32> {
     let tsx_offset = vue_position_to_tsx_offset(position, vue_line_index, mapper, tsx_line_index)?;
-    if let Some(exact_offset) = find_exact_roundtrip_offset(
-        position,
-        tsx_offset,
-        mapper,
-        tsx_line_index,
-    ) {
+    if let Some(exact_offset) =
+        find_exact_roundtrip_offset(position, tsx_offset, mapper, tsx_line_index)
+    {
         return Some(exact_offset);
     }
 

@@ -2575,6 +2575,7 @@ pub fn create_test_project(dir: &Path) -> std::io::Result<()> {
     "strict": true,
     "jsx": "preserve",
     "jsxImportSource": "vue",
+    "allowImportingTsExtensions": true,
     "paths": {}
   },
   "include": ["**/*.ts", "**/*.tsx"]
@@ -3341,7 +3342,8 @@ const count: number = 42;
     "moduleResolution": "bundler",
     "strict": true,
     "jsx": "preserve",
-    "jsxImportSource": "vue"
+    "jsxImportSource": "vue",
+    "allowImportingTsExtensions": true
   },
   "include": ["**/*.ts", "**/*.tsx"]
 }"#;
@@ -3682,7 +3684,8 @@ const props = withDefaults(defineProps({ bar: String }), {})
     "moduleResolution": "bundler",
     "strict": true,
     "jsx": "preserve",
-    "jsxImportSource": "vue"
+    "jsxImportSource": "vue",
+    "allowImportingTsExtensions": true
   },
   "include": ["**/*.ts", "**/*.tsx"]
 }"#;

@@ -5,17 +5,126 @@
 export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
 export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
 export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
-export type ExtractRenderComponent<T> = T extends { new (): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
+export type ExtractRenderComponent<T> = T extends { new (): infer I }
+  ? I extends { $props: any }
+    ? T
+    : I extends HTMLElement
+      ? (props: {}) => I
+      : I
+  : T extends (...args: any) => infer R
+    ? void extends R
+      ? typeof import("vue").Comment
+      : R extends Array<any>
+        ? typeof import("vue").Fragment
+        : HTMLElement
+    : T extends HTMLElement
+      ? (props: {}) => T
+      : T extends keyof import("vue").NativeElements
+        ? (props: import("vue").NativeElements[T]) => JSX.Element
+        : (props: {}) => JSX.Element;
 export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
-export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
-export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
-export declare function extractArgumentsFromRenderSlot<T extends { $slots: { [K in N]: any } }, N extends string>(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
-export type ExtractLeafElement<T> = T extends HTMLElement ? T : T extends { $el: infer E } ? ExtractLeafElement<E> : T extends { new (): infer I } ? ExtractLeafElement<I> : never;
-export type ExtractDirectives<T> = { [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any> ? K extends `v${Capitalize<string>}` ? K : never : never]: T[K]; };
-export declare function runCustomDirective<TInstance, TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>>(instance: TInstance, directive: TDirective): ExtractLeafElement<TInstance> extends infer El extends HTMLElement ? TDirective extends import("vue").Directive<infer TElement, infer TValue, infer M extends string> ? El extends TElement ? (instance: TInstance, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : (instance: TElement, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : false : false;
-export declare function retrieveSetupDirectives<T>(o: T): ExtractDirectives<T> extends infer D ? ExtractDirectives<Omit<import("vue").GlobalDirectives, keyof D>> & D : ExtractDirectives<import("vue").GlobalDirectives>;
-export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
-export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
-export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
-export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
+export type ExtractComponentProps<T> = T extends { new (): infer I }
+  ? ExtractComponentProps<I>
+  : T extends { $props: infer P }
+    ? P
+    : T extends HTMLElement
+      ? import("vue").HTMLAttributes
+      : T extends (p: infer P) => any
+        ? P
+        : {};
+export declare function instantiateComponent<T, P>(
+  comp: T,
+  props: P,
+): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
+export declare function extractArgumentsFromRenderSlot<
+  TSlots extends Record<string, any>,
+  N extends keyof TSlots & string,
+>(
+  component: {
+    $slots: TSlots;
+  },
+  slotName: N,
+): TSlots[N] extends (...args: infer P) => any ? P[0] : never;
+export type ExtractLeafElement<T> = T extends HTMLElement
+  ? T
+  : T extends { $el: infer E }
+    ? ExtractLeafElement<E>
+    : T extends { new (): infer I }
+      ? ExtractLeafElement<I>
+      : never;
+export type ExtractDirectives<T> = {
+  [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any>
+    ? K extends `v${Capitalize<string>}`
+      ? K
+      : never
+    : never]: T[K];
+};
+export declare function runCustomDirective<
+  TInstance,
+  TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>,
+>(
+  instance: TInstance,
+  directive: TDirective,
+): ExtractLeafElement<TInstance> extends infer El extends HTMLElement
+  ? TDirective extends import("vue").Directive<infer TElement, infer TValue, infer M extends string>
+    ? El extends TElement
+      ? (
+          instance: TInstance,
+          value: TValue,
+          arg: string | undefined,
+          modifiers: { [K in M]?: true },
+        ) => void
+      : (
+          instance: TElement,
+          value: TValue,
+          arg: string | undefined,
+          modifiers: { [K in M]?: true },
+        ) => void
+    : false
+  : false;
+export declare function retrieveSetupDirectives<T>(
+  o: T,
+): ExtractDirectives<T> extends infer D
+  ? ExtractDirectives<Omit<import("vue").GlobalDirectives, keyof D>> & D
+  : ExtractDirectives<import("vue").GlobalDirectives>;
+export type IsExactlyEqual<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(
+  slot: T,
+  child: ReturnType<T> extends infer R
+    ? R extends Array<any>
+      ? never
+      : R extends string
+        ? [R]
+        : R extends U
+          ? [U]
+          : R
+    : ReturnType<T>,
+): any;
+export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(
+  slot: T,
+  children: ReturnType<T> extends infer R
+    ? R extends readonly [any, ...any[]]
+      ? R
+      : R extends Array<infer E>
+        ? U extends Array<infer UE>
+          ? [UE] extends [never]
+            ? U
+            : E extends string | number | boolean | symbol | bigint | null | undefined
+              ? E extends UE
+                ? U
+                : never
+              : UE extends E
+                ? IsExactlyEqual<UE, E> extends true
+                  ? U
+                  : never
+                : never
+          : never
+        : never
+    : ReturnType<T>,
+): any;
+export declare function checkRequiredSlots<T>(
+  slots: T,
+  provided: { [K in keyof T as undefined extends T[K] ? never : K]: true },
+): void;

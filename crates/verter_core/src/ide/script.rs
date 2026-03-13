@@ -3807,7 +3807,13 @@ declare module "@verter/types" {
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
   export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
-  export declare function extractArgumentsFromRenderSlot<T extends { $slots: { [K in N]: any } }, N extends string>(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
+  export declare function extractArgumentsFromRenderSlot<
+    TSlots extends Record<string, any>,
+    N extends keyof TSlots & string,
+  >(
+    component: { $slots: TSlots },
+    slotName: N,
+  ): TSlots[N] extends (...args: infer P) => any ? P[0] : never;
   export type ExtractLeafElement<T> = T extends HTMLElement ? T : T extends { $el: infer E } ? ExtractLeafElement<E> : T extends { new (): infer I } ? ExtractLeafElement<I> : never;
   export type ExtractDirectives<T> = { [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any> ? K extends `v${Capitalize<string>}` ? K : never : never]: T[K]; };
   export declare function runCustomDirective<TInstance, TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>>(instance: TInstance, directive: TDirective): ExtractLeafElement<TInstance> extends infer El extends HTMLElement ? TDirective extends import("vue").Directive<infer TElement, infer TValue, infer M extends string> ? El extends TElement ? (instance: TInstance, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : (instance: TElement, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : false : false;
@@ -3840,7 +3846,13 @@ export declare function extractRenderComponent<T extends string>(t: T): ExtractR
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
 export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
 export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
-export declare function extractArgumentsFromRenderSlot<T extends { $slots: { [K in N]: any } }, N extends string>(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
+export declare function extractArgumentsFromRenderSlot<
+  TSlots extends Record<string, any>,
+  N extends keyof TSlots & string,
+>(
+  component: { $slots: TSlots },
+  slotName: N,
+): TSlots[N] extends (...args: infer P) => any ? P[0] : never;
 export type ExtractLeafElement<T> = T extends HTMLElement ? T : T extends { $el: infer E } ? ExtractLeafElement<E> : T extends { new (): infer I } ? ExtractLeafElement<I> : never;
 export type ExtractDirectives<T> = { [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any> ? K extends `v${Capitalize<string>}` ? K : never : never]: T[K]; };
 export declare function runCustomDirective<TInstance, TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>>(instance: TInstance, directive: TDirective): ExtractLeafElement<TInstance> extends infer El extends HTMLElement ? TDirective extends import("vue").Directive<infer TElement, infer TValue, infer M extends string> ? El extends TElement ? (instance: TInstance, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : (instance: TElement, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void : false : false;
@@ -5515,6 +5527,33 @@ mod tests {
     /// IDE output rewrites `.vue` import specifiers to `.vue.ts` so that
     /// type providers (TSGO/tsserver) resolve them to the public API output.
     /// The rewrite uses CodeTransform::prepend_left so the sourcemap stays correct.
+    #[test]
+    fn standalone_and_ambient_types_preserve_slot_argument_maps() {
+        let slot_signature =
+            "TSlots extends Record<string, any>,\n    N extends keyof TSlots & string,";
+
+        assert!(
+            VERTER_TYPES_AMBIENT_MODULE.contains(slot_signature),
+            "ambient @verter/types declarations should infer the concrete slot map first"
+        );
+        assert!(
+            VERTER_TYPES_AMBIENT_MODULE
+                .contains("): TSlots[N] extends (...args: infer P) => any ? P[0] : never;"),
+            "ambient @verter/types declarations should preserve slot prop types"
+        );
+        assert!(
+            VERTER_TYPES_STANDALONE_DTS.contains(
+                "TSlots extends Record<string, any>,\n  N extends keyof TSlots & string,"
+            ),
+            "standalone @verter/types stub should infer the concrete slot map first"
+        );
+        assert!(
+            VERTER_TYPES_STANDALONE_DTS
+                .contains("): TSlots[N] extends (...args: infer P) => any ? P[0] : never;"),
+            "standalone @verter/types stub should preserve slot prop types"
+        );
+    }
+
     #[test]
     fn vue_imports_rewritten_to_vue_ts() {
         let (code, _) = gen_tsx_script(

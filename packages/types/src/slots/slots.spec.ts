@@ -328,6 +328,38 @@ describe("extractArgumentsFromRenderSlot", () => {
     result.slotItem.id satisfies string;
   });
 
+  it("preserves slot props for generated public-api intersections", () => {
+    type OmitNew<T> = { [K in keyof T]: T[K] };
+    const BaseComp = defineComponent({});
+
+    type GeneratedPublicApiComponent = OmitNew<typeof BaseComp> & {
+      new (props?: {}): {
+        $props: {};
+        $slots: {
+          default(props: {
+            slotItem: { id: number; name: string };
+            slotIndex: number;
+            slotTotal: number;
+          }): any;
+        };
+      };
+    };
+
+    const PublicApiComp = {} as GeneratedPublicApiComponent;
+    const result = extractArgumentsFromRenderSlot(
+      instantiateComponent(PublicApiComp, {}),
+      "default",
+    );
+
+    result.slotItem.id satisfies number;
+    result.slotItem.name satisfies string;
+    result.slotIndex satisfies number;
+    result.slotTotal satisfies number;
+
+    // @ts-expect-error - slot item should not widen to any
+    result.slotItem.id satisfies string;
+  });
+
   // Test with generic component types
   describe("with generic components", () => {
     const GenericComp = defineComponent({
