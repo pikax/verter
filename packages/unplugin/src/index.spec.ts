@@ -1205,6 +1205,34 @@ defineProps<MyProps>()
     expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
   });
 
+  it("recursive relative imports inside probed type files are upserted without resolveId", async () => {
+    const plugin = createPlugin();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+
+    writeFileSync(join(tempDir, "base.ts"), "export interface BaseProps { id: string; }\n");
+    writeFileSync(
+      join(tempDir, "types.ts"),
+      "import { BaseProps } from './base';\nexport interface MyProps extends BaseProps { name: string; }\n",
+    );
+
+    const sfc = `<script setup lang="ts">
+import type { MyProps } from "./types"
+defineProps<MyProps>()
+</script>
+<template><div>hello</div></template>
+`;
+
+    const resolveSpy = vi.fn(async () => null);
+
+    const result = await plugin.transform.call({ resolve: resolveSpy }, sfc, filename);
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    expect(code).toContain("name");
+    expect(code).toContain("id");
+    expect(code).not.toContain("HOST_MISSING_MACRO_TYPE_DEP");
+  });
+
   it("barrel file export-star re-export chain resolves macro type deps", async () => {
     const plugin = createPlugin();
     const filename = join(tempDir, "App.vue").replace(/\\/g, "/");

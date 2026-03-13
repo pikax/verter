@@ -195,6 +195,110 @@ function findTypesInExports(exports: Record<string, unknown>, pkgDir: string): s
   return null;
 }
 
+async function hydrateRelativeDependencyClosure(
+  host: VerterHost,
+  entryFile: string,
+  fs: typeof import("fs"),
+  path: typeof import("path"),
+  visited: Set<string>,
+): Promise<void> {
+  const normalizedEntry = normalizePath(entryFile);
+  if (visited.has(normalizedEntry)) return;
+
+  const queue = [normalizedEntry];
+  visited.add(normalizedEntry);
+
+  while (queue.length > 0) {
+    const currentFile = queue.shift()!;
+    const depAnalysisJson = host.getAnalysis(currentFile);
+    if (!depAnalysisJson) continue;
+
+    let depAnalysis: FileAnalysisSnapshot;
+    try {
+      depAnalysis = JSON.parse(depAnalysisJson);
+    } catch {
+      continue;
+    }
+
+    const depResolutions: HostDependencyResolution[] = [];
+
+    // Export signatures are more precise than moduleReferences: they know exactly
+    // which names are re-exported and from where.
+    const importSources = (depAnalysis.imports ?? []).map((imp) => imp.source);
+    const reexportSources = (depAnalysis.exportSignatures ?? [])
+      .filter((sig) => sig.reexportSource)
+      .map((sig) => sig.reexportSource!);
+    const allSources = [...new Set([...importSources, ...reexportSources])];
+
+    for (const source of allSources) {
+      if (!isRelativeImport(source)) continue;
+
+      const absBase = path.resolve(path.dirname(currentFile), source);
+      const candidates = [
+        absBase + ".d.ts",
+        absBase + ".ts",
+        absBase + "/index.d.ts",
+        absBase + "/index.ts",
+        absBase,
+      ];
+
+      for (const candidate of candidates) {
+        const normalized = normalizePath(candidate);
+        if (visited.has(normalized)) {
+          depResolutions.push({
+            specifier: source,
+            resolvedCanonicalId: normalized,
+          });
+          break;
+        }
+        if (!fs.existsSync(candidate)) continue;
+
+        // .vue files at the end of a barrel chain need their types available
+        // for cross-file resolution. Upsert as SFC (not non_sfc) so script
+        // analysis extracts exported types. The SFC's own transform will
+        // re-upsert with the full source later, which is a no-op if unchanged.
+        // Do NOT traverse further (SFC internal imports are handled separately).
+        if (normalized.endsWith(".vue")) {
+          visited.add(normalized);
+          try {
+            const vueSrc = fs.readFileSync(candidate);
+            host.upsert({ inputId: normalized, source: vueSrc });
+          } catch {
+            // If read fails, just record the resolution without upserting
+          }
+          depResolutions.push({
+            specifier: source,
+            resolvedCanonicalId: normalized,
+          });
+          break;
+        }
+
+        visited.add(normalized);
+        try {
+          const depSource = fs.readFileSync(candidate);
+          host.upsert({
+            inputId: normalized,
+            source: depSource,
+            fileKind: "non_sfc",
+          });
+          depResolutions.push({
+            specifier: source,
+            resolvedCanonicalId: normalized,
+          });
+          queue.push(normalized);
+          break;
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    if (depResolutions.length > 0) {
+      host.setImportDependencies(currentFile, depResolutions);
+    }
+  }
+}
+
 /**
  * Hydrate macro type dependencies for a Vue SFC.
  *
@@ -223,6 +327,7 @@ export async function hydrateMacroTypeDeps(
 
   const fs = await import("fs");
   const path = await import("path");
+  const hydratedRelativeVisited = new Set<string>();
 
   // Collect unique specifiers from macro type deps.
   const specifiers = [...new Set(analysis.macroTypeDeps.map((dep) => dep.importSource))];
@@ -300,6 +405,13 @@ export async function hydrateMacroTypeDeps(
           // Read failed — skip
         }
         resolutions.push({ specifier, resolvedCanonicalId: effectiveNormalized });
+        await hydrateRelativeDependencyClosure(
+          host,
+          effectiveNormalized,
+          fs,
+          path,
+          hydratedRelativeVisited,
+        );
         continue;
       }
     }
@@ -326,6 +438,13 @@ export async function hydrateMacroTypeDeps(
             // skip
           }
           resolutions.push({ specifier, resolvedCanonicalId: normalized });
+          await hydrateRelativeDependencyClosure(
+            host,
+            normalized,
+            fs,
+            path,
+            hydratedRelativeVisited,
+          );
           found = true;
           break;
         }
@@ -341,7 +460,6 @@ export async function hydrateMacroTypeDeps(
 
   // Phase 2: Bare (non-relative) specifiers pointing to npm packages.
   const bareSpecifiers = remaining;
-  const visited = new Set<string>();
 
   for (const specifier of bareSpecifiers) {
     // Try to resolve via bundler hook first
@@ -425,8 +543,6 @@ export async function hydrateMacroTypeDeps(
 
     // Upsert the entry file
     const normalizedEntryPath = normalizePath(entryPath);
-    if (visited.has(normalizedEntryPath)) continue;
-    visited.add(normalizedEntryPath);
 
     try {
       const source = fs.readFileSync(entryPath);
@@ -443,100 +559,13 @@ export async function hydrateMacroTypeDeps(
       continue;
     }
 
-    // Recursively traverse relative imports inside the hydrated file
-    const queue = [normalizedEntryPath];
-    while (queue.length > 0) {
-      const currentFile = queue.shift()!;
-
-      const depAnalysisJson = host.getAnalysis(currentFile);
-      if (!depAnalysisJson) continue;
-
-      let depAnalysis: FileAnalysisSnapshot;
-      try {
-        depAnalysis = JSON.parse(depAnalysisJson);
-      } catch {
-        continue;
-      }
-
-      const depResolutions: HostDependencyResolution[] = [];
-
-      // Collect sources from imports and re-export signatures.
-      // Export signatures are more precise than moduleReferences: they know exactly
-      // which names are re-exported and from where.
-      const importSources = (depAnalysis.imports ?? []).map((imp) => imp.source);
-      const reexportSources = (depAnalysis.exportSignatures ?? [])
-        .filter((sig) => sig.reexportSource)
-        .map((sig) => sig.reexportSource!);
-      const allSources = [...new Set([...importSources, ...reexportSources])];
-
-      for (const source of allSources) {
-        if (!isRelativeImport(source)) continue;
-
-        const absBase = path.resolve(path.dirname(currentFile), source);
-        // Try common declaration file extensions
-        const candidates = [
-          absBase + ".d.ts",
-          absBase + ".ts",
-          absBase + "/index.d.ts",
-          absBase + "/index.ts",
-          absBase,
-        ];
-
-        for (const candidate of candidates) {
-          const normalized = normalizePath(candidate);
-          if (visited.has(normalized)) {
-            depResolutions.push({
-              specifier: source,
-              resolvedCanonicalId: normalized,
-            });
-            break;
-          }
-          if (!fs.existsSync(candidate)) continue;
-
-          // .vue files at the end of a barrel chain need their types available
-          // for cross-file resolution. Upsert as SFC (not non_sfc) so script
-          // analysis extracts exported types. The SFC's own transform will
-          // re-upsert with the full source later, which is a no-op if unchanged.
-          // Do NOT traverse further (SFC internal imports are handled separately).
-          if (normalized.endsWith(".vue")) {
-            visited.add(normalized);
-            try {
-              const vueSrc = fs.readFileSync(candidate);
-              host.upsert({ inputId: normalized, source: vueSrc });
-            } catch {
-              // If read fails, just record the resolution without upserting
-            }
-            depResolutions.push({
-              specifier: source,
-              resolvedCanonicalId: normalized,
-            });
-            break;
-          }
-
-          visited.add(normalized);
-          try {
-            const depSource = fs.readFileSync(candidate);
-            host.upsert({
-              inputId: normalized,
-              source: depSource,
-              fileKind: "non_sfc",
-            });
-            depResolutions.push({
-              specifier: source,
-              resolvedCanonicalId: normalized,
-            });
-            queue.push(normalized);
-            break;
-          } catch {
-            continue;
-          }
-        }
-      }
-
-      if (depResolutions.length > 0) {
-        host.setImportDependencies(currentFile, depResolutions);
-      }
-    }
+    await hydrateRelativeDependencyClosure(
+      host,
+      normalizedEntryPath,
+      fs,
+      path,
+      hydratedRelativeVisited,
+    );
   }
 
   // Update the entry file's import dependencies to include the hydrated resolutions
