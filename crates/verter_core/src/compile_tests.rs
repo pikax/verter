@@ -12735,7 +12735,7 @@ export default {
 }
 
 #[test]
-fn tsx_instance_declaration_options_api_js_has_jsdoc_any() {
+fn tsx_instance_declaration_options_api_js_has_jsdoc_typed() {
     let result = compile_tsx(
         r#"<script>
 export default {
@@ -12748,22 +12748,47 @@ export default {
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(tsx.is_jsx, "JS Options API should produce JSX");
 
-    // Positive: should have JSDoc-style instance
+    // Positive: should have inline defineComponent wrapping for plain object export
     assert!(
-        tsx.code.contains("/** @type {any} */"),
-        "JS Options API should use JSDoc @type {{any}} for instance, got:\n{}",
+        tsx.code.contains("___VERTER___defineComponent)(__sfc__)"),
+        "JS Options API should wrap __sfc__ with defineComponent, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("InstanceType<typeof ___VERTER___dc>"),
+        "JS Options API should use InstanceType<typeof dc> for instance, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("var ___VERTER___instance"),
+        "JS Options API should use var (not declare let) for instance, got:\n{}",
+        tsx.code
+    );
+    // Positive: defineComponent must be imported from vue
+    assert!(
+        tsx.code
+            .contains("defineComponent as ___VERTER___defineComponent"),
+        "JS Options API should import defineComponent from vue, got:\n{}",
         tsx.code
     );
 
-    // Negative: must NOT have TS ambient instance
+    // Negative: must NOT have TS ambient instance syntax
     assert!(
         !tsx.code.contains("declare let ___VERTER___instance:"),
         "JS Options API must NOT use 'declare let' for instance, got:\n{}",
         tsx.code
     );
+    // Negative: must NOT have the old untyped @type {any}
     assert!(
-        !tsx.code.contains("InstanceType<"),
-        "JS Options API must NOT use InstanceType, got:\n{}",
+        !tsx.code
+            .contains("/** @type {any} */\nvar ___VERTER___instance"),
+        "JS Options API must NOT use untyped @type {{any}} for instance, got:\n{}",
+        tsx.code
+    );
+    // Negative: must NOT use self-import pattern (TSGO can't resolve virtual .vue.jsx imports)
+    assert!(
+        !tsx.code.contains("import('./"),
+        "JS Options API must NOT use self-import for instance typing, got:\n{}",
         tsx.code
     );
 }

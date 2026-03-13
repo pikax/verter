@@ -386,6 +386,86 @@ export default defineComponent({
     );
 }
 
+// ── Options API plain object wrapping with defineComponent ─────────────────
+
+#[test]
+fn tsc_options_api_plain_object_gets_define_component_wrap() {
+    let r = gen_tsc(
+        r#"<script>
+export default {
+  data() { return { count: 0 } },
+  methods: { increment() { this.count++ } }
+}
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+
+    // Positive: should have defineComponent wrapping
+    assert!(
+        r.contains("defineComponent("),
+        "plain object should be wrapped with defineComponent:\n{r}"
+    );
+    assert!(
+        r.contains("import { defineComponent }"),
+        "should add defineComponent import:\n{r}"
+    );
+    // Positive: original content preserved inside the wrap
+    assert!(
+        r.contains("data()"),
+        "data() must be preserved inside defineComponent wrap:\n{r}"
+    );
+
+    // Negative: should not have bare object as default export
+    // (the object literal should be inside defineComponent())
+    assert!(
+        !r.contains("export default {"),
+        "plain object should not remain bare — must be wrapped with defineComponent:\n{r}"
+    );
+}
+
+#[test]
+fn tsc_options_api_with_define_component_not_double_wrapped() {
+    let r = gen_tsc(
+        r#"<script lang="ts">
+import { defineComponent } from 'vue'
+export default defineComponent({
+  data() { return { count: 0 } }
+})
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+
+    // Positive: defineComponent preserved
+    assert!(
+        r.contains("defineComponent("),
+        "existing defineComponent should be preserved:\n{r}"
+    );
+
+    // Negative: should not double-wrap
+    let count = r.matches("defineComponent(").count();
+    assert_eq!(
+        count, 1,
+        "should not double-wrap defineComponent, got {count} occurrences in:\n{r}"
+    );
+}
+
+#[test]
+fn tsc_options_api_non_object_export_not_wrapped() {
+    let r = gen_tsc(
+        r#"<script>
+const MyComponent = { data() { return {} } }
+export default MyComponent
+</script>
+<template><div></div></template>"#,
+    );
+
+    // Negative: identifier export should NOT get defineComponent wrap
+    assert!(
+        !r.contains("import { defineComponent }"),
+        "identifier export should not get defineComponent import added:\n{r}"
+    );
+}
+
 // ── PropType<X> extraction ──────────────────────────────────────────────────
 
 #[test]

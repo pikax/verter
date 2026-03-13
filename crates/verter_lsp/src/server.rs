@@ -1192,9 +1192,14 @@ impl VerterLanguageServer {
         self.touch_mru(&canonical_id);
 
         let has_committed_state = self.provider_sync_states.contains_key(&canonical_id);
+        let ide_already_synced = self
+            .provider_sync_states
+            .get(&canonical_id)
+            .map(|s| s.ide_background_loaded)
+            .unwrap_or(false);
         let needs_sync = self.needs_ide_sync.remove(&canonical_id).is_some();
 
-        if !needs_sync && has_committed_state {
+        if !needs_sync && has_committed_state && ide_already_synced {
             return; // IDE is fresh
         }
 

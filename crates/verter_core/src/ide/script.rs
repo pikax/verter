@@ -69,8 +69,8 @@ use crate::template::code_gen::binding::{is_simple_ident, BindingType};
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::utils::oxc::bindings::collect_setup_binding_refs;
 use crate::utils::oxc::vue::{
-    parse_script, parse_script_with_companion, MacroDeclarator, MacroTypeParams, ScriptItem,
-    ScriptMacro, ScriptMode,
+    parse_script, parse_script_with_companion, DefaultExportType, MacroDeclarator, MacroTypeParams,
+    ScriptItem, ScriptMacro, ScriptMode,
 };
 
 use super::{event_to_jsx_name, get_directive_name, IdeGenericInfo, IdeScriptOptions};
@@ -2749,6 +2749,16 @@ fn process_tsx_script_only<'alloc>(
     // so the template JSX `<Alias />` resolves to the imported component.
     let component_aliases = extract_component_aliases(&parser_ret.program, content_str);
 
+    // Detect if the default export is a plain object (needs defineComponent wrapping
+    // for type inference). Only applies to JS mode — TS uses native type syntax.
+    let needs_define_component_wrap = options.is_jsx
+        && parse_result.items.iter().any(|item| {
+            matches!(
+                item,
+                ScriptItem::DefaultExport(de) if de.export_type == DefaultExportType::Object
+            )
+        });
+
     // Remove script tags, emit wrapper + content
     // The Options API wraps the script content in a TemplateBindingFN for type construct parity.
     let hoist_pos = script.tag_open.start;
@@ -2765,6 +2775,7 @@ fn process_tsx_script_only<'alloc>(
         close.push_str(&instance_declaration_ambient(
             options.filename,
             options.is_jsx,
+            needs_define_component_wrap,
         ));
         close.push_str(&directive_accessor_declaration(options.is_jsx));
         out.overwrite(tag_close.start, tag_close.end, &close);
@@ -2781,7 +2792,17 @@ fn process_tsx_script_only<'alloc>(
     }
 
     // Emit helper imports + type constructs (same as template-only and setup paths)
-    emit_helper_imports(out, hoist_pos, options, builtin_components, template_ast);
+    if needs_define_component_wrap {
+        emit_helper_imports_with_define_component(
+            out,
+            hoist_pos,
+            options,
+            builtin_components,
+            template_ast,
+        );
+    } else {
+        emit_helper_imports(out, hoist_pos, options, builtin_components, template_ast);
+    }
 
     emit_type_constructs(
         type_constructs,
@@ -3619,12 +3640,30 @@ fn instance_declaration(filename: &str, is_jsx: bool, override_attrs: bool) -> S
 ///
 /// Uses `declare let` so the declaration is available regardless of position in file.
 /// Needed because template JSX may appear before the script block.
-fn instance_declaration_ambient(filename: &str, is_jsx: bool) -> String {
+///
+/// For JS mode with plain object exports (`needs_define_component_wrap = true`), we
+/// inline a `defineComponent(__sfc__)` call to get proper instance typing without
+/// relying on self-import (which TSGO cannot resolve for virtual `.vue.jsx` files).
+fn instance_declaration_ambient(
+    filename: &str,
+    is_jsx: bool,
+    needs_define_component_wrap: bool,
+) -> String {
     if is_jsx {
-        format!(
-            "\n/** @type {{any}} */\nvar {P}instance = /** @type {{any}} */ (null);\n",
-            P = PREFIX,
-        )
+        if needs_define_component_wrap {
+            // Inline defineComponent wrapping — avoids self-import, works with TSGO + tsserver
+            format!(
+                "\nconst {P}dc = ({P}defineComponent)(__sfc__);\n/** @type {{InstanceType<typeof {P}dc>}} */\nvar {P}instance = /** @type {{*}} */ (null);\n",
+                P = PREFIX,
+            )
+        } else {
+            // Already has defineComponent — use self-import for the typed default export
+            format!(
+                "\n/** @type {{InstanceType<import('./{filename}.ts')['default']>}} */\nvar {P}instance = /** @type {{*}} */ (null);\n",
+                P = PREFIX,
+                filename = filename,
+            )
+        }
     } else {
         format!(
             "\n// @ts-ignore\ndeclare let {P}instance: InstanceType<import('./{filename}.ts')['default']>;\n",
@@ -3866,6 +3905,27 @@ fn emit_helper_imports(
     builtin_components: &[&str],
     template_ast: Option<&crate::ast::types::TemplateAst>,
 ) {
+    emit_helper_imports_inner(out, pos, options, builtin_components, template_ast, false);
+}
+
+fn emit_helper_imports_with_define_component(
+    out: &mut CodeGenOutput<'_>,
+    pos: u32,
+    options: &IdeScriptOptions<'_>,
+    builtin_components: &[&str],
+    template_ast: Option<&crate::ast::types::TemplateAst>,
+) {
+    emit_helper_imports_inner(out, pos, options, builtin_components, template_ast, true);
+}
+
+fn emit_helper_imports_inner(
+    out: &mut CodeGenOutput<'_>,
+    pos: u32,
+    options: &IdeScriptOptions<'_>,
+    builtin_components: &[&str],
+    template_ast: Option<&crate::ast::types::TemplateAst>,
+    needs_define_component: bool,
+) {
     use std::fmt::Write;
 
     let mut imports = String::with_capacity(512);
@@ -3902,6 +3962,9 @@ fn emit_helper_imports(
 
     // Collect vue imports: built-in components + template helpers (normalizeClass, normalizeStyle)
     let mut vue_imports: Vec<&str> = Vec::new();
+    if needs_define_component {
+        vue_imports.push("defineComponent as ___VERTER___defineComponent");
+    }
     for &name in builtin_components {
         vue_imports.push(name);
     }
@@ -9487,6 +9550,30 @@ export default {
         assert!(
             !code.contains("!:"),
             "JSX options API must not have definite assignment:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn jsx_options_api_instance_uses_var() {
+        let (code, _) = gen_jsx_script(
+            r#"<script>
+export default {
+  data() { return { d_rows: [] } }
+}
+</script>
+<template><div>{{ d_rows }}</div></template>"#,
+        );
+        // Positive: JS Options API uses var (not declare let) for instance
+        assert!(
+            code.contains("var ___VERTER___instance"),
+            "JS Options API should use var for instance:\n{}",
+            code
+        );
+        // Negative: must NOT use TS declare let syntax
+        assert!(
+            !code.contains("declare let ___VERTER___instance"),
+            "JS Options API must not use 'declare let' for instance:\n{}",
             code
         );
     }

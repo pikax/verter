@@ -2172,17 +2172,48 @@ fn component_is_dynamic_resolves_bindings() {
 
 #[test]
 fn component_is_dynamic_resolves_data_binding() {
-    // In TSX mode, Data bindings are bare identifiers (no _ctx. prefix).
+    // In TSX mode, Data bindings use ___VERTER___instance. prefix (no _ctx. prefix).
     let source = r#"<template><component :is="currentView">hello</component></template>"#;
     let output = gen_tsx_template_with_bindings(source, &[("currentView", BindingType::Data)]);
 
     assert!(
-        output.contains("currentView") && !output.contains("_ctx.currentView"),
-        "Data binding should be bare identifier in TSX mode: {output}"
+        output.contains("___VERTER___instance.currentView") && !output.contains("_ctx.currentView"),
+        "Data binding should use instance prefix in TSX mode: {output}"
     );
     assert!(
         !output.contains(":is="),
         "`:is` attribute should be removed from output: {output}"
+    );
+}
+
+// ── Data/Options binding instance prefix in TSX mode ─────────────
+
+#[test]
+fn data_binding_uses_instance_prefix() {
+    let source = r#"<template><div>{{ count }}</div></template>"#;
+    let output = gen_tsx_template_with_bindings(source, &[("count", BindingType::Data)]);
+
+    // Positive: Data bindings should use ___VERTER___instance. prefix
+    assert!(
+        output.contains("___VERTER___instance.count"),
+        "Data binding should use instance prefix in TSX mode: {output}"
+    );
+    // Negative: should NOT contain bare `{count}` without instance prefix
+    assert!(
+        !output.contains("{count}"),
+        "Data binding should not be bare — must use instance prefix: {output}"
+    );
+}
+
+#[test]
+fn options_binding_uses_instance_prefix() {
+    let source = r#"<template><div>{{ total }}</div></template>"#;
+    let output = gen_tsx_template_with_bindings(source, &[("total", BindingType::Options)]);
+
+    // Positive: Options bindings should use ___VERTER___instance. prefix
+    assert!(
+        output.contains("___VERTER___instance.total"),
+        "Options binding should use instance prefix in TSX mode: {output}"
     );
 }
 
@@ -2687,6 +2718,38 @@ fn static_prop_with_prefix_source_map_accuracy() {
         "source map must have a token mapping to the original $attrs position (col {}), \
          but only found source columns: {:?}",
         source_attrs_col,
+        tokens.iter().map(|t| t.2).collect::<Vec<_>>()
+    );
+}
+
+/// `:rows="d_rows"` with Data binding (PrimeVue-shaped case) — the prefix-only
+/// rewrite must use split overwrite so `d_rows` retains its source map position.
+/// Without the split, TSGO hover lands on the synthetic `___VERTER___instance` prefix.
+#[test]
+fn data_prop_binding_source_map_accuracy() {
+    let source = r#"<template><DataTable :rows="d_rows"/></template>"#;
+
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("d_rows", BindingType::Data)]);
+
+    // Positive: prop should use instance prefix
+    assert!(
+        output.contains("rows={___VERTER___instance.d_rows}"),
+        ":rows=\"d_rows\" should produce rows={{___VERTER___instance.d_rows}}: {output}"
+    );
+    // Negative: no raw :rows
+    assert!(
+        !output.contains(":rows"),
+        ":rows directive must be removed from JSX: {output}"
+    );
+
+    // Source map: d_rows should map to its original source position
+    let source_col = source.find("d_rows").expect("d_rows in source") as u32;
+    let has_token = tokens.iter().any(|&(_dl, _dc, sc)| sc == source_col);
+    assert!(
+        has_token,
+        "source map must have a token mapping to the original d_rows position (col {}), \
+         but only found source columns: {:?}",
+        source_col,
         tokens.iter().map(|t| t.2).collect::<Vec<_>>()
     );
 }

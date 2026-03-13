@@ -55,7 +55,11 @@ class LspClient {
   private nextId = 1;
   private pendingRequests = new Map<
     number,
-    { resolve: (v: any) => void; reject: (e: Error) => void }
+    {
+      resolve: (v: any) => void;
+      reject: (e: Error) => void;
+      timer?: ReturnType<typeof setTimeout>;
+    }
   >();
   private notificationHandlers = new Map<string, ((params: any) => void)[]>();
   private requestHandlers = new Map<string, (params: any) => unknown>();
@@ -67,6 +71,7 @@ class LspClient {
       stdio: ["pipe", "pipe", "pipe"],
       cwd,
       env: { ...process.env },
+      detached: process.platform !== "win32",
     });
 
     this.process.stdout!.on("data", (chunk: Buffer) => {
@@ -83,8 +88,9 @@ class LspClient {
     });
 
     this.process.on("exit", (code) => {
-      // Reject all pending requests
+      // Clear timers and reject all pending requests
       for (const [, pending] of this.pendingRequests) {
+        if (pending.timer) clearTimeout(pending.timer);
         pending.reject(new Error(`${this.name} process exited with code ${code}`));
       }
       this.pendingRequests.clear();
@@ -128,6 +134,7 @@ class LspClient {
       const pending = this.pendingRequests.get(msg.id);
       if (pending) {
         this.pendingRequests.delete(msg.id);
+        if (pending.timer) clearTimeout(pending.timer);
         if (msg.error) {
           pending.reject(new Error(`${this.name} LSP error: ${JSON.stringify(msg.error)}`));
         } else {
@@ -181,18 +188,20 @@ class LspClient {
   sendRequest<T = any>(method: string, params?: any, timeout = SHORT_TIMEOUT): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = this.nextId++;
-      this.pendingRequests.set(id, { resolve, reject });
 
-      const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-      const header = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n`;
-      this.process.stdin!.write(header + body);
-
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
           reject(new Error(`${this.name} request '${method}' timed out after ${timeout}ms`));
         }
       }, timeout);
+      timer.unref();
+
+      this.pendingRequests.set(id, { resolve, reject, timer });
+
+      const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+      const header = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n`;
+      this.process.stdin!.write(header + body);
     });
   }
 
@@ -239,12 +248,44 @@ class LspClient {
   }
 
   async kill() {
-    this.process.kill("SIGTERM");
-    // Give it a moment to exit gracefully
-    await new Promise((r) => setTimeout(r, 500));
-    if (!this.process.killed) {
-      this.process.kill("SIGKILL");
-    }
+    return new Promise<void>((resolve) => {
+      // Already exited
+      if (this.process.exitCode !== null) {
+        resolve();
+        return;
+      }
+
+      const pid = this.process.pid;
+      const forceTimer = setTimeout(() => {
+        // Grace period expired — hard kill the process tree
+        if (process.platform === "win32") {
+          const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          killer.once("close", () => {});
+        } else {
+          // Negative PID kills the process group (requires detached spawn)
+          try {
+            process.kill(-pid!, "SIGKILL");
+          } catch {
+            try {
+              process.kill(pid!, "SIGKILL");
+            } catch {}
+          }
+        }
+      }, 2000);
+      forceTimer.unref();
+
+      this.process.once("exit", () => {
+        clearTimeout(forceTimer);
+        resolve();
+      });
+
+      try {
+        this.process.kill("SIGTERM");
+      } catch {}
+    });
   }
 }
 
@@ -319,9 +360,12 @@ async function benchmarkVerter(label: string, typeProvider: string): Promise<Ben
   if (typeProvider === "extension") {
     const { ExtensionTsService } = await import("../../vue-vscode/src/extensionTsService");
     const tsService = new ExtensionTsService(resolve(WORKSPACE_ROOT));
-    client.onRequest("$/verter/tsQuery", (params: { command: string; arguments: Record<string, unknown> }) => {
-      return tsService.handleQuery(params.command, params.arguments);
-    });
+    client.onRequest(
+      "$/verter/tsQuery",
+      (params: { command: string; arguments: Record<string, unknown> }) => {
+        return tsService.handleQuery(params.command, params.arguments);
+      },
+    );
   }
 
   const rootUri = pathToFileURL(resolve(WORKSPACE_ROOT)).toString();

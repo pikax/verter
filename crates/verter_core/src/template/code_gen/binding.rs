@@ -205,11 +205,12 @@ impl<'alloc> BindingResolver<'alloc> {
     #[inline]
     pub fn resolve_prefix(&self, ident: &str) -> &'static str {
         if self.is_tsx {
-            // TSX mode: props → __props., known → bare,
-            // globals/keywords → bare,
+            // TSX mode: props → __props., data/options → instance.,
+            // setup bindings → bare, globals/keywords → bare,
             // unresolved → instance prefix (matches Vue's _ctx. behavior)
             return match self.bindings.get(ident) {
                 Some(bt) if bt.is_props() => "__props.",
+                Some(BindingType::Data) | Some(BindingType::Options) => "___VERTER___instance.",
                 Some(_) => "",
                 None if is_global(ident.as_bytes())
                     || is_keyword(ident.as_bytes())
@@ -1001,6 +1002,26 @@ mod tests {
         // In VDOM mode, $event should also not get _ctx. prefix
         let resolver = make_resolver(&[], true);
         assert_eq!(resolver.resolve_prefix("$event"), "");
+    }
+
+    // ==================== Data/Options TSX prefix ====================
+
+    #[test]
+    fn tsx_data_binding_prefix_is_instance() {
+        let resolver = make_tsx_resolver(&[("count", BindingType::Data)]);
+        assert_eq!(resolver.resolve_prefix("count"), "___VERTER___instance.");
+    }
+
+    #[test]
+    fn tsx_options_binding_prefix_is_instance() {
+        let resolver = make_tsx_resolver(&[("total", BindingType::Options)]);
+        assert_eq!(resolver.resolve_prefix("total"), "___VERTER___instance.");
+    }
+
+    #[test]
+    fn tsx_setup_const_binding_stays_bare() {
+        let resolver = make_tsx_resolver(&[("x", BindingType::SetupConst)]);
+        assert_eq!(resolver.resolve_prefix("x"), "");
     }
 
     // ==================== Const prop overrides ====================

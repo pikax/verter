@@ -47,9 +47,9 @@ use crate::template::code_gen::binding::BindingType;
 use crate::tokenizer::byte::tokenize_sfc;
 use crate::utils::oxc::vue::resolve_type::ResolvedProp;
 use crate::utils::oxc::vue::{
-    extract_companion_types, parse_script_with_companion, MacroArrayArg, MacroObjectArg,
-    MacroTypeParams, ResolvedElements, ResolvedEmitSignature, RuntimeType, ScriptItem, ScriptMacro,
-    ScriptMode,
+    extract_companion_types, parse_script, parse_script_with_companion, DefaultExportType,
+    ImportSpecifierKind, MacroArrayArg, MacroObjectArg, MacroTypeParams, ResolvedElements,
+    ResolvedEmitSignature, RuntimeType, ScriptItem, ScriptMacro, ScriptMode,
 };
 
 /// Macro stub declarations shared between `generate_code` (when expose entries
@@ -1837,16 +1837,65 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
 /// Generate a stub for Options API `<script>` blocks that preserves the
 /// original script content (including `defineComponent()` props/emits/etc.)
 /// so that cross-component type checking works.
+///
+/// When the default export is a plain object (no `defineComponent` wrapper),
+/// we insert `defineComponent()` around it so that Vue's type overloads
+/// infer data/methods/computed on the instance type. This makes
+/// `InstanceType<typeof import('./Foo.vue.ts')['default']>` resolve to the
+/// full component instance rather than `never`.
 fn generate_options_api_stub(_component_name: &str, script_content: &str) -> TscOutput {
     let source_map = minimal_source_map();
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
-    // Emit the original script body. The `export default defineComponent({...})`
-    // is kept intact so TypeScript infers the full component type.
-    let code = format!(
-        "{content}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
-        content = script_content.trim(),
-        map = encoded,
-    );
+
+    // Parse to detect if the default export is a plain object (needs wrapping)
+    let alloc = Allocator::default();
+    let parser_ret = Parser::new(&alloc, script_content, SourceType::tsx()).parse();
+    let parse_result = parse_script(&parser_ret.program, ScriptMode::Options, 0, script_content);
+
+    // Find a plain object default export that needs defineComponent wrapping
+    let obj_span = parse_result.items.iter().find_map(|item| {
+        if let ScriptItem::DefaultExport(de) = item {
+            if de.export_type == DefaultExportType::Object {
+                return de.object_span;
+            }
+        }
+        None
+    });
+
+    let code = if let Some(span) = obj_span {
+        // Check if defineComponent is already imported
+        let has_dc_import = parse_result.items.iter().any(|item| {
+            if let ScriptItem::Import(imp) = item {
+                imp.source == "vue"
+                    && imp.bindings.iter().any(|b| {
+                        b.name == "defineComponent"
+                            && b.import_kind == Some(ImportSpecifierKind::Named)
+                    })
+            } else {
+                false
+            }
+        });
+
+        let mut result = String::with_capacity(script_content.len() + 80);
+        if !has_dc_import {
+            result.push_str("import { defineComponent } from \"vue\"\n");
+        }
+        result.push_str(&script_content[..span.start as usize]);
+        result.push_str("defineComponent(");
+        result.push_str(&script_content[span.start as usize..span.end as usize]);
+        result.push(')');
+        result.push_str(&script_content[span.end as usize..]);
+        let trimmed = result.trim();
+        format!("{trimmed}\n//# sourceMappingURL=data:application/json;base64,{encoded}\n")
+    } else {
+        // Already has defineComponent or different export type — pass through
+        format!(
+            "{content}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
+            content = script_content.trim(),
+            map = encoded,
+        )
+    };
+
     TscOutput { code, source_map }
 }
 
