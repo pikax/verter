@@ -37,7 +37,7 @@ export type PropertyMetaSchema =
   | {
       kind: "enum" | "object" | "array";
       type: string;
-      schema?: PropertyMetaSchema[];
+      schema?: PropertyMetaSchema[] | Record<string, PropertyMetaSchema>;
     };
 
 /**

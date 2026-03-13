@@ -364,3 +364,81 @@ fn props_ts_as_prop_type_without_annotation() {
     assert_eq!(opts.props[0].type_constructor.as_deref(), Some("Number"));
     assert!(opts.props[0].type_annotation.is_none());
 }
+
+// ── Emit payload types ──
+
+#[test]
+fn emits_object_validator_extracts_payload_type() {
+    let snap = analyze(
+        r#"export default {
+            emits: {
+                select: (item: string) => typeof item === 'string',
+                clear: () => true,
+                'update:count': (value: number) => typeof value === 'number',
+            }
+        }"#,
+    );
+    let opts = snap.options_api.unwrap();
+    assert_eq!(opts.emits.len(), 3);
+
+    assert_eq!(opts.emits[0].name, "select");
+    assert_eq!(
+        opts.emits[0].payload_type.as_deref(),
+        Some("[item: string]"),
+        "validator (item: string) => ... should extract payload_type"
+    );
+
+    assert_eq!(opts.emits[1].name, "clear");
+    assert_eq!(
+        opts.emits[1].payload_type.as_deref(),
+        Some("[]"),
+        "validator () => true should extract empty tuple payload_type"
+    );
+
+    assert_eq!(opts.emits[2].name, "update:count");
+    assert_eq!(
+        opts.emits[2].payload_type.as_deref(),
+        Some("[value: number]"),
+        "validator (value: number) => ... should extract payload_type"
+    );
+}
+
+#[test]
+fn emits_object_null_has_no_payload_type() {
+    let snap = analyze("export default { emits: { click: null } }");
+    let opts = snap.options_api.unwrap();
+    assert_eq!(opts.emits[0].name, "click");
+    assert!(
+        opts.emits[0].payload_type.is_none(),
+        "null validator should not have payload_type"
+    );
+}
+
+#[test]
+fn emits_array_has_no_payload_type() {
+    let snap = analyze("export default { emits: ['click', 'update'] }");
+    let opts = snap.options_api.unwrap();
+    for emit in &opts.emits {
+        assert!(
+            emit.payload_type.is_none(),
+            "array-form emits should not have payload_type"
+        );
+    }
+}
+
+#[test]
+fn emits_object_multi_param_validator() {
+    let snap = analyze(
+        r#"export default {
+            emits: {
+                drop: (source: string, target: string, mode: number) => true,
+            }
+        }"#,
+    );
+    let opts = snap.options_api.unwrap();
+    assert_eq!(
+        opts.emits[0].payload_type.as_deref(),
+        Some("[source: string, target: string, mode: number]"),
+        "multi-param validator should extract all params as tuple"
+    );
+}

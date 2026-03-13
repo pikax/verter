@@ -343,12 +343,20 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
       if (!props.some((p) => p.name === modelName)) {
         const propField = m.propFields?.[0];
         const rawType = propField?.typeAnnotation ?? undefined;
+        const hasDefault = (m.defaultKeys ?? []).includes(modelName);
+        const isModelOptional = hasDefault;
+        const finalRawType = isModelOptional && rawType ? `${rawType} | undefined` : rawType;
         props.push({
           name: modelName,
-          type: rawType ? parseType(rawType) : unknown("unknown"),
-          required: false,
-          hasDefault: false,
-          ...(rawType && { rawType }),
+          type:
+            isModelOptional && rawType
+              ? union([parseType(rawType), primitive("undefined")])
+              : rawType
+                ? parseType(rawType)
+                : unknown("unknown"),
+          required: !hasDefault,
+          hasDefault,
+          ...(finalRawType && { rawType: finalRawType }),
         });
       }
       // Add update:modelName event if not already in events list
@@ -356,11 +364,13 @@ export function snapshotToMeta(snapshot: unknown, filePath: string): ComponentMe
       if (!events.some((e) => e.name === updateEventName)) {
         const propField = m.propFields?.[0];
         const rawType = propField?.typeAnnotation ?? undefined;
+        const tupleSignature = rawType ? `[value: ${rawType}]` : undefined;
         events.push({
           name: updateEventName,
-          payload: rawType ? parseType(rawType) : unknown("unknown"),
+          payload: tupleSignature ? parseType(tupleSignature) : unknown("unknown"),
           hasValidator: false,
           isDeclared: true,
+          ...(tupleSignature && { rawSignature: tupleSignature }),
         });
       }
     }
@@ -724,11 +734,14 @@ function extractOptionsEmits(
 
   return optionsApi.emits.map((field): EventMeta => {
     const templateDef = defMap.get(field.name);
+    const rawPayload = field.payloadType ?? undefined;
+    const payload = rawPayload ? parseType(rawPayload) : unknown("unknown");
     return {
       name: field.name,
-      payload: unknown("unknown"),
+      payload,
       hasValidator: templateDef?.hasValidator ?? false,
       isDeclared: templateDef?.isDeclared ?? true,
+      ...(rawPayload && { rawSignature: rawPayload }),
     };
   });
 }

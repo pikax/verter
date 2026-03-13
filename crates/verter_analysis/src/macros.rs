@@ -887,6 +887,8 @@ fn try_extract_macro(
                 extract_with_defaults_keys(call)
             } else if kind == AnalyzedMacroKind::DefineProps {
                 prop_extraction.default_keys
+            } else if kind == AnalyzedMacroKind::DefineModel {
+                extract_define_model_default_keys(call, &model_name)
             } else {
                 Vec::new()
             };
@@ -961,6 +963,48 @@ fn extract_define_model_type(
         resolution_source: TypeResolutionSource::Rust,
         resolution_error: None,
     }]
+}
+
+/// Check if a `defineModel()` call has a `default` key in its options object.
+///
+/// Handles:
+/// - `defineModel<T>({ default: ... })` — options as first arg
+/// - `defineModel<T>('name', { default: ... })` — options as second arg
+///
+/// Returns a vec containing the model name if `default` is present, empty otherwise.
+fn extract_define_model_default_keys(
+    call: &CallExpression<'_>,
+    model_name: &Option<String>,
+) -> Vec<String> {
+    let name = model_name.as_deref().unwrap_or("modelValue").to_string();
+
+    // Find the options object argument (skip string literal name argument)
+    let options_obj = call.arguments.iter().find_map(|arg| {
+        if let Argument::ObjectExpression(obj) = arg {
+            Some(obj)
+        } else {
+            None
+        }
+    });
+
+    let Some(obj) = options_obj else {
+        return Vec::new();
+    };
+
+    // Check if the object has a "default" property
+    let has_default = obj.properties.iter().any(|prop| {
+        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+            matches!(&p.key, PropertyKey::StaticIdentifier(id) if id.name == "default")
+        } else {
+            false
+        }
+    });
+
+    if has_default {
+        vec![name]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Result of extracting prop fields from a `defineProps` call.

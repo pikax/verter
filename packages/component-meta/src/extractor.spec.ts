@@ -1671,7 +1671,11 @@ describe("snapshotToMeta", () => {
       // update event should also have string type
       const updateEvent = meta.events.find((e) => e.name === "update:modelValue")!;
       expect(updateEvent).toBeDefined();
-      expect(updateEvent.payload).toEqual({ kind: "primitive", name: "string" });
+      // defineModel events are wrapped in tuple format: [value: string]
+      expect(updateEvent.payload).toEqual({
+        kind: "tuple",
+        elements: [{ kind: "primitive", name: "string" }],
+      });
       expect(updateEvent.payload.kind).not.toBe("unknown");
     });
   });
@@ -1708,7 +1712,8 @@ describe("snapshotToMeta", () => {
       // Should have a prop named "title" from defineModel
       const titleProp = meta.props.find((p) => p.name === "title");
       expect(titleProp).toBeDefined();
-      expect(titleProp!.required).toBe(false);
+      // defineModel without default → required
+      expect(titleProp!.required).toBe(true);
     });
 
     it("synthesizes update:modelName event from defineModel", () => {

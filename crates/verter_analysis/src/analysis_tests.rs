@@ -1882,3 +1882,51 @@ fn mark_bindings_used_in_style_quoted_expression() {
         "quoted v-bind(color) should still mark the binding"
     );
 }
+
+#[test]
+fn define_model_with_default_extracts_default_keys() {
+    let code = r#"const checked = defineModel<boolean>('checked', { default: false });"#;
+    let result = analyze(code);
+    let model_macro = result
+        .macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineModel)
+        .expect("should have DefineModel macro");
+    assert!(
+        model_macro.default_keys.contains(&"checked".to_string()),
+        "defineModel with {{ default: ... }} should populate default_keys with the model name, got: {:?}",
+        model_macro.default_keys
+    );
+}
+
+#[test]
+fn define_model_without_default_has_empty_default_keys() {
+    let code = r#"const model = defineModel<string>({ required: true });"#;
+    let result = analyze(code);
+    let model_macro = result
+        .macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineModel)
+        .expect("should have DefineModel macro");
+    assert!(
+        model_macro.default_keys.is_empty(),
+        "defineModel without default should have empty default_keys, got: {:?}",
+        model_macro.default_keys
+    );
+}
+
+#[test]
+fn define_model_default_modelvalue() {
+    let code = r#"const model = defineModel<string>({ default: '' });"#;
+    let result = analyze(code);
+    let model_macro = result
+        .macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineModel)
+        .expect("should have DefineModel macro");
+    assert!(
+        model_macro.default_keys.contains(&"modelValue".to_string()),
+        "defineModel without name should use 'modelValue' as default key, got: {:?}",
+        model_macro.default_keys
+    );
+}

@@ -83,7 +83,7 @@ fn extract_options_api(
 
         match key {
             "props" => result.props = extract_options_props(&p.value, _source),
-            "emits" => result.emits = extract_options_emits(&p.value),
+            "emits" => result.emits = extract_options_emits(&p.value, _source),
             "data" => result.data_fields = extract_data_fields(&p.value),
             "computed" => result.computed_fields = extract_object_keys(&p.value),
             "methods" => result.methods = extract_object_keys(&p.value),
@@ -231,7 +231,7 @@ fn extract_options_props(value: &Expression<'_>, source: &str) -> Vec<AnalyzedOp
 
 // ── Emits ──
 
-fn extract_options_emits(value: &Expression<'_>) -> Vec<AnalyzedEmitField> {
+fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEmitField> {
     match value {
         // emits: ['click', 'update']
         Expression::ArrayExpression(arr) => arr
@@ -261,10 +261,11 @@ fn extract_options_emits(value: &Expression<'_>) -> Vec<AnalyzedEmitField> {
                     return None;
                 };
                 let name = static_key_name(&p.key)?;
+                let payload_type = extract_validator_payload_type(&p.value, source);
                 Some(AnalyzedEmitField {
                     name,
                     span: key_span(&p.key),
-                    payload_type: None,
+                    payload_type,
                     description: None,
                     tags: Vec::new(),
                 })
@@ -273,6 +274,39 @@ fn extract_options_emits(value: &Expression<'_>) -> Vec<AnalyzedEmitField> {
 
         _ => Vec::new(),
     }
+}
+
+/// Extract payload type from an emit validator function.
+///
+/// For `(item: string) => ...` returns `Some("[item: string]")`.
+/// For `() => true` returns `Some("[]")`.
+/// For `null` or non-function values returns `None`.
+fn extract_validator_payload_type(value: &Expression<'_>, source: &str) -> Option<String> {
+    let params = match value {
+        Expression::ArrowFunctionExpression(f) => &f.params,
+        Expression::FunctionExpression(f) => &f.params,
+        _ => return None,
+    };
+
+    if params.items.is_empty() {
+        return Some("[]".to_string());
+    }
+
+    let parts: Vec<String> = params
+        .items
+        .iter()
+        .map(|p| {
+            let start = p.span().start as usize;
+            let end = p.span().end as usize;
+            if end <= source.len() {
+                source[start..end].to_string()
+            } else {
+                "unknown".to_string()
+            }
+        })
+        .collect();
+
+    Some(format!("[{}]", parts.join(", ")))
 }
 
 // ── Data ──
