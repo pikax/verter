@@ -83,14 +83,11 @@ export function mapSlotMeta(slot: SlotMeta, options?: MetaCheckerOptions): Prope
 export function mapExposedMeta(exposed: ExposedMeta, options?: MetaCheckerOptions): PropertyMeta {
   return {
     name: exposed.name,
-    description: exposed.description ?? "",
+    description: "",
     type: typeDescriptorToString(exposed.type),
     required: false,
     global: false,
-    tags: (exposed.tags ?? []).map((t) => ({
-      name: t.name,
-      ...(t.text != null && { text: t.text }),
-    })),
+    tags: [],
     schema: typeDescriptorToSchema(exposed.type, options),
   };
 }
