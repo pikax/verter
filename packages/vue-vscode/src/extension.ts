@@ -60,6 +60,7 @@ import {
   updateMcpPort,
 } from "./claudeCodeDetection";
 import { createActivationGate } from "./activationGate";
+import { readE2eEnv } from "./e2eEnv";
 import { shouldConfigureBuiltInTypeScriptPlugin } from "./startupOptimizations";
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
 
@@ -1059,8 +1060,8 @@ function buildServerOptions(
   const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
   const verterConfig = workspace.getConfiguration("verter");
   // E2E tests can override the type provider via environment variable
-  const typeProvider =
-    process.env.VERTER_E2E_TYPE_PROVIDER || verterConfig.get<string>("typeProvider", "auto");
+  const typeProvider = readE2eEnv("TYPE_PROVIDER")
+    || verterConfig.get<string>("typeProvider", "auto");
   const userTsdk = verterConfig.get<string>("typescript.tsdk", "");
   // Always pass --tsdk: user setting → bundled TypeScript (fallback for pnpm strict mode etc.)
   const bundledTsdk = join(extensionPath, "node_modules", "typescript", "lib");

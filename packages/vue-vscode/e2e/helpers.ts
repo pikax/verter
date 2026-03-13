@@ -3,14 +3,15 @@ import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import * as assert from "assert";
+import { readE2eEnv } from "../src/e2eEnv";
 import { computeStartupSegments } from "../src/startupOptimizations";
 
 // ── Environment ────────────────────────────────────────────────
 
-export const FIXTURE_NAME = process.env.VERTER_E2E_FIXTURE || "single-project";
-export const TYPE_PROVIDER = process.env.VERTER_E2E_TYPE_PROVIDER;
-export const LOG_FILE = process.env.VERTER_E2E_LOG_FILE || path.join(os.tmpdir(), "verter-e2e.log");
-export const TIMING_FILE = process.env.VERTER_E2E_TIMING_FILE || path.join(os.tmpdir(), "verter-e2e-timing.json");
+export const FIXTURE_NAME = readE2eEnv("FIXTURE") || "single-project";
+export const TYPE_PROVIDER = readE2eEnv("TYPE_PROVIDER");
+export const LOG_FILE = readE2eEnv("LOG_FILE") || path.join(os.tmpdir(), "verter-e2e.log");
+export const TIMING_FILE = readE2eEnv("TIMING_FILE") || path.join(os.tmpdir(), "verter-e2e-timing.json");
 
 export interface StartupTiming {
   activationStartMs?: number;
@@ -126,11 +127,12 @@ export async function waitForFileReady(
     probePosition?: vscode.Position;
     expectedLabel?: string;
     expectedKinds?: vscode.CompletionItemKind[];
+    triggerCharacter?: string;
     timeoutMs?: number;
     intervalMs?: number;
   } = {},
 ): Promise<void> {
-  const { timeoutMs = 20_000, intervalMs = 150 } = options;
+  const { timeoutMs = 20_000, intervalMs = 150, triggerCharacter } = options;
   let { probePosition, expectedLabel, expectedKinds } = options;
 
   // Auto-detect from mustache expressions if not provided
@@ -180,6 +182,7 @@ export async function waitForFileReady(
       "vscode.executeCompletionItemProvider",
       doc.uri,
       probePosition,
+      triggerCharacter,
     );
 
     if (completions?.items) {
@@ -292,6 +295,59 @@ export async function waitForDiagnostics(
       }
     });
   });
+}
+
+/**
+ * Wait until no diagnostics matching the predicate remain on a document.
+ * This is useful for flaky resolution scenarios where diagnostics briefly
+ * appear before the type provider finishes reconciling imports.
+ */
+export async function waitForNoDiagnosticsMatching(
+  uri: vscode.Uri,
+  options: {
+    source?: string;
+    timeoutMs?: number;
+    intervalMs?: number;
+    stableMs?: number;
+    predicate: (d: vscode.Diagnostic) => boolean;
+  },
+): Promise<vscode.Diagnostic[]> {
+  const {
+    source,
+    timeoutMs = 30_000,
+    intervalMs = 150,
+    stableMs = 400,
+    predicate,
+  } = options;
+
+  const getFiltered = () => {
+    let diags = vscode.languages.getDiagnostics(uri);
+    if (source) {
+      diags = diags.filter((d) => d.source === source);
+    }
+    return diags;
+  };
+
+  const start = Date.now();
+  let clearSince: number | undefined;
+
+  while (Date.now() - start < timeoutMs) {
+    const diags = getFiltered();
+    const matching = diags.filter(predicate);
+
+    if (matching.length === 0) {
+      clearSince ??= Date.now();
+      if (Date.now() - clearSince >= stableMs) {
+        return diags;
+      }
+    } else {
+      clearSince = undefined;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  return getFiltered();
 }
 
 
@@ -503,12 +559,55 @@ export function parseStartupTiming(): StartupTiming {
 export async function getCompletions(
   uri: vscode.Uri,
   position: vscode.Position,
+  triggerCharacter?: string,
 ): Promise<vscode.CompletionList | undefined> {
   return vscode.commands.executeCommand<vscode.CompletionList>(
     "vscode.executeCompletionItemProvider",
     uri,
     position,
+    triggerCharacter,
   );
+}
+
+export async function waitForCompletionsMatching(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  options: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    stableMs?: number;
+    triggerCharacter?: string;
+    predicate: (list: vscode.CompletionList | undefined) => boolean;
+  },
+): Promise<vscode.CompletionList | undefined> {
+  const {
+    timeoutMs = 20_000,
+    intervalMs = 150,
+    stableMs = 400,
+    triggerCharacter,
+    predicate,
+  } = options;
+
+  const start = Date.now();
+  let matchedSince: number | undefined;
+  let lastList: vscode.CompletionList | undefined;
+
+  while (Date.now() - start < timeoutMs) {
+    lastList = await getCompletions(uri, position, triggerCharacter);
+
+    if (predicate(lastList)) {
+      matchedSince ??= Date.now();
+      if (Date.now() - matchedSince >= stableMs) {
+        return lastList;
+      }
+    } else {
+      matchedSince = undefined;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  return lastList;
 }
 
 export function getCompletionLabel(item: vscode.CompletionItem): string {
@@ -695,6 +794,51 @@ export async function getCodeActions(
     kind?.value,
   );
   return result || [];
+}
+
+/**
+ * Poll code actions until the expected action set is present and stable.
+ * This avoids one-shot assertions while diagnostics and provider state are still settling.
+ */
+export async function waitForCodeActionsMatching(
+  uri: vscode.Uri,
+  range: vscode.Range,
+  options: {
+    kind?: vscode.CodeActionKind;
+    timeoutMs?: number;
+    intervalMs?: number;
+    stableMs?: number;
+    predicate: (items: readonly (vscode.CodeAction | vscode.Command)[]) => boolean;
+  },
+): Promise<(vscode.CodeAction | vscode.Command)[]> {
+  const {
+    kind,
+    timeoutMs = 20_000,
+    intervalMs = 150,
+    stableMs = 400,
+    predicate,
+  } = options;
+
+  const start = Date.now();
+  let matchedSince: number | undefined;
+  let lastItems: (vscode.CodeAction | vscode.Command)[] = [];
+
+  while (Date.now() - start < timeoutMs) {
+    lastItems = await getCodeActions(uri, range, kind);
+
+    if (predicate(lastItems)) {
+      matchedSince ??= Date.now();
+      if (Date.now() - matchedSince >= stableMs) {
+        return lastItems;
+      }
+    } else {
+      matchedSince = undefined;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  return lastItems;
 }
 
 /**

@@ -925,6 +925,35 @@ impl VerterLanguageServer {
         }
     }
 
+    fn refresh_vue_dependency_tracking(&self, canonical_id: &str) {
+        let Some(snapshot) = self.resolver_snapshot() else {
+            return;
+        };
+        let Some(analysis) = self.documents.host().get_analysis(canonical_id) else {
+            return;
+        };
+
+        let reader = LspProjectResolverReader::new(&self.documents);
+        let resolved_dependencies = collect_resolved_provider_dependencies_from_analyzed_refs(
+            &snapshot.resolver,
+            &reader,
+            canonical_id,
+            &analysis.module_references,
+        );
+
+        self.documents.host.set_import_dependencies(
+            canonical_id,
+            resolved_dependencies
+                .iter()
+                .map(|entry| verter_host::DependencyResolution {
+                    specifier: entry.provider_specifier.clone(),
+                    resolved_canonical_id: Some(entry.source_id.clone()),
+                    possible_canonical_ids: Vec::new(),
+                })
+                .collect(),
+        );
+    }
+
     async fn sync_non_vue_file_to_provider(
         &self,
         snapshot: &ResolverSnapshot,
@@ -1405,6 +1434,61 @@ impl VerterLanguageServer {
             ".tsx"
         };
         Some(format!("{canonical}{ext}"))
+    }
+
+    /// Generate a provisional public API path (.vue.ts) without resolver ownership.
+    ///
+    /// Mirrors `provider_id_for_source()` for Vue files and is used during cold
+    /// start before `background_init()` has built the resolver snapshot.
+    fn provisional_api_path_for_canonical_id(&self, canonical_id: &str) -> Option<String> {
+        canonical_id
+            .ends_with(".vue")
+            .then(|| format!("{canonical_id}.ts"))
+    }
+
+    async fn sync_vue_api_provisionally(&self, canonical_id: &str, api_code: &str) -> bool {
+        let Some(sync) = &self.project_sync else {
+            return false;
+        };
+        let Some(dts_path) = self.provisional_api_path_for_canonical_id(canonical_id) else {
+            return false;
+        };
+
+        let mut state = self
+            .provider_sync_state_for_source(canonical_id)
+            .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
+                owner_key: "__provisional__".to_string(),
+                ..Default::default()
+            });
+
+        if state.owner_key.is_empty() {
+            state.owner_key = "__provisional__".to_string();
+        }
+
+        let needs_open =
+            state.api_path.as_deref() != Some(dts_path.as_str()) && !state.api_background_loaded;
+        let result = if needs_open {
+            sync.open_dts(&dts_path, api_code).await
+        } else {
+            sync.sync_dts(&dts_path, api_code).await
+        };
+
+        match result {
+            Ok(()) => {
+                state.api_path = Some(dts_path);
+                state.api_background_loaded = true;
+                self.commit_provider_sync_state(canonical_id, state);
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "sync_vue_api_provisionally: failed for {canonical_id}: {error}"
+                );
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                false
+            }
+        }
     }
 
     /// Generate the IDE file path (.tsx or .jsx) for a given Vue file URI.
@@ -1996,7 +2080,7 @@ impl VerterLanguageServer {
         // Get the child's source
         let child_source_arc = self.documents.host().get_source(&child_canonical_id)?;
         let child_source = child_source_arc.to_string();
-        let child_uri: Uri = format!("file:///{}", child_canonical_id).parse().ok()?;
+        let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
         let blocks = scan_sfc_blocks(&child_source);
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
 
@@ -2286,11 +2370,16 @@ impl VerterLanguageServer {
     async fn sync_imported_vue_api_lightweight(&self, canonical_id: &str) {
         // Fast path: host already has the file — generate API and sync DTS only.
         if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+            if self.resolver_snapshot().is_none() {
+                let _ = self.sync_vue_api_provisionally(canonical_id, &api.code).await;
+                return;
+            }
+
             if let Some(sync) = &self.project_sync {
                 let Some(transition) =
                     self.prepare_vue_provider_sync_transition(canonical_id, false)
                 else {
-                    self.queue_snapshot_provider_sync(canonical_id.to_string());
+                    let _ = self.sync_vue_api_provisionally(canonical_id, &api.code).await;
                     return;
                 };
                 self.close_provider_paths(&transition.stale_paths).await;
@@ -2318,6 +2407,40 @@ impl VerterLanguageServer {
             return;
         }
 
+        if self.resolver_snapshot().is_none() {
+            let compiled = tokio::task::block_in_place(|| {
+                self.documents.host.remove(canonical_id);
+                self.hydration_cache.remove(canonical_id);
+                if !crate::compile_blockers::ensure_source_loaded_into_host(
+                    &self.documents.host,
+                    canonical_id,
+                ) {
+                    return false;
+                }
+
+                crate::compile_blockers::hydrate_vue_compile_blockers_pre_snapshot(
+                    self.documents.host(),
+                    canonical_id,
+                );
+
+                let profile = self.documents.tsx_profile.read().clone();
+                self.documents
+                    .host
+                    .ensure_compiled(canonical_id, &profile)
+                    .is_ok()
+            });
+
+            if compiled {
+                if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+                    let _ = self.sync_vue_api_provisionally(canonical_id, &api.code).await;
+                    return;
+                }
+            }
+
+            self.queue_snapshot_provider_sync(canonical_id.to_string());
+            return;
+        }
+
         // Slow path: file not in host yet — full disk read + upsert + compile + sync.
         self.resync_background_vue_file(canonical_id).await;
     }
@@ -2330,6 +2453,8 @@ impl VerterLanguageServer {
         // Load from disk + upsert + compile (all blocking) — wrapped in block_in_place
         // to prevent tokio worker thread exhaustion during background sync.
         let compile_result = tokio::task::block_in_place(|| {
+            self.documents.host.remove(canonical_id);
+            self.hydration_cache.remove(canonical_id);
             if !crate::compile_blockers::ensure_source_loaded_into_host(
                 &self.documents.host,
                 canonical_id,
@@ -2357,6 +2482,8 @@ impl VerterLanguageServer {
         let Some(profile) = compile_result else {
             return;
         };
+
+        self.refresh_vue_dependency_tracking(canonical_id);
 
         // Sync to type provider
         // For TSGO: only sync DTS (has default export for cross-file imports).
@@ -3291,6 +3418,48 @@ pub(crate) fn collect_resolved_provider_dependencies(
     resolved
 }
 
+fn collect_resolved_provider_dependencies_from_analyzed_refs(
+    resolver: &crate::project_resolver::NativeProjectResolver,
+    reader: &dyn crate::project_resolver::ProjectResolverReader,
+    importer_id: &str,
+    module_references: &[verter_analysis::AnalyzedModuleReference],
+) -> Vec<crate::project_resolver::ResolveResult> {
+    let mut seen = HashSet::new();
+    let mut resolved = Vec::new();
+
+    for reference in module_references {
+        let specifiers: Vec<&str> = if let Some(specifier) = reference.literal_specifier.as_deref()
+        {
+            vec![specifier]
+        } else {
+            reference
+                .finite_specifiers
+                .iter()
+                .map(String::as_str)
+                .collect()
+        };
+
+        for specifier in specifiers {
+            if let Some(result) = resolver.resolve_with_reader(
+                reader,
+                &crate::project_resolver::ResolveRequest {
+                    importer_id: importer_id.to_string(),
+                    specifier: specifier.to_string(),
+                    kind: analyzed_module_reference_request_kind(reference),
+                    phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                },
+            ) {
+                let key = (result.source_id.clone(), result.provider_id.clone());
+                if seen.insert(key) {
+                    resolved.push(result);
+                }
+            }
+        }
+    }
+
+    resolved
+}
+
 pub(crate) fn module_reference_request_kind(
     reference: &verter_host::ScriptModuleReference,
 ) -> crate::project_resolver::ResolveRequestKind {
@@ -3540,7 +3709,7 @@ fn did_open_startup_policy(kind: crate::TypeProviderKind) -> DidOpenStartupPolic
         // When a type provider is active, eagerly sync imported .vue files so that
         // hover/completions/go-to-definition work on <ChildComponent> immediately.
         sync_imported_vue_files: !matches!(kind, crate::TypeProviderKind::None),
-        publish_diagnostics: false,
+        publish_diagnostics: true,
     }
 }
 
@@ -3574,11 +3743,30 @@ fn collect_imported_vue_priority_ids(
 fn collect_imported_vue_priority_ids_from_imports(
     imports: &[verter_analysis::AnalyzedImport],
 ) -> Vec<String> {
+    collect_imported_vue_priority_ids_from_imports_with_fallback(imports, None, |_parent, _specifier| {
+        None
+    })
+}
+
+fn collect_imported_vue_priority_ids_from_imports_with_fallback<F>(
+    imports: &[verter_analysis::AnalyzedImport],
+    parent_canonical_id: Option<&str>,
+    mut resolve_import: F,
+) -> Vec<String>
+where
+    F: FnMut(&str, &str) -> Option<String>,
+{
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
 
     for import in imports {
-        let Some(canonical_id) = import.resolved_canonical_id.as_ref() else {
+        let canonical_id = import
+            .resolved_canonical_id
+            .clone()
+            .or_else(|| {
+                parent_canonical_id.and_then(|parent| resolve_import(parent, &import.source))
+            });
+        let Some(canonical_id) = canonical_id.as_ref() else {
             continue;
         };
         if !canonical_id.ends_with(".vue") {
@@ -4505,6 +4693,105 @@ fn collect_tsconfig_patterns(roots: &[String]) -> Vec<String> {
     patterns
 }
 
+fn identifier_prefix_before_offset(content: &str, offset: usize) -> Option<&str> {
+    if offset == 0 || offset > content.len() {
+        return None;
+    }
+
+    let bytes = content.as_bytes();
+    let mut start = offset;
+    while start > 0 {
+        let byte = bytes[start - 1];
+        if byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
+    if start == offset {
+        return None;
+    }
+
+    let prefix = &content[start..offset];
+    let first = prefix.as_bytes()[0];
+    if first.is_ascii_alphabetic() || first == b'_' || first == b'$' {
+        Some(prefix)
+    } else {
+        None
+    }
+}
+
+fn is_identifier_prefix_completion_kind(kind: crate::tsgo::protocol::CompletionKind) -> bool {
+    matches!(
+        kind,
+        crate::tsgo::protocol::CompletionKind::Variable
+            | crate::tsgo::protocol::CompletionKind::Function
+            | crate::tsgo::protocol::CompletionKind::Method
+            | crate::tsgo::protocol::CompletionKind::Property
+            | crate::tsgo::protocol::CompletionKind::Field
+            | crate::tsgo::protocol::CompletionKind::Constant
+            | crate::tsgo::protocol::CompletionKind::EnumMember
+    )
+}
+
+fn is_member_access_completion_kind(kind: crate::tsgo::protocol::CompletionKind) -> bool {
+    matches!(
+        kind,
+        crate::tsgo::protocol::CompletionKind::Property
+            | crate::tsgo::protocol::CompletionKind::Field
+            | crate::tsgo::protocol::CompletionKind::Method
+            | crate::tsgo::protocol::CompletionKind::Constant
+            | crate::tsgo::protocol::CompletionKind::EnumMember
+    )
+}
+
+fn filter_type_provider_completion_result(
+    type_result: &mut crate::tsgo::protocol::CompletionResult,
+    expr_context: Option<&ExpressionContext>,
+    identifier_prefix: Option<&str>,
+    verter_items: Option<&Vec<CompletionItem>>,
+) {
+    if matches!(expr_context, Some(ExpressionContext::MemberAccess)) {
+        let before = type_result.items.len();
+        type_result
+            .items
+            .retain(|item| item.kind.is_some_and(is_member_access_completion_kind));
+        tracing::debug!(
+            "completion: filtered type provider for MemberAccess context: {} -> {} items",
+            before,
+            type_result.items.len()
+        );
+    } else if let Some(prefix) = identifier_prefix {
+        let before = type_result.items.len();
+        type_result.items.retain(|item| {
+            item.label.starts_with(prefix)
+                && item
+                    .kind
+                    .is_some_and(is_identifier_prefix_completion_kind)
+        });
+        tracing::debug!(
+            "completion: filtered type provider for IdentifierExpected prefix {:?}: {} -> {} items",
+            prefix,
+            before,
+            type_result.items.len()
+        );
+    } else if matches!(expr_context, Some(ExpressionContext::Unknown)) {
+        let allowlist: std::collections::HashSet<&str> = verter_items
+            .map(|items| items.iter().map(|i| i.label.as_str()).collect())
+            .unwrap_or_default();
+        let before = type_result.items.len();
+        type_result
+            .items
+            .retain(|item| allowlist.contains(item.label.as_str()));
+        tracing::debug!(
+            "completion: filtered type provider for Unknown context: {} -> {} items",
+            before,
+            type_result.items.len()
+        );
+    }
+}
+
 impl LanguageServer for VerterLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         tracing::info!("verter-lsp initializing");
@@ -4841,9 +5128,13 @@ impl LanguageServer for VerterLanguageServer {
             .timer("did_open", Some(uri.as_str().to_string()));
         tracing::info!("did_open: {}", uri.as_str());
         let result = self.documents.did_open(&params.text_document);
+        let current_canonical_id = self.documents.get_canonical_id(uri);
         // Touch MRU for snapshot drain ordering (after did_open registers the canonical ID)
-        if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+        if let Some(canonical_id) = current_canonical_id.as_ref() {
             self.touch_mru(&canonical_id);
+            if canonical_id.ends_with(".vue") {
+                self.refresh_vue_dependency_tracking(&canonical_id);
+            }
         }
         if result.diagnostics.has_errors {
             tracing::debug!(
@@ -4853,23 +5144,30 @@ impl LanguageServer for VerterLanguageServer {
             );
         }
         let startup_policy = did_open_startup_policy(self.type_provider_kind);
+        let prewarm_imported_vue_apis =
+            startup_policy.sync_imported_vue_files
+                && matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver);
         let imported_vue_priority_ids = self
             .documents
             .get_analysis(uri)
             .map(|analysis| {
                 // Primary: analysis.imports already has resolved_canonical_id from host
                 // (works even before background_init builds the resolver snapshot)
-                let mut ids = collect_imported_vue_priority_ids_from_imports(&analysis.imports);
+                let mut ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+                    &analysis.imports,
+                    current_canonical_id.as_deref(),
+                    |parent, specifier| self.resolve_import_specifier(parent, specifier),
+                );
 
                 // Supplement: module_references for dynamic import()/require() cases
                 // that aren't in analysis.imports (needs resolver, may return empty pre-init)
-                if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+                if let Some(canonical_id) = current_canonical_id.as_ref() {
                     let snapshot = self.resolver_snapshot();
                     let reader = LspProjectResolverReader::new(&self.documents);
                     let dynamic_ids = collect_priority_vue_targets_from_module_references(
                         snapshot.as_ref(),
                         &reader,
-                        &canonical_id,
+                        canonical_id,
                         &analysis.module_references,
                     );
                     // Dedup: add only IDs not already in the primary set
@@ -4885,15 +5183,27 @@ impl LanguageServer for VerterLanguageServer {
             .unwrap_or_default();
         // Signal the background scanner to prioritize this file's directory
         if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
-            if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
-                scanner.signal_priority(canonical_id);
+            if let Some(canonical_id) = current_canonical_id.as_ref() {
+                scanner.signal_priority(canonical_id.clone());
             }
             for import_id in &imported_vue_priority_ids {
                 scanner.signal_priority(import_id.clone());
             }
         }
 
-        // Active file IDE sync FIRST (Interactive priority) — enables typed hover immediately
+        if prewarm_imported_vue_apis {
+            for import_id in &imported_vue_priority_ids {
+                let should_sync =
+                    !self.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
+                if should_sync {
+                    self.sync_imported_vue_api_lightweight(import_id).await;
+                }
+            }
+        }
+
+        // Active file IDE sync FIRST (Interactive priority) — enables typed hover immediately.
+        // tsserver is the exception: imported Vue public APIs are warmed above so the initial
+        // open does not snapshot missing `.vue.ts` modules into the configured project.
         let provider_sync_policy = did_open_provider_sync_policy(self.type_provider_kind);
         if provider_sync_policy.await_ide_sync {
             // Use ensure_current_file_synced for immediate IDE-only sync
@@ -4901,7 +5211,7 @@ impl LanguageServer for VerterLanguageServer {
         }
 
         // Imported Vue API warmup SECOND (Normal priority, never blocks active file)
-        if startup_policy.sync_imported_vue_files {
+        if startup_policy.sync_imported_vue_files && !prewarm_imported_vue_apis {
             for import_id in &imported_vue_priority_ids {
                 let should_sync =
                     !self.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
@@ -4921,8 +5231,10 @@ impl LanguageServer for VerterLanguageServer {
         // This ensures re-opening a file after external modifications publishes
         // up-to-date merged diagnostics (Verter lint + type provider).
         if let Some(coordinator) = &self.sync_coordinator {
-            if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
-                coordinator.signal(canonical_id, uri.as_str().to_string());
+            if let Some(canonical_id) = current_canonical_id.as_ref() {
+                self.needs_ide_sync.insert(canonical_id.clone());
+                self.needs_deferred_sync.insert(canonical_id.clone());
+                coordinator.signal(canonical_id.clone(), uri.as_str().to_string());
             }
         }
 
@@ -5006,6 +5318,9 @@ impl LanguageServer for VerterLanguageServer {
         // after 300ms of silence. No concurrent spawned tasks.
         if !style_only {
             if let Some(canonical_id) = self.documents.get_canonical_id(&uri) {
+                if canonical_id.ends_with(".vue") {
+                    self.refresh_vue_dependency_tracking(&canonical_id);
+                }
                 self.needs_ide_sync.insert(canonical_id.clone());
                 self.needs_deferred_sync.insert(canonical_id.clone());
                 if let Some(coordinator) = &self.sync_coordinator {
@@ -5179,6 +5494,7 @@ impl LanguageServer for VerterLanguageServer {
 
         // ── Vue file deletions ─────────────────────────────────────
         for (canonical_id, uri_str) in &vue_delete_ids {
+            self.documents.host().invalidate_dependents_of(canonical_id);
             if let Some(state) = self.remove_provider_sync_state(canonical_id).or_else(|| {
                 let profile = self.documents.tsx_profile.read().clone();
                 self.documents
@@ -5198,12 +5514,14 @@ impl LanguageServer for VerterLanguageServer {
 
         // ── Vue file creates/changes ───────────────────────────────
         for canonical_id in &vue_resync_ids {
+            self.documents.host().invalidate_dependents_of(canonical_id);
             self.resync_background_vue_file(canonical_id).await;
             tracing::debug!("did_change_watched_files: resynced vue {canonical_id}");
         }
 
         // ── TS/JS file deletions ───────────────────────────────────
         for canonical_id in &ts_js_delete_ids {
+            self.documents.host().invalidate_dependents_of(canonical_id);
             if let Some(state) = self.remove_provider_sync_state(canonical_id) {
                 self.close_provider_state(&state).await;
             }
@@ -5213,6 +5531,9 @@ impl LanguageServer for VerterLanguageServer {
 
         // ── TS/JS file creates/changes ─────────────────────────────
         if !ts_js_resync_ids.is_empty() {
+            for canonical_id in &ts_js_resync_ids {
+                self.documents.host().invalidate_dependents_of(canonical_id);
+            }
             if let Some(sync) = &self.project_sync {
                 let host = self.documents.host_arc();
                 let sync = sync.clone();
@@ -5788,12 +6109,27 @@ impl LanguageServer for VerterLanguageServer {
                     })
                     .unwrap_or(false);
 
-                let skip_type_provider = expr_context
-                    .as_ref()
-                    .map(|ec| matches!(ec, ExpressionContext::IdentifierExpected))
-                    .unwrap_or(false);
-
                 if let Some(tsx_offset) = tsx_offset {
+                    let identifier_prefix = expr_context.as_ref().and_then(|ec| {
+                        matches!(ec, ExpressionContext::IdentifierExpected | ExpressionContext::Unknown)
+                            .then(|| {
+                                identifier_prefix_before_offset(
+                                    &ctx.tsx_content,
+                                    tsx_offset as usize,
+                                )
+                            })
+                            .flatten()
+                            .map(str::to_string)
+                    });
+
+                    let skip_type_provider = expr_context
+                        .as_ref()
+                        .map(|ec| {
+                            matches!(ec, ExpressionContext::IdentifierExpected)
+                                && identifier_prefix.is_none()
+                        })
+                        .unwrap_or(false);
+
                     // Check if a newer completion request has arrived. If so, skip
                     // the expensive type provider call and return verter-only results.
                     if self
@@ -5839,24 +6175,33 @@ impl LanguageServer for VerterLanguageServer {
                                 type_result.is_incomplete
                             );
 
-                            // For Unknown expression context, filter type provider results
-                            // to only items matching verter's known template bindings.
-                            // Prevents global pollution (AbortController, HTMLElement, etc.)
-                            // while preserving richer type provider metadata for known bindings.
-                            if matches!(expr_context, Some(ExpressionContext::Unknown)) {
-                                let allowlist: std::collections::HashSet<&str> = verter_items
-                                    .as_ref()
-                                    .map(|items| items.iter().map(|i| i.label.as_str()).collect())
-                                    .unwrap_or_default();
-                                let before = type_result.items.len();
-                                type_result
-                                    .items
-                                    .retain(|item| allowlist.contains(item.label.as_str()));
+                            filter_type_provider_completion_result(
+                                &mut type_result,
+                                expr_context.as_ref(),
+                                identifier_prefix.as_deref(),
+                                verter_items.as_ref(),
+                            );
+
+                            if matches!(expr_context, Some(ExpressionContext::MemberAccess))
+                                && tp_trigger == Some(".")
+                                && type_result.items.is_empty()
+                            {
                                 tracing::debug!(
-                                    "completion: filtered type provider for Unknown context: {} → {} items",
-                                    before,
-                                    type_result.items.len()
+                                    "completion: retrying member access without dot trigger after empty backend result"
                                 );
+                                if let Ok(mut retry_result) =
+                                    tp.get_completions(&ctx.tsx_path, tsx_offset, None).await
+                                {
+                                    filter_type_provider_completion_result(
+                                        &mut retry_result,
+                                        expr_context.as_ref(),
+                                        identifier_prefix.as_deref(),
+                                        verter_items.as_ref(),
+                                    );
+                                    if !retry_result.items.is_empty() {
+                                        type_result = retry_result;
+                                    }
+                                }
                             }
 
                             let (merged, is_incomplete) = merge::merge_completions(
@@ -7567,6 +7912,152 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct TriggerSensitiveCompletionProvider;
+
+    impl TypeProvider for TriggerSensitiveCompletionProvider {
+        fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close_file(&self, _path: &str) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn get_completions(
+            &self,
+            _path: &str,
+            _offset: u32,
+            trigger_character: Option<&str>,
+        ) -> ProviderFuture<'_, CompletionResult> {
+            let trigger = trigger_character.map(str::to_string);
+            Box::pin(async move {
+                let items = if trigger.as_deref() == Some(".") {
+                    Vec::new()
+                } else {
+                    vec![
+                        crate::tsgo::protocol::Completion {
+                            label: "name".to_string(),
+                            kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                            detail: Some("(property) name: string".to_string()),
+                            documentation: None,
+                            edit_range_start: None,
+                            edit_range_end: None,
+                            insert_text: None,
+                            sort_text: None,
+                            data: None,
+                        },
+                        crate::tsgo::protocol::Completion {
+                            label: "id".to_string(),
+                            kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                            detail: Some("(property) id: number".to_string()),
+                            documentation: None,
+                            edit_range_start: None,
+                            edit_range_end: None,
+                            insert_text: None,
+                            sort_text: None,
+                            data: None,
+                        },
+                    ]
+                };
+                Ok(CompletionResult {
+                    items,
+                    is_incomplete: false,
+                })
+            })
+        }
+
+        fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_type_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_references(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_rename_locations(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_signature_help(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_code_actions(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_document_highlights(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_inlay_hints(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<InlayHint>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn configure_paths(
+            &self,
+            _base_url: &str,
+            _paths: serde_json::Value,
+        ) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     fn make_hover_test_service(
         type_provider: Arc<dyn TypeProvider>,
     ) -> tower_lsp_server::LspService<VerterLanguageServer> {
@@ -7624,6 +8115,39 @@ mod tests {
         }
     }
 
+    fn completion_params(
+        uri: &Uri,
+        position: Position,
+        trigger_character: Option<&str>,
+    ) -> CompletionParams {
+        CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: Some(CompletionContext {
+                trigger_kind: trigger_character
+                    .map(|_| CompletionTriggerKind::TRIGGER_CHARACTER)
+                    .unwrap_or(CompletionTriggerKind::INVOKED),
+                trigger_character: trigger_character.map(str::to_string),
+            }),
+        }
+    }
+
+    fn completion_labels(response: Option<CompletionResponse>) -> Vec<String> {
+        match response {
+            Some(CompletionResponse::Array(items)) => {
+                items.into_iter().map(|item| item.label).collect()
+            }
+            Some(CompletionResponse::List(list)) => {
+                list.items.into_iter().map(|item| item.label).collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
     fn hover_text(hover: Option<Hover>) -> String {
         match hover.expect("hover should exist").contents {
             HoverContents::Markup(m) => m.value,
@@ -7666,6 +8190,26 @@ mod tests {
                 range_end: None,
             }),
         );
+    }
+
+    fn set_type_completions_at_vue_position(
+        server: &VerterLanguageServer,
+        provider: &MockTypeProvider,
+        uri: &Uri,
+        position: Position,
+        items: Vec<crate::tsgo::protocol::Completion>,
+    ) {
+        let ctx = server
+            .type_provider_context(uri)
+            .expect("type provider context should exist");
+        let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &ctx.vue_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("vue position should map to tsx");
+        provider.set_completions(&ctx.tsx_path, tsx_offset, items);
     }
 
     #[test]
@@ -8169,20 +8713,75 @@ mod tests {
             prepared
                 .resolved_dependencies
                 .iter()
-                .any(|entry| entry.provider_specifier == "./util.ts"),
-            "non-Vue workspace dependencies should target provider paths with explicit extension"
+                .any(|entry| entry.provider_specifier == "./util"),
+            "non-Vue workspace dependencies should preserve the source import specifier"
         );
         assert!(
             prepared.rewritten.contains("'./Foo.vue.ts'"),
             "exact Vue imports should rewrite through the resolved provider specifier"
         );
         assert!(
-            prepared.rewritten.contains("'./util.ts'"),
-            "non-Vue workspace imports should rewrite through the resolved provider specifier"
+            prepared.rewritten.contains("'./util'"),
+            "non-Vue workspace imports should stay source-compatible in the provider file"
         );
         assert!(
             prepared.rewritten.contains("import(`./${name}.vue`)"),
             "finite-set dynamics must keep the original expression text"
+        );
+    }
+
+    #[test]
+    fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            ),
+        ]);
+        let reader = TestResolverReader::with_files(&[
+            "/workspace/src/tempUtil.ts",
+            "/workspace/src/ExternalChild.vue",
+        ]);
+        let source =
+            "import { MAGIC } from './tempUtil';\nimport ExternalChild from './ExternalChild.vue';\n";
+        let temp_util_expr = "'./tempUtil'";
+        let child_expr = "'./ExternalChild.vue'";
+        let temp_util_start = source.find(temp_util_expr).unwrap();
+        let child_start = source.find(child_expr).unwrap();
+
+        let resolved = collect_resolved_provider_dependencies_from_analyzed_refs(
+            &resolver,
+            &reader,
+            "/workspace/src/TempImporter.vue",
+            &[
+                test_analyzed_module_reference(
+                    temp_util_expr,
+                    Some("./tempUtil"),
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::Exact,
+                    temp_util_start,
+                    temp_util_start + temp_util_expr.len(),
+                ),
+                test_analyzed_module_reference(
+                    child_expr,
+                    Some("./ExternalChild.vue"),
+                    &[],
+                    verter_analysis::ModuleReferenceAnalyzability::Exact,
+                    child_start,
+                    child_start + child_expr.len(),
+                ),
+            ],
+        );
+
+        let resolved_sources = resolved
+            .iter()
+            .map(|entry| entry.source_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resolved_sources,
+            vec!["/workspace/src/tempUtil.ts", "/workspace/src/ExternalChild.vue"],
+            "Vue dependency tracking should use exact canonical IDs for extensionless TS imports and exact Vue imports"
         );
     }
 
@@ -8579,6 +9178,50 @@ mod tests {
         assert!(
             !ids.iter().any(|id| id.ends_with(".ts")),
             "non-Vue imports must be excluded"
+        );
+    }
+
+    #[test]
+    fn collect_imported_vue_priority_ids_falls_back_to_relative_resolution() {
+        let imports = vec![
+            verter_analysis::AnalyzedImport {
+                source: "./TypedSlotComp.vue".to_string(),
+                is_type_only: false,
+                bindings: Vec::new(),
+                span: verter_span::Span::new(0, 0),
+                resolved_canonical_id: None,
+            },
+            verter_analysis::AnalyzedImport {
+                source: "./utils".to_string(),
+                is_type_only: false,
+                bindings: Vec::new(),
+                span: verter_span::Span::new(0, 0),
+                resolved_canonical_id: None,
+            },
+        ];
+
+        let ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+            &imports,
+            Some("/workspace/src/TemplateSlotCases.vue"),
+            |parent, specifier| {
+                if parent == "/workspace/src/TemplateSlotCases.vue"
+                    && specifier == "./TypedSlotComp.vue"
+                {
+                    Some("/workspace/src/TypedSlotComp.vue".to_string())
+                } else if parent == "/workspace/src/TemplateSlotCases.vue"
+                    && specifier == "./utils"
+                {
+                    Some("/workspace/src/utils.ts".to_string())
+                } else {
+                    None
+                }
+            },
+        );
+
+        assert_eq!(
+            ids,
+            vec!["/workspace/src/TypedSlotComp.vue".to_string()],
+            "unresolved direct Vue imports should still be prioritized via relative fallback"
         );
     }
 
@@ -9361,6 +10004,895 @@ function handleCustom(payload: string) {
     }
 
     #[tokio::test]
+    async fn completion_queries_type_provider_for_partial_scoped_slot_locals() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+interface SlotItem {
+  id: number
+  name: string
+}
+
+defineSlots<{
+  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
+}>()
+</script>
+<template>
+  <slot :slotItem="{ id: 1, name: 'first' }" :slotIndex="0" :slotTotal="1" />
+</template>
+"#;
+        let slot_source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ sl }}</p>
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+
+        let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
+        let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
+        let position = find_document_position(server, &slot_uri, "{{ sl }}", 5);
+        let slot_ctx = server
+            .type_provider_context(&slot_uri)
+            .expect("type provider context should exist");
+        let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &slot_ctx.vue_line_index,
+            &slot_ctx.mapper,
+            &slot_ctx.tsx_line_index,
+        )
+        .expect("slot completion position should map to tsx");
+        let slot_expr_context = classify_expression_context_with_trigger(
+            &slot_ctx.tsx_content,
+            slot_tsx_offset as usize,
+            None,
+        );
+        let slot_snippet = debug_snippet(&slot_ctx.tsx_content, slot_tsx_offset as usize)
+            .unwrap_or_else(|| ("<none>".to_string(), "<none>".to_string()));
+
+        set_type_completions_at_vue_position(
+            server,
+            &provider,
+            &slot_uri,
+            position,
+            vec![
+                crate::tsgo::protocol::Completion {
+                    label: "slotItem".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                    detail: Some("const slotItem: SlotItem".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "slotIndex".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                    detail: Some("const slotIndex: number".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "slotTotal".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                    detail: Some("const slotTotal: number".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "Set".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Class),
+                    detail: Some("global".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+            ],
+        );
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&slot_uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        let calls = provider.calls();
+
+        assert!(
+            labels.contains(&"slotItem".to_string()),
+            "slotItem should be present, got: {labels:?}, expr_context={slot_expr_context:?}, tsx_before={:?}, tsx_after={:?}, calls={calls:?}",
+            slot_snippet.0,
+            slot_snippet.1,
+        );
+        assert!(
+            labels.contains(&"slotIndex".to_string()),
+            "slotIndex should be present, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"slotTotal".to_string()),
+            "slotTotal should be present, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"Set".to_string()),
+            "global completions should stay filtered for partial slot locals, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_queries_type_provider_for_scoped_slot_member_access() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+interface SlotItem {
+  id: number
+  name: string
+}
+
+defineSlots<{
+  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
+}>()
+</script>
+<template>
+  <slot :slotItem="{ id: 1, name: 'first' }" :slotIndex="0" :slotTotal="1" />
+</template>
+"#;
+        let slot_source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ sl }}</p>
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+
+        let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
+        let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
+        let position = find_document_position(server, &slot_uri, "slotItem.name", 9);
+        let slot_ctx = server
+            .type_provider_context(&slot_uri)
+            .expect("type provider context should exist");
+        let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &slot_ctx.vue_line_index,
+            &slot_ctx.mapper,
+            &slot_ctx.tsx_line_index,
+        )
+        .expect("slot member position should map to tsx");
+        let slot_expr_context = classify_expression_context_with_trigger(
+            &slot_ctx.tsx_content,
+            slot_tsx_offset as usize,
+            None,
+        );
+        let slot_snippet = debug_snippet(&slot_ctx.tsx_content, slot_tsx_offset as usize)
+            .unwrap_or_else(|| ("<none>".to_string(), "<none>".to_string()));
+
+        set_type_completions_at_vue_position(
+            server,
+            &provider,
+            &slot_uri,
+            position,
+            vec![
+                crate::tsgo::protocol::Completion {
+                    label: "name".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) name: string".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "id".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) id: number".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "outerLabel".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                    detail: Some("const outerLabel: string".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+            ],
+        );
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&slot_uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        let calls = provider.calls();
+
+        assert!(
+            labels.contains(&"name".to_string()),
+            "name should be present for scoped-slot member access, got: {labels:?}, expr_context={slot_expr_context:?}, tsx_before={:?}, tsx_after={:?}, calls={calls:?}",
+            slot_snippet.0,
+            slot_snippet.1,
+        );
+        assert!(
+            labels.contains(&"id".to_string()),
+            "id should be present for scoped-slot member access, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"outerLabel".to_string()),
+            "member access should suppress outer scope identifiers, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_queries_type_provider_for_partial_scoped_slot_member_access() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+interface SlotItem {
+  id: number
+  name: string
+}
+
+defineSlots<{
+  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
+}>()
+</script>
+<template>
+  <slot :slotItem="{ id: 1, name: 'first' }" :slotIndex="0" :slotTotal="1" />
+</template>
+"#;
+        let slot_source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ sl }}</p>
+    <p>{{ slotItem.na }}</p>
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+
+        let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
+        let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
+        let position = find_document_position(server, &slot_uri, "slotItem.na", 11);
+        let slot_ctx = server
+            .type_provider_context(&slot_uri)
+            .expect("type provider context should exist");
+        let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &slot_ctx.vue_line_index,
+            &slot_ctx.mapper,
+            &slot_ctx.tsx_line_index,
+        )
+        .expect("partial slot member position should map to tsx");
+        let slot_expr_context = classify_expression_context_with_trigger(
+            &slot_ctx.tsx_content,
+            slot_tsx_offset as usize,
+            None,
+        );
+        let slot_snippet = debug_snippet(&slot_ctx.tsx_content, slot_tsx_offset as usize)
+            .unwrap_or_else(|| ("<none>".to_string(), "<none>".to_string()));
+
+        set_type_completions_at_vue_position(
+            server,
+            &provider,
+            &slot_uri,
+            position,
+            vec![
+                crate::tsgo::protocol::Completion {
+                    label: "name".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) name: string".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "id".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) id: number".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "outerLabel".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                    detail: Some("const outerLabel: string".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+            ],
+        );
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&slot_uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        let calls = provider.calls();
+
+        assert!(
+            labels.contains(&"name".to_string()),
+            "name should be present for partial scoped-slot member access, got: {labels:?}, expr_context={slot_expr_context:?}, tsx_before={:?}, tsx_after={:?}, calls={calls:?}",
+            slot_snippet.0,
+            slot_snippet.1,
+        );
+        assert!(
+            labels.contains(&"id".to_string()),
+            "id should be present for partial scoped-slot member access, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"outerLabel".to_string()),
+            "partial member access should suppress outer scope identifiers, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_queries_type_provider_for_scoped_slot_member_access_after_prior_partial_member_access(
+    ) {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+interface SlotItem {
+  id: number
+  name: string
+}
+
+defineSlots<{
+  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
+}>()
+</script>
+<template>
+  <slot :slotItem="{ id: 1, name: 'first' }" :slotIndex="0" :slotTotal="1" />
+</template>
+"#;
+        let slot_source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ sl }}</p>
+    <p>{{ slotItem.na }}</p>
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+
+        let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
+        let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
+        let position = find_document_position(server, &slot_uri, "slotItem.name", 9);
+
+        set_type_completions_at_vue_position(
+            server,
+            &provider,
+            &slot_uri,
+            position,
+            vec![
+                crate::tsgo::protocol::Completion {
+                    label: "name".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) name: string".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "id".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) id: number".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "outerLabel".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                    detail: Some("const outerLabel: string".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+            ],
+        );
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&slot_uri, position, Some(".")))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        assert!(
+            labels.contains(&"name".to_string()),
+            "name should be present for scoped-slot member access after prior partial member access, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"id".to_string()),
+            "id should be present for scoped-slot member access after prior partial member access, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"outerLabel".to_string()),
+            "member access after prior partial member access should suppress outer scope identifiers, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_retries_member_access_without_dot_trigger_when_backend_returns_empty() {
+        let provider = Arc::new(TriggerSensitiveCompletionProvider);
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+interface SlotItem {
+  id: number
+  name: string
+}
+
+defineSlots<{
+  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
+}>()
+</script>
+<template>
+  <slot :slotItem="{ id: 1, name: 'first' }" :slotIndex="0" :slotTotal="1" />
+</template>
+"#;
+        let slot_source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+
+        let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
+        let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
+        let position = find_document_position(server, &slot_uri, "slotItem.name", 9);
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&slot_uri, position, Some(".")))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        assert!(
+            labels.contains(&"name".to_string()),
+            "member access retry should recover property completions, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"id".to_string()),
+            "member access retry should recover property completions, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"outerLabel".to_string()),
+            "member access retry should not fall back to outer identifiers, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_queries_type_provider_for_partial_identifier_recovery() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let recovery_source = r#"<script setup lang="ts">
+import { ref } from 'vue'
+import MyComp from './MyComp.vue'
+
+const count = ref(1)
+
+function safeAction() {
+  count.value++
+}
+
+const broken =
+</script>
+
+<template>
+  <div>
+    <p>{{ cou }}</p>
+    <p>{{ count }}</p>
+    <button @click="safeAction">go</button>
+    <MyComp foo="ok" :bar="count" />
+  </div>
+</template>
+"#;
+
+        let recovery_uri =
+            open_test_vue(server, "/workspace/src/TemplateRecovery.vue", recovery_source);
+        let position = find_document_position(server, &recovery_uri, "{{ cou }}", 6);
+        let recovery_ctx = server
+            .type_provider_context(&recovery_uri)
+            .expect("type provider context should exist");
+        let recovery_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &recovery_ctx.vue_line_index,
+            &recovery_ctx.mapper,
+            &recovery_ctx.tsx_line_index,
+        )
+        .expect("recovery completion position should map to tsx");
+        let recovery_expr_context = classify_expression_context_with_trigger(
+            &recovery_ctx.tsx_content,
+            recovery_tsx_offset as usize,
+            None,
+        );
+        let recovery_snippet = debug_snippet(&recovery_ctx.tsx_content, recovery_tsx_offset as usize)
+            .unwrap_or_else(|| ("<none>".to_string(), "<none>".to_string()));
+
+        set_type_completions_at_vue_position(
+            server,
+            &provider,
+            &recovery_uri,
+            position,
+            vec![
+                crate::tsgo::protocol::Completion {
+                    label: "count".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                    detail: Some("const count: Ref<number>".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "safeAction".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Function),
+                    detail: Some("function safeAction(): void".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "console".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Module),
+                    detail: Some("global".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+            ],
+        );
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&recovery_uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        let calls = provider.calls();
+
+        assert!(
+            labels.contains(&"count".to_string()),
+            "count should be present, got: {labels:?}, expr_context={recovery_expr_context:?}, tsx_before={:?}, tsx_after={:?}, calls={calls:?}",
+            recovery_snippet.0,
+            recovery_snippet.1,
+        );
+        assert!(
+            !labels.contains(&"console".to_string()),
+            "global completions should stay filtered for broken-script recovery, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_queries_type_provider_for_partial_function_recovery() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let recovery_source = r#"<script setup lang="ts">
+import { ref } from 'vue'
+import MyComp from './MyComp.vue'
+
+const count = ref(1)
+
+function safeAction() {
+  count.value++
+}
+
+const broken =
+</script>
+
+<template>
+  <div>
+    <p>{{ cou }}</p>
+    <p>{{ safeA }}</p>
+    <p>{{ count }}</p>
+    <button @click="safeAction">go</button>
+    <MyComp foo="ok" :bar="count" />
+  </div>
+</template>
+"#;
+
+        let recovery_uri =
+            open_test_vue(server, "/workspace/src/TemplateRecovery.vue", recovery_source);
+        let position = find_document_position(server, &recovery_uri, "{{ safeA }}", 8);
+        let recovery_ctx = server
+            .type_provider_context(&recovery_uri)
+            .expect("type provider context should exist");
+        let recovery_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &recovery_ctx.vue_line_index,
+            &recovery_ctx.mapper,
+            &recovery_ctx.tsx_line_index,
+        )
+        .expect("partial function recovery position should map to tsx");
+        let recovery_expr_context = classify_expression_context_with_trigger(
+            &recovery_ctx.tsx_content,
+            recovery_tsx_offset as usize,
+            None,
+        );
+        let recovery_snippet = debug_snippet(&recovery_ctx.tsx_content, recovery_tsx_offset as usize)
+            .unwrap_or_else(|| ("<none>".to_string(), "<none>".to_string()));
+
+        set_type_completions_at_vue_position(
+            server,
+            &provider,
+            &recovery_uri,
+            position,
+            vec![
+                crate::tsgo::protocol::Completion {
+                    label: "safeAction".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Function),
+                    detail: Some("function safeAction(): void".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "count".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                    detail: Some("const count: Ref<number>".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "console".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Module),
+                    detail: Some("global".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+            ],
+        );
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&recovery_uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        let calls = provider.calls();
+
+        assert!(
+            labels.contains(&"safeAction".to_string()),
+            "safeAction should be present after broken-script recovery, got: {labels:?}, expr_context={recovery_expr_context:?}, tsx_before={:?}, tsx_after={:?}, calls={calls:?}",
+            recovery_snippet.0,
+            recovery_snippet.1,
+        );
+        assert!(
+            !labels.contains(&"console".to_string()),
+            "global completions should stay filtered for broken-script recovery, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_queries_type_provider_for_nested_partial_member_access() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let source = r#"<script setup lang="ts">
+import { ref, computed, reactive } from 'vue'
+
+const mixed = ref<string | number>(0)
+
+interface DeepNested {
+  deep: { value: string; count: number }
+}
+const nested = reactive<DeepNested>({ deep: { value: 'hello', count: 1 } })
+
+const Status = { Active: 'active', Inactive: 'inactive' } as const
+type StatusType = typeof Status[keyof typeof Status]
+const currentStatus = ref<StatusType>('active')
+
+interface HasName { name: string }
+interface HasAge { age: number }
+type Person = HasName & HasAge
+const person = ref<Person>({ name: 'Alice', age: 30 })
+
+const summary = computed(() => `${person.value.name}: ${person.value.age}`)
+</script>
+<template>
+  <div>
+    <p>{{ mixed }}</p>
+    <p>{{ nested.deep.va }}</p>
+    <p>{{ nested.deep }}</p>
+    <p>{{ currentStatus }}</p>
+    <p>{{ person }}</p>
+    <p>{{ summary }}</p>
+  </div>
+</template>
+"#;
+
+        let uri = open_test_vue(server, "/workspace/src/TypeResolutionCases.vue", source);
+        let position = Position {
+            line: 23,
+            character: 21,
+        };
+
+        set_type_completions_at_vue_position(
+            server,
+            &provider,
+            &uri,
+            position,
+            vec![
+                crate::tsgo::protocol::Completion {
+                    label: "value".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) value: string".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "count".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) count: number".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+            ],
+        );
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        assert!(
+            labels.contains(&"value".to_string()),
+            "value should be present for nested member access, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"count".to_string()),
+            "count should be present for nested member access, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn hover_rewrites_prop_backed_event_attr_to_vue_syntax() {
         let provider = Arc::new(MockTypeProvider::new());
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -9493,6 +11025,83 @@ function handleCustom(payload: string) {
                 MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
             )),
             "drain should sync the open Vue IDE file through the synthetic TSX path"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_imported_vue_api_lightweight_uses_provisional_api_path_before_snapshot() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+        std::fs::write(
+            workspace.join("src/Child.vue"),
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+        )
+        .expect("write child");
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                    type_provider_none_reason: None,
+                },
+            )
+        });
+
+        let server = service.inner();
+        let child_id = workspace
+            .join("src/Child.vue")
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        server.sync_imported_vue_api_lightweight(&child_id).await;
+
+        let calls = provider.file_sync_calls();
+        let expected_api_path = format!("{child_id}.ts");
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path == &expected_api_path
+            )),
+            "pre-snapshot imported Vue API sync should open the provisional .vue.ts path, calls={calls:?}"
+        );
+
+        let state = server
+            .provider_sync_states
+            .get(&child_id)
+            .map(|entry| entry.clone())
+            .expect("provisional API sync should commit provider state");
+        assert_eq!(
+            state.owner_key, "__provisional__",
+            "pre-snapshot imported sync should mark the owner as provisional"
+        );
+        assert_eq!(
+            state.api_path.as_deref(),
+            Some(expected_api_path.as_str()),
+            "imported Vue API should use the canonical provisional .vue.ts path"
+        );
+        assert!(
+            state.api_background_loaded,
+            "provisional imported API sync should mark the API path as loaded"
+        );
+        assert!(
+            server.pending_snapshot_provider_sync.contains(&child_id),
+            "owner-aware sync should still be queued for reconciliation after snapshot discovery"
         );
     }
 

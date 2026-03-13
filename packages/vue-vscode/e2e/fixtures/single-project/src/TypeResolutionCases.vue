@@ -27,6 +27,7 @@ const summary = computed(() => `${person.value.name}: ${person.value.age}`)
 <template>
   <div>
     <p>{{ mixed }}</p>
+    <p>{{ nested.deep.va }}</p>
     <p>{{ nested.deep }}</p>
     <p>{{ currentStatus }}</p>
     <p>{{ person }}</p>

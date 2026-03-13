@@ -25,7 +25,7 @@ export async function run(): Promise<void> {
   });
 
   const testsRoot = path.resolve(__dirname);
-  const onlyPattern = process.env.VERTER_E2E_ONLY;
+  const onlyPattern = process.env.VERTER_E2E_ONLY || process.env.E2E_ONLY;
   const files = findTestFiles(testsRoot).filter((file) =>
     onlyPattern ? file.includes(onlyPattern) : true,
   );

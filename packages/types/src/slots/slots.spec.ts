@@ -299,6 +299,35 @@ describe("extractArgumentsFromRenderSlot", () => {
     extractArgumentsFromRenderSlot(Comp1(), "nonexistent");
   });
 
+  it("preserves slot props for public-api-style constructor components", () => {
+    type PublicApiComponent = {
+      new (props?: {}): {
+        $props: {};
+        $slots: {
+          default(props: {
+            slotItem: { id: number; name: string };
+            slotIndex: number;
+            slotTotal: number;
+          }): any;
+        };
+      };
+    };
+
+    const PublicApiComp = {} as PublicApiComponent;
+    const result = extractArgumentsFromRenderSlot(
+      instantiateComponent(PublicApiComp, {}),
+      "default",
+    );
+
+    result.slotItem.id satisfies number;
+    result.slotItem.name satisfies string;
+    result.slotIndex satisfies number;
+    result.slotTotal satisfies number;
+
+    // @ts-expect-error - slot item should not widen to any
+    result.slotItem.id satisfies string;
+  });
+
   // Test with generic component types
   describe("with generic components", () => {
     const GenericComp = defineComponent({

@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["./e2e", "./src/startupOptimizations.ts"],
+  "include": ["./e2e", "./src/startupOptimizations.ts", "./src/e2eEnv.ts"],
   "exclude": ["./e2e/fixtures"],
   "compilerOptions": {
     "outDir": "./out-test",

@@ -331,13 +331,8 @@ jobs:
           node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Build LSP binary
-        run: cargo build -p verter_lsp
-      - name: Build extension deps + extension + E2E tests
-        run: |
-          pnpm --filter @verter/language-shared build
-          pnpm --filter verter-vscode build:dev
-          pnpm --filter verter-vscode pretest:e2e
+      - name: Prepare VS Code E2E artifacts
+        run: pnpm --filter verter-vscode prepare:e2e
       - name: Upload LSP binary
         uses: actions/upload-artifact@v4
         with:
@@ -355,7 +350,7 @@ jobs:
           retention-days: 1
 
   vscode-e2e:
-    name: VS Code E2E (${{ matrix.fixture }})
+    name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
     needs: [detect-changes, build-vscode-e2e]
     if: needs.detect-changes.outputs.vscode == 'true'
     runs-on: ubuntu-latest
@@ -372,6 +367,9 @@ jobs:
           - composite-paths
           - no-config
           - single-file
+        type_provider:
+          - tsserver
+          - tsgo
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -392,15 +390,16 @@ jobs:
         with:
           name: vscode-e2e-build
           path: packages
-      - name: Run E2E tests (${{ matrix.fixture }})
-        run: xvfb-run -a pnpm --filter verter-vscode test:e2e
+      - name: Run E2E tests (${{ matrix.fixture }} / ${{ matrix.type_provider }})
+        run: xvfb-run -a pnpm --filter verter-vscode test:e2e:run
         env:
           E2E_FIXTURE: ${{ matrix.fixture }}
+          E2E_TYPE_PROVIDER: ${{ matrix.type_provider }}
       - name: Upload timing report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-timing-${{ matrix.fixture }}
+          name: e2e-timing-${{ matrix.fixture }}-${{ matrix.type_provider }}
           path: /tmp/verter-e2e-timing-*.json
           if-no-files-found: ignore
 

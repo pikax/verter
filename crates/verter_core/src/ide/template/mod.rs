@@ -675,10 +675,10 @@ fn build_slot_iife_info(
         source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize].to_string()
     };
 
-    let open_text = format!("{{(function({params}){{ return (<>");
-    let close_text = format!(
-        "</>) }})(___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent({comp_tag}, {{}}), \"{slot_name}\"))}}",
+    let open_text = format!(
+        "{{(() => {{ const {params} = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent({comp_tag}, {{}}), \"{slot_name}\"); return (<>"
     );
+    let close_text = "</>); })()}".to_string();
 
     Some(SlotIifeInfo {
         open_text,

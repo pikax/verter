@@ -116,10 +116,10 @@ suite(`Script Block [${FIXTURE_NAME}]`, function () {
 
     const content = hoverText(hovers[0]);
     expect(content, "should mention onMounted").to.include("onMounted");
-    // In verter-only mode, the full callback signature may include `: any`
-    // for unresolved parameter types — only assert strict no-any with a type provider
+    // `onMounted` legitimately accepts callbacks that can return `any`; only reject
+    // a degraded hook parameter itself becoming `any`.
     if (TYPE_PROVIDER) {
-      expect(content, "should NOT be any").to.not.match(/:\s*any\b/);
+      expect(content, "hook parameter should stay typed").to.not.include("hook: any");
     }
   });
 

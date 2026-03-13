@@ -377,9 +377,9 @@ Changes to the VS Code extension (`packages/vue-vscode/`) or the LSP server (`cr
 
 **E2E tests** (Mocha + @vscode/test-cli, `e2e/suite/*.test.ts`):
 - For LSP integration: completions, hover, diagnostics, go-to-definition, rename, decorations
-- Run: `pnpm run build:lsp && pnpm --filter verter-vscode build:dev && E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e`
-- Run all fixtures: `for f in single-project barrel-exports path-aliases monorepo tsconfig-extends tsconfig-references composite-paths no-config single-file; do E2E_FIXTURE=$f pnpm --filter verter-vscode test:e2e; done`
-- CI runs all 9 fixtures in parallel via matrix strategy
+- Single fixture/provider: `E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter verter-vscode test:e2e`
+- Full matrix from the repo root: `pnpm run test:e2e`
+- CI runs the same fixture matrix across both `tsserver` and `tsgo`
 - See `.claude/skills/e2e-vscode-testing.md` for fixture design, helpers API, and adding new tests
 
 **When to use which:**

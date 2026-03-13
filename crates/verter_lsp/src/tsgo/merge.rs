@@ -65,6 +65,14 @@ pub fn vue_position_to_tsx_offset_validated(
     tsx_line_index: &LineIndex,
 ) -> Option<u32> {
     let tsx_offset = vue_position_to_tsx_offset(position, vue_line_index, mapper, tsx_line_index)?;
+    if let Some(exact_offset) = find_exact_roundtrip_offset(
+        position,
+        tsx_offset,
+        mapper,
+        tsx_line_index,
+    ) {
+        return Some(exact_offset);
+    }
 
     // Round-trip: TSX offset → TSX position → Vue position
     let tsx_pos = tsx_line_index.offset_to_position(tsx_offset)?;
@@ -77,6 +85,46 @@ pub fn vue_position_to_tsx_offset_validated(
     } else {
         None
     }
+}
+
+fn find_exact_roundtrip_offset(
+    position: &Position,
+    initial_offset: u32,
+    mapper: &PositionMapper,
+    tsx_line_index: &LineIndex,
+) -> Option<u32> {
+    const SEARCH_WINDOW: u32 = 256;
+
+    let initial_pos = tsx_line_index.offset_to_position(initial_offset)?;
+
+    let roundtrips_exact = |offset: u32| -> Option<bool> {
+        let tsx_pos = tsx_line_index.offset_to_position(offset)?;
+        if tsx_pos.line != initial_pos.line {
+            return Some(false);
+        }
+        let vue_pos = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.character)?;
+        Some(vue_pos.line == position.line && vue_pos.column == position.character)
+    };
+
+    if roundtrips_exact(initial_offset)? {
+        return Some(initial_offset);
+    }
+
+    for delta in 1..=SEARCH_WINDOW {
+        if initial_offset >= delta {
+            let candidate = initial_offset - delta;
+            if roundtrips_exact(candidate)? {
+                return Some(candidate);
+            }
+        }
+
+        let candidate = initial_offset + delta;
+        if roundtrips_exact(candidate)? {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 /// Map a TSX byte offset range back to an LSP `Range` in the Vue source.

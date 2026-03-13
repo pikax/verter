@@ -44,6 +44,10 @@ function parseFixtureEntry(entry: string): { fixture: string; typeProvider?: str
   };
 }
 
+function readE2eEnv(name: string): string | undefined {
+  return process.env[`VERTER_E2E_${name}`] ?? process.env[`E2E_${name}`];
+}
+
 /**
  * Find the verter-lsp binary in the monorepo.
  * Searches: target/debug/, target/release/, dist/, PATH.
@@ -136,12 +140,18 @@ function installFixtureDeps(fixtureDir: string): void {
 async function main() {
   const extensionDevelopmentPath = path.resolve(__dirname, "../../");
   const extensionTestsPath = path.resolve(__dirname, "./suite/index");
-  const vscodeVersion = process.env.VERTER_E2E_VSCODE_VERSION ?? "stable";
+  const vscodeVersion = readE2eEnv("VSCODE_VERSION") ?? "stable";
 
   const fixtureArg = process.argv.find((a) => a.startsWith("--fixture="));
+  const envFixture = readE2eEnv("FIXTURE");
+  const envTypeProvider = readE2eEnv("TYPE_PROVIDER");
   const fixturesToRun = fixtureArg
     ? [fixtureArg.replace("--fixture=", "")]
-    : FIXTURES;
+    : envFixture
+      ? [envTypeProvider ? `${envFixture}@${envTypeProvider}` : envFixture]
+      : envTypeProvider
+        ? FIXTURES.filter((entry) => parseFixtureEntry(entry).typeProvider === envTypeProvider)
+        : FIXTURES;
 
   const vscodeExecutablePath = await downloadAndUnzipVSCode(vscodeVersion);
 
@@ -153,9 +163,10 @@ async function main() {
   for (const entry of fixturesToRun) {
     const { fixture, typeProvider } = parseFixtureEntry(entry);
     const label = typeProvider ? `${fixture}@${typeProvider}` : fixture;
-    const fixtureDir = path.resolve(
-      __dirname,
-      "../fixtures",
+    const fixtureDir = path.join(
+      extensionDevelopmentPath,
+      "e2e",
+      "fixtures",
       fixture,
     );
 

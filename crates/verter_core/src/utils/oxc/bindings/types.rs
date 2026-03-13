@@ -199,6 +199,14 @@ impl<'a> BindingContext<'a> {
             || is_global(bytes)
             || name == "$event"
             || self.ignored_identifiers.contains(name)
+            // In IDE mode, partial completions inside v-for / v-slot scopes arrive as
+            // unfinished identifiers (`it`, `slotI`, etc.). Treat prefixes of ignored
+            // locals as ignored too so the template codegen keeps them bare and the
+            // type provider can offer scoped completions instead of instance members.
+            || self
+                .ignored_identifiers
+                .iter()
+                .any(|ignored| ignored.starts_with(name))
     }
 
     /// Add an identifier to the ignore list

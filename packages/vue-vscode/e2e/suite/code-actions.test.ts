@@ -3,10 +3,10 @@ import * as vscode from "vscode";
 import {
   waitForExtensionReady,
   openAndReady,
-  getAppVuePath,
   getCodeActions,
   FIXTURE_NAME,
   TYPE_PROVIDER,
+  waitForCodeActionsMatching,
 } from "../helpers";
 
 function isCodeAction(item: vscode.CodeAction | vscode.Command): item is vscode.CodeAction {
@@ -20,17 +20,30 @@ suite(`Code Actions [${FIXTURE_NAME}]`, function () {
 
   suiteSetup(async function () {
     await waitForExtensionReady();
-    doc = await openAndReady(getAppVuePath());
+    doc = await openAndReady("src/OrganizeImports.vue");
   });
 
   test("organize imports action available with source.organizeImports filter", async function () {
     if (!TYPE_PROVIDER) return this.skip();
-    // Request code actions for the import region (lines 1-12, 0-indexed: 0-11)
+    // Request code actions for the import region after the type provider has settled.
     const importRange = new vscode.Range(
       new vscode.Position(1, 0),
-      new vscode.Position(11, 0),
+      new vscode.Position(3, 0),
     );
-    const actions = await getCodeActions(
+    const actions = await waitForCodeActionsMatching(doc.uri, importRange, {
+      kind: vscode.CodeActionKind.SourceOrganizeImports,
+      predicate: (items: readonly (vscode.CodeAction | vscode.Command)[]) =>
+        items.some(
+          (item: vscode.CodeAction | vscode.Command) =>
+            isCodeAction(item) &&
+            item.kind?.value?.startsWith("source.organizeImports"),
+        ),
+      stableMs: 500,
+      timeoutMs: 20_000,
+      intervalMs: 150,
+    });
+
+    const filteredActions = await getCodeActions(
       doc.uri,
       importRange,
       vscode.CodeActionKind.SourceOrganizeImports,
@@ -46,8 +59,9 @@ suite(`Code Actions [${FIXTURE_NAME}]`, function () {
     ).to.be.greaterThan(0);
 
     // Should NOT have quickfix or refactor actions when filtering by source.organizeImports
-    const quickfixActions = actions.filter(
-      (a) => isCodeAction(a) && a.kind?.value?.startsWith("quickfix"),
+    const quickfixActions = filteredActions.filter(
+      (a: vscode.CodeAction | vscode.Command) =>
+        isCodeAction(a) && a.kind?.value?.startsWith("quickfix"),
     );
     expect(
       quickfixActions.length,
@@ -57,12 +71,24 @@ suite(`Code Actions [${FIXTURE_NAME}]`, function () {
 
   test("unfiltered request returns multiple action kinds", async function () {
     if (!TYPE_PROVIDER) return this.skip();
-    // Request code actions for the full script range without kind filter
     const scriptRange = new vscode.Range(
       new vscode.Position(0, 0),
-      new vscode.Position(32, 0),
+      new vscode.Position(10, 0),
     );
-    const actions = await getCodeActions(doc.uri, scriptRange);
+    const actions = await waitForCodeActionsMatching(doc.uri, scriptRange, {
+      predicate: (items: readonly (vscode.CodeAction | vscode.Command)[]) => {
+        const kinds = new Set(
+          items
+            .filter(isCodeAction)
+            .map((item: vscode.CodeAction) => item.kind?.value.split(".")[0])
+            .filter((kind: string | undefined): kind is string => Boolean(kind)),
+        );
+        return kinds.has("source") && kinds.has("quickfix");
+      },
+      stableMs: 500,
+      timeoutMs: 20_000,
+      intervalMs: 150,
+    });
 
     // Should have at least some actions
     expect(actions.length, "should have code actions").to.be.greaterThan(0);

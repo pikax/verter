@@ -152,6 +152,15 @@ impl<'alloc> BindingResolver<'alloc> {
         self.bindings.get(ident).copied()
     }
 
+    #[inline]
+    fn has_completion_prefix_match(&self, ident: &str) -> bool {
+        !ident.is_empty()
+            && self
+                .bindings
+                .keys()
+                .any(|candidate| candidate.starts_with(ident))
+    }
+
     /// Check if all non-ignored bindings in an expression are const props (cross-file override).
     ///
     /// Returns `true` ONLY when cross-file `const_props` data is available AND every
@@ -212,6 +221,7 @@ impl<'alloc> BindingResolver<'alloc> {
                 Some(bt) if bt.is_props() => "__props.",
                 Some(BindingType::Data) | Some(BindingType::Options) => "___VERTER___instance.",
                 Some(_) => "",
+                None if self.has_completion_prefix_match(ident) => "",
                 None if is_global(ident.as_bytes())
                     || is_keyword(ident.as_bytes())
                     || ident == "$event" =>

@@ -190,6 +190,24 @@ fn interpolation_expression() {
 }
 
 #[test]
+fn interpolation_partial_known_binding_stays_bare_for_completion() {
+    let result = gen_tsx_template_with_bindings(
+        "<template><div>{{ cou }}</div></template>",
+        &[("count", BindingType::SetupRef)],
+    );
+    assert!(
+        result.contains("{ cou }") || result.contains("{cou}"),
+        "partial binding should stay bare for completion context, got: {}",
+        result
+    );
+    assert!(
+        !result.contains("___VERTER___instance.cou"),
+        "partial binding must not get instance prefix, got: {}",
+        result
+    );
+}
+
+#[test]
 fn comment_preserved() {
     let result = gen_tsx_template("<template><!-- hello --></template>");
     assert!(
@@ -4477,6 +4495,15 @@ fn v_slot_params_arrow_wrapper() {
         !result.contains("v-slot"),
         "v-slot attribute must be removed: {result}"
     );
+    assert!(
+        result.contains("const { slotItem } = ___VERTER___extractArgumentsFromRenderSlot")
+            || result.contains("const {slotItem} = ___VERTER___extractArgumentsFromRenderSlot"),
+        "slot params should bind from the typed slot extract result, got: {result}"
+    );
+    assert!(
+        !result.contains("function({ slotItem })") && !result.contains("function({slotItem})"),
+        "slot params should not be introduced as untyped function parameters, got: {result}"
+    );
 }
 
 #[test]
@@ -4563,6 +4590,21 @@ fn v_slot_params_no_instance_prefix() {
     assert!(
         !result.contains("___VERTER___instance.slotItem"),
         "slot param must NOT get instance prefix: {result}"
+    );
+}
+
+#[test]
+fn partial_v_slot_param_stays_bare_for_completion() {
+    let result = gen_tsx_template(
+        r#"<template><MyComp v-slot="{ slotItem, slotIndex, slotTotal }"><span>{{ sl }}</span></MyComp></template>"#,
+    );
+    assert!(
+        result.contains("{ sl }") || result.contains("{sl}"),
+        "partial slot param should stay bare for completion context, got: {result}"
+    );
+    assert!(
+        !result.contains("___VERTER___instance.sl"),
+        "partial slot param must not get instance prefix, got: {result}"
     );
 }
 

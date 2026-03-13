@@ -305,10 +305,22 @@ impl NativeProjectResolver {
             None => ProviderTarget::SourceFile,
         };
         let provider_specifier = if target_owner.is_some() {
-            let importer_provider_id = self
-                .provider_id_for_source(&request.importer_id)
-                .unwrap_or_else(|| normalize_canonical_id(&request.importer_id));
-            relative_specifier(&importer_provider_id, &provider_id)
+            match provider_target {
+                // Vue imports must target the synthetic public API file for cross-file
+                // component typing inside the provider project.
+                ProviderTarget::VuePublicApi => {
+                    let importer_provider_id = self
+                        .provider_id_for_source(&request.importer_id)
+                        .unwrap_or_else(|| normalize_canonical_id(&request.importer_id));
+                    relative_specifier(&importer_provider_id, &provider_id)
+                }
+                // Non-Vue workspace files stay on the original source specifier so the
+                // provider project obeys the workspace tsconfig and does not introduce
+                // explicit `.ts` imports that trigger TS5097 under bundler resolution.
+                ProviderTarget::ShadowSourceFile | ProviderTarget::SourceFile => {
+                    request.specifier.clone()
+                }
+            }
         } else {
             request.specifier.clone()
         };

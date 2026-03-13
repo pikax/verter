@@ -13,6 +13,8 @@ const broken =
 
 <template>
   <div>
+    <p>{{ cou }}</p>
+    <p>{{ safeA }}</p>
     <p>{{ count }}</p>
     <button @click="safeAction">go</button>
     <MyComp foo="ok" :bar="count" />

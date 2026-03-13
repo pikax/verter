@@ -9,6 +9,9 @@ use verter_host::{HostConfig, VerterHost};
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::DocumentRegistry;
 use crate::features::completion::completions_at_position;
+use crate::features::cursor_context::{
+    classify_expression_context_with_trigger, ExpressionContext,
+};
 use crate::features::definition::definition_at_position;
 use crate::features::diagnostics::map_diagnostics;
 use crate::features::document_highlight::highlights_at_position;
@@ -1657,6 +1660,188 @@ function handleClick() {}
          Vue position: {}:{}\nTSX code:\n{}",
         position.line,
         position.character,
+        tsx.code
+    );
+}
+
+#[test]
+fn validated_tsx_offset_marks_partial_member_access_as_member_context() {
+    let source = r#"<script setup lang="ts">
+import { reactive } from 'vue'
+
+const nested = reactive({ deep: { value: 'hello', count: 1 } })
+</script>
+<template><div>{{ nested.deep.va }}</div></template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
+    let tsx_li = crate::documents::line_index::LineIndex::new_utf16(&tsx.code);
+
+    let source_offset = source.find("nested.deep.va").unwrap() + "nested.deep.".len();
+    let line = source[..source_offset].matches('\n').count() as u32;
+    let line_start = source[..source_offset]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let position = Position {
+        line,
+        character: (source_offset - line_start) as u32,
+    };
+
+    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+        &position,
+        &doc.line_index,
+        &mapper,
+        &tsx_li,
+    )
+    .expect("partial member access should map to TSX");
+
+    let tsx_suffix = &tsx.code[tsx_offset as usize..tsx.code.len().min(tsx_offset as usize + 16)];
+    assert!(
+        tsx_suffix.starts_with("va"),
+        "mapped TSX offset should land on the partial member, found {:?}\nTSX code:\n{}",
+        tsx_suffix,
+        tsx.code
+    );
+
+    let expr_context =
+        classify_expression_context_with_trigger(&tsx.code, tsx_offset as usize, None);
+    assert!(
+        matches!(expr_context, ExpressionContext::MemberAccess),
+        "partial member access should classify as MemberAccess, got {expr_context:?}\nTSX code:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn validated_tsx_offset_marks_scoped_slot_member_access_start_as_member_context() {
+    let source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
+    let tsx_li = crate::documents::line_index::LineIndex::new_utf16(&tsx.code);
+
+    let source_offset = source.find("slotItem.name").unwrap() + "slotItem.".len();
+    let line = source[..source_offset].matches('\n').count() as u32;
+    let line_start = source[..source_offset]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let position = Position {
+        line,
+        character: (source_offset - line_start) as u32,
+    };
+
+    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+        &position,
+        &doc.line_index,
+        &mapper,
+        &tsx_li,
+    )
+    .expect("scoped-slot member access should map to TSX");
+
+    let tsx_suffix = &tsx.code[tsx_offset as usize..tsx.code.len().min(tsx_offset as usize + 16)];
+    assert!(
+        tsx_suffix.starts_with("name"),
+        "mapped TSX offset should land on the member start, found {:?}\nTSX code:\n{}",
+        tsx_suffix,
+        tsx.code
+    );
+
+    let expr_context =
+        classify_expression_context_with_trigger(&tsx.code, tsx_offset as usize, None);
+    assert!(
+        matches!(expr_context, ExpressionContext::MemberAccess),
+        "scoped-slot member access should classify as MemberAccess, got {expr_context:?}\nTSX code:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn validated_tsx_offset_marks_partial_scoped_slot_member_access_as_member_context() {
+    let source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ slotItem.na }}</p>
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
+    let tsx_li = crate::documents::line_index::LineIndex::new_utf16(&tsx.code);
+
+    let source_offset = source.find("slotItem.na").unwrap() + "slotItem.".len() + "na".len();
+    let line = source[..source_offset].matches('\n').count() as u32;
+    let line_start = source[..source_offset]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let position = Position {
+        line,
+        character: (source_offset - line_start) as u32,
+    };
+
+    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+        &position,
+        &doc.line_index,
+        &mapper,
+        &tsx_li,
+    )
+    .expect("partial scoped-slot member access should map to TSX");
+
+    if let Some(slot_idx) = tsx.code.find("slotItem.na") {
+        eprintln!("slotItem.na tsx idx={slot_idx}, validated offset={tsx_offset}");
+        for delta in 0..=12 {
+            let candidate = slot_idx as u32 + delta;
+            if let Some(tsx_pos) = tsx_li.offset_to_position(candidate) {
+                let vue_pos = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.character);
+                eprintln!(
+                    "candidate offset={candidate} tsx={}:{} vue={vue_pos:?} text={:?}",
+                    tsx_pos.line,
+                    tsx_pos.character,
+                    &tsx.code[candidate as usize..tsx.code.len().min(candidate as usize + 6)]
+                );
+            }
+        }
+    }
+
+    let expr_context =
+        classify_expression_context_with_trigger(&tsx.code, tsx_offset as usize, None);
+    assert!(
+        matches!(expr_context, ExpressionContext::MemberAccess),
+        "partial scoped-slot member access should classify as MemberAccess, got {expr_context:?}\nTSX code:\n{}",
         tsx.code
     );
 }

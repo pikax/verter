@@ -317,7 +317,7 @@ fn resolve_workspace_alias_rewrites_to_shadow_provider_file() {
     assert_eq!(resolved.source_id, "/workspace/src/utils.ts");
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
     assert_eq!(resolved.resolution_kind, ResolutionKind::WorkspaceAlias);
-    assert_eq!(resolved.provider_specifier, "./utils.ts");
+    assert_eq!(resolved.provider_specifier, "@/utils");
     assert_eq!(
         resolved.provider_id, "/workspace/src/utils.ts",
         "non-Vue workspace files should resolve to their canonical path: {}",
@@ -359,7 +359,7 @@ fn resolve_tsconfig_paths_before_base_url() {
     assert_eq!(resolved.source_id, "/workspace/generated/shared.ts");
     assert_eq!(resolved.resolution_kind, ResolutionKind::TsConfigPath);
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
-    assert_eq!(resolved.provider_specifier, "../generated/shared.ts");
+    assert_eq!(resolved.provider_specifier, "shared");
     assert_eq!(
         resolved.provider_id, "/workspace/generated/shared.ts",
         "tsconfig paths match must not fall through to baseUrl"
@@ -396,7 +396,7 @@ fn resolve_base_url_when_no_paths_match() {
     assert_eq!(resolved.source_id, "/workspace/src/shared.ts");
     assert_eq!(resolved.resolution_kind, ResolutionKind::TsConfigPath);
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
-    assert_eq!(resolved.provider_specifier, "./shared.ts");
+    assert_eq!(resolved.provider_specifier, "shared");
 }
 
 #[test]
@@ -428,7 +428,7 @@ fn resolve_relative_paths_use_realpath_normalization() {
     assert_eq!(resolved.source_id, "/workspace/src/shared/util.ts");
     assert_eq!(resolved.resolution_kind, ResolutionKind::Relative);
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
-    assert_eq!(resolved.provider_specifier, "./shared/util.ts");
+    assert_eq!(resolved.provider_specifier, "./linked/util");
     assert_eq!(
         resolved.provider_id, "/workspace/src/shared/util.ts",
         "provider path should be derived from the canonical realpath target: {}",
@@ -479,10 +479,6 @@ fn resolve_project_references_after_local_tsconfig_options() {
     let expected_provider_id = resolver
         .provider_id_for_source("/workspace/packages/shared/src/index.ts")
         .expect("referenced source should receive a provider path");
-    let expected_importer_provider_id = resolver
-        .provider_id_for_source("/workspace/packages/app/src/App.ts")
-        .expect("importer should receive a provider path");
-
     assert_eq!(
         resolved.source_id,
         "/workspace/packages/shared/src/index.ts"
@@ -491,7 +487,7 @@ fn resolve_project_references_after_local_tsconfig_options() {
     assert_eq!(resolved.provider_id, expected_provider_id);
     assert_eq!(
         resolved.provider_specifier,
-        relative_specifier(&expected_importer_provider_id, &expected_provider_id)
+        "shared"
     );
     assert_eq!(
         resolved.owner_tsconfig_path.as_deref(),
@@ -532,7 +528,7 @@ fn resolve_package_imports_from_nearest_package_json() {
     assert_eq!(resolved.source_id, "/workspace/src/utils.ts");
     assert_eq!(resolved.resolution_kind, ResolutionKind::PackageImports);
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
-    assert_eq!(resolved.provider_specifier, "./utils.ts");
+    assert_eq!(resolved.provider_specifier, "#utils");
 }
 
 #[test]

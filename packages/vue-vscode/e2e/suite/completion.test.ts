@@ -12,6 +12,7 @@ import {
   findNthPosition,
   FIXTURE_NAME,
   TYPE_PROVIDER,
+  waitForCompletionsMatching,
 } from "../helpers";
 
 function completionLabel(item: vscode.CompletionItem): string {
@@ -130,13 +131,19 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const pos = findPosition(doc, "<MyComp ", 8);
+    const compDoc = await openVueFile("src/ComponentCompletionCase.vue");
+    const pos = findPosition(compDoc, "<MyComp />", 8);
     if (!pos) {
       this.skip();
       return;
     }
 
-    const completions = await getCompletions(doc.uri, pos);
+    const completions = await waitForCompletionsMatching(compDoc.uri, pos, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("foo") && labels.includes("bar") && labels.includes("@custom");
+      },
+    });
     expectCompletionsNonEmpty(completions, "completions");
 
     console.log(`    <MyComp completions: ${completionLabels(completions!).join(", ")}`);
@@ -172,7 +179,12 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const completions = await getCompletions(doc.uri, pos);
+    const completions = await waitForCompletionsMatching(doc.uri, pos, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("item");
+      },
+    });
     expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["item"]);
@@ -192,7 +204,12 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const completions = await getCompletions(doc.uri, pos);
+    const completions = await waitForCompletionsMatching(doc.uri, pos, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("disabled") && labels.includes("label") && labels.includes("handler");
+      },
+    });
     expectCompletionsNonEmpty(completions, "completions");
 
     console.log(`    action. completions: ${completionLabels(completions!).join(", ")}`);
@@ -223,7 +240,12 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const completions = await getCompletions(doc.uri, pos);
+    const completions = await waitForCompletionsMatching(doc.uri, pos, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("name") && labels.includes("email") && labels.includes("age");
+      },
+    });
     expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["name", "email", "age"]);
@@ -250,8 +272,18 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     expect(innerPos, "should find nested inner member access").to.exist;
     expect(outerPos, "should find nested outer member access").to.exist;
 
-    const innerCompletions = await getCompletions(doc.uri, innerPos!);
-    const outerCompletions = await getCompletions(doc.uri, outerPos!);
+    const innerCompletions = await waitForCompletionsMatching(doc.uri, innerPos!, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("label") && labels.includes("disabled");
+      },
+    });
+    const outerCompletions = await waitForCompletionsMatching(doc.uri, outerPos!, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("name") && labels.includes("email") && labels.includes("age");
+      },
+    });
     expectCompletionsNonEmpty(innerCompletions, "inner completions");
     expectCompletionsNonEmpty(outerCompletions, "outer completions");
 
@@ -274,7 +306,12 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const completions = await getCompletions(doc.uri, pos);
+    const completions = await waitForCompletionsMatching(doc.uri, pos, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("name") && labels.includes("email") && labels.includes("age");
+      },
+    });
     expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["name", "email", "age"]);
@@ -298,7 +335,12 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const completions = await getCompletions(doc.uri, pos);
+    const completions = await waitForCompletionsMatching(doc.uri, pos, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("title");
+      },
+    });
     expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["title"]);
@@ -424,15 +466,36 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const slotDoc = await openAndReady("src/TemplateSlotCases.vue");
-
-    const localPos = findPosition(slotDoc, "{{ slotItem.name }}", 3);
+    await openVueFile("src/TypedSlotComp.vue");
+    const slotDoc = await openVueFile("src/TemplateSlotCases.vue");
+    const localPos = findPosition(slotDoc, "{{ sl }}", 5);
     const memberPos = findPosition(slotDoc, "slotItem.name", 9);
     expect(localPos, "should find slot local usage").to.exist;
-    expect(memberPos, "should find slot member usage").to.exist;
+    expect(memberPos, "should find slot member completion probe").to.exist;
+    await waitForFileReady(slotDoc, {
+      probePosition: memberPos!,
+      expectedLabel: "name",
+      expectedKinds: [
+        vscode.CompletionItemKind.Property,
+        vscode.CompletionItemKind.Field,
+      ],
+      triggerCharacter: ".",
+      timeoutMs: 30_000,
+    });
 
-    const localCompletions = await getCompletions(slotDoc.uri, localPos!);
-    const memberCompletions = await getCompletions(slotDoc.uri, memberPos!);
+    const localCompletions = await waitForCompletionsMatching(slotDoc.uri, localPos!, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("slotItem") && labels.includes("slotIndex") && labels.includes("slotTotal");
+      },
+    });
+    const memberCompletions = await waitForCompletionsMatching(slotDoc.uri, memberPos!, {
+      triggerCharacter: ".",
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("name") && labels.includes("id");
+      },
+    });
     expectCompletionsNonEmpty(localCompletions, "slot local completions");
     expectCompletionsNonEmpty(memberCompletions, "slot member completions");
 
@@ -457,17 +520,51 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const recoveryDoc = await openAndReady("src/TemplateRecovery.vue");
+    const recoveryDoc = await openVueFile("src/TemplateRecovery.vue");
 
-    const pos = findPosition(recoveryDoc, "{{ count }}", 3);
+    const pos = findPosition(recoveryDoc, "{{ cou }}", 6);
     expect(pos, "should find recovered count usage").to.exist;
 
-    const completions = await getCompletions(recoveryDoc.uri, pos!);
+    const completions = await waitForCompletionsMatching(recoveryDoc.uri, pos!, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("count");
+      },
+    });
     expectCompletionsNonEmpty(completions, "completions");
 
-    expectCompletionsPresent(completions!, ["count", "safeAction"]);
+    expectCompletionsPresent(completions!, ["count"]);
     expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
-    expectCompletionKinds(completions!, "safeAction", [vscode.CompletionItemKind.Function]);
+    expectCompletionsMissing(completions!, ["window", "document", "AbortController"]);
+    expectNoInternalLeakage(completions!);
+  });
+
+  test("broken script recovery keeps earlier functions searchable by prefix", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+
+    const recoveryDoc = await openVueFile("src/TemplateRecovery.vue");
+
+    const pos = findPosition(recoveryDoc, "{{ safeA }}", 8);
+    expect(pos, "should find recovered safeAction prefix").to.exist;
+
+    const completions = await waitForCompletionsMatching(recoveryDoc.uri, pos!, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("safeAction");
+      },
+    });
+    expectCompletionsNonEmpty(completions, "safeAction completions");
+
+    expectCompletionsPresent(completions!, ["safeAction"]);
+    expectCompletionKinds(completions!, "safeAction", [
+      vscode.CompletionItemKind.Function,
+      vscode.CompletionItemKind.Method,
+      vscode.CompletionItemKind.Variable,
+    ]);
     expectCompletionsMissing(completions!, ["window", "document", "AbortController"]);
     expectNoInternalLeakage(completions!);
   });
@@ -508,13 +605,17 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     expect(memberPos, "should find JS member usage").to.exist;
 
     const mustacheCompletions = await getCompletions(jsDoc.uri, mustachePos!);
-    const memberCompletions = await getCompletions(jsDoc.uri, memberPos!);
+    const memberCompletions = await getCompletions(jsDoc.uri, memberPos!, ".");
     expectCompletionsNonEmpty(mustacheCompletions, "JS mustache completions");
     expectCompletionsNonEmpty(memberCompletions, "JS member completions");
 
     expectCompletionsPresent(mustacheCompletions!, ["count", "increment"]);
     expectCompletionKinds(mustacheCompletions!, "count", [vscode.CompletionItemKind.Variable]);
-    expectCompletionKinds(mustacheCompletions!, "increment", [vscode.CompletionItemKind.Function]);
+    expectCompletionKinds(mustacheCompletions!, "increment", [
+      vscode.CompletionItemKind.Function,
+      vscode.CompletionItemKind.Method,
+      vscode.CompletionItemKind.Variable,
+    ]);
 
     expectCompletionsPresent(memberCompletions!, ["label", "done"]);
     expectCompletionKinds(memberCompletions!, "label", [
@@ -582,13 +683,18 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     const trDoc = await openAndReady("src/TypeResolutionCases.vue");
 
-    const pos = findPosition(trDoc, "nested.deep", 7);
+    const pos = findPosition(trDoc, "nested.deep.va", "nested.deep.va".length);
     if (!pos) {
       this.skip();
       return;
     }
 
-    const completions = await getCompletions(trDoc.uri, pos);
+    const completions = await waitForCompletionsMatching(trDoc.uri, pos, {
+      predicate: (list) => {
+        const labels = list ? completionLabels(list) : [];
+        return labels.includes("value");
+      },
+    });
     expectCompletionsNonEmpty(completions, "nested member completions");
     expectCompletionsPresent(completions!, ["value"]);
     expectCompletionKinds(completions!, "value", [

@@ -6,6 +6,8 @@ const outerLabel = 'outer'
 
 <template>
   <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ sl }}</p>
+    <p>{{ slotItem.na }}</p>
     <p>{{ slotItem.name }}</p>
     <p>{{ slotIndex }}</p>
     <p>{{ slotTotal }}</p>

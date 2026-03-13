@@ -4,17 +4,7 @@ This guide covers how to run and write E2E tests for the Verter VS Code extensio
 
 ## Prerequisites
 
-1. **Build the Rust LSP binary**:
-   ```bash
-   pnpm run build:lsp
-   ```
-
-2. **Build the extension**:
-   ```bash
-   pnpm --filter verter-vscode build:dev
-   ```
-
-3. **Install test dependencies** (handled by `pnpm install`):
+1. **Install test dependencies** (handled by `pnpm install`):
    - `@vscode/test-electron` — Downloads and launches VS Code
    - `@vscode/test-cli` — CLI configuration wrapper
    - `mocha` + `chai` (v4, CommonJS) — Test framework and assertions
@@ -27,11 +17,13 @@ This guide covers how to run and write E2E tests for the Verter VS Code extensio
 ### Single fixture (recommended for development)
 
 ```bash
-# Set the fixture and run
-E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e
+# Rebuild the LSP + extension + E2E bundle, then run a single fixture/provider
+E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter verter-vscode test:e2e
 ```
 
-The `E2E_FIXTURE` environment variable selects which test workspace to open. Available fixtures:
+`pnpm --filter verter-vscode test:e2e` now prepares the Rust binary, extension bundle, and compiled E2E tests before launching VS Code. Use `pnpm --filter verter-vscode test:e2e:run` only when artifacts are already prepared, such as in CI.
+
+The `E2E_FIXTURE` environment variable selects which test workspace to open. `E2E_TYPE_PROVIDER` selects the provider under test (`tsserver` or `tsgo`). Available fixtures:
 
 - `single-project` — Standard Vue project with tsconfig
 - `monorepo` — pnpm workspace with cross-package imports
@@ -41,37 +33,36 @@ The `E2E_FIXTURE` environment variable selects which test workspace to open. Ava
 - `no-config` — Bare folder, no configuration
 - `single-file` — Just one .vue file
 
-**All 29 tests run for every fixture** — no suite-level skips. The extension works with default tsgo/tsserver config even without tsconfig, just like VS Code does. Individual tests that check for specific template tokens (e.g. `{{ title }}`) pass with an N/A message when the token isn't in the fixture.
+Every CI E2E run is fixture x provider, so provider-specific regressions are caught explicitly instead of relying on `auto` mode.
 
-### All fixtures
+### All fixtures and both providers
 
 ```bash
-npx ts-node packages/vue-vscode/e2e/runTests.ts
+pnpm run test:e2e
 ```
 
-This iterates over every fixture, launching a fresh VS Code instance for each.
+This prepares the artifacts once, then iterates over every fixture/provider combination with a fresh VS Code instance for each run.
 
 ### Specific fixture via runTests.ts
 
 ```bash
-npx ts-node packages/vue-vscode/e2e/runTests.ts --fixture=monorepo
+pnpm --filter verter-vscode test:e2e:matrix -- --fixture=monorepo@tsgo
 ```
 
 ### From the monorepo root
 
 ```bash
-pnpm run test:e2e                           # Single fixture (single-project)
-E2E_FIXTURE=no-config pnpm run test:e2e     # Specific fixture
+pnpm run test:e2e                                                # Full fixture/provider matrix
+E2E_FIXTURE=no-config E2E_TYPE_PROVIDER=tsgo pnpm run test:e2e:single
 ```
 
 ## CI Integration
 
 The E2E tests run as part of the CI workflow on every push to `main` and every pull request (when `packages/vue-vscode/**` or `crates/**` files change). The CI job:
 
-1. Builds the LSP binary (Linux)
-2. Builds the extension
-3. Compiles E2E tests
-4. Runs against the `single-project` fixture with `xvfb-run` (headless display)
+1. Prepares the LSP binary, extension bundle, and compiled E2E tests once
+2. Downloads those artifacts into the E2E job
+3. Runs the fixture matrix against both `tsserver` and `tsgo` with `xvfb-run` (headless display)
 
 See `.github/workflows/ci.yml` → `vscode-e2e` job.
 

@@ -1269,6 +1269,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalidate_dependents_of_works_when_dependency_was_never_loaded() {
+        let host = VerterHost::new(HostConfig::default());
+
+        let _ = upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">\nimport { helper } from './tempUtil'\n</script>\n<template><div>{{ helper }}</div></template>",
+        );
+
+        host.set_import_dependencies(
+            "/src/Comp.vue",
+            vec![DependencyResolution {
+                specifier: "./tempUtil".to_string(),
+                resolved_canonical_id: Some("/src/tempUtil.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let _ = host
+            .get_virtual_file(VirtualQuery {
+                raw_id: Some("/src/Comp.vue".to_string()),
+                canonical_id: None,
+                node_kind: None,
+                compile_profile: profile_dev(),
+            })
+            .unwrap();
+
+        host.invalidate_dependents_of("/src/tempUtil.ts");
+
+        let files = read_lock(&host.files);
+        let comp = files.get("/src/Comp.vue").unwrap();
+        assert!(
+            comp.compile_slots.is_empty(),
+            "compile slots should be cleared even when the deleted dependency was never loaded"
+        );
+    }
+
     /// @ai-generated - Dep file with no export signatures → full invalidation (Tier 1 fallback)
     #[test]
     fn smart_invalidation_no_signatures_full_invalidation() {

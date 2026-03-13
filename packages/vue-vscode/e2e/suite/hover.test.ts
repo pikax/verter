@@ -492,7 +492,13 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const slotDoc = await openAndReady("src/TemplateSlotCases.vue");
+    const slotDoc = await openVueFile("src/TemplateSlotCases.vue");
+    const readyPos = findPosition(slotDoc, "{{ outerLabel }}", 3);
+    expect(readyPos, "should find slot outer-label probe").to.exist;
+    await waitForFileReady(slotDoc, {
+      probePosition: readyPos!,
+      expectedLabel: "outerLabel",
+    });
 
     const localPos = findPosition(slotDoc, "slotItem.name", 0);
     const memberPos = findPosition(slotDoc, "slotItem.name", 9);
@@ -509,7 +515,12 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     const memberContent = hoverText(memberHover.hovers[0]);
 
     expect(localContent, "slot local hover should mention slotItem").to.include("slotItem");
-    expect(localContent, "slot local hover should mention name").to.include("name");
+    const hasNamedType = localContent.includes("SlotItem");
+    const hasExpandedType = localContent.includes("name") && localContent.includes("id");
+    expect(
+      hasNamedType || hasExpandedType,
+      `slot local hover should show named or expanded slot type:\n${localContent}`,
+    ).to.equal(true);
     expect(localContent, "slot local hover should not degrade to any").to.not.match(/:\s*any\b/);
 
     expect(memberContent, "slot member hover should mention name").to.include("name");

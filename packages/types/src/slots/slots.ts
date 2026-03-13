@@ -166,6 +166,9 @@ export declare function checkRequiredSlots<T>(
 ): void;
 
 export declare function extractArgumentsFromRenderSlot<
-  T extends { $slots: { [K in N]: any } },
-  N extends string,
->(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
+  TSlots extends Record<string, any>,
+  N extends keyof TSlots & string,
+>(
+  component: { $slots: TSlots },
+  slotName: N,
+): TSlots[N] extends (...args: infer P) => any ? P[0] : never;

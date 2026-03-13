@@ -184,12 +184,17 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
       `Expected TS error for 'thisDoesNotExist'. Got: ${JSON.stringify(diags.map((d) => ({ msg: d.message, code: d.code, src: d.source })))}`,
     ).to.exist;
 
-    // Negative: foo and bar are valid props — no errors on them
+    // Negative: only the unknown prop should be diagnosed
     const allDiags = vscode.languages.getDiagnostics(invalidDoc.uri);
-    const fooError = allDiags.find((d) => d.message.includes("'foo'") && d.source === "ts");
-    const barError = allDiags.find((d) => d.message.includes("'bar'") && d.source === "ts");
-    expect(fooError, "foo is a valid prop — should have no TS error").to.be.undefined;
-    expect(barError, "bar is a valid prop — should have no TS error").to.be.undefined;
+    const tsDiags = allDiags.filter((d) => d.source === "ts");
+    expect(
+      tsDiags.length,
+      `expected exactly one TS diagnostic for InvalidPropCase.vue, got: ${JSON.stringify(tsDiags.map((d) => ({ msg: d.message, code: d.code, src: d.source })))}`,
+    ).to.equal(1);
+    expect(
+      tsDiags[0].message,
+      "the TS diagnostic should be about the unknown prop",
+    ).to.include("thisDoesNotExist");
 
     // Negative: no verter/unknown-prop diagnostics (TypeProvider is source of truth)
     const verterPropDiag = allDiags.find(

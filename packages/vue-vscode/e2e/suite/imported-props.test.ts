@@ -48,15 +48,15 @@ suite(`Imported Props [${FIXTURE_NAME}]`, function () {
     expect(completionPos, "should find partial imported prop member usage").to.exist;
 
     let completions: vscode.CompletionList | undefined;
-    let propsCompletion: vscode.CompletionItem | undefined;
+    let countCompletion: vscode.CompletionItem | undefined;
     const completionDeadline = Date.now() + 20_000;
     while (Date.now() < completionDeadline) {
       completions = await getCompletions(doc.uri, completionPos!);
-      propsCompletion = completions?.items.find((item) => item.label === "props");
+      countCompletion = completions?.items.find((item) => item.label === "count");
       if (
-        propsCompletion &&
-        propsCompletion.kind !== undefined &&
-        propsCompletion.kind !== vscode.CompletionItemKind.Text
+        countCompletion &&
+        countCompletion.kind !== undefined &&
+        countCompletion.kind !== vscode.CompletionItemKind.Text
       ) {
         break;
       }
@@ -64,10 +64,10 @@ suite(`Imported Props [${FIXTURE_NAME}]`, function () {
     }
 
     expect(completions, "should return completions").to.exist;
-    expect(propsCompletion, "should include the imported props binding").to.exist;
+    expect(countCompletion, "should include the imported count prop").to.exist;
     expect(
-      propsCompletion!.kind,
-      "imported props completion should be typed, not plain text",
+      countCompletion!.kind,
+      "imported props member completion should be typed, not plain text",
     ).to.not.equal(vscode.CompletionItemKind.Text);
 
     assertLogNotContains(

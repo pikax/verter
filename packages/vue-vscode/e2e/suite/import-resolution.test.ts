@@ -7,6 +7,7 @@ import {
   getAppVuePath,
   FIXTURE_NAME,
   TYPE_PROVIDER,
+  waitForNoDiagnosticsMatching,
 } from "../helpers";
 
 suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
@@ -22,6 +23,42 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
     "monorepo",
   ];
 
+  const diagnosticCode = (diagnostic: vscode.Diagnostic): string => {
+    const code = typeof diagnostic.code === "object" ? diagnostic.code?.value : diagnostic.code;
+    return String(code ?? "");
+  };
+
+  const formatDiagnostics = (diagnostics: vscode.Diagnostic[]): string =>
+    diagnostics.map((diagnostic) => `${diagnostic.source ?? "unknown"}:${diagnosticCode(diagnostic)} ${diagnostic.message}`).join("; ");
+
+  const isModuleNotFoundDiagnostic = (diagnostic: vscode.Diagnostic): boolean =>
+    diagnostic.message.includes("Cannot find module") &&
+    diagnosticCode(diagnostic) === "2307";
+
+  const isVueTsModuleDiagnostic = (diagnostic: vscode.Diagnostic): boolean =>
+    isModuleNotFoundDiagnostic(diagnostic) &&
+    diagnostic.message.includes(".vue.ts");
+
+  const isTsExtensionDiagnostic = (diagnostic: vscode.Diagnostic): boolean =>
+    diagnosticCode(diagnostic) === "5097" ||
+    diagnostic.message.includes("allowImportingTsExtensions");
+
+  const expectNoForbiddenDiagnostics = async (
+    doc: vscode.TextDocument,
+    predicate: (diagnostic: vscode.Diagnostic) => boolean,
+    label: string,
+  ) => {
+    const settledDiagnostics = await waitForNoDiagnosticsMatching(doc.uri, {
+      predicate,
+      timeoutMs: 15_000,
+    });
+    const forbiddenDiagnostics = settledDiagnostics.filter(predicate);
+    expect(
+      forbiddenDiagnostics,
+      `${label}: ${formatDiagnostics(forbiddenDiagnostics)}`,
+    ).to.have.lengthOf(0);
+  };
+
   suiteSetup(async function () {
     await waitForExtensionReady();
   });
@@ -35,19 +72,13 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
     const doc = await openVueFile(getAppVuePath());
     await waitForFileReady(doc);
 
-    const diags = vscode.languages.getDiagnostics(doc.uri);
-    const moduleErrors = diags.filter((d) => {
-      if (!d.message.includes("Cannot find module")) return false;
-      // TS2307 code can be number, string, or {value: number} depending on provider
-      const code = typeof d.code === "object" ? d.code?.value : d.code;
-      return code === 2307 || code === "2307" || String(code) === "2307";
-    });
-
     // TSGO CANARY: composite-paths with TSGO should have module errors because
     // TSGO cannot resolve path aliases from referenced tsconfigs (upstream limitation).
     // If this test starts FAILING, TSGO has fixed the limitation — update auto-mode
     // detection in main.rs and remove this canary.
     if (FIXTURE_NAME === "composite-paths" && TYPE_PROVIDER === "tsgo") {
+      const diags = vscode.languages.getDiagnostics(doc.uri);
+      const moduleErrors = diags.filter(isModuleNotFoundDiagnostic);
       expect(
         moduleErrors.length,
         "TSGO CANARY: composite-paths @/ aliases should fail on TSGO (known upstream limitation). " +
@@ -57,10 +88,11 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    expect(
-      moduleErrors,
-      `Expected no TS2307 errors but found: ${moduleErrors.map((d) => d.message).join("; ")}`,
-    ).to.have.lengthOf(0);
+    await expectNoForbiddenDiagnostics(
+      doc,
+      isModuleNotFoundDiagnostic,
+      "Expected no TS2307 module resolution diagnostics",
+    );
   });
 
   test("@/ path alias imports resolve without errors", async function () {
@@ -103,16 +135,11 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
     const doc = await openVueFile(getAppVuePath());
     await waitForFileReady(doc);
 
-    const diags = vscode.languages.getDiagnostics(doc.uri);
-    const vueTsErrors = diags.filter(
-      (d) =>
-        d.message.includes(".vue.ts") &&
-        d.message.includes("Cannot find module"),
-    );
-
     // TSGO CANARY: composite-paths .vue.ts errors are caused by unresolved @/ aliases
     // (same root cause as the path alias canary above).
     if (FIXTURE_NAME === "composite-paths" && TYPE_PROVIDER === "tsgo") {
+      const diags = vscode.languages.getDiagnostics(doc.uri);
+      const vueTsErrors = diags.filter(isVueTsModuleDiagnostic);
       // Don't assert error count — .vue.ts errors here are a side effect of the
       // @/ alias limitation, not a separate .vue.ts resolution issue.
       console.log(
@@ -121,9 +148,44 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    expect(
-      vueTsErrors,
-      `.vue.ts resolution errors: ${vueTsErrors.map((d) => d.message).join("; ")}`,
-    ).to.have.lengthOf(0);
+    await expectNoForbiddenDiagnostics(
+      doc,
+      isVueTsModuleDiagnostic,
+      ".vue.ts resolution errors",
+    );
+  });
+
+  test(".vue imports do not trigger TS5097 .ts-extension diagnostics", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
+    if (FIXTURE_NAME === "no-config" || FIXTURE_NAME === "single-file") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+    const doc = await openVueFile(getAppVuePath());
+    await waitForFileReady(doc);
+
+    await expectNoForbiddenDiagnostics(
+      doc,
+      isTsExtensionDiagnostic,
+      "Unexpected TS5097 .ts-extension diagnostics",
+    );
+  });
+
+  test("nested Vue-to-Vue imports resolve in component files", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const doc = await openVueFile("src/WrappedButton.vue");
+    await waitForFileReady(doc);
+
+    await expectNoForbiddenDiagnostics(
+      doc,
+      (diagnostic) =>
+        isModuleNotFoundDiagnostic(diagnostic) || isTsExtensionDiagnostic(diagnostic),
+      "Nested Vue import diagnostics",
+    );
   });
 });

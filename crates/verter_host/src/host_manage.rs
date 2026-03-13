@@ -334,6 +334,15 @@ impl VerterHost {
         entry.latest_diagnostics.get(&profile_hash).cloned()
     }
 
+    /// Invalidate compile outputs of files that depend on the given path.
+    ///
+    /// Unlike `remove()`, this works even when the dependency file was never
+    /// loaded into the host but reverse-dependency edges were registered.
+    pub fn invalidate_dependents_of(&self, canonical_or_alias: &str) {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        self.smart_invalidate_dependents(&canonical, &[], &[]);
+    }
+
     /// Remove a file from the host, cleaning up aliases, dependencies,
     /// and invalidating compile slots of any dependents.
     pub fn remove(&self, canonical_or_alias: &str) -> Option<HostRemoveResult> {
