@@ -516,7 +516,7 @@ pub struct VerterLanguageServer {
     /// Avoids re-running the linter when both push and pull paths request diagnostics
     /// for the same document version. Arc-wrapped so the SyncCoordinator can read
     /// cached verter diagnostics when publishing merged diagnostics after sync.
-    cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
+    cached_verter_diags: Arc<DashMap<String, (i32, u64, Vec<Diagnostic>)>>,
     /// Source-keyed provider materialization state shared across background/live sync.
     provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     /// Which type provider backend is active (TSGO, tsserver, or none).
@@ -4624,16 +4624,21 @@ fn collect_priority_vue_targets_from_module_references(
 pub(crate) fn compute_verter_diagnostics_for(
     documents: &DocumentRegistry,
     uri: &Uri,
-    cached_verter_diags: &DashMap<String, (i32, Vec<Diagnostic>)>,
+    cached_verter_diags: &DashMap<String, (i32, u64, Vec<Diagnostic>)>,
     project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
     fallback_linter: &parking_lot::RwLock<verter_diagnostics::Linter>,
 ) -> Vec<Diagnostic> {
-    // Check cache: if version matches, return cached diagnostics.
+    // Check cache: if version AND diagnostics generation both match, return cached.
     let uri_str = uri.as_str();
+    let canonical_id = uri_to_canonical_id(uri);
+    let current_diag_gen = documents
+        .host()
+        .get_diagnostics_generation(&canonical_id)
+        .unwrap_or(0);
     if let Some(doc) = documents.get(uri) {
         if let Some(cached) = cached_verter_diags.get(uri_str) {
-            if cached.0 == doc.version {
-                return cached.1.clone();
+            if cached.0 == doc.version && cached.1 == current_diag_gen {
+                return cached.2.clone();
             }
         }
     }
@@ -4830,7 +4835,7 @@ struct BackgroundInitArgs {
     provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     pending_snapshot_provider_sync: Arc<DashSet<String>>,
     is_tsgo: bool,
-    cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
+    cached_verter_diags: Arc<DashMap<String, (i32, u64, Vec<Diagnostic>)>>,
     position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
     /// Snapshot of MRU list at init time for drain ordering.
     mru_canonical_ids: Arc<parking_lot::Mutex<Vec<String>>>,
@@ -5016,11 +5021,14 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
     // 5. Materialize @verter/types (spawn_blocking — blocking FS)
     let roots_for_types = roots.clone();
-    let any_failed =
+    let materialize_types =
         tokio::task::spawn_blocking(move || materialize_verter_types(&roots_for_types))
             .await
-            .unwrap_or(true);
-    if any_failed {
+            .unwrap_or(MaterializeVerterTypesResult {
+                any_failed: true,
+                wrote_any: false,
+            });
+    if materialize_types.any_failed {
         tsx_profile.write().embed_ambient_types = true;
     }
 
@@ -5482,16 +5490,22 @@ fn write_if_changed(path: &std::path::Path, desired: &str) -> std::io::Result<bo
     Ok(true)
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct MaterializeVerterTypesResult {
+    any_failed: bool,
+    wrote_any: bool,
+}
+
 /// Materialise `@verter/types` in all workspace roots that don't already have it.
-/// Returns `true` if any root failed (caller should fall back to embedding ambient types).
-fn materialize_verter_types(roots: &[String]) -> bool {
-    let mut any_failed = false;
+/// Returns whether any root failed and whether any files were written.
+fn materialize_verter_types(roots: &[String]) -> MaterializeVerterTypesResult {
+    let mut result = MaterializeVerterTypesResult::default();
     for root_uri in roots {
         let canonical = crate::documents::uri_to_canonical_id_from_str(root_uri);
         let root_path = std::path::PathBuf::from(&canonical);
         let types_dir = root_path.join("node_modules/@verter/types");
-        let types_index = root_path.join("node_modules/@verter/types/index.d.ts");
-        if !types_index.exists() || is_generated_verter_types_stub(&types_dir) {
+        let pkg_path = types_dir.join("package.json");
+        if !pkg_path.exists() || is_generated_verter_types_stub(&types_dir) {
             match std::fs::create_dir_all(&types_dir) {
                 Ok(()) => {
                     let dts = verter_host::VERTER_TYPES_STANDALONE_DTS;
@@ -5500,7 +5514,7 @@ fn materialize_verter_types(roots: &[String]) -> bool {
                         Ok(w) => w,
                         Err(e) => {
                             tracing::warn!("failed to write @verter/types index.d.ts: {e}");
-                            any_failed = true;
+                            result.any_failed = true;
                             continue;
                         }
                     };
@@ -5511,6 +5525,7 @@ fn materialize_verter_types(roots: &[String]) -> bool {
                             continue;
                         }
                     };
+                    result.wrote_any |= dts_written || pkg_written;
                     if dts_written || pkg_written {
                         tracing::info!(
                             "@verter/types materialised/refreshed at {}",
@@ -5524,12 +5539,12 @@ fn materialize_verter_types(roots: &[String]) -> bool {
                     tracing::warn!(
                         "failed to create @verter/types dir: {e} — falling back to embed"
                     );
-                    any_failed = true;
+                    result.any_failed = true;
                 }
             }
         }
     }
-    any_failed
+    result
 }
 
 /// Collect tsconfig patterns for all workspace roots (blocking FS walk).
@@ -14254,7 +14269,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             }),
             fragment_analysis
                 .as_ref()
-                .map(|analysis| analysis.macros.iter().map(|mac| mac.kind.clone()).collect::<Vec<_>>()),
+                .map(|analysis| analysis.macros.iter().map(|mac| mac.kind).collect::<Vec<_>>()),
             fragment_analysis.as_ref().map(|analysis| {
                 analysis
                     .template
@@ -14963,7 +14978,8 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         // materialize_verter_types expects URI strings but falls back to path
         let root = format!("file://{}", tmp.path().display());
         let result = materialize_verter_types(&[root]);
-        assert!(!result, "should not fail on first call");
+        assert!(!result.any_failed, "should not fail on first call");
+        assert!(result.wrote_any, "should write stub files on first call");
         assert!(nm.join("index.d.ts").exists());
         assert!(nm.join("package.json").exists());
         let dts = std::fs::read_to_string(nm.join("index.d.ts")).unwrap();
@@ -14977,22 +14993,15 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     fn test_materialize_second_call_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let root = format!("file://{}", tmp.path().display());
-        materialize_verter_types(&[root.clone()]);
-        let nm = tmp.path().join("node_modules/@verter/types");
-        let mtime_before = std::fs::metadata(nm.join("index.d.ts"))
-            .unwrap()
-            .modified()
-            .unwrap();
-        // Small sleep to ensure mtime would differ if rewritten
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        materialize_verter_types(&[root]);
-        let mtime_after = std::fs::metadata(nm.join("index.d.ts"))
-            .unwrap()
-            .modified()
-            .unwrap();
-        assert_eq!(
-            mtime_before, mtime_after,
-            "second call should not rewrite identical files"
+        let first = materialize_verter_types(&[root.clone()]);
+        assert!(!first.any_failed, "first materialization should succeed");
+        assert!(first.wrote_any, "first materialization should write files");
+
+        let second = materialize_verter_types(&[root]);
+        assert!(!second.any_failed, "second materialization should succeed");
+        assert!(
+            !second.wrote_any,
+            "second materialization should not rewrite identical files"
         );
     }
 
@@ -15000,26 +15009,39 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     fn test_materialize_skips_real_installed_package() {
         let tmp = tempfile::tempdir().unwrap();
         let nm = tmp.path().join("node_modules/@verter/types");
-        std::fs::create_dir_all(&nm).unwrap();
-        // Pre-populate with real package content (no marker)
+        let dist = nm.join("dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        // Pre-populate with real package content (no marker, uses dist/index.d.ts).
         let real_dts = "export type DefineComponent = any;";
         let real_pkg = r#"{"name":"@verter/types","version":"0.1.0","types":"dist/index.d.ts"}"#;
-        std::fs::write(nm.join("index.d.ts"), real_dts).unwrap();
+        std::fs::write(dist.join("index.d.ts"), real_dts).unwrap();
         std::fs::write(nm.join("package.json"), real_pkg).unwrap();
 
         let root = format!("file://{}", tmp.path().display());
-        materialize_verter_types(&[root]);
+        let result = materialize_verter_types(&[root]);
+        assert!(
+            !result.any_failed,
+            "real installed package should not trigger fallback mode"
+        );
+        assert!(
+            !result.wrote_any,
+            "real installed package should not be rewritten"
+        );
 
         // Real package should not be overwritten
         assert_eq!(
-            std::fs::read_to_string(nm.join("index.d.ts")).unwrap(),
+            std::fs::read_to_string(dist.join("index.d.ts")).unwrap(),
             real_dts,
-            "real installed package index.d.ts should not be overwritten"
+            "real installed package dist/index.d.ts should not be overwritten"
         );
         assert_eq!(
             std::fs::read_to_string(nm.join("package.json")).unwrap(),
             real_pkg,
             "real installed package package.json should not be overwritten"
+        );
+        assert!(
+            !nm.join("index.d.ts").exists(),
+            "materialization should not create a stub index.d.ts for a real package"
         );
     }
 

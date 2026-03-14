@@ -2413,7 +2413,7 @@ mod tests {
         // Vite config with both @ and ~ aliases
         std::fs::write(
             tmp.join("vite.config.js"),
-            &format!(
+            format!(
                 "export default {{ resolve: {{ alias: {{ '@': '{src}', '~': '{lib}' }} }} }};",
                 src = tmp.join("src").to_string_lossy().replace('\\', "/"),
                 lib = tmp.join("lib").to_string_lossy().replace('\\', "/"),

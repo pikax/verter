@@ -276,7 +276,7 @@ count.
 const x = ref(1)
 </script>
 <template><div>{{ count }}</div></template>"#;
-    let (code, bindings, _) = gen(source);
+    let (code, _bindings, _) = gen(source);
     assert_not_error_recovery(&code, "A23");
     // At least the import should be hoisted
     assert!(
@@ -309,7 +309,7 @@ const handler = () => { event. }
 const count = ref(0)
 </script>
 <template><div>{{ count }}</div></template>"#;
-    let (code, bindings, _) = gen(source);
+    let (code, _bindings, _) = gen(source);
     assert_not_error_recovery(&code, "A25");
 }
 
@@ -321,7 +321,7 @@ const count = ref(0)
 const x = computed(() => count.)
 </script>
 <template><div>{{ count }}</div></template>"#;
-    let (code, bindings, _) = gen(source);
+    let (code, _bindings, _) = gen(source);
     assert_not_error_recovery(&code, "A27");
 }
 
@@ -387,7 +387,7 @@ const count = ref(0)
 count.
 </script>
 <template><div>{{ count }}</div></template>"#;
-    let (code, bindings, _) = gen(source);
+    let (code, _bindings, _) = gen(source);
     assert_not_error_recovery(&code, "A31");
 }
 
@@ -556,7 +556,7 @@ const x = ref(0)
 defineProps<{
 </script>
 <template><div>{{ x }}</div></template>"#;
-    let (code, bindings, _) = gen(source);
+    let (code, _bindings, _) = gen(source);
     assert_has_template_binding_fn(&code, "B12");
     assert!(
         code.contains("import { ref } from 'vue'"),

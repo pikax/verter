@@ -1560,7 +1560,7 @@ export default { resolve: { alias: { [key]: './src' } } }"#,
 
         std::fs::write(
             tmp.join("vite.config.js"),
-            &format!(
+            format!(
                 "export default {{ resolve: {{ alias: {{ '@': '{}' }} }} }}",
                 tmp.join("src").to_string_lossy().replace('\\', "/")
             ),

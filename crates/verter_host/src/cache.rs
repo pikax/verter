@@ -259,6 +259,7 @@ mod tests {
             content_overrides: FxHashMap::default(),
             compile_slots: FxHashMap::default(),
             latest_diagnostics: FxHashMap::default(),
+            diagnostics_generation: 0,
             generation: 0,
             cached_parse: None,
             cached_tsc_extract: None,

@@ -44,7 +44,7 @@ export default { name: 'MyComponent' }
         ..Default::default()
     };
     let result = compile(input, &options, &verter_opts, &allocator);
-    let has_code = result.script.as_ref().map_or(false, |s| !s.code.is_empty());
+    let has_code = result.script.as_ref().is_some_and(|s| !s.code.is_empty());
     assert!(
         has_code || !result.errors.is_empty(),
         "Multi-script SFC should compile or report errors, not panic"

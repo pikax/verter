@@ -588,6 +588,7 @@ impl VerterHost {
                 entry
                     .latest_diagnostics
                     .insert(profile_hash, diagnostics.clone());
+                entry.diagnostics_generation += 1;
                 enforce_profile_cap(entry, self.config.max_profiles_per_file.max(1));
             }
         }
@@ -760,6 +761,7 @@ impl VerterHost {
         let mut files = write_lock(&self.files);
         if let Some(entry) = files.get_mut(canonical_id) {
             entry.latest_diagnostics.insert(profile_hash, diagnostics);
+            entry.diagnostics_generation += 1;
         }
     }
 

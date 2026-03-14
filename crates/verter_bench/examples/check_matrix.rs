@@ -11,7 +11,7 @@ use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // ─── Data Contracts ──────────────────────────────────────────────────────────
 

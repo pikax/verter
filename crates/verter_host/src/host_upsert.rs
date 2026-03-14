@@ -176,6 +176,7 @@ impl VerterHost {
                     content_overrides: FxHashMap::default(),
                     compile_slots: FxHashMap::default(),
                     latest_diagnostics: FxHashMap::default(),
+                    diagnostics_generation: 0,
                     generation: 0,
                     cached_parse: None,
                     cached_tsc_extract: None,
@@ -216,6 +217,7 @@ impl VerterHost {
 
             if changes.changed && changes.semantic_changed {
                 entry.latest_diagnostics.clear();
+                entry.diagnostics_generation += 1;
                 if changes.slice_changes.script_changed
                     || changes.slice_changes.structure_changed
                     || changes.slice_changes.descriptor_changed

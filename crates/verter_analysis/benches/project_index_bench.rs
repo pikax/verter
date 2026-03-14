@@ -12,7 +12,7 @@ fn make_file_info(i: usize) -> FileUsageInfoOwned {
     let mut info = FileUsageInfoOwned::default();
 
     // Half the files provide
-    if i % 2 == 0 {
+    if i.is_multiple_of(2) {
         info.provides.push(ProvideUsageOwned {
             key: Some(format!("key-{}", i % 20)),
             is_dynamic_key: false,
@@ -23,7 +23,7 @@ fn make_file_info(i: usize) -> FileUsageInfoOwned {
     }
 
     // A third inject
-    if i % 3 == 0 {
+    if i.is_multiple_of(3) {
         info.injects.push(InjectUsageOwned {
             key: Some(format!("key-{}", (i + 5) % 20)),
             is_dynamic_key: false,
@@ -36,7 +36,7 @@ fn make_file_info(i: usize) -> FileUsageInfoOwned {
     }
 
     // Most files use components
-    if i % 4 != 0 {
+    if !i.is_multiple_of(4) {
         info.components.push(ComponentUsageOwned {
             name: Some(format!("Component{}", i % 10)),
             is_dynamic: false,
@@ -47,7 +47,7 @@ fn make_file_info(i: usize) -> FileUsageInfoOwned {
     }
 
     // Some files have styles
-    if i % 5 == 0 {
+    if i.is_multiple_of(5) {
         info.styles.push(StyleUsageInfoOwned {
             lang: Some("css".to_string()),
             scoped: true,

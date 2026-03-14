@@ -63,7 +63,7 @@ fn collect_vue_files() -> Vec<VueFile> {
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "vue") {
+        if path.extension().is_some_and(|ext| ext == "vue") {
             if let Ok(source) = std::fs::read_to_string(path) {
                 // Only include files with <template> (skip script-only SFCs)
                 if source.contains("<template") {

@@ -681,7 +681,7 @@ mod tests {
         // But our simple scanner skips the entire template literal including interpolation
         // This is acceptable — the scanner is conservative
         assert!(
-            r.macros.len() >= 1,
+            !r.macros.is_empty(),
             "should find at least defineEmits after template literal"
         );
         assert!(

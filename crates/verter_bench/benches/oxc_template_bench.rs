@@ -60,9 +60,9 @@ fn generate_dynamic_template(n: usize) -> String {
     let mut s = String::with_capacity(n * 80 + 30);
     s.push_str("<template>\n");
     for i in 0..n {
-        write!(
+        writeln!(
             s,
-            "  <div :class=\"cls{i}\" :style=\"{{ color: color{i} }}\" @click=\"handle{i}\">{{{{ msg{i} }}}}</div>\n",
+            "  <div :class=\"cls{i}\" :style=\"{{ color: color{i} }}\" @click=\"handle{i}\">{{{{ msg{i} }}}}</div>",
         )
         .unwrap();
     }
@@ -76,7 +76,7 @@ fn generate_static_template(n: usize) -> String {
     let mut s = String::with_capacity(n * 50 + 30);
     s.push_str("<template>\n");
     for i in 0..n {
-        write!(s, "  <div class=\"item-{i}\">Static text {i}</div>\n",).unwrap();
+        writeln!(s, "  <div class=\"item-{i}\">Static text {i}</div>",).unwrap();
     }
     s.push_str("</template>\n");
     s

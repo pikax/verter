@@ -792,7 +792,7 @@ fn make_event_directive_analysis(
     let dir_start = source.find(raw_name).unwrap_or(0) as u32;
     // Find the end — either next whitespace, >, or end of raw_name text
     let dir_end_in_src = source[dir_start as usize..]
-        .find(|c: char| c == '>' || c == ' ' || c == '\t' || c == '\n')
+        .find(['>', ' ', '\t', '\n'])
         .map(|i| dir_start + i as u32)
         .unwrap_or(dir_start + raw_name.len() as u32);
 
@@ -876,7 +876,7 @@ fn make_vmodel_directive_analysis(
     let raw_name = "v-model";
     let dir_start = source.find(raw_name).unwrap_or(0) as u32;
     let dir_end_in_src = source[dir_start as usize..]
-        .find(|c: char| c == '>' || c == ' ' || c == '\t' || c == '\n' || c == '=')
+        .find(['>', ' ', '\t', '\n', '='])
         .map(|i| dir_start + i as u32)
         .unwrap_or(dir_start + raw_name.len() as u32);
 
@@ -2417,7 +2417,7 @@ fn test_component_prop_completions_from_macros() {
 
     // Negative: parent's script bindings must NOT leak
     assert!(
-        !labels.iter().any(|l| *l == "count"),
+        !labels.contains(&"count"),
         "parent binding 'count' must not appear in component prop completions"
     );
 

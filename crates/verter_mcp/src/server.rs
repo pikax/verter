@@ -3409,7 +3409,7 @@ const props = defineProps<{ count: number; label: string }>()
         // Verify prop_fields are present in the serialized output
         let prop_fields = props_val.get("propFields").and_then(|v| v.as_array());
         assert!(
-            prop_fields.map_or(false, |a| !a.is_empty()),
+            prop_fields.is_some_and(|a| !a.is_empty()),
             "Bug 1: propFields should be populated, got: {}",
             serde_json::to_string_pretty(&props_val).unwrap()
         );
@@ -3499,13 +3499,13 @@ const count = ref(0)
 
         // unusedHelper should be detected as unused
         assert!(
-            unused.iter().any(|n| *n == "unusedHelper"),
+            unused.contains(&"unusedHelper"),
             "Bug 3: unusedHelper should appear in unused bindings, got: {:?}",
             unused
         );
         // handleClick is used in @click, should NOT be in unused
         assert!(
-            !unused.iter().any(|n| *n == "handleClick"),
+            !unused.contains(&"handleClick"),
             "Bug 3: handleClick should NOT appear in unused (used in event handler), got: {:?}",
             unused
         );

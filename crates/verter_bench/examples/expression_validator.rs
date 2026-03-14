@@ -346,9 +346,8 @@ fn is_likely_function_param(content: &str, identifier: &str) -> bool {
 
         // Check for simple arrow function: `identifier =>`
         let trimmed = before_arrow.trim_end();
-        if trimmed.ends_with(identifier) {
+        if let Some(before_ident) = trimmed.strip_suffix(identifier) {
             // Make sure it's a standalone identifier, not part of a larger word
-            let before_ident = &trimmed[..trimmed.len() - identifier.len()];
             if before_ident.is_empty() || !is_ident_char(before_ident.chars().last().unwrap_or(' '))
             {
                 return true;
@@ -369,9 +368,8 @@ fn is_likely_function_param(content: &str, identifier: &str) -> bool {
                     }
                 } else if param == identifier {
                     return true;
-                } else if param.starts_with(identifier) {
+                } else if let Some(rest) = param.strip_prefix(identifier) {
                     // Could be `identifier: Type` or `identifier = default`
-                    let rest = &param[identifier.len()..];
                     if rest.starts_with(':') || rest.starts_with('=') || rest.starts_with(' ') {
                         return true;
                     }
@@ -508,7 +506,7 @@ fn main() {
                 .filter_map(|expr| {
                     total_expressions += 1;
 
-                    let is_slot = expr.expr_type == "slot";
+                    let _is_slot = expr.expr_type == "slot";
                     let extraction_result = extract_identifiers_from_expression(
                         &expr.expression.content,
                         &expr.expr_type,
@@ -518,7 +516,7 @@ fn main() {
                     match extraction_result {
                         ExtractionResult::Empty => {
                             skipped_empty += 1;
-                            return None;
+                            None
                         }
                         ExtractionResult::ParseError => {
                             parse_errors.push(ErrorExpression {
@@ -528,7 +526,7 @@ fn main() {
                                 expr_type: expr.expr_type.clone(),
                                 vue_identifiers: expr.expression.identifiers.clone(),
                             });
-                            return None;
+                            None
                         }
                         ExtractionResult::Slot { locals, references } => {
                             // For slots, compare Vue identifiers with our locals
@@ -596,12 +594,12 @@ fn main() {
                             verter_identifiers.sort();
                             verter_identifiers.dedup();
 
-                            return Some(OutputExpression {
+                            Some(OutputExpression {
                                 id: expr.id,
                                 content: expr.expression.content,
                                 vue_identifiers: vue_identifiers_sorted,
                                 verter_identifiers,
-                            });
+                            })
                         }
                         ExtractionResult::VFor { locals, references } => {
                             // For v-for, combine locals and references for comparison
@@ -686,12 +684,12 @@ fn main() {
                                 }
                             }
 
-                            return Some(OutputExpression {
+                            Some(OutputExpression {
                                 id: expr.id,
                                 content: expr.expression.content,
                                 vue_identifiers: vue_identifiers_sorted,
                                 verter_identifiers: all_verter,
-                            });
+                            })
                         }
                         ExtractionResult::Ok(verter_identifiers) => {
                             // Regular expression handling

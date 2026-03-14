@@ -44,7 +44,7 @@ fn tokenize_sfc_and_feed(syntax: &mut Syntax, input: &str, ctx: &SyntaxPluginCon
 }
 
 /// Extract a substring using u32 span indices.
-fn span_str<'a>(input: &'a str, start: u32, end: u32) -> &'a str {
+fn span_str(input: &str, start: u32, end: u32) -> &str {
     &input[start as usize..end as usize]
 }
 
@@ -1284,7 +1284,7 @@ fn complete_sfc_all_sections() {
 
     // Template
     let ast = syn.template_ast.as_ref().expect("template_ast");
-    assert!(ast.root.content.as_ref().unwrap().children.len() > 0);
+    assert!(!ast.root.content.as_ref().unwrap().children.is_empty());
 
     // Script (non-setup)
     let script = syn.script_node.as_ref().expect("script_node");

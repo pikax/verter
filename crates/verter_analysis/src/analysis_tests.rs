@@ -1606,7 +1606,7 @@ const store = useUserStore();
 const { name, email } = storeToRefs(store);
 "#,
     );
-    assert!(result.store_usages.len() >= 1, "should detect store usage");
+    assert!(!result.store_usages.is_empty(), "should detect store usage");
     // The useUserStore call should be detected
     let store_usage = result
         .store_usages

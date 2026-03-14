@@ -3400,7 +3400,7 @@ fn v_for_body_member_access_source_mapped() {
         gen_tsx_template_with_map(source, &[("actions", BindingType::SetupConst)]);
     eprintln!("TSX output:\n{}", output);
     eprintln!("Tokens (dst_line, dst_col, src_col):");
-    for &(dl, dc, sc) in &tokens {
+    for &(_dl, dc, sc) in &tokens {
         eprintln!("  gen_col={}, src_col={}", dc, sc);
     }
 

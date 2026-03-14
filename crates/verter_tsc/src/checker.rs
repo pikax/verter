@@ -1421,7 +1421,7 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
     /// Write a mock tsc that reports an error (exit 1) but STILL emits a .d.ts file.
     /// This simulates real tsc behavior where errors in some files don't prevent
     /// emission of declarations for other (non-erroring) files.
-    fn write_mock_tsc_error_with_emit(project_root: &Path, decl_dir: &Path) {
+    fn write_mock_tsc_error_with_emit(project_root: &Path, _decl_dir: &Path) {
         let bin_dir = project_root.join("node_modules").join(".bin");
         fs::create_dir_all(&bin_dir).unwrap();
 

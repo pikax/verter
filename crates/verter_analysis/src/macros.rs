@@ -1865,7 +1865,7 @@ mod tests {
 
     use super::*;
 
-    fn parse_and_extract<'a>(alloc: &'a Allocator, source: &str) -> Vec<AnalyzedMacro> {
+    fn parse_and_extract(alloc: &Allocator, source: &str) -> Vec<AnalyzedMacro> {
         let parser =
             Parser::new(alloc, source, SourceType::ts()).with_options(ParseOptions::default());
         let result = parser.parse();

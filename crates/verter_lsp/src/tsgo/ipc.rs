@@ -2880,8 +2880,8 @@ import Bar from './Bar.vue'"#;
         let our_uri = "file:///C:/Users/Someone/AppData/Local/Temp/test/App.vue.tsx";
         let tsgo_uri = "file:///c%3A/users/someone/appdata/local/temp/test/App.vue.tsx";
 
-        let our_normalized = normalize_file_uri(our_uri);
-        let tsgo_normalized = normalize_file_uri(tsgo_uri);
+        let _our_normalized = normalize_file_uri(our_uri);
+        let _tsgo_normalized = normalize_file_uri(tsgo_uri);
 
         // On Windows, both should normalize to the same lowercase form
         #[cfg(windows)]
@@ -2903,11 +2903,11 @@ import Bar from './Bar.vue'"#;
     fn test_normalize_file_uri_cache_key_match() {
         // Simulate what open_file does: path_to_uri → normalize → cache key
         let path = "C:/Users/Someone/AppData/Local/Temp/verter_test/App.vue.tsx";
-        let our_key = normalize_file_uri(&TsgoTypeProvider::path_to_uri(path));
+        let _our_key = normalize_file_uri(&TsgoTypeProvider::path_to_uri(path));
 
         // Simulate what read_loop does with TSGO's publishDiagnostics URI
         let tsgo_raw = "file:///c%3A/users/someone/appdata/local/temp/verter_test/app.vue.tsx";
-        let tsgo_key = normalize_file_uri(tsgo_raw);
+        let _tsgo_key = normalize_file_uri(tsgo_raw);
 
         #[cfg(windows)]
         assert_eq!(
@@ -3156,7 +3156,7 @@ const count: number = 42;
         create_test_project(&tmp).unwrap();
 
         // Write a TS file for testing
-        std::fs::write(&tmp.join("test.ts"), "const x: number = 42;\n").unwrap();
+        std::fs::write(tmp.join("test.ts"), "const x: number = 42;\n").unwrap();
 
         let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
         let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();

@@ -6560,7 +6560,7 @@ defineProps<{ tag?: string }>()
 <template><component :is="tag"><slot /></component></template>"#,
         );
         // Positive: props literal should reference __props.tag, not bare tag
-        let passed_section = code
+        let _passed_section = code
             .split("getRootComponentPassedProps")
             .nth(1)
             .unwrap_or("")
@@ -10106,10 +10106,10 @@ const myRef = useTemplateRef('myRef')
         // Template-first + empty script setup should still produce valid TSX.
         let fn_open_pos = code
             .find("function ___VERTER___TemplateBindingFN")
-            .expect(&format!("should have TemplateBindingFN: {code}"));
+            .unwrap_or_else(|| panic!("should have TemplateBindingFN: {code}"));
         let close_fn_pos = code
             .find("} // close templateBindingFN")
-            .expect(&format!("should have close marker: {code}"));
+            .unwrap_or_else(|| panic!("should have close marker: {code}"));
         assert!(
             fn_open_pos < close_fn_pos,
             "function opening must come before closing. open={fn_open_pos}, close={close_fn_pos}: {code}"
@@ -10134,10 +10134,10 @@ const msg = 'hello'
 
         let fn_open_pos = code
             .find("function ___VERTER___TemplateBindingFN")
-            .expect(&format!("should have TemplateBindingFN: {code}"));
+            .unwrap_or_else(|| panic!("should have TemplateBindingFN: {code}"));
         let close_fn_pos = code
             .find("} // close templateBindingFN")
-            .expect(&format!("should have close marker: {code}"));
+            .unwrap_or_else(|| panic!("should have close marker: {code}"));
         assert!(
             fn_open_pos < close_fn_pos,
             "function opening must come before closing: {code}"

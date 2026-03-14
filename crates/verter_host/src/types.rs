@@ -1030,6 +1030,10 @@ pub(crate) struct FileEntry {
     pub(crate) content_overrides: FxHashMap<u64, ContentOverrideLayer>,
     pub(crate) compile_slots: FxHashMap<u64, CompileSlot>,
     pub(crate) latest_diagnostics: FxHashMap<u64, DiagnosticsSnapshot>,
+    /// Monotonic counter incremented on every write to `latest_diagnostics`.
+    /// Used by the LSP cache to detect host-driven recompiles that don't change
+    /// the document version (e.g., dependency hydration clearing stale errors).
+    pub(crate) diagnostics_generation: u64,
     /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
     pub(crate) cached_parse: Option<Arc<verter_core::parser::types::ParsedSfc>>,
     /// Cached intermediate TSC extract state. Populated on first `get_public_api_with_mode`

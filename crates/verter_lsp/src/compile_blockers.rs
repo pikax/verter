@@ -773,9 +773,7 @@ mod tests {
         std::fs::write(&types_path, "export interface Props { msg: string }").unwrap();
 
         let vue_path = dir.path().join("App.vue");
-        let vue_source = format!(
-            "<script setup lang=\"ts\">\nimport type {{ Props }} from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{{{ props.msg }}}}</div></template>"
-        );
+        let vue_source = "<script setup lang=\"ts\">\nimport type { Props } from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>".to_string();
         std::fs::write(&vue_path, &vue_source).unwrap();
 
         let host = strict_host();

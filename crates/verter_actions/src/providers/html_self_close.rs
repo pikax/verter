@@ -145,7 +145,7 @@ mod tests {
         assert!(actions[0].title.contains("br"), "title should mention br");
         assert_eq!(actions[0].kind, ActionKind::QuickFix);
         // Should have 2 edits: replace `>` with `/>` and remove `</br>`
-        assert!(actions[0].edits.len() >= 1, "should have at least 1 edit");
+        assert!(!actions[0].edits.is_empty(), "should have at least 1 edit");
         // First edit: `>` → `/>`
         let first_edit = &actions[0].edits[0];
         assert_eq!(first_edit.replacement, "/>", "should replace > with />");

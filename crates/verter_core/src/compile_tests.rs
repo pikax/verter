@@ -3383,10 +3383,12 @@ const msg = 'hello'
 
     // Script must emit __scopeId with data-v- prefix
     let scope_marker = "__scopeId = \"";
-    let scope_pos = script.code.find(scope_marker).expect(&format!(
-        "Script should contain __scopeId assignment, got:\n{}",
-        script.code
-    ));
+    let scope_pos = script.code.find(scope_marker).unwrap_or_else(|| {
+        panic!(
+            "Script should contain __scopeId assignment, got:\n{}",
+            script.code
+        )
+    });
     let scope_value_start = scope_pos + scope_marker.len();
     let scope_value_end = script.code[scope_value_start..]
         .find('"')
@@ -3403,10 +3405,12 @@ const msg = 'hello'
 
     // CSS must use the same scope_id in its selectors
     let css_marker = "[data-v-";
-    let css_pos = style.code.find(css_marker).expect(&format!(
-        "CSS should contain [data-v-...] selector, got:\n{}",
-        style.code
-    ));
+    let css_pos = style.code.find(css_marker).unwrap_or_else(|| {
+        panic!(
+            "CSS should contain [data-v-...] selector, got:\n{}",
+            style.code
+        )
+    });
     let css_id_start = css_pos + 1; // skip '['
     let css_id_end = style.code[css_id_start..]
         .find(']')
@@ -3727,10 +3731,9 @@ onMounted(() => {
     let code = &script.code;
 
     // Extract the __returned__ assignment
-    let returned_idx = code.find("const __returned__ = ").expect(&format!(
-        "Must have __returned__ assignment. Full output:\n{}",
-        code
-    ));
+    let returned_idx = code
+        .find("const __returned__ = ")
+        .unwrap_or_else(|| panic!("Must have __returned__ assignment. Full output:\n{}", code));
     let returned_rest = &code[returned_idx..];
     let returned_end = returned_rest.find(';').unwrap_or(returned_rest.len());
     let returned_stmt = &returned_rest[..returned_end];
@@ -13235,11 +13238,11 @@ const msg = ref('hello')
     let fn_open = tsx
         .code
         .find("function ___VERTER___TemplateBindingFN")
-        .expect(&format!("should have function: {}", tsx.code));
+        .unwrap_or_else(|| panic!("should have function: {}", tsx.code));
     let fn_close = tsx
         .code
         .find("} // close templateBindingFN")
-        .expect(&format!("should have close: {}", tsx.code));
+        .unwrap_or_else(|| panic!("should have close: {}", tsx.code));
     assert!(
         fn_open < fn_close,
         "function open must come before close: {}",
@@ -13249,7 +13252,7 @@ const msg = ref('hello')
     let msg_pos = tsx
         .code
         .find("const msg = ref('hello')")
-        .expect(&format!("should have script content: {}", tsx.code));
+        .unwrap_or_else(|| panic!("should have script content: {}", tsx.code));
     assert!(
         fn_open < msg_pos && msg_pos < fn_close,
         "script content must be inside function: {}",
@@ -13259,7 +13262,7 @@ const msg = ref('hello')
     let jsx_pos = tsx
         .code
         .find("{ msg }")
-        .expect(&format!("should have template binding: {}", tsx.code));
+        .unwrap_or_else(|| panic!("should have template binding: {}", tsx.code));
     assert!(
         fn_open < jsx_pos && jsx_pos < fn_close,
         "template JSX must be inside function: {}",
@@ -13291,15 +13294,15 @@ fn tsx_global_component_fallbacks_before_block_scope() {
         .code
         .find("/* verter-destructured-start */")
         .or_else(|| tsx.code.find("\n{\n"))
-        .expect(&format!("should have block scope: {}", tsx.code));
+        .unwrap_or_else(|| panic!("should have block scope: {}", tsx.code));
     let router_link_pos = tsx
         .code
         .find("const RouterLink =")
-        .expect(&format!("should have RouterLink fallback: {}", tsx.code));
+        .unwrap_or_else(|| panic!("should have RouterLink fallback: {}", tsx.code));
     let router_view_pos = tsx
         .code
         .find("const RouterView =")
-        .expect(&format!("should have RouterView fallback: {}", tsx.code));
+        .unwrap_or_else(|| panic!("should have RouterView fallback: {}", tsx.code));
     assert!(
         router_link_pos < block_scope_pos,
         "RouterLink fallback must be before block scope (TDZ): {}",

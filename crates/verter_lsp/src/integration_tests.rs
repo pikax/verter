@@ -187,12 +187,12 @@ const message = 'hello'
     // Should include bindings from script setup
     let labels: Vec<_> = result.items.iter().map(|i| i.label.as_str()).collect();
     assert!(
-        labels.iter().any(|l| *l == "count"),
+        labels.contains(&"count"),
         "Should complete 'count', got: {:?}",
         labels
     );
     assert!(
-        labels.iter().any(|l| *l == "message"),
+        labels.contains(&"message"),
         "Should complete 'message', got: {:?}",
         labels
     );
@@ -2380,7 +2380,7 @@ import MyComp from './MyComp.vue'
             // slotsUsed should be ABSENT (not an empty array) when skip_serializing_if fires
             assert!(
                 comp.get("slotsUsed").is_none()
-                    || comp["slotsUsed"].as_array().map_or(false, |a| a.is_empty()),
+                    || comp["slotsUsed"].as_array().is_some_and(|a| a.is_empty()),
                 "slotsUsed should be absent or empty when no slots are used, got: {:?}",
                 comp.get("slotsUsed")
             );
@@ -2394,7 +2394,7 @@ import MyComp from './MyComp.vue'
                             || ref_bindings
                                 .unwrap()
                                 .as_array()
-                                .map_or(false, |a| a.is_empty()),
+                                .is_some_and(|a| a.is_empty()),
                         "referencedBindings should be absent or empty for const prop, got: {:?}",
                         ref_bindings
                     );
@@ -3881,14 +3881,14 @@ async fn sync_coordinator_channel_delivers_all_signals() {
     // Send 20 rapid signals (simulating 20 keystrokes)
     for _ in 0..20 {
         handle.signal(
-            format!("C:/project/src/App.vue"),
-            format!("file:///C:/project/src/App.vue"),
+            "C:/project/src/App.vue".to_string(),
+            "file:///C:/project/src/App.vue".to_string(),
         );
     }
 
     // All 20 signals should arrive
     let mut count = 0;
-    while let Ok(_) = rx.try_recv() {
+    while rx.try_recv().is_ok() {
         count += 1;
     }
     assert_eq!(count, 20, "all 20 signals should be delivered");
@@ -4493,7 +4493,7 @@ const msg = "hello"
     let comp_flag = Arc::clone(&completion_done);
     let task_a = tokio::spawn(async move {
         // Extract context synchronously (mirrors type_provider_context pattern)
-        let tsx_resp = reg_a.get_ide(&uri_a).unwrap();
+        let _tsx_resp = reg_a.get_ide(&uri_a).unwrap();
         let _mapper = reg_a.get_position_mapper(&uri_a).unwrap();
         let _vue_li = reg_a.get(&uri_a).unwrap().line_index.clone();
         // Guards dropped here ^

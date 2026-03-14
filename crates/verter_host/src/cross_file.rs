@@ -363,7 +363,7 @@ pub(crate) fn resolve_import_to_canonical(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::*;
     use std::sync::Arc;
 
@@ -479,7 +479,7 @@ const msg = ref('world')
         let result = host.compute_cross_file_optimizations();
         // msg should NOT be const because ParentB passes dynamic
         let child_consts = result.const_prop_overrides.get("Child.vue");
-        let has_msg = child_consts.map_or(false, |s| s.contains("msg"));
+        let has_msg = child_consts.is_some_and(|s| s.contains("msg"));
         assert!(
             !has_msg,
             "msg should NOT be const when one parent passes dynamic"
@@ -621,7 +621,7 @@ import Child from './Child.vue'
         let result = host.compute_cross_file_optimizations();
         let child_consts = result.const_prop_overrides.get("Child.vue");
         assert!(
-            child_consts.map_or(false, |s| s.contains("msg")),
+            child_consts.is_some_and(|s| s.contains("msg")),
             "msg should be const when all parents pass const values"
         );
     }

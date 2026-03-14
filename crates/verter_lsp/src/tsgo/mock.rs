@@ -122,6 +122,12 @@ mod inner {
         state: Arc<Mutex<MockState>>,
     }
 
+    impl Default for MockTypeProvider {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl MockTypeProvider {
         pub fn new() -> Self {
             Self {
