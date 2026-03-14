@@ -87,7 +87,7 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
             match spec {
                 ImportDeclarationSpecifier::ImportSpecifier(s) => {
                     let local_name = s.local.name.to_string();
-                    let spec_type_only = s.import_kind.is_type();
+                    let spec_type_only = is_type_only || s.import_kind.is_type();
                     // Classify by the *imported* (original) name, not the local alias.
                     // e.g. `import { ref as myRef } from 'vue'` → classify "ref", not "myRef"
                     let vue_api = if is_vue {
@@ -315,6 +315,38 @@ mod tests {
         assert!(
             !imports[0].bindings[0].is_type_only,
             "value namespace import should not be type-only"
+        );
+    }
+
+    /// Declaration-level `import type { Foo }` should mark named specifiers as type-only
+    #[test]
+    fn declaration_level_type_only_named_specifiers() {
+        let imports = analyze_imports("import type { Foo, Bar } from './types';");
+        assert_eq!(imports.len(), 1);
+        assert!(imports[0].is_type_only, "declaration should be type-only");
+        assert!(
+            imports[0].bindings[0].is_type_only,
+            "Foo from `import type {{ Foo }}` should be type-only"
+        );
+        assert!(
+            imports[0].bindings[1].is_type_only,
+            "Bar from `import type {{ Bar }}` should be type-only"
+        );
+    }
+
+    /// Mixed: `import { type Foo, Bar }` — only Foo is type-only
+    #[test]
+    fn specifier_level_type_only_mixed() {
+        let imports = analyze_imports("import { type Foo, Bar } from './types';");
+        assert_eq!(imports.len(), 1);
+        assert!(!imports[0].is_type_only, "declaration is not type-only");
+        assert!(
+            imports[0].bindings[0].is_type_only,
+            "Foo with specifier-level `type` should be type-only"
+        );
+        assert!(
+            !imports[0].bindings[1].is_type_only,
+            "Bar without `type` should not be type-only"
         );
     }
 

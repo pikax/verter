@@ -52,8 +52,12 @@ impl ActionProvider for ReplaceContent {
                 ("Remove boolean default value".to_string(), String::new())
             }
             "v-for-delimiter-style" => {
-                // Replace "in" with "of" or vice versa
-                let replacement = if text == "in" { "of" } else { "in" };
+                // Replace "in" with "of" or vice versa — only act on exact match
+                let replacement = match text {
+                    "in" => "of",
+                    "of" => "in",
+                    _ => return vec![],
+                };
                 (
                     format!("Use '{replacement}' delimiter"),
                     replacement.to_string(),
@@ -169,6 +173,40 @@ mod tests {
         let actions = ReplaceContent.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].edits[0].replacement, "of");
+    }
+
+    #[test]
+    fn v_for_delimiter_ignores_unexpected_span() {
+        // If the span doesn't contain exactly "in" or "of", produce no action
+        let source = "item  in  items";
+        let start = source.find("  in").unwrap() as u32; // includes leading space
+        let end = start + 4; // "  in"
+        let diag = LintDiagnostic {
+            rule: "v-for-delimiter-style".to_string(),
+            category: "vue".to_string(),
+            severity: Severity::Warning,
+            message: "use of".to_string(),
+            span: verter_span::Span::new(start, end),
+            tags: vec![],
+            span_kind: DiagnosticSpanKind::Directive,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        };
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "/src/App.vue",
+            diagnostics: &set,
+            template: None,
+            script: None,
+            styles: &[],
+        };
+        let actions = ReplaceContent.fixes_for_diagnostic(&diag, &ctx);
+        assert!(
+            actions.is_empty(),
+            "should produce no action when span is not exactly 'in' or 'of'"
+        );
     }
 
     #[test]
