@@ -517,9 +517,11 @@ pub struct VerterLanguageServer {
     vite_config_options: tokio::sync::Mutex<crate::vite_config::ViteConfigOptions>,
     /// Whether type provider inlay hints are enabled (from initializationOptions).
     inlay_hints_enabled: std::sync::atomic::AtomicBool,
-    /// Cached verter diagnostics per document: URI → (version, diagnostics).
-    /// Avoids re-running the linter when both push and pull paths request diagnostics
-    /// for the same document version. Arc-wrapped so the SyncCoordinator can read
+    /// Cached verter diagnostics per document:
+    /// URI → (document_version, diagnostics_generation, diagnostics).
+    /// Avoids re-running host + lint + component diagnostics when both push and
+    /// pull paths request diagnostics for the same document version and host
+    /// diagnostics generation. Arc-wrapped so the SyncCoordinator can read
     /// cached verter diagnostics when publishing merged diagnostics after sync.
     cached_verter_diags: Arc<DashMap<String, CachedVerterDiagEntry>>,
     /// Source-keyed provider materialization state shared across background/live sync.
@@ -4624,8 +4626,10 @@ fn collect_priority_vue_targets_from_module_references(
 /// Compute verter diagnostics (host errors + lint rules + component usage) for a document.
 ///
 /// Extracted as a free function so both `VerterLanguageServer::compute_verter_diagnostics()`
-/// and the `SyncCoordinator` can produce fresh diagnostics. Results are cached per document
-/// version in `cached_verter_diags` to avoid redundant re-computation.
+/// and the `SyncCoordinator` can produce diagnostics using the same cache policy.
+/// Results are cached per `(document version, host diagnostics generation)` in
+/// `cached_verter_diags` to avoid redundant re-computation after host-driven
+/// recompiles that do not change the editor document version.
 pub(crate) fn compute_verter_diagnostics_for(
     documents: &DocumentRegistry,
     uri: &Uri,
@@ -13493,6 +13497,132 @@ function handleCustom(payload: string) {
                 MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
             )),
             "drain should sync the open Vue IDE file through the synthetic TSX path"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_init_drain_clears_stale_macro_type_diagnostic_for_package_exports_dep() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+        std::fs::create_dir_all(workspace.join("node_modules/motion/dist"))
+            .expect("create motion dist dir");
+        std::fs::write(workspace.join("tsconfig.json"), "{}").expect("write tsconfig");
+        std::fs::write(
+            workspace.join("node_modules/motion/package.json"),
+            r#"{
+                "name": "motion",
+                "exports": {
+                    ".": {
+                        "types": "./dist/index.d.ts"
+                    }
+                }
+            }"#,
+        )
+        .expect("write motion package");
+        std::fs::write(
+            workspace.join("node_modules/motion/dist/index.d.ts"),
+            "export interface MotionProps { duration: number }\n",
+        )
+        .expect("write motion types");
+
+        let popup_source = "<script setup lang=\"ts\">\nimport type { MotionProps } from 'motion'\nconst props = defineProps<MotionProps>()\n</script>\n<template><div>{{ props.duration }}</div></template>";
+        std::fs::write(workspace.join("src/Popup.vue"), popup_source).expect("write Popup.vue");
+
+        let workspace_id = std::fs::canonicalize(&workspace)
+            .expect("canonical workspace path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let popup_id = format!("{workspace_id}/src/Popup.vue");
+        let uri = crate::uri::path_to_file_uri(&popup_id).expect("file uri");
+
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: popup_source.to_string(),
+        });
+
+        let cached_verter_diags = DashMap::new();
+        let project_registry = parking_lot::RwLock::new(None);
+        let fallback_linter = parking_lot::RwLock::new(verter_diagnostics::Linter::new(
+            verter_diagnostics::LintConfig::default(),
+        ));
+
+        let stale_diags = compute_verter_diagnostics_for(
+            &documents,
+            &uri,
+            &cached_verter_diags,
+            &project_registry,
+            &fallback_linter,
+        );
+        assert!(
+            stale_diags.iter().any(|d| matches!(
+                &d.code,
+                Some(NumberOrString::String(code)) if code == "HOST_MISSING_MACRO_TYPE_DEP"
+            )),
+            "pre-hydration diagnostics should contain HOST_MISSING_MACRO_TYPE_DEP, got: {stale_diags:?}"
+        );
+        let stale_cache = cached_verter_diags
+            .get(uri.as_str())
+            .expect("stale diagnostics should be cached");
+        assert_eq!(
+            stale_cache.0, 1,
+            "cached doc version should match did_open version"
+        );
+        drop(stale_cache);
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider, ProjectSyncMode::FullProject);
+        let resolver_snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+                crate::project_resolver::IdeProjectConfig::new(
+                    workspace_id.clone(),
+                    workspace_id.clone(),
+                    Some(format!("{workspace_id}/tsconfig.json")),
+                ),
+            ]),
+        }));
+        let provider_sync_states = DashMap::new();
+        let pending_snapshot_provider_sync = DashSet::new();
+        pending_snapshot_provider_sync.insert(popup_id.clone());
+
+        drain_pending_snapshot_provider_sync(
+            Some(&sync),
+            &documents,
+            &resolver_snapshot,
+            &provider_sync_states,
+            &pending_snapshot_provider_sync,
+            false,
+            None,
+        )
+        .await;
+
+        assert!(
+            !pending_snapshot_provider_sync.contains(&popup_id),
+            "drain should remove Popup.vue after successful hydration + sync"
+        );
+
+        let fresh_diags = compute_verter_diagnostics_for(
+            &documents,
+            &uri,
+            &cached_verter_diags,
+            &project_registry,
+            &fallback_linter,
+        );
+        assert!(
+            !fresh_diags.iter().any(|d| matches!(
+                &d.code,
+                Some(NumberOrString::String(code)) if code == "HOST_MISSING_MACRO_TYPE_DEP"
+            )),
+            "post-hydration diagnostics should clear HOST_MISSING_MACRO_TYPE_DEP at the same doc version, got: {fresh_diags:?}"
+        );
+        assert!(
+            fresh_diags.is_empty(),
+            "post-hydration diagnostics should be empty after motion types load, got: {fresh_diags:?}"
         );
     }
 
