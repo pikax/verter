@@ -162,6 +162,24 @@ let wasmHost: HostBinding | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
 
+/**
+ * Test-only: directly inject a mock host binding and mark the compiler as initialized.
+ * Returns a teardown function that restores the previous state.
+ */
+export function __setHostForTest(host: HostBinding): () => void {
+  const prevHost = wasmHost;
+  const prevInit = initialized;
+  const prevPromise = initPromise;
+  wasmHost = host;
+  initialized = true;
+  initPromise = null;
+  return () => {
+    wasmHost = prevHost;
+    initialized = prevInit;
+    initPromise = prevPromise;
+  };
+}
+
 function toHostProfile(file: File, options?: CompilerOptions): HostCompileProfile {
   return {
     filename: file.filename,
