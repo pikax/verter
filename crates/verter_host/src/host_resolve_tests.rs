@@ -1579,3 +1579,74 @@ fn diagnostics_generation_increments_on_source_change() {
         "diagnostics_generation should increment on source change: gen1={gen1}, gen2={gen2}"
     );
 }
+
+#[test]
+fn bump_diagnostics_generation_increments_without_recompile() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    let _ = host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some("/src/Comp.vue".to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile(),
+    });
+    let gen1 = host
+        .get_diagnostics_generation("/src/Comp.vue")
+        .expect("gen should exist after compile");
+
+    host.bump_diagnostics_generation("/src/Comp.vue");
+
+    let gen2 = host
+        .get_diagnostics_generation("/src/Comp.vue")
+        .expect("gen should exist after bump");
+    assert!(
+        gen2 > gen1,
+        "bump_diagnostics_generation should increment: gen1={gen1}, gen2={gen2}"
+    );
+}
+
+#[test]
+fn bump_diagnostics_generation_is_noop_for_missing_file() {
+    let host = strict_host();
+    host.bump_diagnostics_generation("/nonexistent.vue");
+    assert!(
+        host.get_diagnostics_generation("/nonexistent.vue")
+            .is_none(),
+        "bump on nonexistent file should not create an entry"
+    );
+}
+
+#[test]
+fn invalidate_compile_slots_forces_recompile() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    let p = profile();
+    let _ = host.ensure_compiled("/src/Comp.vue", &p);
+    // Second call should be a cache hit (no-op)
+    let _ = host.ensure_compiled("/src/Comp.vue", &p);
+
+    // After invalidation, ensure_compiled should recompile
+    host.invalidate_compile_slots("/src/Comp.vue");
+    let gen_before = host
+        .get_diagnostics_generation("/src/Comp.vue")
+        .unwrap_or(0);
+    let _ = host.ensure_compiled("/src/Comp.vue", &p);
+    let gen_after = host
+        .get_diagnostics_generation("/src/Comp.vue")
+        .unwrap_or(0);
+    assert!(
+        gen_after > gen_before,
+        "ensure_compiled after invalidate_compile_slots should recompile and bump diagnostics_generation: before={gen_before}, after={gen_after}"
+    );
+}
+
+#[test]
+fn invalidate_compile_slots_is_noop_for_missing_file() {
+    let host = strict_host();
+    host.invalidate_compile_slots("/nonexistent.vue");
+    // Should not panic
+}

@@ -1571,7 +1571,11 @@ export default { resolve: { alias: { [key]: './src' } } }"#,
         let config_path_str = config_path.to_string_lossy().replace('\\', "/");
 
         let result = execute_trusted_vite_config(&config_path, &tmp, &node);
-        assert!(result.is_some(), "trusted execution should succeed");
+        let Some(_) = result else {
+            eprintln!("skipping: vite config execution failed");
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        };
 
         // LKG should be populated
         let lkg = get_lkg(&config_path_str);

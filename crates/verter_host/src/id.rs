@@ -7,6 +7,22 @@ use crate::types::{FileMeta, ParsedRawId, VirtualNodeKind};
 pub(crate) fn canonicalize_id(input: &str) -> Cow<'_, str> {
     let trimmed = input.trim();
 
+    // Strip Windows extended-length path prefix (`//?/` or `\\?\`) early.
+    // `std::fs::canonicalize()` produces these on Windows and they break
+    // query-parameter stripping (`?` in `//?/` is not a query separator).
+    let trimmed = if let Some(rest) = trimmed
+        .strip_prefix("//?/")
+        .or_else(|| trimmed.strip_prefix("\\\\?\\"))
+    {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("//?/UNC/") {
+        // UNC extended path: //?/UNC/server/share → //server/share
+        // (handled as a separate case to avoid double-strip)
+        return Cow::Owned(format!("//{}", rest.replace('\\', "/")));
+    } else {
+        trimmed
+    };
+
     // Check if the path has a Windows drive letter that needs lowercasing
     // (e.g., `C:/...` or `C:\...` → `c:/...`)
     let needs_drive_lower = {
@@ -549,5 +565,34 @@ mod tests {
     fn canonicalize_id_backslash_and_drive_letter() {
         let result = canonicalize_id("D:\\src\\App.vue");
         assert_eq!(result, "d:/src/App.vue");
+    }
+
+    #[test]
+    fn canonicalize_id_strips_windows_extended_length_prefix() {
+        let result = canonicalize_id("//?/C:/Users/david/workspace/src/App.vue");
+        assert_eq!(result, "c:/Users/david/workspace/src/App.vue");
+    }
+
+    #[test]
+    fn canonicalize_id_strips_windows_extended_length_backslash_prefix() {
+        let result = canonicalize_id("\\\\?\\C:\\Users\\david\\workspace\\src\\App.vue");
+        assert_eq!(result, "c:/Users/david/workspace/src/App.vue");
+    }
+
+    #[test]
+    fn canonicalize_id_extended_length_does_not_corrupt_query_param() {
+        // Ensure //?/ prefix doesn't cause the ? to be treated as query separator
+        let result = canonicalize_id("//?/D:/project/Comp.vue?vue&type=script");
+        assert_eq!(result, "d:/project/Comp.vue");
+    }
+
+    #[test]
+    fn canonicalize_id_extended_length_preserves_path() {
+        let result = canonicalize_id("//?/C:/Users/david/node_modules/motion/dist/index.d.ts");
+        assert_eq!(result, "c:/Users/david/node_modules/motion/dist/index.d.ts");
+        assert!(
+            !result.as_ref().contains("//?/"),
+            "extended-length prefix must be stripped"
+        );
     }
 }

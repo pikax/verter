@@ -829,6 +829,15 @@ fn project_rank(project: &IdeProjectConfig) -> u8 {
 
 fn normalize_canonical_id(value: &str) -> String {
     let normalized = value.replace('\\', "/");
+    // Strip Windows extended-length path prefix (`//?/` or `\\?\`)
+    // produced by `std::fs::canonicalize()` on Windows.
+    let normalized = if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = normalized.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        normalized
+    };
     if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
         let mut chars = normalized.chars();
         if let Some(first) = chars.next() {

@@ -343,6 +343,32 @@ impl VerterHost {
         files.get(&canonical).map(|e| e.diagnostics_generation)
     }
 
+    /// Bump the diagnostics generation counter for a file without changing
+    /// its diagnostics. This causes the LSP diagnostic cache to treat the
+    /// next `compute_verter_diagnostics_for` call as a cache miss, forcing
+    /// a fresh recomputation. Used after hydrating compile blockers (e.g.,
+    /// macro type deps) where the source hasn't changed but stale error
+    /// diagnostics need to be cleared.
+    pub fn bump_diagnostics_generation(&self, canonical_or_alias: &str) {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let mut files = write_lock(&self.files);
+        if let Some(entry) = files.get_mut(&canonical) {
+            entry.diagnostics_generation += 1;
+        }
+    }
+
+    /// Clear all compile slots for a specific file so `ensure_compiled` will
+    /// recompile it on the next call. Use this after loading new dependencies
+    /// (e.g., macro type deps via hydration) that affect the compilation
+    /// output even though the source itself hasn't changed.
+    pub fn invalidate_compile_slots(&self, canonical_or_alias: &str) {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let mut files = write_lock(&self.files);
+        if let Some(entry) = files.get_mut(&canonical) {
+            entry.compile_slots.clear();
+        }
+    }
+
     /// Invalidate compile outputs of files that depend on the given path.
     ///
     /// Unlike `remove()`, this works even when the dependency file was never
