@@ -64,6 +64,7 @@ pub struct SyncCoordinatorDeps {
     pub documents: Arc<DocumentRegistry>,
     pub project_sync: ProjectSync,
     pub needs_provider_sync: Arc<DashSet<String>>,
+    pub pending_snapshot_provider_sync: Arc<DashSet<String>>,
     pub client: Client,
     /// Type provider for fetching TS diagnostics after sync.
     pub type_provider: Option<Arc<dyn TypeProvider>>,
@@ -160,6 +161,8 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         tracing::debug!(
             "sync_coordinator: deferring sync without resolver snapshot {canonical_id}"
         );
+        deps.pending_snapshot_provider_sync
+            .insert(canonical_id.to_string());
         return;
     };
     let reader = crate::compile_blockers::HostFsProjectResolverReader::new(deps.documents.host());
@@ -337,6 +340,44 @@ mod tests {
     use super::*;
     use crate::tsgo::mock::{MockCall, MockTypeProvider};
     use crate::ProjectSyncMode;
+    use tower_lsp_server::{LspService, Server};
+    use verter_host::{HostConfig, VerterHost};
+
+    #[derive(Default)]
+    struct NoopLanguageServer;
+
+    impl tower_lsp_server::LanguageServer for NoopLanguageServer {
+        async fn initialize(
+            &self,
+            _: InitializeParams,
+        ) -> tower_lsp_server::jsonrpc::Result<InitializeResult> {
+            Ok(InitializeResult::default())
+        }
+
+        async fn shutdown(&self) -> tower_lsp_server::jsonrpc::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn make_test_client() -> Client {
+        let client_slot = Arc::new(std::sync::Mutex::new(None));
+        let client_slot_for_service = Arc::clone(&client_slot);
+        let (service, socket) = LspService::new(move |client| {
+            *client_slot_for_service.lock().expect("client lock") = Some(client.clone());
+            NoopLanguageServer
+        });
+        tokio::spawn(async move {
+            let _ = Server::new(tokio::io::empty(), tokio::io::sink(), socket)
+                .serve(service)
+                .await;
+        });
+        let client = client_slot
+            .lock()
+            .expect("client lock")
+            .clone()
+            .expect("test client should be captured");
+        client
+    }
 
     #[tokio::test]
     async fn sync_coordinator_coalesces_rapid_changes() {
@@ -457,6 +498,43 @@ mod tests {
                 .owner_key,
             "/workspace/tsconfig.new.json",
             "committed state should have the new owner key"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_file_queues_pending_snapshot_sync_when_resolver_snapshot_is_missing() {
+        let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new(
+            HostConfig::default(),
+        ))));
+        let provider = Arc::new(MockTypeProvider::new());
+        let deps = SyncCoordinatorDeps {
+            documents,
+            project_sync: ProjectSync::new(provider, ProjectSyncMode::FullProject),
+            needs_provider_sync: Arc::new(DashSet::new()),
+            pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+            client: make_test_client(),
+            type_provider: None,
+            cached_verter_diags: Arc::new(DashMap::new()),
+            position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+            resolver_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            provider_sync_states: Arc::new(DashMap::new()),
+            project_registry: Arc::new(parking_lot::RwLock::new(None)),
+            fallback_linter: Arc::new(parking_lot::RwLock::new(verter_diagnostics::Linter::new(
+                verter_diagnostics::LintConfig::default(),
+            ))),
+        };
+
+        sync_file(
+            &deps,
+            "/workspace/src/App.vue",
+            "file:///workspace/src/App.vue",
+        )
+        .await;
+
+        assert!(
+            deps.pending_snapshot_provider_sync
+                .contains("/workspace/src/App.vue"),
+            "sync coordinator should preserve pending IDE/API sync until resolver discovery completes"
         );
     }
 }

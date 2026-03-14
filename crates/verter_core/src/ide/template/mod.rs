@@ -1603,22 +1603,177 @@ fn visit_text(text: &TextNode, source: &str, out: &mut CodeGenOutput<'_>) {
 fn visit_interpolation<'alloc>(
     interp: &InterpolationNode,
     oxc_expr: Option<&crate::template::oxc::types::OxcParsedExpression<'alloc>>,
-    _source: &'alloc str,
+    source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
 ) {
     // Replace `{{` with `{`
     out.overwrite(interp.start, interp.inner_start, "{");
 
-    // Apply binding prefixes to expression identifiers
     if let Some(expr) = oxc_expr {
-        if let Some(ref bindings) = expr.bindings {
+        if expr.expression.is_none() && expr.errors.is_some() {
+            let raw_expr = &source[interp.inner_start as usize..interp.inner_end as usize];
+            recover_broken_interpolation_expr(raw_expr, interp.inner_start, out, resolver);
+        } else if let Some(ref bindings) = expr.bindings {
+            // Apply binding prefixes to expression identifiers for valid expressions.
             resolver.collect_binding_patches(bindings, out);
         }
     }
 
     // Replace `}}` with `}`
     out.overwrite(interp.inner_end, interp.end, "}");
+}
+
+struct RecoveredInterpolationIdent {
+    start: usize,
+    end: usize,
+    patch: RecoveredInterpolationPatch,
+}
+
+enum RecoveredInterpolationPatch {
+    PrefixSuffix {
+        ident: String,
+        prefix: &'static str,
+        suffix: &'static str,
+    },
+    OverwriteResolved {
+        resolved: String,
+    },
+}
+
+fn recover_broken_interpolation_expr<'alloc>(
+    raw_expr: &str,
+    expr_start: u32,
+    out: &mut CodeGenOutput<'alloc>,
+    resolver: &BindingResolver<'alloc>,
+) {
+    let bytes = raw_expr.as_bytes();
+    let mut recovered = Vec::new();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if is_ident_start(byte)
+            && (i == 0 || !(is_ident_continue(bytes[i - 1]) || bytes[i - 1] == b'.'))
+        {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            let ident = &raw_expr[start..i];
+            let resolved = resolver.resolve_simple_expr(ident);
+            let is_passthrough_keyword_or_global = resolved == ident
+                && (crate::utils::oxc::bindings::keywords::is_keyword(ident.as_bytes())
+                    || crate::utils::oxc::bindings::keywords::is_global(ident.as_bytes()));
+            if is_passthrough_keyword_or_global {
+                continue;
+            }
+
+            let prefix = resolver.resolve_prefix(ident);
+            let suffix = resolver.resolve_suffix(ident);
+            let simple_resolved = format!("{prefix}{ident}{suffix}");
+            let patch = if resolved == simple_resolved {
+                RecoveredInterpolationPatch::PrefixSuffix {
+                    ident: ident.to_string(),
+                    prefix,
+                    suffix,
+                }
+            } else {
+                RecoveredInterpolationPatch::OverwriteResolved { resolved }
+            };
+            recovered.push(RecoveredInterpolationIdent {
+                start,
+                end: i,
+                patch,
+            });
+            continue;
+        }
+        i += 1;
+    }
+
+    if recovered.is_empty() {
+        out.overwrite(expr_start, expr_start + raw_expr.len() as u32, "undefined");
+        return;
+    }
+
+    let mut sanitized = vec![b' '; raw_expr.len()];
+    for recovered_ident in &recovered {
+        sanitized[recovered_ident.start..recovered_ident.end]
+            .copy_from_slice(&bytes[recovered_ident.start..recovered_ident.end]);
+    }
+
+    for pair in recovered.windows(2) {
+        let gap_start = pair[0].end;
+        let gap_end = pair[1].start;
+        if gap_start >= gap_end {
+            continue;
+        }
+        let separator_offset = bytes[gap_start..gap_end]
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(0);
+        sanitized[gap_start + separator_offset] = b',';
+    }
+
+    let mut start = 0usize;
+    while start < bytes.len() {
+        if bytes[start] == sanitized[start] {
+            start += 1;
+            continue;
+        }
+
+        let mut end = start + 1;
+        while end < bytes.len() && bytes[end] != sanitized[end] {
+            end += 1;
+        }
+
+        let replacement =
+            std::str::from_utf8(&sanitized[start..end]).expect("recovered interpolation is ASCII");
+        out.overwrite(
+            expr_start + start as u32,
+            expr_start + end as u32,
+            replacement,
+        );
+        start = end;
+    }
+
+    for recovered_ident in recovered {
+        match recovered_ident.patch {
+            RecoveredInterpolationPatch::PrefixSuffix {
+                ident,
+                prefix,
+                suffix,
+            } => {
+                if !prefix.is_empty() {
+                    out.prepend_static(expr_start + recovered_ident.start as u32, prefix);
+                }
+                if !suffix.is_empty() {
+                    out.prepend_static(
+                        expr_start + recovered_ident.start as u32 + ident.len() as u32,
+                        suffix,
+                    );
+                }
+            }
+            RecoveredInterpolationPatch::OverwriteResolved { resolved } => {
+                out.overwrite(
+                    expr_start + recovered_ident.start as u32,
+                    expr_start + recovered_ident.end as u32,
+                    &resolved,
+                );
+            }
+        }
+    }
+}
+
+#[inline]
+fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$'
+}
+
+#[inline]
+fn is_ident_continue(byte: u8) -> bool {
+    is_ident_start(byte) || byte.is_ascii_digit()
 }
 
 /// Visit a comment node: `<!-- text -->` → `{/* text */}`.

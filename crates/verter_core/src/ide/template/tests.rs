@@ -4413,13 +4413,43 @@ fn broken_interpolation_preserves_identifiers() {
     );
     // Positive: mustache delimiters converted
     assert!(
-        result.contains("{count") || result.contains("{ count"),
-        "mustache should be converted to JSX expression: {result}"
+        result.contains('{') && result.contains('}') && result.contains("count"),
+        "mustache should be converted to a JSX expression with preserved identifiers: {result}"
     );
     // Negative: no raw mustache delimiters
     assert!(
         !result.contains("{{") && !result.contains("}}"),
         "mustache delimiters must be converted to JSX: {result}"
+    );
+    assert_valid_tsx(&result, "broken-interpolation");
+}
+
+#[test]
+fn broken_interpolation_keeps_identifier_source_map_anchor() {
+    let source = r#"<template><div>{{ count + }}</div></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("count", BindingType::SetupConst)]);
+
+    let count_src_col = source.find("count").unwrap() as u32;
+    let anchor = tokens
+        .iter()
+        .filter(|&&(_, _, src_col)| src_col <= count_src_col)
+        .max_by_key(|&&(_, _, src_col)| src_col)
+        .copied();
+
+    assert!(
+        anchor.is_some(),
+        "broken interpolation should retain a usable source-map anchor before 'count', tokens: {:?}",
+        tokens
+    );
+
+    let (_gen_line, gen_col, anchor_src_col) = anchor.unwrap();
+    let mapped_col = gen_col + (count_src_col - anchor_src_col);
+    let first_line = output.lines().next().unwrap_or("");
+    assert!(
+        first_line
+            .get(mapped_col as usize..)
+            .is_some_and(|suffix| suffix.starts_with("count")),
+        "broken interpolation should keep linear mapping from the nearest anchor to 'count', got output: {output}, anchor={anchor:?}"
     );
 }
 
@@ -4454,14 +4484,15 @@ fn mixed_broken_and_valid_interpolations() {
     );
     // Broken expression: identifiers preserved
     assert!(
-        result.contains("count +"),
-        "broken expression identifiers preserved: {result}"
+        result.contains("count"),
+        "broken expression should still preserve identifiers: {result}"
     );
     // No raw mustache delimiters anywhere
     assert!(
         !result.contains("{{") && !result.contains("}}"),
         "no raw mustache delimiters: {result}"
     );
+    assert_valid_tsx(&result, "mixed-broken-and-valid-interpolations");
 }
 
 // ── Fix 3: v-slot scoped parameter typing ─────────────────────────

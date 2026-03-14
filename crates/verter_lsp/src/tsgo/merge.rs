@@ -691,7 +691,10 @@ fn resolve_vue_tsx_range(
 /// `external_resolver` is used to resolve positions in `.vue.tsx` files that differ
 /// from the current file (cross-file navigation, e.g., CTRL+CLICK on component tag
 /// navigates to the target component's file).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "definition merging needs mapper, indexes, URI, and resolver inputs"
+)]
 pub fn merge_definitions(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,
@@ -715,6 +718,10 @@ pub fn merge_definitions(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "barrel-aware definition merging adds one resolver to the shared merge context"
+)]
 pub fn merge_definitions_with_barrel_resolver(
     verter_def: Option<GotoDefinitionResponse>,
     type_defs: Vec<TypeLocation>,

@@ -451,6 +451,7 @@ async fn configure_tsserver_session(
     Ok(ws_root)
 }
 
+#[cfg(test)]
 fn tsserver_plugin_args(plugin_path: Option<&str>) -> Vec<String> {
     let Some(plugin_path) = plugin_path.filter(|path| !path.is_empty()) else {
         return Vec::new();
@@ -471,12 +472,13 @@ impl TsserverTypeProvider {
     /// `node_path`: path to the `node` executable.
     /// `tsserver_path`: path to `tsserver.js`.
     /// `workspace_root`: filesystem path to the workspace root.
-    /// `plugin_path`: directory containing `@verter/typescript-plugin`.
+    /// `plugin_path`: reserved for legacy/plugin test coverage; currently not
+    /// used when spawning the production tsserver process.
     pub async fn spawn(
         node_path: &str,
         tsserver_path: &str,
         workspace_root: &str,
-        plugin_path: Option<&str>,
+        _plugin_path: Option<&str>,
         crash_notify: Option<Arc<Notify>>,
     ) -> Result<Self, TypeProviderError> {
         let mut cmd = tokio::process::Command::new(node_path);
@@ -490,9 +492,6 @@ impl TsserverTypeProvider {
         cmd.arg(tsserver_path)
             .arg("--useSyntaxServer=false")
             .arg("--disableAutomaticTypingAcquisition");
-        for arg in tsserver_plugin_args(plugin_path) {
-            cmd.arg(arg);
-        }
 
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -2954,6 +2953,434 @@ const outerLabel = 'outer'
         assert!(
             labels.iter().any(|label| label == "id"),
             "slot member completions should include id, got: {labels:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_e2e_tsserver_scoped_slot_types_with_in_memory_child_api() {
+        let Some((node_path, tsserver_path)) = tsserver_assets_or_skip() else {
+            eprintln!("skipping: node or tsserver.js not found");
+            return;
+        };
+
+        let tmp = std::env::temp_dir().join("verter_tsserver_slot_types_in_memory");
+        let _ = std::fs::remove_dir_all(&tmp);
+        if create_test_project_with_workspace_node_modules(&tmp).is_err() {
+            eprintln!("skipping: could not create test project with workspace node_modules");
+            return;
+        }
+
+        let child_source = r#"<script setup lang="ts">
+interface SlotItem {
+  id: number
+  name: string
+}
+
+defineSlots<{
+  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
+}>()
+
+const items: SlotItem[] = [{ id: 1, name: 'alpha' }]
+</script>
+
+<template>
+  <slot :slotItem="items[0]" :slotIndex="0" :slotTotal="items.length" />
+</template>
+"#;
+        let parent_source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ sl }}</p>
+    <p>{{ slotItem.na }}</p>
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+
+        let host = VerterHost::new(HostConfig::default());
+        let child_id = "/src/TypedSlotComp.vue";
+        let parent_id = "/src/TemplateSlotCases.vue";
+
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(child_id.to_string()),
+            input_id: child_id.to_string(),
+            source: Arc::from(child_source),
+            file_kind: FileKind::VueSfc,
+            aliases: vec![],
+        });
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(parent_id.to_string()),
+            input_id: parent_id.to_string(),
+            source: Arc::from(parent_source),
+            file_kind: FileKind::VueSfc,
+            aliases: vec![],
+        });
+
+        let profile = CompileProfile {
+            source_map: false,
+            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+            embed_ambient_types: false,
+            ..Default::default()
+        };
+
+        let _ = host
+            .get_virtual_file(VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(child_id.to_string()),
+                node_kind: Some(VirtualNodeKind::Main),
+                compile_profile: profile.clone(),
+            })
+            .expect("child compilation should succeed");
+        let _ = host
+            .get_virtual_file(VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(parent_id.to_string()),
+                node_kind: Some(VirtualNodeKind::Main),
+                compile_profile: profile.clone(),
+            })
+            .expect("parent compilation should succeed");
+
+        let child_api = host
+            .get_public_api(child_id)
+            .expect("child public API should exist");
+        let parent_ide = host
+            .get_ide(parent_id, &profile)
+            .expect("parent IDE output should exist");
+
+        let src_dir = tmp.join("src");
+        let child_api_path = src_dir.join("TypedSlotComp.vue.ts");
+        let parent_ide_path = src_dir.join("TemplateSlotCases.vue.tsx");
+        std::fs::write(&parent_ide_path, &*parent_ide.code).expect("parent IDE should be written");
+
+        let provider = TsserverTypeProvider::spawn(
+            &node_path,
+            &tsserver_path,
+            tmp.to_str().expect("tmp path should be valid UTF-8"),
+            None,
+            None,
+        )
+        .await
+        .expect("tsserver should spawn");
+
+        let child_api_path_str = child_api_path.to_string_lossy().replace('\\', "/");
+        let parent_ide_path_str = parent_ide_path.to_string_lossy().replace('\\', "/");
+
+        provider
+            .open_file(&child_api_path_str, &child_api.code)
+            .await
+            .expect("child API should open");
+        provider
+            .open_file(&parent_ide_path_str, &parent_ide.code)
+            .await
+            .expect("parent IDE should open");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        let member_offset = parent_ide
+            .code
+            .find("slotItem.name")
+            .expect("parent IDE should reference slotItem.name") as u32
+            + "slotItem.".len() as u32;
+
+        let completion_result = provider
+            .get_completions(&parent_ide_path_str, member_offset, Some("."))
+            .await;
+
+        assert!(
+            completion_result.is_ok(),
+            "slot member completion should succeed with an in-memory child API, got: {:?}",
+            completion_result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_tsserver_scoped_slot_types_with_plugin_and_open_child_ide() {
+        let Some((node_path, tsserver_path)) = tsserver_assets_or_skip() else {
+            eprintln!("skipping: node or tsserver.js not found");
+            return;
+        };
+
+        let tmp = std::env::temp_dir().join("verter_tsserver_slot_types_plugin_child_ide");
+        let _ = std::fs::remove_dir_all(&tmp);
+        if create_test_project_with_workspace_node_modules(&tmp).is_err() {
+            eprintln!("skipping: could not create test project with workspace node_modules");
+            return;
+        }
+
+        let child_source = r#"<script setup lang="ts">
+interface SlotItem {
+  id: number
+  name: string
+}
+
+defineSlots<{
+  default(props: { slotItem: SlotItem; slotIndex: number; slotTotal: number }): any
+}>()
+
+const items: SlotItem[] = [{ id: 1, name: 'alpha' }]
+</script>
+
+<template>
+  <slot :slotItem="items[0]" :slotIndex="0" :slotTotal="items.length" />
+</template>
+"#;
+        let parent_source = r#"<script setup lang="ts">
+import TypedSlotComp from './TypedSlotComp.vue'
+
+const outerLabel = 'outer'
+</script>
+
+<template>
+  <TypedSlotComp v-slot="{ slotItem, slotIndex, slotTotal }">
+    <p>{{ sl }}</p>
+    <p>{{ slotItem.na }}</p>
+    <p>{{ slotItem.name }}</p>
+    <p>{{ slotIndex }}</p>
+    <p>{{ slotTotal }}</p>
+    <p>{{ outerLabel }}</p>
+  </TypedSlotComp>
+</template>
+"#;
+
+        let host = VerterHost::new(HostConfig::default());
+        let child_id = "/src/TypedSlotComp.vue";
+        let parent_id = "/src/TemplateSlotCases.vue";
+
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(child_id.to_string()),
+            input_id: child_id.to_string(),
+            source: Arc::from(child_source),
+            file_kind: FileKind::VueSfc,
+            aliases: vec![],
+        });
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(parent_id.to_string()),
+            input_id: parent_id.to_string(),
+            source: Arc::from(parent_source),
+            file_kind: FileKind::VueSfc,
+            aliases: vec![],
+        });
+
+        let profile = CompileProfile {
+            source_map: false,
+            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+            embed_ambient_types: false,
+            ..Default::default()
+        };
+
+        let _ = host
+            .get_virtual_file(VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(child_id.to_string()),
+                node_kind: Some(VirtualNodeKind::Main),
+                compile_profile: profile.clone(),
+            })
+            .expect("child compilation should succeed");
+        let _ = host
+            .get_virtual_file(VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(parent_id.to_string()),
+                node_kind: Some(VirtualNodeKind::Main),
+                compile_profile: profile.clone(),
+            })
+            .expect("parent compilation should succeed");
+
+        let child_api = host
+            .get_public_api(child_id)
+            .expect("child public API should exist");
+        let child_ide = host
+            .get_ide(child_id, &profile)
+            .expect("child IDE output should exist");
+        let parent_api = host
+            .get_public_api(parent_id)
+            .expect("parent public API should exist");
+        let parent_ide = host
+            .get_ide(parent_id, &profile)
+            .expect("parent IDE output should exist");
+
+        let src_dir = tmp.join("src");
+        let child_api_path = src_dir.join("TypedSlotComp.vue.ts");
+        let child_ide_path = src_dir.join("TypedSlotComp.vue.tsx");
+        let parent_api_path = src_dir.join("TemplateSlotCases.vue.ts");
+        let parent_ide_path = src_dir.join("TemplateSlotCases.vue.tsx");
+
+        let plugin_path = tmp
+            .join("node_modules")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let provider = TsserverTypeProvider::spawn(
+            &node_path,
+            &tsserver_path,
+            tmp.to_str().expect("tmp path should be valid UTF-8"),
+            Some(&plugin_path),
+            None,
+        )
+        .await
+        .expect("tsserver should spawn");
+
+        provider
+            .open_file(
+                &child_ide_path.to_string_lossy().replace('\\', "/"),
+                &child_ide.code,
+            )
+            .await
+            .expect("child IDE should open");
+        provider
+            .open_file(
+                &child_api_path.to_string_lossy().replace('\\', "/"),
+                &child_api.code,
+            )
+            .await
+            .expect("child API should open");
+        provider
+            .open_file(
+                &parent_api_path.to_string_lossy().replace('\\', "/"),
+                &parent_api.code,
+            )
+            .await
+            .expect("parent API should open");
+        provider
+            .open_file(
+                &parent_ide_path.to_string_lossy().replace('\\', "/"),
+                &parent_ide.code,
+            )
+            .await
+            .expect("parent IDE should open");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        let member_offset = parent_ide
+            .code
+            .find("slotItem.name")
+            .expect("parent IDE should reference slotItem.name") as u32
+            + "slotItem.".len() as u32;
+
+        let completion_result = provider
+            .get_completions(
+                &parent_ide_path.to_string_lossy().replace('\\', "/"),
+                member_offset,
+                Some("."),
+            )
+            .await;
+
+        assert!(
+            completion_result.is_ok(),
+            "slot member completion should succeed with plugin + child IDE open, got: {:?}",
+            completion_result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_tsserver_vfor_member_access_from_fixture_generated_vue_output() {
+        let Some((node_path, tsserver_path)) = tsserver_assets_or_skip() else {
+            eprintln!("skipping: node or tsserver.js not found");
+            return;
+        };
+
+        let tmp = std::env::temp_dir().join("verter_tsserver_fixture_vfor_member_access");
+        let _ = std::fs::remove_dir_all(&tmp);
+        if create_test_project_with_workspace_node_modules(&tmp).is_err() {
+            eprintln!("skipping: could not create test project with workspace node_modules");
+            return;
+        }
+
+        let source =
+            include_str!("../../../../packages/vue-vscode/e2e/fixtures/single-project/src/App.vue");
+        let host = VerterHost::new(HostConfig::default());
+        let app_id = "/src/App.vue";
+
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(app_id.to_string()),
+            input_id: app_id.to_string(),
+            source: Arc::from(source),
+            file_kind: FileKind::VueSfc,
+            aliases: vec![],
+        });
+
+        let profile = CompileProfile {
+            source_map: false,
+            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+            embed_ambient_types: false,
+            ..Default::default()
+        };
+
+        let _ = host
+            .get_virtual_file(VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(app_id.to_string()),
+                node_kind: Some(VirtualNodeKind::Main),
+                compile_profile: profile.clone(),
+            })
+            .expect("fixture compilation should succeed");
+
+        let app_ide = host
+            .get_ide(app_id, &profile)
+            .expect("fixture IDE output should exist");
+
+        let src_dir = tmp.join("src");
+        let app_ide_path = src_dir.join("App.vue.tsx");
+        std::fs::write(&app_ide_path, &*app_ide.code).expect("fixture IDE should be written");
+
+        let provider = TsserverTypeProvider::spawn(
+            &node_path,
+            &tsserver_path,
+            tmp.to_str().expect("tmp path should be valid UTF-8"),
+            None,
+            None,
+        )
+        .await
+        .expect("tsserver should spawn");
+
+        let app_ide_path_str = app_ide_path.to_string_lossy().replace('\\', "/");
+        provider
+            .open_file(&app_ide_path_str, &app_ide.code)
+            .await
+            .expect("fixture IDE should open");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        let member_offset = app_ide
+            .code
+            .find("action.disabled")
+            .map(|offset| offset as u32 + "action.".len() as u32)
+            .expect("fixture IDE should reference action.disabled");
+
+        let completion_result = provider
+            .get_completions(&app_ide_path_str, member_offset, Some("."))
+            .await;
+        let labels: Vec<String> = completion_result
+            .as_ref()
+            .ok()
+            .map(|result| result.items.iter().map(|item| item.label.clone()).collect())
+            .unwrap_or_default();
+
+        assert!(
+            completion_result.is_ok(),
+            "fixture member completion should succeed, got: {:?}",
+            completion_result.err()
+        );
+        assert!(
+            labels.iter().any(|label| label == "disabled"),
+            "fixture member completions should include disabled, got: {labels:?}\nTSX code:\n{}",
+            app_ide.code
+        );
+        assert!(
+            labels.iter().any(|label| label == "label"),
+            "fixture member completions should include label, got: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|label| label == "handler"),
+            "fixture member completions should include handler, got: {labels:?}"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

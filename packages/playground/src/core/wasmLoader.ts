@@ -34,6 +34,24 @@ export interface WasmModule {
   default: (input?: unknown) => Promise<unknown>;
 }
 
+function isNodeRuntime(): boolean {
+  const maybeProcess = (globalThis as { process?: { versions?: { node?: string } } }).process;
+  return typeof maybeProcess?.versions?.node === "string";
+}
+
+async function resolveLocalWasmModuleOrPath(): Promise<string | Uint8Array> {
+  if (!isNodeRuntime()) {
+    return "/verter_wasm_bg.wasm";
+  }
+
+  const wasmUrl = new URL("../../../wasm/wasm/verter_wasm_bg.wasm", import.meta.url);
+  const nodeFs = (await import(/* @vite-ignore */ "node:fs/promises")) as unknown as {
+    readFile(path: URL): Promise<Uint8Array>;
+  };
+
+  return nodeFs.readFile(wasmUrl);
+}
+
 /**
  * Load the locally bundled WASM (default "This Build" mode).
  * Uses the standard import path resolved by Vite.
@@ -41,7 +59,7 @@ export interface WasmModule {
 export async function loadLocalWasm(): Promise<WasmModule> {
   // @ts-ignore - Dynamic import of wasm glue code
   const mod = await import("verter-wasm-glue");
-  await mod.default({ module_or_path: "/verter_wasm_bg.wasm" });
+  await mod.default({ module_or_path: await resolveLocalWasmModuleOrPath() });
   return mod;
 }
 

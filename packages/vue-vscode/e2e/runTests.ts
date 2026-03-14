@@ -87,13 +87,20 @@ function findLspBinary(extensionPath: string): string | undefined {
 /**
  * Copy the LSP binary to a temp directory to prevent file locking issues.
  * On Windows, a running .exe is locked and can't be overwritten by cargo build.
- * Returns the path to the copied binary, or undefined if source not found.
+ * On Unix, keep the original path to avoid location-sensitive startup issues
+ * when running ad-hoc signed debug binaries from a temp directory.
+ * Returns the path to use for tests, or undefined if source not found.
  */
 function copyLspBinaryToTemp(extensionPath: string): string | undefined {
   const sourcePath = findLspBinary(extensionPath);
   if (!sourcePath) {
     console.warn("Warning: LSP binary not found — tests will use PATH fallback");
     return undefined;
+  }
+
+  if (process.platform !== "win32") {
+    console.log(`LSP binary using source path: ${sourcePath}`);
+    return sourcePath;
   }
 
   const ext = process.platform === "win32" ? ".exe" : "";
@@ -163,12 +170,7 @@ async function main() {
   for (const entry of fixturesToRun) {
     const { fixture, typeProvider } = parseFixtureEntry(entry);
     const label = typeProvider ? `${fixture}@${typeProvider}` : fixture;
-    const fixtureDir = path.join(
-      extensionDevelopmentPath,
-      "e2e",
-      "fixtures",
-      fixture,
-    );
+    const fixtureDir = path.join(extensionDevelopmentPath, "e2e", "fixtures", fixture);
 
     console.log(`\n${"=".repeat(60)}`);
     console.log(`Running E2E tests for fixture: ${label}`);
@@ -197,15 +199,9 @@ async function main() {
         extensionTestsEnv: {
           ...process.env,
           VERTER_E2E_TEST: "1",
-          VERTER_E2E_LOG_FILE: path.join(
-            os.tmpdir(),
-            `verter-e2e-${label}.log`,
-          ),
+          VERTER_E2E_LOG_FILE: path.join(os.tmpdir(), `verter-e2e-${label}.log`),
           VERTER_E2E_FIXTURE: fixture,
-          VERTER_E2E_TIMING_FILE: path.join(
-            os.tmpdir(),
-            `verter-e2e-timing-${label}.json`,
-          ),
+          VERTER_E2E_TIMING_FILE: path.join(os.tmpdir(), `verter-e2e-timing-${label}.json`),
           VERTER_LOG: "debug",
           ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
           ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),

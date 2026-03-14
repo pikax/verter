@@ -4182,9 +4182,26 @@ fn emit_comp_functions_to_string(
         })
         .count();
 
+    // A root-level v-for expands to multiple rendered roots, so attrs
+    // fallthrough behaves like a fragment rather than a single root element.
+    let root_has_v_for = root_children.iter().any(|id| {
+        matches!(
+            &ast.nodes[id.0].kind,
+            AstNodeKind::Element(el)
+                if el.v_for.is_some()
+                    && !matches!(
+                        el.v_condition.as_ref().map(|c| &c.kind),
+                        Some(
+                            crate::ast::types::ElementNodeConditionKind::Else
+                                | crate::ast::types::ElementNodeConditionKind::ElseIf
+                        )
+                    )
+        )
+    });
+
     // Only emit Comp functions for root elements when it's a single root
     // (possibly a conditional chain). Fragments don't support attrs fallthrough.
-    let emit_root_comps = root_element_count <= 1;
+    let emit_root_comps = root_element_count <= 1 && !root_has_v_for;
 
     let mut root_comp_entries: Vec<(u32, String, Option<String>)> = Vec::new();
     let mut all_comp_offsets: Vec<u32> = Vec::new();
@@ -6568,6 +6585,42 @@ defineProps<{ tag?: string }>()
             !passed_body.contains(": tag}") && !passed_body.contains(": tag,"),
             "bare prop name should NOT appear as value in passed props: {}",
             code
+        );
+    }
+
+    #[test]
+    fn root_vfor_is_treated_as_fragment_for_root_attrs_helpers() {
+        let (code, _, _tc) = gen_tsx_script_full(
+            r#"<script setup lang="ts">
+interface Action { label: string; disabled: boolean }
+const actions: Action[] = [{ label: 'ok', disabled: false }]
+</script>
+<template>
+  <button v-for="action in actions" :key="action.label" :disabled="action.disabled">
+    {{ action.label }}
+  </button>
+</template>"#,
+        );
+
+        assert!(
+            code.contains("getRootComponent() { return {};"),
+            "root v-for should not synthesize a single root component helper: {code}"
+        );
+        assert!(
+            code.contains("getRootComponentPassedProps() { return {};"),
+            "root v-for should not synthesize passed props from loop-local bindings: {code}"
+        );
+
+        let passed_props_section = code
+            .split("getRootComponentPassedProps")
+            .nth(1)
+            .unwrap_or("")
+            .split('}')
+            .next()
+            .unwrap_or("");
+        assert!(
+            !passed_props_section.contains("action.disabled"),
+            "loop-local bindings must not leak into root passed props helper: {code}"
         );
     }
 

@@ -1718,6 +1718,202 @@ const nested = reactive({ deep: { value: 'hello', count: 1 } })
 }
 
 #[test]
+fn validated_tsx_offset_prefers_vfor_loop_body_over_helper_duplicates() {
+    let source = r#"<script setup lang="ts">
+interface Action {
+  label: string
+  disabled: boolean
+}
+
+const actions: Action[] = [{ label: 'ok', disabled: false }]
+</script>
+<template>
+  <button v-for="action in actions" :key="action.label" :disabled="action.di">
+    {{ action.label }}
+  </button>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
+    let tsx_li = crate::documents::line_index::LineIndex::new_utf16(&tsx.code);
+
+    let source_offset = source.find("action.di").unwrap() + "action.".len();
+    let line = source[..source_offset].matches('\n').count() as u32;
+    let line_start = source[..source_offset]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let position = Position {
+        line,
+        character: (source_offset - line_start) as u32,
+    };
+
+    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+        &position,
+        &doc.line_index,
+        &mapper,
+        &tsx_li,
+    )
+    .expect("v-for partial member access should map to TSX");
+
+    let first_occurrence = tsx
+        .code
+        .find("action.di")
+        .expect("TSX should contain loop-body action.di") as u32;
+    let second_occurrence = tsx.code[first_occurrence as usize + 1..]
+        .find("action.di")
+        .map(|idx| first_occurrence + 1 + idx as u32);
+
+    assert!(
+        tsx_offset >= first_occurrence && tsx_offset < first_occurrence + "di".len() as u32 + 7,
+        "validated TSX offset should land on the first loop-body action.di occurrence at {first_occurrence}, got {tsx_offset}\nTSX code:\n{}",
+        tsx.code
+    );
+    assert!(
+        second_occurrence.is_none_or(|dup| tsx_offset < dup),
+        "validated TSX offset should not drift to a later helper duplicate {second_occurrence:?}, got {tsx_offset}\nTSX code:\n{}",
+        tsx.code
+    );
+
+    let expr_context =
+        classify_expression_context_with_trigger(&tsx.code, tsx_offset as usize, None);
+    assert!(
+        matches!(expr_context, ExpressionContext::MemberAccess),
+        "v-for partial member access should classify as MemberAccess, got {expr_context:?}\nTSX code:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn validated_tsx_offset_keeps_outer_vfor_member_access_on_its_own_occurrence() {
+    let source = r#"<script setup lang="ts">
+interface Action {
+  label: string
+  disabled: boolean
+}
+
+interface User {
+  name: string
+  email: string
+  age: number
+}
+
+const actions: Action[] = [{ label: 'ok', disabled: false }]
+const users: User[] = [{ name: 'Alice', email: 'a@b.com', age: 30 }]
+</script>
+<template>
+  <span v-for="(user, idx) in users" :key="idx">{{ user.name }}</span>
+  <div v-for="user in users" :key="user.email">
+    <button v-for="action in actions" :key="action.label">
+      {{ user.name }}: {{ action.label }}
+    </button>
+  </div>
+</template>
+"#;
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
+    let tsx_li = crate::documents::line_index::LineIndex::new_utf16(&tsx.code);
+
+    let source_offset = source.find("user.name").unwrap() + "user.".len();
+    let line = source[..source_offset].matches('\n').count() as u32;
+    let line_start = source[..source_offset]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let position = Position {
+        line,
+        character: (source_offset - line_start) as u32,
+    };
+
+    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+        &position,
+        &doc.line_index,
+        &mapper,
+        &tsx_li,
+    )
+    .expect("outer v-for member access should map to TSX");
+
+    let first_occurrence = tsx
+        .code
+        .find("user.name")
+        .expect("TSX should contain outer user.name") as u32;
+    let second_occurrence = tsx.code[first_occurrence as usize + 1..]
+        .find("user.name")
+        .map(|idx| first_occurrence + 1 + idx as u32)
+        .expect("TSX should contain nested user.name");
+
+    assert!(
+        tsx_offset >= first_occurrence && tsx_offset < second_occurrence,
+        "validated TSX offset should stay on the first outer user.name occurrence, got {tsx_offset} (first={first_occurrence}, second={second_occurrence})\nTSX code:\n{}",
+        tsx.code
+    );
+
+    let expr_context =
+        classify_expression_context_with_trigger(&tsx.code, tsx_offset as usize, None);
+    assert!(
+        matches!(expr_context, ExpressionContext::MemberAccess),
+        "outer v-for member access should classify as MemberAccess, got {expr_context:?}\nTSX code:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn validated_tsx_offset_keeps_fixture_vfor_member_access_on_template_occurrence() {
+    let source =
+        include_str!("../../../packages/vue-vscode/e2e/fixtures/single-project/src/App.vue");
+    let (registry, uri) = open_vue_file(source);
+    let doc = registry.get(&uri).unwrap();
+    let tsx = registry.get_ide(&uri).expect("TSX should be available");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
+    let tsx_li = crate::documents::line_index::LineIndex::new_utf16(&tsx.code);
+
+    let source_offset = source.find("action.disabled").unwrap() + "action.".len();
+    let line = source[..source_offset].matches('\n').count() as u32;
+    let line_start = source[..source_offset]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let position = Position {
+        line,
+        character: (source_offset - line_start) as u32,
+    };
+
+    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+        &position,
+        &doc.line_index,
+        &mapper,
+        &tsx_li,
+    )
+    .expect("fixture v-for member access should map to TSX");
+
+    let tsx_suffix = &tsx.code[tsx_offset as usize..tsx.code.len().min(tsx_offset as usize + 16)];
+    assert!(
+        tsx_suffix.starts_with("disabled"),
+        "fixture v-for member access should land on the real property occurrence, found {:?}\nTSX code:\n{}",
+        tsx_suffix,
+        tsx.code
+    );
+
+    let expr_context =
+        classify_expression_context_with_trigger(&tsx.code, tsx_offset as usize, None);
+    assert!(
+        matches!(expr_context, ExpressionContext::MemberAccess),
+        "fixture v-for member access should classify as MemberAccess, got {expr_context:?}\nTSX code:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn validated_tsx_offset_marks_scoped_slot_local_start_as_identifier_context() {
     let source = r#"<script setup lang="ts">
 import TypedSlotComp from './TypedSlotComp.vue'

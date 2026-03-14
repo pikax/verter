@@ -215,6 +215,15 @@ pub struct TypeProviderStatusParams {
     pub reason: Option<String>,
 }
 
+fn block_in_place_if_available<R>(f: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
 /// Server → client request: forward a TypeScript query to the extension's
 /// in-process `ts.createLanguageService()`. Uses tsserver command format so
 /// existing response parsers work unchanged.
@@ -605,6 +614,7 @@ impl VerterLanguageServer {
                     documents: Arc::clone(&documents),
                     project_sync: ps.clone(),
                     needs_provider_sync: Arc::clone(&needs_deferred_sync),
+                    pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
                     client: client.clone(),
                     type_provider: config.type_provider.clone(),
                     cached_verter_diags: Arc::clone(&cached_verter_diags),
@@ -899,12 +909,19 @@ impl VerterLanguageServer {
                 return;
             };
             self.close_provider_paths(&transition.stale_paths).await;
-            if let Some(dts_path) = transition.next.api_path.clone() {
+            let mut committed_state = transition.next;
+            if let Some(dts_path) = committed_state.api_path.clone() {
                 if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
-                    if let Err(e) = sync.sync_dts(&dts_path, &api.code).await {
+                    let result = if committed_state.api_background_loaded {
+                        sync.sync_dts(&dts_path, &api.code).await
+                    } else {
+                        sync.open_dts(&dts_path, &api.code).await
+                    };
+                    if let Err(e) = result {
                         tracing::warn!("sync_api: failed for {dts_path}: {e}");
                     } else {
-                        self.commit_provider_sync_state(&canonical_id, transition.next.clone());
+                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                        self.commit_provider_sync_state(&canonical_id, committed_state);
                     }
                 }
             }
@@ -1177,12 +1194,19 @@ impl VerterLanguageServer {
                     );
                 }
             }
-            let api = tokio::task::block_in_place(|| host.get_public_api(&canonical_id));
+            let api = block_in_place_if_available(|| host.get_public_api(&canonical_id));
             if let Some(api) = api {
-                if let Err(e) = sync.sync_dts(&dts_path, &api.code).await {
+                let mut committed_state = transition.next;
+                let result = if committed_state.api_background_loaded {
+                    sync.sync_dts(&dts_path, &api.code).await
+                } else {
+                    sync.open_dts(&dts_path, &api.code).await
+                };
+                if let Err(e) = result {
                     tracing::warn!("sync_api(background): failed for {dts_path}: {e}");
                 } else {
-                    commit_sync_transition(&provider_sync_states, &canonical_id, transition.next);
+                    committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                    commit_sync_transition(&provider_sync_states, &canonical_id, committed_state);
                 }
             }
         });
@@ -1298,7 +1322,7 @@ impl VerterLanguageServer {
         match result {
             Ok(Ok(())) => {
                 // Commit state
-                let state = if provisional {
+                let mut state = if provisional {
                     crate::provider_sync::ProviderSyncState {
                         owner_key: "__provisional__".to_string(),
                         ide_path: Some(ide_path),
@@ -1321,7 +1345,12 @@ impl VerterLanguageServer {
                         }
                     })
                 };
+                state.set_background_loaded(ProviderPathKind::Ide, true);
                 self.commit_provider_sync_state(&canonical_id, state);
+                if provisional {
+                    self.pending_snapshot_provider_sync
+                        .insert(canonical_id.clone());
+                }
                 // Queue deferred API sync
                 self.needs_deferred_sync.insert(canonical_id);
             }
@@ -1342,9 +1371,113 @@ impl VerterLanguageServer {
         }
     }
 
+    async fn force_reopen_current_file_in_type_provider(&self, uri: &Uri) {
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+
+        self.documents.recompile_and_refresh_mapper(uri);
+
+        let Some(ide) = self.documents.get_ide(uri) else {
+            return;
+        };
+        let Some(ide_path) = self.ide_path_for_uri(uri) else {
+            return;
+        };
+
+        if let Err(error) = sync.close_tsx(&ide_path).await {
+            tracing::warn!(
+                "force_reopen_current_file_in_type_provider: failed to close {}: {error}",
+                ide_path
+            );
+        }
+
+        match sync.open_tsx(&ide_path, &ide.code).await {
+            Ok(()) => {
+                if let Some(mut state) = self.provider_sync_state_for_source(&canonical_id) {
+                    state.ide_path = Some(ide_path);
+                    self.commit_provider_sync_state(&canonical_id, state);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "force_reopen_current_file_in_type_provider: failed to reopen {}: {error}",
+                    uri.as_str()
+                );
+                self.needs_ide_sync.insert(canonical_id);
+            }
+        }
+    }
+
     /// Legacy wrapper for backward compat — calls `ensure_current_file_synced`.
     async fn ensure_provider_synced(&self, uri: &Uri) {
         self.ensure_current_file_synced(uri).await;
+        self.ensure_imported_vue_apis_synced(uri).await;
+    }
+
+    async fn ensure_imported_vue_apis_synced(&self, uri: &Uri) {
+        if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+            return;
+        }
+
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+        let Some(analysis) = self.documents.get_analysis(uri) else {
+            return;
+        };
+
+        let mut import_ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+            &analysis.imports,
+            Some(&canonical_id),
+            |parent, specifier| self.resolve_import_specifier(parent, specifier),
+        );
+
+        let snapshot = self.resolver_snapshot();
+        let reader = LspProjectResolverReader::new(&self.documents);
+        let dynamic_ids = collect_priority_vue_targets_from_module_references(
+            snapshot.as_ref(),
+            &reader,
+            &canonical_id,
+            &analysis.module_references,
+        );
+        let mut seen: HashSet<String> = import_ids.iter().cloned().collect();
+        for import_id in dynamic_ids {
+            if seen.insert(import_id.clone()) {
+                import_ids.push(import_id);
+            }
+        }
+
+        for import_id in import_ids {
+            self.sync_imported_vue_api_lightweight(&import_id).await;
+        }
+    }
+
+    fn current_file_needs_inline_type_provider_sync(&self, uri: &Uri) -> bool {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return false;
+        };
+
+        if self.needs_ide_sync.contains(&canonical_id) {
+            return true;
+        }
+
+        let Some(state) = self.provider_sync_state_for_source(&canonical_id) else {
+            return true;
+        };
+
+        if !state.ide_background_loaded {
+            return true;
+        }
+
+        let Some(ide_path) = self.ide_path_for_uri(uri) else {
+            return false;
+        };
+
+        state.ide_path.as_deref() != Some(ide_path.as_str())
     }
 
     /// Returns true if the user is actively typing (last change was within the cooldown window).
@@ -2223,9 +2356,7 @@ impl VerterLanguageServer {
         let host = &self.documents.host;
         let analysis = host.get_analysis(&canonical)?;
         let (sig, matched_local) = analysis.export_signatures.iter().find_map(|sig| {
-            if sig.reexport_source.is_none() {
-                return None;
-            }
+            sig.reexport_source.as_ref()?;
             if sig.span.start <= start && end <= sig.span.end {
                 return Some((sig, false));
             }
@@ -2984,13 +3115,10 @@ impl VerterLanguageServer {
                 self.close_provider_paths(&transition.stale_paths).await;
                 let mut committed_state = transition.next;
                 if let Some(dts_path) = committed_state.api_path.clone() {
-                    let is_bg = self
-                        .is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Api);
-                    let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
-                    let result = if is_tsgo && !is_bg {
-                        sync.open_dts(&dts_path, &api.code).await
-                    } else {
+                    let result = if committed_state.api_background_loaded {
                         sync.sync_dts(&dts_path, &api.code).await
+                    } else {
+                        sync.open_dts(&dts_path, &api.code).await
                     };
                     if result.is_ok() {
                         committed_state.set_background_loaded(ProviderPathKind::Api, true);
@@ -3007,7 +3135,7 @@ impl VerterLanguageServer {
         }
 
         if self.resolver_snapshot().is_none() {
-            let compiled = tokio::task::block_in_place(|| {
+            let compiled = block_in_place_if_available(|| {
                 self.documents.host.remove(canonical_id);
                 self.hydration_cache.remove(canonical_id);
                 if !crate::compile_blockers::ensure_source_loaded_into_host(
@@ -3053,7 +3181,7 @@ impl VerterLanguageServer {
         );
         // Load from disk + upsert + compile (all blocking) — wrapped in block_in_place
         // to prevent tokio worker thread exhaustion during background sync.
-        let compile_result = tokio::task::block_in_place(|| {
+        let compile_result = block_in_place_if_available(|| {
             self.documents.host.remove(canonical_id);
             self.hydration_cache.remove(canonical_id);
             if !crate::compile_blockers::ensure_source_loaded_into_host(
@@ -3136,8 +3264,10 @@ impl VerterLanguageServer {
                     } else {
                         sync.open_dts(&dts_path, &api.code).await
                     }
-                } else {
+                } else if is_bg {
                     sync.sync_dts(&dts_path, &api.code).await
+                } else {
+                    sync.load_dts(&dts_path, &api.code).await
                 };
                 if result.is_ok() {
                     committed_state.set_background_loaded(ProviderPathKind::Api, true);
@@ -4160,12 +4290,37 @@ pub(crate) fn resolve_component_for(
     parent_canonical_id: &str,
     import_source: &str,
 ) -> Option<verter_host::FileAnalysisSnapshot> {
+    let read_component_analysis = |canonical_id: &str| {
+        let mut analysis = host.get_analysis(canonical_id);
+
+        if analysis.is_none()
+            && crate::compile_blockers::ensure_source_loaded_into_host(host, canonical_id)
+        {
+            analysis = host.get_analysis(canonical_id);
+        }
+
+        if canonical_id.ends_with(".vue")
+            && analysis
+                .as_ref()
+                .is_some_and(|analysis| analysis.template.is_none())
+        {
+            let profile = verter_host::CompileProfile {
+                target: verter_host::CompileTarget::ANALYSIS,
+                ..Default::default()
+            };
+            let _ = host.ensure_compiled(canonical_id, &profile);
+            analysis = host.get_analysis(canonical_id);
+        }
+
+        analysis
+    };
+
     // Try 1: Relative import
     if import_source.starts_with('.') {
         let parts: Vec<&str> = parent_canonical_id.split('/').collect();
         let dir = parts[..parts.len().saturating_sub(1)].join("/");
         let resolved = resolve_import_path(&dir, import_source);
-        if let Some(a) = host.get_analysis(&resolved) {
+        if let Some(a) = read_component_analysis(&resolved) {
             return Some(a);
         }
     }
@@ -4176,7 +4331,7 @@ pub(crate) fn resolve_component_for(
         if let Some(ref registry) = *registry_guard {
             if let Some(resolved_path) = registry.resolve_alias(parent_canonical_id, import_source)
             {
-                if let Some(a) = host.get_analysis(&resolved_path) {
+                if let Some(a) = read_component_analysis(&resolved_path) {
                     return Some(a);
                 }
             }
@@ -4184,7 +4339,7 @@ pub(crate) fn resolve_component_for(
     }
 
     // Try 3: Direct lookup
-    host.get_analysis(import_source)
+    read_component_analysis(import_source)
 }
 
 fn location_from_span(
@@ -5105,8 +5260,8 @@ async fn sync_pending_vue_provider_file(
         canonical_id,
     );
     let profile = documents.tsx_profile.read().clone();
-    let _ = tokio::task::block_in_place(|| documents.host.ensure_compiled(canonical_id, &profile));
-    let ide = tokio::task::block_in_place(|| documents.host.get_ide(canonical_id, &profile));
+    let _ = block_in_place_if_available(|| documents.host.ensure_compiled(canonical_id, &profile));
+    let ide = block_in_place_if_available(|| documents.host.get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
     let Some(next_state) =
         crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, canonical_id, is_jsx)
@@ -5121,19 +5276,17 @@ async fn sync_pending_vue_provider_file(
     let is_open = documents.canonical_id_to_uri(canonical_id).is_some();
     let mut synced_any = false;
 
-    if let Some(api) = tokio::task::block_in_place(|| documents.host.get_public_api(canonical_id)) {
+    if let Some(api) = block_in_place_if_available(|| documents.host.get_public_api(canonical_id)) {
         let Some(dts_path) = committed_state.api_path.clone() else {
             return false;
         };
-        let result = if is_open {
-            sync.sync_dts(&dts_path, &api.code).await
-        } else if is_tsgo {
+        let result = if is_tsgo {
             if committed_state.api_background_loaded {
                 sync.sync_dts(&dts_path, &api.code).await
             } else {
                 sync.open_dts(&dts_path, &api.code).await
             }
-        } else if committed_state.api_background_loaded {
+        } else if is_open || committed_state.api_background_loaded {
             sync.sync_dts(&dts_path, &api.code).await
         } else {
             sync.load_dts(&dts_path, &api.code).await
@@ -5141,7 +5294,7 @@ async fn sync_pending_vue_provider_file(
 
         match result {
             Ok(()) => {
-                if !is_open {
+                if !is_tsgo || !is_open {
                     committed_state.set_background_loaded(ProviderPathKind::Api, true);
                 }
                 synced_any = true;
@@ -5197,7 +5350,7 @@ async fn sync_pending_non_vue_provider_file(
     let Some(source) = documents.host.get_source(canonical_id) else {
         return false;
     };
-    let module_references = tokio::task::block_in_place(|| {
+    let module_references = block_in_place_if_available(|| {
         documents
             .host
             .upsert(verter_host::UpsertRequest {
@@ -5372,6 +5525,20 @@ fn identifier_prefix_before_offset(content: &str, offset: usize) -> Option<&str>
     } else {
         None
     }
+}
+
+fn is_immediately_after_member_access_dot(content: &str, offset: usize) -> bool {
+    if offset == 0 || offset > content.len() {
+        return false;
+    }
+
+    let bytes = content.as_bytes();
+    let mut i = offset;
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+
+    i > 0 && bytes[i - 1] == b'.' && (i < 2 || bytes[i - 2] != b'.')
 }
 
 fn is_identifier_prefix_completion_kind(kind: crate::tsgo::protocol::CompletionKind) -> bool {
@@ -5842,11 +6009,7 @@ impl LanguageServer for VerterLanguageServer {
 
         if prewarm_imported_vue_apis {
             for import_id in &imported_vue_priority_ids {
-                let should_sync =
-                    !self.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
-                if should_sync {
-                    self.sync_imported_vue_api_lightweight(import_id).await;
-                }
+                self.sync_imported_vue_api_lightweight(import_id).await;
             }
         }
 
@@ -5944,7 +6107,7 @@ impl LanguageServer for VerterLanguageServer {
             std::thread::current().id()
         );
         let upsert_start = std::time::Instant::now();
-        let update_result = tokio::task::block_in_place(|| {
+        let update_result = block_in_place_if_available(|| {
             self.documents
                 .did_change_incremental(&uri, version, params.content_changes)
         });
@@ -6693,6 +6856,16 @@ impl LanguageServer for VerterLanguageServer {
         // Enhance with TypeProvider if available.
         // Extract all context synchronously — no DashMap guard held across await.
         if let Some(tp) = &self.type_provider {
+            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver)
+                && self.current_file_needs_inline_type_provider_sync(uri)
+            {
+                tracing::debug!(
+                    "completion: repairing current-file tsserver sync for {}",
+                    uri.as_str()
+                );
+                self.ensure_current_file_synced(uri).await;
+            }
+            self.ensure_imported_vue_apis_synced(uri).await;
             let ctx = self.type_provider_context(uri);
             if ctx.is_none() {
                 tracing::debug!("completion: no ide_context for {}", uri.as_str());
@@ -6779,24 +6952,6 @@ impl LanguageServer for VerterLanguageServer {
                         })
                         .unwrap_or(false);
 
-                    // Check if a newer completion request has arrived. If so, skip
-                    // the expensive type provider call and return verter-only results.
-                    if self
-                        .completion_generation
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        != completion_gen + 1
-                    {
-                        tracing::debug!(
-                            "completion: skipping stale type provider call (gen {})",
-                            completion_gen
-                        );
-                        return Ok(verter_items.map(|items| {
-                            CompletionResponse::List(CompletionList {
-                                is_incomplete: true,
-                                items,
-                            })
-                        }));
-                    }
                     if skip_type_provider {
                         tracing::debug!(
                             "completion: skipping type provider for IdentifierExpected context"
@@ -6812,11 +6967,43 @@ impl LanguageServer for VerterLanguageServer {
                     // Vue-specific triggers (":", "@", " ") are handled by Verter's
                     // native completions and cause tsserver errors if forwarded.
                     let tp_trigger = trigger_character
-                        .filter(|t| matches!(*t, "." | "\"" | "'" | "`" | "/" | "<"));
-                    match tp
+                        .filter(|t| matches!(*t, "." | "\"" | "'" | "`" | "/" | "<"))
+                        .or_else(|| {
+                            (matches!(expr_context, Some(ExpressionContext::MemberAccess))
+                                && is_immediately_after_member_access_dot(
+                                    &ctx.tsx_content,
+                                    tsx_offset as usize,
+                                ))
+                            .then_some(".")
+                        });
+                    let mut type_completion_result = tp
                         .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
-                        .await
-                    {
+                        .await;
+                    if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+                        for retry_delay_ms in [50u64, 150, 300] {
+                            let needs_retry = matches!(
+                                type_completion_result,
+                                Err(ref error) if error.message.contains("No content available")
+                            );
+                            if !needs_retry {
+                                break;
+                            }
+                            tracing::debug!(
+                                "completion: retrying tsserver completion after no-content error for {} (delay={}ms)",
+                                ctx.tsx_path,
+                                retry_delay_ms
+                            );
+                            self.force_reopen_current_file_in_type_provider(uri).await;
+                            self.sync_api_to_provider(uri).await;
+                            self.ensure_imported_vue_apis_synced(uri).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms))
+                                .await;
+                            type_completion_result = tp
+                                .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
+                                .await;
+                        }
+                    }
+                    match type_completion_result {
                         Ok(mut type_result) => {
                             tracing::debug!(
                                 "completion: type provider returned {} items (incomplete={})",
@@ -8727,6 +8914,366 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct DotTriggerRequiredCompletionProvider;
+
+    impl TypeProvider for DotTriggerRequiredCompletionProvider {
+        fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close_file(&self, _path: &str) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn get_completions(
+            &self,
+            _path: &str,
+            _offset: u32,
+            trigger_character: Option<&str>,
+        ) -> ProviderFuture<'_, CompletionResult> {
+            let trigger = trigger_character.map(str::to_string);
+            Box::pin(async move {
+                let items = if trigger.as_deref() == Some(".") {
+                    vec![
+                        crate::tsgo::protocol::Completion {
+                            label: "disabled".to_string(),
+                            kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                            detail: Some("(property) disabled: boolean".to_string()),
+                            documentation: None,
+                            edit_range_start: None,
+                            edit_range_end: None,
+                            insert_text: None,
+                            sort_text: None,
+                            data: None,
+                        },
+                        crate::tsgo::protocol::Completion {
+                            label: "label".to_string(),
+                            kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                            detail: Some("(property) label: string".to_string()),
+                            documentation: None,
+                            edit_range_start: None,
+                            edit_range_end: None,
+                            insert_text: None,
+                            sort_text: None,
+                            data: None,
+                        },
+                        crate::tsgo::protocol::Completion {
+                            label: "handler".to_string(),
+                            kind: Some(crate::tsgo::protocol::CompletionKind::Method),
+                            detail: Some("(method) handler(): void".to_string()),
+                            documentation: None,
+                            edit_range_start: None,
+                            edit_range_end: None,
+                            insert_text: None,
+                            sort_text: None,
+                            data: None,
+                        },
+                    ]
+                } else {
+                    Vec::new()
+                };
+                Ok(CompletionResult {
+                    items,
+                    is_incomplete: false,
+                })
+            })
+        }
+
+        fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_type_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_references(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_rename_locations(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_signature_help(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_code_actions(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_document_highlights(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_inlay_hints(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<InlayHint>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn configure_paths(
+            &self,
+            _base_url: &str,
+            _paths: serde_json::Value,
+        ) -> ProviderFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct LostContentCompletionProvider {
+        open_paths: std::sync::Mutex<HashSet<String>>,
+        calls: std::sync::Mutex<Vec<MockCall>>,
+        require_current_api: bool,
+    }
+
+    impl LostContentCompletionProvider {
+        fn requiring_current_api() -> Self {
+            Self {
+                require_current_api: true,
+                ..Default::default()
+            }
+        }
+
+        fn drop_open_path(&self, path: &str) {
+            self.open_paths.lock().unwrap().remove(path);
+        }
+
+        fn calls(&self) -> Vec<MockCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl TypeProvider for LostContentCompletionProvider {
+        fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+            let path = path.to_string();
+            let content = content.to_string();
+            Box::pin(async move {
+                self.open_paths.lock().unwrap().insert(path.clone());
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(MockCall::OpenFile { path, content });
+                Ok(())
+            })
+        }
+
+        fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+            let path = path.to_string();
+            let content = content.to_string();
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(MockCall::UpdateFile {
+                    path: path.clone(),
+                    content,
+                });
+                if self.open_paths.lock().unwrap().contains(&path) {
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+            let path = path.to_string();
+            Box::pin(async move {
+                self.open_paths.lock().unwrap().remove(&path);
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(MockCall::CloseFile { path });
+                Ok(())
+            })
+        }
+
+        fn get_completions(
+            &self,
+            path: &str,
+            _offset: u32,
+            _trigger_character: Option<&str>,
+        ) -> ProviderFuture<'_, CompletionResult> {
+            let path = path.to_string();
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(MockCall::GetCompletions {
+                    path: path.clone(),
+                    offset: 0,
+                });
+                if !self.open_paths.lock().unwrap().contains(&path) {
+                    return Err(crate::tsgo::protocol::TypeProviderError::new(
+                        "No content available.",
+                    ));
+                }
+                if self.require_current_api {
+                    let current_api_path = path
+                        .strip_suffix(".tsx")
+                        .map(|prefix| format!("{prefix}.ts"))
+                        .unwrap_or_else(|| path.clone());
+                    if !self.open_paths.lock().unwrap().contains(&current_api_path) {
+                        return Err(crate::tsgo::protocol::TypeProviderError::new(
+                            "No content available.",
+                        ));
+                    }
+                }
+                Ok(CompletionResult {
+                    items: vec![
+                        crate::tsgo::protocol::Completion {
+                            label: "disabled".to_string(),
+                            kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                            detail: Some("(property) disabled: boolean".to_string()),
+                            documentation: None,
+                            edit_range_start: None,
+                            edit_range_end: None,
+                            insert_text: None,
+                            sort_text: None,
+                            data: None,
+                        },
+                        crate::tsgo::protocol::Completion {
+                            label: "label".to_string(),
+                            kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                            detail: Some("(property) label: string".to_string()),
+                            documentation: None,
+                            edit_range_start: None,
+                            edit_range_end: None,
+                            insert_text: None,
+                            sort_text: None,
+                            data: None,
+                        },
+                    ],
+                    is_incomplete: false,
+                })
+            })
+        }
+
+        fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_type_definition(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_references(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_rename_locations(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_signature_help(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_code_actions(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_document_highlights(
+            &self,
+            _path: &str,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn get_inlay_hints(
+            &self,
+            _path: &str,
+            _start_offset: u32,
+            _end_offset: u32,
+        ) -> ProviderFuture<'_, Vec<InlayHint>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
     fn make_hover_test_service(
         type_provider: Arc<dyn TypeProvider>,
     ) -> tower_lsp_server::LspService<VerterLanguageServer> {
@@ -9161,6 +9708,30 @@ mod tests {
         }
 
         (temp, service, drain_handle, provider, workspace_id)
+    }
+
+    fn fixture_workspace_root(name: &str) -> String {
+        std::fs::canonicalize(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../packages/vue-vscode/e2e/fixtures/{name}")),
+        )
+        .expect("fixture workspace path should canonicalize")
+        .to_string_lossy()
+        .replace('\\', "/")
+    }
+
+    #[test]
+    fn fixture_workspace_root_returns_canonical_path() {
+        let workspace_id = fixture_workspace_root("single-project");
+
+        assert!(
+            workspace_id.starts_with('/'),
+            "fixture workspace path should be absolute, got: {workspace_id}"
+        );
+        assert!(
+            !workspace_id.contains("/../"),
+            "fixture workspace path should not retain dot segments, got: {workspace_id}"
+        );
     }
 
     fn workspace_uri(workspace_id: &str, relative_path: &str) -> Uri {
@@ -11933,6 +12504,229 @@ const outerLabel = 'outer'
     }
 
     #[tokio::test]
+    async fn completion_queries_type_provider_for_partial_vfor_member_access() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let source = r#"<script setup lang="ts">
+interface Action {
+  label: string
+  disabled: boolean
+  handler: () => void
+}
+
+const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
+</script>
+
+<template>
+  <div>
+    <button v-for="action in actions" :key="action.label" :disabled="action.di">
+      {{ action.label }}
+    </button>
+  </div>
+</template>
+"#;
+
+        let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+        let position = find_document_position(server, &uri, "action.di", 7);
+        let ctx = server
+            .type_provider_context(&uri)
+            .expect("type provider context should exist");
+        let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &ctx.vue_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("v-for member access position should map to tsx");
+        let expr_context =
+            classify_expression_context_with_trigger(&ctx.tsx_content, tsx_offset as usize, None);
+        let snippet = debug_snippet(&ctx.tsx_content, tsx_offset as usize)
+            .unwrap_or_else(|| ("<none>".to_string(), "<none>".to_string()));
+
+        set_type_completions_at_vue_position(
+            server,
+            &provider,
+            &uri,
+            position,
+            vec![
+                crate::tsgo::protocol::Completion {
+                    label: "disabled".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) disabled: boolean".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "label".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) label: string".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "handler".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Method),
+                    detail: Some("(method) handler(): void".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "actions".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                    detail: Some("const actions: Action[]".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+            ],
+        );
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        let calls = provider.calls();
+
+        assert!(
+            labels.contains(&"disabled".to_string()),
+            "disabled should be present for v-for member access, got: {labels:?}, expr_context={expr_context:?}, tsx_before={:?}, tsx_after={:?}, calls={calls:?}",
+            snippet.0,
+            snippet.1,
+        );
+        assert!(
+            labels.contains(&"label".to_string()),
+            "label should be present for v-for member access, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"handler".to_string()),
+            "handler should be present for v-for member access, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"actions".to_string()),
+            "member access should suppress outer identifiers, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_queries_type_provider_for_fixture_vfor_member_access_after_broken_interpolation(
+    ) {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let source =
+            include_str!("../../../packages/vue-vscode/e2e/fixtures/single-project/src/App.vue");
+        let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+        let position = find_document_position(server, &uri, "action.disabled", 7);
+        let ctx = server
+            .type_provider_context(&uri)
+            .expect("type provider context should exist");
+        let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &ctx.vue_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("fixture member access position should map to tsx");
+        let expr_context =
+            classify_expression_context_with_trigger(&ctx.tsx_content, tsx_offset as usize, None);
+        let snippet = debug_snippet(&ctx.tsx_content, tsx_offset as usize)
+            .unwrap_or_else(|| ("<none>".to_string(), "<none>".to_string()));
+
+        set_type_completions_at_vue_position(
+            server,
+            &provider,
+            &uri,
+            position,
+            vec![
+                crate::tsgo::protocol::Completion {
+                    label: "disabled".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) disabled: boolean".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "label".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                    detail: Some("(property) label: string".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+                crate::tsgo::protocol::Completion {
+                    label: "handler".to_string(),
+                    kind: Some(crate::tsgo::protocol::CompletionKind::Method),
+                    detail: Some("(method) handler(): void".to_string()),
+                    documentation: None,
+                    edit_range_start: None,
+                    edit_range_end: None,
+                    insert_text: None,
+                    sort_text: None,
+                    data: None,
+                },
+            ],
+        );
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        let calls = provider.calls();
+
+        assert!(
+            labels.contains(&"disabled".to_string()),
+            "disabled should be present for fixture v-for member access, got: {labels:?}, expr_context={expr_context:?}, tsx_before={:?}, tsx_after={:?}, calls={calls:?}",
+            snippet.0,
+            snippet.1,
+        );
+        assert!(
+            labels.contains(&"label".to_string()),
+            "label should be present for fixture v-for member access, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"handler".to_string()),
+            "handler should be present for fixture v-for member access, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"actions".to_string()),
+            "fixture member access should suppress outer identifiers, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn completion_queries_type_provider_for_scoped_slot_member_access_after_prior_partial_member_access(
     ) {
         let provider = Arc::new(MockTypeProvider::new());
@@ -12100,6 +12894,61 @@ const outerLabel = 'outer'
         assert!(
             !labels.contains(&"outerLabel".to_string()),
             "member access retry should not fall back to outer identifiers, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_synthesizes_dot_trigger_for_member_access_without_trigger_character() {
+        let provider = Arc::new(DotTriggerRequiredCompletionProvider);
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let source = r#"<script setup lang="ts">
+interface Action {
+  label: string
+  disabled: boolean
+  handler: () => void
+}
+
+const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
+</script>
+
+<template>
+  <div>
+    <button v-for="action in actions" :key="action.label" :disabled="action.disabled">
+      {{ action.label }}
+    </button>
+  </div>
+</template>
+"#;
+
+        let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+        let position = find_document_position(server, &uri, "action.disabled", 7);
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        assert!(
+            labels.contains(&"disabled".to_string()),
+            "member access completion should synthesize a dot trigger, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"label".to_string()),
+            "member access completion should synthesize a dot trigger, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"handler".to_string()),
+            "member access completion should synthesize a dot trigger, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"actions".to_string()),
+            "member access completion should stay scoped when synthesizing a dot trigger, got: {labels:?}"
         );
     }
 
@@ -12645,6 +13494,1017 @@ defineProps<{ msg: string }>()
         assert!(
             server.pending_snapshot_provider_sync.contains(&child_id),
             "owner-aware sync should still be queued for reconciliation after snapshot discovery"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_imported_vue_api_lightweight_opens_snapshot_api_path_for_tsserver() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_id = "/workspace/src/Child.vue";
+        let _child_uri = open_test_vue(
+            server,
+            child_id,
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+        );
+
+        server.sync_imported_vue_api_lightweight(child_id).await;
+
+        let state = server
+            .provider_sync_states
+            .get(child_id)
+            .map(|entry| entry.clone())
+            .expect("snapshot imported API sync should commit provider state");
+        let api_path = state
+            .api_path
+            .clone()
+            .expect("snapshot imported API sync should record the API path");
+        let calls = provider.file_sync_calls();
+
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path == &api_path
+            )),
+            "snapshot imported Vue API sync should open the provider-facing API path for tsserver, calls={calls:?}, api_path={api_path}"
+        );
+        assert!(
+            !calls.iter().any(|call| matches!(
+                call,
+                MockCall::LoadFile { path, .. } if path == &api_path
+            )),
+            "snapshot imported Vue API sync should not only cache the API path for tsserver, calls={calls:?}, api_path={api_path}"
+        );
+        assert!(
+            state.api_background_loaded,
+            "snapshot imported API sync should mark the API path as loaded"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_current_file_synced_queues_provisional_ide_path_for_snapshot_reconciliation() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                    type_provider_none_reason: None,
+                },
+            )
+        });
+
+        let server = service.inner();
+        let uri = open_test_vue(
+            server,
+            "/workspace/src/App.vue",
+            r#"<script setup lang="ts">
+interface Action {
+  label: string
+  disabled: boolean
+}
+
+const actions: Action[] = [{ label: 'ok', disabled: false }]
+</script>
+
+<template>
+  <button v-for="action in actions" :key="action.label" :disabled="action.disabled">
+    {{ action.label }}
+  </button>
+</template>
+"#,
+        );
+
+        server.ensure_current_file_synced(&uri).await;
+
+        let calls = provider.file_sync_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.tsx"
+            )),
+            "pre-snapshot current-file sync should open the provisional IDE path, calls={calls:?}"
+        );
+
+        let state = server
+            .provider_sync_states
+            .get("/workspace/src/App.vue")
+            .map(|entry| entry.clone())
+            .expect("provisional IDE sync should commit provider state");
+        assert_eq!(
+            state.owner_key, "__provisional__",
+            "pre-snapshot current-file sync should mark the IDE owner as provisional"
+        );
+        assert_eq!(
+            state.ide_path.as_deref(),
+            Some("/workspace/src/App.vue.tsx"),
+            "pre-snapshot current-file sync should use the provisional IDE path"
+        );
+        assert!(
+            server
+                .pending_snapshot_provider_sync
+                .contains("/workspace/src/App.vue"),
+            "pre-snapshot current-file sync should queue owner-aware reconciliation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_file_needs_inline_type_provider_sync_when_matching_ide_path_is_not_loaded() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let uri = open_test_vue(
+            server,
+            "/workspace/src/App.vue",
+            r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+        );
+
+        server.provider_sync_states.insert(
+            "/workspace/src/App.vue".to_string(),
+            ProviderSyncState {
+                owner_key: "/workspace/tsconfig.json".to_string(),
+                ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+                api_path: Some("/workspace/src/App.vue.ts".to_string()),
+                ide_background_loaded: false,
+                api_background_loaded: true,
+                shadow_path: None,
+                shadow_background_loaded: false,
+            },
+        );
+
+        assert!(
+            server.current_file_needs_inline_type_provider_sync(&uri),
+            "matching IDE paths must still trigger inline sync until the TSX file has been opened in the provider"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_current_file_synced_marks_matching_ide_path_loaded() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let uri = open_test_vue(
+            server,
+            "/workspace/src/App.vue",
+            r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+        );
+
+        server.ensure_current_file_synced(&uri).await;
+
+        let state = server
+            .provider_sync_state_for_source("/workspace/src/App.vue")
+            .expect("current-file sync should commit provider state");
+        assert!(
+            state.ide_background_loaded,
+            "successful current-file sync should mark the IDE path as loaded"
+        );
+        assert!(
+            !server.current_file_needs_inline_type_provider_sync(&uri),
+            "matching loaded IDE paths should not keep triggering inline sync"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_reopens_current_file_when_tsserver_lost_virtual_file_content() {
+        let provider = Arc::new(LostContentCompletionProvider::default());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let uri = open_test_vue(
+            server,
+            "/workspace/src/App.vue",
+            r#"<script setup lang="ts">
+interface Action {
+  label: string
+  disabled: boolean
+}
+
+const actions: Action[] = [{ label: 'ok', disabled: false }]
+</script>
+
+<template>
+  <button v-for="action in actions" :key="action.label" :disabled="action.disabled">
+    {{ action.label }}
+  </button>
+</template>
+"#,
+        );
+
+        server.ensure_current_file_synced(&uri).await;
+
+        let ctx = server
+            .type_provider_context(&uri)
+            .expect("type provider context should exist");
+        provider.drop_open_path(&ctx.tsx_path);
+
+        let position = find_document_position(server, &uri, "action.disabled", 7);
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        let calls = provider.calls();
+        let open_count = calls
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    MockCall::OpenFile { path, .. } if path == &ctx.tsx_path
+                )
+            })
+            .count();
+
+        assert!(
+            labels.contains(&"disabled".to_string()),
+            "completion should recover after the provider loses the current-file TSX content, got: {labels:?}, calls={calls:?}"
+        );
+        assert!(
+            labels.contains(&"label".to_string()),
+            "completion should recover after the provider loses the current-file TSX content, got: {labels:?}"
+        );
+        assert!(
+            open_count >= 2,
+            "recovery should force a reopen of the current-file TSX path after provider content loss, calls={calls:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_syncs_current_file_api_when_tsserver_needs_self_public_api() {
+        let provider = Arc::new(LostContentCompletionProvider::requiring_current_api());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let uri = open_test_vue(
+            server,
+            "/workspace/src/App.vue",
+            r#"<script setup lang="ts">
+interface Action {
+  label: string
+  disabled: boolean
+}
+
+const actions: Action[] = [{ label: 'ok', disabled: false }]
+</script>
+
+<template>
+  <button v-for="action in actions" :key="action.label" :disabled="action.disabled">
+    {{ action.label }}
+  </button>
+</template>
+"#,
+        );
+
+        server.ensure_current_file_synced(&uri).await;
+
+        let position = find_document_position(server, &uri, "action.disabled", 7);
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        let calls = provider.calls();
+
+        assert!(
+            labels.contains(&"disabled".to_string()),
+            "completion should recover by syncing the current file API when tsserver requires the self public API, got: {labels:?}, calls={calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.ts"
+            )),
+            "recovery should open the current file .vue.ts path when the provider requires it, calls={calls:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_properties() {
+        let workspace_id = fixture_workspace_root("single-project");
+        let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules/typescript/lib")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Some(node_path) = crate::tsserver::find_node() else {
+            eprintln!("skipping: node not found");
+            return;
+        };
+        let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
+        else {
+            eprintln!("skipping: tsserver.js not found");
+            return;
+        };
+        let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let provider = Arc::new(
+            crate::tsserver::ipc::TsserverTypeProvider::spawn(
+                &node_path,
+                &tsserver_path.to_string_lossy().replace('\\', "/"),
+                &workspace_id,
+                Some(&plugin_path),
+                None,
+            )
+            .await
+            .expect("tsserver should spawn"),
+        );
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                    type_provider_none_reason: None,
+                },
+            )
+        });
+
+        let server = service.inner();
+        *server.resolver_snapshot.write() = Some(ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+                crate::project_resolver::IdeProjectConfig::new(
+                    workspace_id.clone(),
+                    workspace_id.clone(),
+                    Some(format!("{workspace_id}/tsconfig.json")),
+                ),
+            ]),
+        });
+
+        let app_path = format!("{workspace_id}/src/App.vue");
+        let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
+        let uri: Uri = format!("file://{app_path}")
+            .parse()
+            .expect("fixture uri should be valid");
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: app_source,
+                },
+            })
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        let position = find_document_position(server, &uri, "action.disabled", 7);
+        let ctx = server
+            .type_provider_context(&uri)
+            .expect("type provider context should exist");
+        let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &ctx.vue_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("fixture member access position should map to tsx");
+        let expr_context =
+            classify_expression_context_with_trigger(&ctx.tsx_content, tsx_offset as usize, None);
+        let direct_labels: Vec<String> = provider
+            .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
+            .await
+            .expect("direct tsserver completion should succeed")
+            .items
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        assert!(
+            labels.contains(&"disabled".to_string()),
+            "real tsserver fixture member access should include disabled, got: {labels:?}, direct_labels={direct_labels:?}, expr_context={expr_context:?}, tsx_path={}",
+            ctx.tsx_path
+        );
+        assert!(
+            labels.contains(&"label".to_string()),
+            "real tsserver fixture member access should include label, got: {labels:?}, direct_labels={direct_labels:?}"
+        );
+        assert!(
+            labels.contains(&"handler".to_string()),
+            "real tsserver fixture member access should include handler, got: {labels:?}, direct_labels={direct_labels:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immediately_after_open(
+    ) {
+        let workspace_id = fixture_workspace_root("single-project");
+        let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules/typescript/lib")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Some(node_path) = crate::tsserver::find_node() else {
+            eprintln!("skipping: node not found");
+            return;
+        };
+        let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
+        else {
+            eprintln!("skipping: tsserver.js not found");
+            return;
+        };
+        let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let provider = Arc::new(
+            crate::tsserver::ipc::TsserverTypeProvider::spawn(
+                &node_path,
+                &tsserver_path.to_string_lossy().replace('\\', "/"),
+                &workspace_id,
+                Some(&plugin_path),
+                None,
+            )
+            .await
+            .expect("tsserver should spawn"),
+        );
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                    type_provider_none_reason: None,
+                },
+            )
+        });
+
+        let server = service.inner();
+        *server.resolver_snapshot.write() = Some(ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+                crate::project_resolver::IdeProjectConfig::new(
+                    workspace_id.clone(),
+                    workspace_id.clone(),
+                    Some(format!("{workspace_id}/tsconfig.json")),
+                ),
+            ]),
+        });
+
+        let app_path = format!("{workspace_id}/src/App.vue");
+        let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
+        let uri: Uri =
+            crate::uri::path_to_file_uri(&app_path).expect("fixture uri should be valid");
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: app_source,
+                },
+            })
+            .await;
+
+        let position = find_document_position(server, &uri, "action.disabled", 7);
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        assert!(
+            labels.contains(&"disabled".to_string()),
+            "immediate real tsserver fixture member access should include disabled, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"label".to_string()),
+            "immediate real tsserver fixture member access should include label, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"handler".to_string()),
+            "immediate real tsserver fixture member access should include handler, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_dot_trigger_immediately_after_open(
+    ) {
+        let workspace_id = fixture_workspace_root("single-project");
+        let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules/typescript/lib")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Some(node_path) = crate::tsserver::find_node() else {
+            eprintln!("skipping: node not found");
+            return;
+        };
+        let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
+        else {
+            eprintln!("skipping: tsserver.js not found");
+            return;
+        };
+        let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let provider = Arc::new(
+            crate::tsserver::ipc::TsserverTypeProvider::spawn(
+                &node_path,
+                &tsserver_path.to_string_lossy().replace('\\', "/"),
+                &workspace_id,
+                Some(&plugin_path),
+                None,
+            )
+            .await
+            .expect("tsserver should spawn"),
+        );
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                    type_provider_none_reason: None,
+                },
+            )
+        });
+
+        let server = service.inner();
+        *server.resolver_snapshot.write() = Some(ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+                crate::project_resolver::IdeProjectConfig::new(
+                    workspace_id.clone(),
+                    workspace_id.clone(),
+                    Some(format!("{workspace_id}/tsconfig.json")),
+                ),
+            ]),
+        });
+
+        let app_path = format!("{workspace_id}/src/App.vue");
+        let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
+        let uri: Uri =
+            crate::uri::path_to_file_uri(&app_path).expect("fixture uri should be valid");
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: app_source,
+                },
+            })
+            .await;
+
+        let position = find_document_position(server, &uri, "action.disabled", 7);
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, Some(".")))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        assert!(
+            labels.contains(&"disabled".to_string()),
+            "immediate dot-trigger real tsserver fixture member access should include disabled, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"label".to_string()),
+            "immediate dot-trigger real tsserver fixture member access should include label, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"handler".to_string()),
+            "immediate dot-trigger real tsserver fixture member access should include handler, got: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
+        let workspace_id = fixture_workspace_root("single-project");
+        let app_path = format!("{workspace_id}/src/App.vue");
+        let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
+        let uri = crate::uri::path_to_file_uri(&app_path).expect("fixture uri should be valid");
+
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: app_source,
+        });
+
+        let cached_verter_diags = Arc::new(DashMap::new());
+        let project_registry = Arc::new(parking_lot::RwLock::new(None));
+        let fallback_linter = Arc::new(parking_lot::RwLock::new(verter_diagnostics::Linter::new(
+            verter_diagnostics::LintConfig::default(),
+        )));
+
+        let diags = compute_verter_diagnostics_for(
+            &documents,
+            &uri,
+            &cached_verter_diags,
+            &project_registry,
+            &fallback_linter,
+        );
+        let fragment_path = format!("{workspace_id}/src/FragmentComp.vue");
+        let fragment_analysis = resolve_component_for(
+            host.as_ref(),
+            project_registry.as_ref(),
+            &app_path,
+            "./FragmentComp.vue",
+        );
+
+        assert!(
+            diags.iter().any(|diag| {
+                matches!(
+                    diag.code.as_ref(),
+                    Some(NumberOrString::String(code)) if code == "verter/unknown-prop"
+                ) && diag.message.contains("data-test")
+            }),
+            "fixture fragment component should flag data-test, got: {diags:?}, child_loaded={}, child_template_roots={:?}, child_macros={:?}, child_components={:?}",
+            host.get_analysis(&fragment_path).is_some(),
+            fragment_analysis.as_ref().and_then(|analysis| {
+                analysis.template.as_ref().map(|template| {
+                    template
+                        .elements
+                        .iter()
+                        .filter(|element| element.parent_index.is_none())
+                        .map(|element| element.tag.clone())
+                        .collect::<Vec<_>>()
+                })
+            }),
+            fragment_analysis
+                .as_ref()
+                .map(|analysis| analysis.macros.iter().map(|mac| mac.kind.clone()).collect::<Vec<_>>()),
+            fragment_analysis.as_ref().map(|analysis| {
+                analysis
+                    .template
+                    .as_ref()
+                    .map(|template| template.components.iter().map(|comp| comp.name.clone()).collect::<Vec<_>>())
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_missed() {
+        let workspace_id = fixture_workspace_root("single-project");
+        let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules/typescript/lib")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Some(node_path) = crate::tsserver::find_node() else {
+            eprintln!("skipping: node not found");
+            return;
+        };
+        let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
+        else {
+            eprintln!("skipping: tsserver.js not found");
+            return;
+        };
+        let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let provider = Arc::new(
+            crate::tsserver::ipc::TsserverTypeProvider::spawn(
+                &node_path,
+                &tsserver_path.to_string_lossy().replace('\\', "/"),
+                &workspace_id,
+                Some(&plugin_path),
+                None,
+            )
+            .await
+            .expect("tsserver should spawn"),
+        );
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                    type_provider_none_reason: None,
+                },
+            )
+        });
+
+        let server = service.inner();
+        *server.resolver_snapshot.write() = Some(ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+                crate::project_resolver::IdeProjectConfig::new(
+                    workspace_id.clone(),
+                    workspace_id.clone(),
+                    Some(format!("{workspace_id}/tsconfig.json")),
+                ),
+            ]),
+        });
+
+        let app_path = format!("{workspace_id}/src/App.vue");
+        let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
+        let uri = open_test_vue(server, &app_path, &app_source);
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        let position = find_document_position(server, &uri, "action.disabled", 7);
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        assert!(
+            labels.contains(&"disabled".to_string()),
+            "completion should repair a missed current-file tsserver sync, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"label".to_string()),
+            "completion should repair a missed current-file tsserver sync, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"handler".to_string()),
+            "completion should repair a missed current-file tsserver sync, got: {labels:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_parent() {
+        let workspace_id = fixture_workspace_root("single-project");
+        let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules/typescript/lib")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Some(node_path) = crate::tsserver::find_node() else {
+            eprintln!("skipping: node not found");
+            return;
+        };
+        let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
+        else {
+            eprintln!("skipping: tsserver.js not found");
+            return;
+        };
+        let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vue-vscode/node_modules")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let provider = Arc::new(
+            crate::tsserver::ipc::TsserverTypeProvider::spawn(
+                &node_path,
+                &tsserver_path.to_string_lossy().replace('\\', "/"),
+                &workspace_id,
+                Some(&plugin_path),
+                None,
+            )
+            .await
+            .expect("tsserver should spawn"),
+        );
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsserver,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                    type_provider_none_reason: None,
+                },
+            )
+        });
+
+        let server = service.inner();
+        *server.resolver_snapshot.write() = Some(ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+                crate::project_resolver::IdeProjectConfig::new(
+                    workspace_id.clone(),
+                    workspace_id.clone(),
+                    Some(format!("{workspace_id}/tsconfig.json")),
+                ),
+            ]),
+        });
+
+        let child_path = format!("{workspace_id}/src/TypedSlotComp.vue");
+        let child_source =
+            std::fs::read_to_string(&child_path).expect("fixture TypedSlotComp.vue should exist");
+        let child_uri = crate::uri::path_to_file_uri(&child_path).expect("child uri");
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: child_uri,
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: child_source,
+                },
+            })
+            .await;
+
+        let parent_path = format!("{workspace_id}/src/TemplateSlotCases.vue");
+        let parent_source = std::fs::read_to_string(&parent_path)
+            .expect("fixture TemplateSlotCases.vue should exist");
+        let parent_uri = crate::uri::path_to_file_uri(&parent_path).expect("parent uri");
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: parent_uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 1,
+                    text: parent_source,
+                },
+            })
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        let member_position = find_document_position(server, &parent_uri, "slotItem.name", 9);
+        let hover_position = find_document_position(server, &parent_uri, "slotItem.name", 2);
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&parent_uri, member_position, Some(".")))
+                .await
+                .expect("slot completion request should succeed"),
+        );
+        let hover = hover_text(
+            server
+                .hover(hover_params(&parent_uri, hover_position))
+                .await
+                .expect("slot hover request should succeed"),
+        );
+        let literal_debug = server.type_provider_context(&parent_uri).and_then(|ctx| {
+            ctx.tsx_content.find("slotItem.name").map(|start| {
+                (
+                    ctx.tsx_path.clone(),
+                    start as u32 + "slotItem.".len() as u32,
+                )
+            })
+        });
+        let direct_provider = provider.clone();
+        let direct_debug = server
+            .type_provider_context(&parent_uri)
+            .and_then(|ctx| {
+                let tsx_path = ctx.tsx_path.clone();
+                merge::vue_position_to_tsx_offset_validated(
+                    &member_position,
+                    &ctx.vue_line_index,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                )
+                .map(|tsx_offset| (ctx, tsx_offset, tsx_path))
+            })
+            .map(|(ctx, tsx_offset, tsx_path)| async move {
+                direct_provider
+                    .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
+                    .await
+                    .map(|result| {
+                        (
+                            result
+                                .items
+                                .into_iter()
+                                .map(|item| item.label)
+                                .collect::<Vec<_>>(),
+                            tsx_path.clone(),
+                        )
+                    })
+                    .map_err(|error| (error.to_string(), tsx_path))
+            });
+        let parent_state = server
+            .provider_sync_states
+            .get(&parent_path)
+            .map(|state| state.clone());
+        let child_state = server
+            .provider_sync_states
+            .get(&child_path)
+            .map(|state| state.clone());
+        let (direct_labels, tsx_path, direct_error) = if let Some(fut) = direct_debug {
+            match fut.await {
+                Ok((labels, tsx_path)) => (Some(labels), Some(tsx_path), None),
+                Err((error, tsx_path)) => (None, Some(tsx_path), Some(error)),
+            }
+        } else {
+            (
+                None,
+                None,
+                Some("missing type provider context".to_string()),
+            )
+        };
+        let (literal_labels, literal_error) = if let Some((tsx_path, tsx_offset)) = literal_debug {
+            match provider
+                .get_completions(&tsx_path, tsx_offset, Some("."))
+                .await
+            {
+                Ok(result) => (
+                    Some(
+                        result
+                            .items
+                            .into_iter()
+                            .map(|item| item.label)
+                            .collect::<Vec<_>>(),
+                    ),
+                    None,
+                ),
+                Err(error) => (None, Some(error.to_string())),
+            }
+        } else {
+            (
+                None,
+                Some("slotItem.name missing from generated TSX".to_string()),
+            )
+        };
+
+        assert!(
+            labels.contains(&"name".to_string()),
+            "slot member completions should include name, got: {labels:?}, direct_labels={direct_labels:?}, direct_error={direct_error:?}, literal_labels={literal_labels:?}, literal_error={literal_error:?}, parent_state={parent_state:?}, child_state={child_state:?}, tsx_path={tsx_path:?}",
+        );
+        assert!(
+            labels.contains(&"id".to_string()),
+            "slot member completions should include id, got: {labels:?}"
+        );
+        assert!(
+            hover.contains("SlotItem") || (hover.contains("name") && hover.contains("id")),
+            "slot hover should retain the slot item type, got: {hover}"
+        );
+        assert!(
+            !hover.contains(": any"),
+            "slot hover should not degrade to any, got: {hover}"
         );
     }
 
