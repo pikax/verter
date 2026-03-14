@@ -657,6 +657,19 @@ export async function getCompletions(
   );
 }
 
+export async function measureCompletion(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  triggerCharacter?: string,
+): Promise<{ completions: vscode.CompletionList | undefined; latencyMs: number }> {
+  const start = Date.now();
+  const completions = await getCompletions(uri, position, triggerCharacter);
+  return {
+    completions,
+    latencyMs: Date.now() - start,
+  };
+}
+
 export async function waitForCompletionsMatching(
   uri: vscode.Uri,
   position: vscode.Position,
@@ -696,6 +709,19 @@ export async function waitForCompletionsMatching(
   }
 
   return lastList;
+}
+
+export async function measureTimeToCompletionsMatching(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  options: Parameters<typeof waitForCompletionsMatching>[2],
+): Promise<{ completions: vscode.CompletionList | undefined; latencyMs: number }> {
+  const start = Date.now();
+  const completions = await waitForCompletionsMatching(uri, position, options);
+  return {
+    completions,
+    latencyMs: Date.now() - start,
+  };
 }
 
 export function getCompletionLabel(item: vscode.CompletionItem): string {

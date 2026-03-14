@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import * as path from "path";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
@@ -88,6 +89,66 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
         d.range.start.isBeforeOrEqual(d.range.end),
         `Diagnostic range should be valid: ${d.message}`,
       ).to.be.true;
+    }
+  });
+
+  test("plain .ts MaybeRef generic does not produce verter XMissingEndTag", async function () {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    expect(workspaceFolders, "workspace should have folders").to.exist;
+    expect(workspaceFolders!.length, "workspace should have at least one folder").to.be.greaterThan(
+      0,
+    );
+
+    const appDir = path.posix.dirname(getAppVuePath());
+    const relativePath =
+      appDir === "."
+        ? "__verter_mayberef_repro__.ts"
+        : path.posix.join(appDir, "__verter_mayberef_repro__.ts");
+    const fileUri = vscode.Uri.file(
+      path.join(workspaceFolders![0].uri.fsPath, ...relativePath.split("/")),
+    );
+
+    const content = `type MaybeRef<T> = T
+
+export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
+  return target
+}
+`;
+
+    await vscode.workspace.fs.writeFile(fileUri, Buffer.from(content, "utf8"));
+
+    try {
+      const doc = await vscode.workspace.openTextDocument(fileUri);
+      await vscode.window.showTextDocument(doc);
+      expect(doc.languageId).to.equal("typescript");
+
+      const diags = await waitForDiagnostics(doc.uri, {
+        timeoutMs: 8_000,
+        predicate: () => false,
+      });
+
+      const summary = diags.map((d) => ({
+        source: d.source,
+        code: String(d.code),
+        message: d.message,
+        range: {
+          start: `${d.range.start.line}:${d.range.start.character}`,
+          end: `${d.range.end.line}:${d.range.end.character}`,
+        },
+      }));
+
+      console.log(`    MaybeRef repro diagnostics (${diags.length}): ${JSON.stringify(summary)}`);
+
+      const missingEndTag = diags.find(
+        (d) => d.source === "verter" && String(d.code) === "XMissingEndTag",
+      );
+
+      expect(
+        missingEndTag,
+        `Expected no verter XMissingEndTag for plain .ts MaybeRef generic. Got: ${JSON.stringify(summary)}`,
+      ).to.be.undefined;
+    } finally {
+      await vscode.workspace.fs.delete(fileUri, { useTrash: false });
     }
   });
 

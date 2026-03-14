@@ -33,6 +33,7 @@
     "test:e2e:run": "node out-test/e2e/runTests.js",
     "test:e2e:matrix": "pnpm run prepare:e2e && node out-test/e2e/runTests.js",
     "benchmark:startup": "node e2e/startupBenchmark.mjs",
+    "benchmark:completion": "node e2e/completionBenchmark.mjs",
     "package": "node package.mjs",
     "package:win32-x64": "node package.mjs --target win32-x64",
     "package:linux-x64": "node package.mjs --target linux-x64",

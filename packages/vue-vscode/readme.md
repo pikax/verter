@@ -185,6 +185,19 @@ Alternatively, use `pnpm dev-extension` to build the LSP binary and watch-build 
 pnpm --filter verter-vscode package
 ```
 
+### Benchmarking
+
+```bash
+# Cold-start typed completion benchmark
+pnpm --filter verter-vscode benchmark:startup
+
+# Steady-state script completion benchmark (tsserver, multi-run JSON summary)
+pnpm --filter verter-vscode benchmark:completion
+```
+
+The completion benchmark writes per-run and summary JSON files under
+`packages/vue-vscode/e2e/benchmarks/results/`.
+
 ### Troubleshooting
 
 | Problem                  | Solution                                                                                                             |
