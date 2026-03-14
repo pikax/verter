@@ -55,6 +55,7 @@ docs/.vitepress/cache
 packages/vue-vscode/bin/
 packages/vue-vscode/out-test/
 packages/vue-vscode/.vscode-test/
+.vscode-test/
 *.vsix
 
 # Scratch files
