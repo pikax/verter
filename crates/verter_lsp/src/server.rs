@@ -6908,6 +6908,13 @@ impl LanguageServer for VerterLanguageServer {
                         if resolved.ends_with(".vue") {
                             return self.documents.host().get_analysis(resolved);
                         }
+                        // Ensure the barrel file is loaded so we can inspect its exports
+                        if self.documents.host().get_analysis(resolved).is_none() {
+                            let _ = crate::compile_blockers::ensure_source_loaded_into_host(
+                                self.documents.host(),
+                                resolved,
+                            );
+                        }
                         // For non-.vue files (barrel/index), follow re-export chains if we know the component name
                         if let Some(name) = comp_name {
                             if let Some((terminal_id, _, _)) = self
@@ -6916,6 +6923,14 @@ impl LanguageServer for VerterLanguageServer {
                                 .get_export_span_follow_reexports(resolved, name)
                             {
                                 if terminal_id.ends_with(".vue") {
+                                    // Ensure the terminal .vue file is compiled
+                                    if self.documents.host().get_analysis(&terminal_id).is_none() {
+                                        let _ =
+                                            crate::compile_blockers::ensure_source_loaded_into_host(
+                                                self.documents.host(),
+                                                &terminal_id,
+                                            );
+                                    }
                                     return self.documents.host().get_analysis(&terminal_id);
                                 }
                             }

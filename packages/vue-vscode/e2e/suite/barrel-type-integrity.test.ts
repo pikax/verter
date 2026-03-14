@@ -7,6 +7,7 @@ import {
   measureHover,
   getCompletions,
   findPosition,
+  findNthPosition,
   hoverText,
   FIXTURE_NAME,
   TYPE_PROVIDER,
@@ -61,7 +62,9 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     if (!TYPE_PROVIDER) {
       const hasProps = content.includes("disabled") || content.includes("size");
       if (!hasProps) {
-        console.log("    Verter-only: barrel Button hover lacks detailed props (needs type provider)");
+        console.log(
+          "    Verter-only: barrel Button hover lacks detailed props (needs type provider)",
+        );
         return;
       }
     }
@@ -73,7 +76,9 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     );
 
     // Negative: must NOT be degraded shell
-    expect(content, "Button hover must NOT be DefineComponent<{}, {}>").to.not.include("DefineComponent<{}, {}>");
+    expect(content, "Button hover must NOT be DefineComponent<{}, {}>").to.not.include(
+      "DefineComponent<{}, {}>",
+    );
     expect(content, "Button hover must NOT degrade to any").to.not.match(/:\s*any\b/);
   });
 
@@ -106,7 +111,9 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     );
 
     // Negative: must NOT be degraded shell
-    expect(content, "Overlay hover must NOT be DefineComponent<{}, {}>").to.not.include("DefineComponent<{}, {}>");
+    expect(content, "Overlay hover must NOT be DefineComponent<{}, {}>").to.not.include(
+      "DefineComponent<{}, {}>",
+    );
     expect(content, "Overlay hover must NOT degrade to any").to.not.match(/:\s*any\b/);
   });
 
@@ -118,7 +125,8 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const pos = findPosition(doc, "<Button ", 8);
+    // Use the probe element (2nd occurrence) which has no existing props
+    const pos = findNthPosition(doc, "<Button ", 1, 8);
     if (!pos) {
       this.skip();
       return;
@@ -126,7 +134,9 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
 
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "Button completions should exist").to.exist;
-    expect(completions!.items.length, "Button completions should not be empty").to.be.greaterThan(0);
+    expect(completions!.items.length, "Button completions should not be empty").to.be.greaterThan(
+      0,
+    );
 
     const labels = completionLabels(completions!);
     console.log(`    <Button > completions: ${labels.slice(0, 20).join(", ")}`);
@@ -157,7 +167,8 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const pos = findPosition(doc, "<Overlay ", 9);
+    // Use the probe element (2nd occurrence) which has no existing props
+    const pos = findNthPosition(doc, "<Overlay ", 1, 9);
     if (!pos) {
       this.skip();
       return;
@@ -165,7 +176,9 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
 
     const completions = await getCompletions(doc.uri, pos);
     expect(completions, "Overlay completions should exist").to.exist;
-    expect(completions!.items.length, "Overlay completions should not be empty").to.be.greaterThan(0);
+    expect(completions!.items.length, "Overlay completions should not be empty").to.be.greaterThan(
+      0,
+    );
 
     const labels = completionLabels(completions!);
     console.log(`    <Overlay > completions: ${labels.slice(0, 20).join(", ")}`);
@@ -179,9 +192,10 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    expect(labels, "should include zIndex prop").to.include("zIndex");
+    // Props are offered in kebab-case by Verter
+    expect(labels, "should include z-index prop").to.include("z-index");
     expect(labels, "should include show prop").to.include("show");
-    expect(labels, "should include lockScroll prop").to.include("lockScroll");
+    expect(labels, "should include lock-scroll prop").to.include("lock-scroll");
     expect(labels, "should include duration prop").to.include("duration");
   });
 
@@ -210,7 +224,9 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     }
 
     // Negative: must NOT be plain any or degraded shell
-    expect(content, "Button import should NOT be DefineComponent<{}, {}>").to.not.include("DefineComponent<{}, {}>");
+    expect(content, "Button import should NOT be DefineComponent<{}, {}>").to.not.include(
+      "DefineComponent<{}, {}>",
+    );
     expect(content, "Button import should NOT be any").to.not.match(/:\s*any\b/);
   });
 
@@ -236,7 +252,9 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
       console.log("    TSGO: checking Overlay import binding for typed component");
     }
 
-    expect(content, "Overlay import should NOT be DefineComponent<{}, {}>").to.not.include("DefineComponent<{}, {}>");
+    expect(content, "Overlay import should NOT be DefineComponent<{}, {}>").to.not.include(
+      "DefineComponent<{}, {}>",
+    );
     expect(content, "Overlay import should NOT be any").to.not.match(/:\s*any\b/);
   });
 
@@ -265,13 +283,13 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     expect(content, ":show value should NOT be any").to.not.match(/:\s*any\b/);
   });
 
-  test("hover on :zIndex value shows number type", async function () {
+  test("hover on :zIndex prop name shows number type", async function () {
     if (!isBarrelFixture) {
       console.log("    N/A");
       return;
     }
 
-    const pos = findPosition(doc, ':zIndex="100"', 9); // on "100"
+    const pos = findPosition(doc, ':zIndex="100"', 1); // on "zIndex" (prop name)
     if (!pos) {
       this.skip();
       return;
@@ -281,20 +299,20 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
 
     // In verter-only mode, barrel component prop values may not get hover
     if (hovers.length === 0 && !TYPE_PROVIDER) {
-      console.log("    Verter-only: no hover for barrel component prop value (needs type provider)");
+      console.log("    Verter-only: no hover for barrel component prop name (needs type provider)");
       return;
     }
 
-    expect(hovers.length, ":zIndex value hover should exist").to.be.greaterThan(0);
+    expect(hovers.length, ":zIndex prop hover should exist").to.be.greaterThan(0);
 
     const content = hoverText(hovers[0]);
-    console.log(`    :zIndex value hover: ${content.slice(0, 200)}`);
+    console.log(`    :zIndex prop hover: ${content.slice(0, 200)}`);
 
-    // 100 is a number literal
-    expect(content, ":zIndex value should mention 100 or number").to.satisfy(
-      (c: string) => c.includes("100") || c.includes("number"),
+    // zIndex prop should show its type (number)
+    expect(content, ":zIndex prop should mention zIndex or number").to.satisfy(
+      (c: string) => c.includes("zIndex") || c.includes("number"),
     );
-    expect(content, ":zIndex value should NOT be any").to.not.match(/:\s*any\b/);
+    expect(content, ":zIndex prop should NOT be any").to.not.match(/:\s*any\b/);
   });
 
   test("hover on label= string value shows string type", async function () {

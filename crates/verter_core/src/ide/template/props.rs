@@ -663,12 +663,12 @@ fn process_v_on<'alloc>(
                     &format!("{{...{{\"{}\": {}}}}}", jsx_event_name, resolved_expr),
                 );
             } else if has_event_param {
-                // Inline expression with $event → wrap with ($event) => { ... }
+                // Inline expression with $event → wrap with eventCallbacks for type inference
                 out.overwrite(
                     prop.start,
                     prop_end,
                     &format!(
-                        "{{...{{\"{}\": ($event) => {{{}}}}}}}",
+                        "{{...{{\"{}\": (...___VERTER___eventArgs) => ___VERTER___eventCallbacks(___VERTER___eventArgs, ($event) => {{{}}})}}}}",
                         jsx_event_name, resolved_expr
                     ),
                 );
@@ -740,24 +740,23 @@ fn process_v_on<'alloc>(
             }
         } else if has_event_param {
             // $event can only exist inside a callback parameter scope.
+            // Use eventCallbacks wrapper for proper type inference:
+            //   onClick={(...___VERTER___eventArgs) => ___VERTER___eventCallbacks(___VERTER___eventArgs, ($event) => {EXPR})}
             let guard_prefix = v_if_guard
                 .map(|guard| format!("if (!({})) {{ return undefined; }} ", guard))
                 .unwrap_or_default();
+            let prefix = format!(
+                "{}={{(...___VERTER___eventArgs) => ___VERTER___eventCallbacks(___VERTER___eventArgs, ($event) => {{{}",
+                jsx_event_name, guard_prefix
+            );
+            let suffix = "})}";
             if expr_unchanged {
-                out.overwrite(
-                    prop.start,
-                    trimmed_vs,
-                    &format!("{}={{($event) => {{{}", jsx_event_name, guard_prefix),
-                );
-                out.overwrite(trimmed_ve, prop_end, "}}");
+                out.overwrite(prop.start, trimmed_vs, &prefix);
+                out.overwrite(trimmed_ve, prop_end, suffix);
             } else {
                 // Patch-based: preserve source map tokens inside callback body.
-                out.overwrite(
-                    prop.start,
-                    trimmed_vs,
-                    &format!("{}={{($event) => {{{}", jsx_event_name, guard_prefix),
-                );
-                out.overwrite(trimmed_ve, prop_end, "}}");
+                out.overwrite(prop.start, trimmed_vs, &prefix);
+                out.overwrite(trimmed_ve, prop_end, suffix);
                 if let Some(oxc_p) = oxc_prop {
                     if let Some(ref exp) = oxc_p.exp {
                         if let Some(ref bindings) = exp.bindings {

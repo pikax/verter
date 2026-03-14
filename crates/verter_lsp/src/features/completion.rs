@@ -129,7 +129,7 @@ pub fn completions_at_position(
                 TemplateCursorContext::AttributeName {
                     tag_name: _,
                     is_component,
-                    ..
+                    ref existing_attrs,
                 } => {
                     // For components, try to offer prop/event completions
                     if is_component {
@@ -139,6 +139,7 @@ pub fn completions_at_position(
                             source,
                             analysis,
                             resolve_component,
+                            existing_attrs,
                         ) {
                             return Some(CompletionResult {
                                 items,
@@ -1204,6 +1205,7 @@ fn component_prop_completions(
     source: &str,
     analysis: &FileAnalysisSnapshot,
     resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
+    existing_attrs: &[String],
 ) -> Option<Vec<CompletionItem>> {
     let template = analysis.template.as_deref()?;
 
@@ -1224,9 +1226,11 @@ fn component_prop_completions(
 
     let mut items = Vec::new();
 
-    // Collect already-used prop names to avoid offering duplicates
-    let used_props: std::collections::HashSet<String> =
-        comp_usage.props.iter().map(|p| p.name.clone()).collect();
+    // Collect already-used prop/event names on THIS element (not all usages of the component)
+    // to avoid offering duplicates. existing_attrs comes from cursor_context and contains
+    // only the attributes on the specific element at the cursor position.
+    let used_props: std::collections::HashSet<&str> =
+        existing_attrs.iter().map(|s| s.as_str()).collect();
 
     // --- Props ---
     // Try template.prop_definitions first (future type-provider enrichment),
@@ -1236,10 +1240,10 @@ fn component_prop_completions(
 
     if let (true, Some(child_template)) = (has_prop_defs, child_template) {
         for prop_def in &child_template.prop_definitions {
-            if used_props.contains(&prop_def.name) {
+            let label = to_kebab_case(&prop_def.name);
+            if used_props.contains(prop_def.name.as_str()) || used_props.contains(label.as_str()) {
                 continue;
             }
-            let label = to_kebab_case(&prop_def.name);
             let mut detail_parts = Vec::new();
             if let Some(ref ty) = prop_def.type_annotation {
                 detail_parts.push(ty.clone());
@@ -1276,10 +1280,12 @@ fn component_prop_completions(
         for m in child_analysis.macros.iter() {
             if m.kind == verter_analysis::AnalyzedMacroKind::DefineProps {
                 for field in &m.prop_fields {
-                    if used_props.contains(&field.name) {
+                    let label = to_kebab_case(&field.name);
+                    if used_props.contains(field.name.as_str())
+                        || used_props.contains(label.as_str())
+                    {
                         continue;
                     }
-                    let label = to_kebab_case(&field.name);
                     items.push(CompletionItem {
                         label: label.clone(),
                         kind: Some(CompletionItemKind::PROPERTY),

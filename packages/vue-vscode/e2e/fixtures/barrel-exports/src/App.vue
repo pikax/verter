@@ -16,5 +16,7 @@ function increment() { count.value++ }
     <Overlay :show="showOverlay" :zIndex="100" :lockScroll="true">
       <p>Overlay content</p>
     </Overlay>
+    <Button  />
+    <Overlay  />
   </div>
 </template>

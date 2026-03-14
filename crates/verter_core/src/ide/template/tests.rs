@@ -4331,20 +4331,23 @@ fn kebab_event_with_dollar_event_wraps_with_event_param() {
         r#"<template><div @click-overlay="emit('clickOverlay', $event)" /></template>"#,
         &[("emit", BindingType::SetupConst)],
     );
-    // Kebab event → spread syntax with ($event) callback
+    // Kebab event → spread syntax with eventCallbacks wrapper
     assert!(
-        result.contains(r#"($event) =>"#),
-        "should wrap with ($event) => callback: {result}"
+        result.contains("___VERTER___eventCallbacks"),
+        "should use eventCallbacks wrapper: {result}"
     );
     assert!(
         result.contains(r#""onClick-overlay""#),
         "should preserve kebab-case event name: {result}"
     );
-    // Negative: should NOT have bare () => (no $event)
-    let spread_part = result.split(r#""onClick-overlay""#).nth(1).unwrap_or("");
     assert!(
-        !spread_part.starts_with(": () =>"),
-        "should NOT use () => (without $event) when $event is used: {result}"
+        result.contains("...___VERTER___eventArgs"),
+        "should have rest args for eventCallbacks: {result}"
+    );
+    // Negative: should NOT have bare ($event) => without eventCallbacks
+    assert!(
+        !result.contains(r#"": ($event) =>"#),
+        "should NOT use bare ($event) => pattern: {result}"
     );
 }
 
@@ -6067,5 +6070,90 @@ fn bare_event_no_value_removed() {
     assert!(
         !result.contains("___VERTER___instance.click"),
         "bare @click must not produce instance.click binding: {result}"
+    );
+}
+
+// ── eventCallbacks wrapper for $event type inference ─────────────────────
+
+#[test]
+fn event_handler_with_event_param_uses_event_callbacks_native() {
+    let result =
+        gen_tsx_template(r#"<template><div @click="handleClick($event)">click</div></template>"#);
+    // Positive: should use eventCallbacks wrapper for $event type inference
+    assert!(
+        result.contains("___VERTER___eventCallbacks"),
+        "native event with $event should use eventCallbacks wrapper: {result}"
+    );
+    assert!(
+        result.contains("...___VERTER___eventArgs"),
+        "should have rest args for eventCallbacks: {result}"
+    );
+    // Positive: $event should still be present inside the inner callback
+    assert!(
+        result.contains("$event"),
+        "should still contain $event in inner callback: {result}"
+    );
+    // Negative: should NOT have bare ($event) => without eventCallbacks
+    assert!(
+        !result.contains("={($event) =>"),
+        "should NOT use bare ($event) => pattern, must use eventCallbacks: {result}"
+    );
+}
+
+#[test]
+fn event_handler_with_event_param_uses_event_callbacks_component() {
+    let result =
+        gen_tsx_template(r#"<template><MyComp @custom="handleCustom($event)" /></template>"#);
+    // Positive: should use eventCallbacks wrapper
+    assert!(
+        result.contains("___VERTER___eventCallbacks"),
+        "component event with $event should use eventCallbacks wrapper: {result}"
+    );
+    assert!(
+        result.contains("...___VERTER___eventArgs"),
+        "should have rest args for eventCallbacks: {result}"
+    );
+    // Negative: should NOT have bare ($event) =>
+    assert!(
+        !result.contains("={($event) =>"),
+        "should NOT use bare ($event) => pattern on component: {result}"
+    );
+}
+
+#[test]
+fn event_handler_without_event_param_no_event_callbacks() {
+    // Simple identifier — no eventCallbacks needed
+    let result = gen_tsx_template(r#"<template><div @click="handleClick">click</div></template>"#);
+    assert!(
+        !result.contains("___VERTER___eventCallbacks"),
+        "simple ident handler should NOT use eventCallbacks: {result}"
+    );
+
+    // Inline expression without $event — no eventCallbacks needed
+    let result2 = gen_tsx_template(r#"<template><div @click="count++">click</div></template>"#);
+    assert!(
+        !result2.contains("___VERTER___eventCallbacks"),
+        "inline expr without $event should NOT use eventCallbacks: {result2}"
+    );
+}
+
+#[test]
+fn event_handler_spread_with_event_param_uses_event_callbacks() {
+    let result = gen_tsx_template(
+        r#"<template><div @click-overlay="emit('clickOverlay', $event)" /></template>"#,
+    );
+    // Positive: spread path should also use eventCallbacks
+    assert!(
+        result.contains("___VERTER___eventCallbacks"),
+        "spread event with $event should use eventCallbacks wrapper: {result}"
+    );
+    assert!(
+        result.contains("...___VERTER___eventArgs"),
+        "spread event should have rest args: {result}"
+    );
+    // Negative: should NOT have bare ($event) => without eventCallbacks wrapping it
+    assert!(
+        !result.contains(r#"": ($event) =>"#),
+        "spread event should NOT use bare ($event) => pattern (without eventCallbacks): {result}"
     );
 }
