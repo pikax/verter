@@ -385,6 +385,8 @@ jobs:
           path: target/debug
       - name: Make LSP binary executable
         run: chmod +x target/debug/verter-lsp
+      - name: Prewarm tsgo cache
+        run: npx -y @typescript/native-preview --version
       - name: Download built extension
         uses: actions/download-artifact@v4
         with:

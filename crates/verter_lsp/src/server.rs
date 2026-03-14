@@ -6917,14 +6917,21 @@ impl LanguageServer for VerterLanguageServer {
                         self.documents.host().get_analysis(resolved)
                     };
 
-                // Try 1: Relative import → resolve against current file
+                // Try 1: Use resolve_import_specifier (handles relative, alias, index files)
+                if let Some(resolved) = self.resolve_import_specifier(&canonical_id, import_source)
+                {
+                    if let Some(a) = try_follow_reexport(&resolved, component_name) {
+                        return Some(a);
+                    }
+                }
+
+                // Try 2: Manual relative resolution (fallback for host-cached files not on disk)
                 if import_source.starts_with('.') {
                     let parts: Vec<&str> = canonical_id.split('/').collect();
                     let dir = parts[..parts.len().saturating_sub(1)].join("/");
                     let resolved = if let Some(stripped) = import_source.strip_prefix("./") {
                         format!("{}/{}", dir, stripped)
                     } else if import_source.starts_with("../") {
-                        // Simple parent resolution
                         let mut dir_parts: Vec<&str> = dir.split('/').collect();
                         let mut rel = import_source;
                         while let Some(rest) = rel.strip_prefix("../") {
@@ -6944,7 +6951,7 @@ impl LanguageServer for VerterLanguageServer {
                     }
                 }
 
-                // Try 2: Path alias resolution (per-project)
+                // Try 3: Path alias resolution (per-project)
                 {
                     let registry_guard = self.project_registry.read();
                     if let Some(ref registry) = *registry_guard {
@@ -6958,7 +6965,7 @@ impl LanguageServer for VerterLanguageServer {
                     }
                 }
 
-                // Try 3: Direct lookup (bare specifiers, already-resolved)
+                // Try 4: Direct lookup (bare specifiers, already-resolved)
                 try_follow_reexport(import_source, component_name)
             };
             // Build workspace component list for auto-import
@@ -10965,6 +10972,55 @@ mod tests {
             target.range.start.line,
             line_for_snippet(child_source, "custom: []"),
             "definition should point to the re-exported child emit declaration"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn completion_resolves_barrel_reexport_props_via_index_file() {
+        let child_source =
+            "<script setup lang=\"ts\">\ndefineProps<{ label: string; zIndex?: number }>()\n</script>\n";
+        let barrel_source = "export { default as BarrelComp } from './BarrelComp.vue'\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport { BarrelComp } from './components'\n</script>\n<template>\n  <BarrelComp  />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/components/BarrelComp.vue", "vue", child_source),
+                ("src/components/index.ts", "typescript", barrel_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let server = service.inner();
+
+        // Cursor at `<BarrelComp |/>` — in attribute position
+        let cursor_pos = parent_source.find("<BarrelComp ").unwrap() + "<BarrelComp ".len();
+        let line_index = LineIndex::new_utf16(parent_source);
+        let position = line_index.offset_to_position(cursor_pos as u32).unwrap();
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&app_uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        // Positive: child props should appear via barrel re-export
+        assert!(
+            labels.contains(&"label".to_string()),
+            "barrel-imported component should offer 'label' prop, got: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"z-index".to_string()),
+            "barrel-imported component should offer 'z-index' prop (kebab-case), got: {labels:?}"
+        );
+
+        // Negative: internal symbols must not leak
+        assert!(
+            !labels.iter().any(|l| l.contains("___VERTER___")),
+            "internal symbols must not leak: {labels:?}"
         );
 
         drain_handle.abort();
