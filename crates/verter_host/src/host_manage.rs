@@ -334,6 +334,15 @@ impl VerterHost {
         entry.latest_diagnostics.get(&profile_hash).cloned()
     }
 
+    /// Returns the monotonic diagnostics generation counter for a file.
+    /// Incremented on every write to `latest_diagnostics`. Used by the LSP
+    /// cache to detect host-driven recompiles without a document version change.
+    pub fn get_diagnostics_generation(&self, canonical_or_alias: &str) -> Option<u64> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let files = read_lock(&self.files);
+        files.get(&canonical).map(|e| e.diagnostics_generation)
+    }
+
     /// Invalidate compile outputs of files that depend on the given path.
     ///
     /// Unlike `remove()`, this works even when the dependency file was never

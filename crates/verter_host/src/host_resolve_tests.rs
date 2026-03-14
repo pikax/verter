@@ -1496,3 +1496,86 @@ fn expand_relative_candidates_handles_parent_traversal() {
         "should resolve parent traversal correctly"
     );
 }
+
+#[test]
+fn diagnostics_generation_increments_on_successful_recompile() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { Props } from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    // First compile — error path (missing macro type dep)
+    let _ = compile_main_error(&host, "/src/Comp.vue");
+    let gen1 = host
+        .get_diagnostics_generation("/src/Comp.vue")
+        .expect("gen should exist after first compile");
+    assert!(
+        gen1 >= 1,
+        "generation should be at least 1 after error-path compile"
+    );
+
+    // Load the dependency and recompile — success path
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { msg: string }",
+    );
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("compile should succeed after dep loaded");
+
+    let gen2 = host
+        .get_diagnostics_generation("/src/Comp.vue")
+        .expect("gen should exist after second compile");
+    assert!(
+        gen2 > gen1,
+        "diagnostics_generation should increment on success recompile: gen1={gen1}, gen2={gen2}"
+    );
+    assert!(
+        !response.diagnostics.has_errors,
+        "success compile should have no errors"
+    );
+    assert!(
+        !response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
+        "success compile should not contain HOST_MISSING_MACRO_TYPE_DEP: {:?}",
+        response.diagnostics.diagnostics
+    );
+}
+
+#[test]
+fn diagnostics_generation_increments_on_source_change() {
+    let host = strict_host();
+    let source1 = "<script setup lang=\"ts\">\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source1);
+
+    // Compile to populate latest_diagnostics
+    let _ = host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some("/src/Comp.vue".to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile(),
+    });
+    let gen1 = host
+        .get_diagnostics_generation("/src/Comp.vue")
+        .expect("gen should exist after compile");
+
+    // Upsert with different source — triggers latest_diagnostics.clear()
+    let source2 = "<script setup lang=\"ts\">\nconst b = 2\n</script>\n<template><div>{{ b }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source2);
+
+    let gen2 = host
+        .get_diagnostics_generation("/src/Comp.vue")
+        .expect("gen should exist after source change");
+    assert!(
+        gen2 > gen1,
+        "diagnostics_generation should increment on source change: gen1={gen1}, gen2={gen2}"
+    );
+}

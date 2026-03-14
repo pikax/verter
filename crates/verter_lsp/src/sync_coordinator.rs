@@ -68,9 +68,9 @@ pub struct SyncCoordinatorDeps {
     pub client: Client,
     /// Type provider for fetching TS diagnostics after sync.
     pub type_provider: Option<Arc<dyn TypeProvider>>,
-    /// Cached verter-only diagnostics (URI → (version, diagnostics)).
+    /// Cached verter-only diagnostics (URI → (version, diag_gen, diagnostics)).
     /// Shared with the server so we can read cached verter diags after sync.
-    pub cached_verter_diags: Arc<DashMap<String, (i32, Vec<Diagnostic>)>>,
+    pub cached_verter_diags: Arc<DashMap<String, crate::server::CachedVerterDiagEntry>>,
     /// Negotiated position encoding for building line indexes.
     pub position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
     /// Resolver snapshot for owner-aware provider path materialization.

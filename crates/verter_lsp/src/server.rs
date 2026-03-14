@@ -483,6 +483,11 @@ struct ResolvedComponentDocument {
 /// 3. `fallback_linter` (parking_lot::RwLock — only acquired after project_registry is released)
 ///
 /// Rule: Never acquire `fallback_linter` while holding `project_registry`.
+/// Cached verter diagnostic entry: (document_version, diagnostics_generation, diagnostics).
+/// The `diagnostics_generation` comes from `VerterHost::get_diagnostics_generation()` and
+/// detects host-driven recompiles (e.g., dependency hydration) without a document version change.
+pub(crate) type CachedVerterDiagEntry = (i32, u64, Vec<Diagnostic>);
+
 /// Pattern: check project_registry → drop guard → acquire fallback_linter if needed.
 pub struct VerterLanguageServer {
     client: Client,
@@ -516,7 +521,7 @@ pub struct VerterLanguageServer {
     /// Avoids re-running the linter when both push and pull paths request diagnostics
     /// for the same document version. Arc-wrapped so the SyncCoordinator can read
     /// cached verter diagnostics when publishing merged diagnostics after sync.
-    cached_verter_diags: Arc<DashMap<String, (i32, u64, Vec<Diagnostic>)>>,
+    cached_verter_diags: Arc<DashMap<String, CachedVerterDiagEntry>>,
     /// Source-keyed provider materialization state shared across background/live sync.
     provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     /// Which type provider backend is active (TSGO, tsserver, or none).
@@ -4624,7 +4629,7 @@ fn collect_priority_vue_targets_from_module_references(
 pub(crate) fn compute_verter_diagnostics_for(
     documents: &DocumentRegistry,
     uri: &Uri,
-    cached_verter_diags: &DashMap<String, (i32, u64, Vec<Diagnostic>)>,
+    cached_verter_diags: &DashMap<String, CachedVerterDiagEntry>,
     project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
     fallback_linter: &parking_lot::RwLock<verter_diagnostics::Linter>,
 ) -> Vec<Diagnostic> {
@@ -4730,7 +4735,10 @@ pub(crate) fn compute_verter_diagnostics_for(
 
     // Cache the result
     if let Some(doc) = documents.get(uri) {
-        cached_verter_diags.insert(uri_str.to_string(), (doc.version, diags.clone()));
+        cached_verter_diags.insert(
+            uri_str.to_string(),
+            (doc.version, current_diag_gen, diags.clone()),
+        );
     }
 
     diags
@@ -4835,7 +4843,7 @@ struct BackgroundInitArgs {
     provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     pending_snapshot_provider_sync: Arc<DashSet<String>>,
     is_tsgo: bool,
-    cached_verter_diags: Arc<DashMap<String, (i32, u64, Vec<Diagnostic>)>>,
+    cached_verter_diags: Arc<DashMap<String, CachedVerterDiagEntry>>,
     position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
     /// Snapshot of MRU list at init time for drain ordering.
     mru_canonical_ids: Arc<parking_lot::Mutex<Vec<String>>>,
@@ -15052,5 +15060,79 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         assert!(!is_vue_file("file:///project/src/utils.ts"));
         assert!(!is_vue_file("file:///project/tsconfig.json"));
         assert!(!is_vue_file("file:///project/vue.config.js"));
+    }
+
+    /// Proves that `compute_verter_diagnostics_for` bypasses its cache when the
+    /// host's `diagnostics_generation` changes (even if the document version hasn't).
+    #[test]
+    fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
+        use verter_host::{CompileErrorPolicy, FileKind, UpsertRequest};
+
+        let host = Arc::new(VerterHost::new(verter_host::HostConfig {
+            dev_mode: false,
+            compile_error_policy: CompileErrorPolicy::StrictError,
+            ..verter_host::HostConfig::default()
+        }));
+        let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+
+        // SFC with a macro type dep on ./types
+        let source = "<script setup lang=\"ts\">\nimport type { Props } from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
+        let uri: Uri = "file:///workspace/src/Comp.vue".parse().unwrap();
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+
+        let cached_verter_diags = Arc::new(DashMap::new());
+        let project_registry = Arc::new(parking_lot::RwLock::new(None));
+        let fallback_linter = Arc::new(parking_lot::RwLock::new(verter_diagnostics::Linter::new(
+            verter_diagnostics::LintConfig::default(),
+        )));
+
+        // First call — should contain HOST_MISSING_MACRO_TYPE_DEP
+        let diags1 = compute_verter_diagnostics_for(
+            &documents,
+            &uri,
+            &cached_verter_diags,
+            &project_registry,
+            &fallback_linter,
+        );
+        assert!(
+            diags1.iter().any(|d| matches!(
+                &d.code,
+                Some(NumberOrString::String(c)) if c.contains("HOST_MISSING_MACRO_TYPE_DEP")
+            )),
+            "first call should contain HOST_MISSING_MACRO_TYPE_DEP, got: {diags1:?}"
+        );
+
+        // Load the dependency
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/types.ts".to_string(),
+            source: Arc::from("export interface Props { msg: string }"),
+            file_kind: FileKind::NonSfc,
+            aliases: vec![],
+        });
+
+        // Force recompile with the tsx_profile (same as documents.get_diagnostics uses)
+        let _ = host.ensure_compiled("/workspace/src/Comp.vue", &documents.tsx_profile.read());
+
+        // Second call — same doc version, but diagnostics_generation changed
+        let diags2 = compute_verter_diagnostics_for(
+            &documents,
+            &uri,
+            &cached_verter_diags,
+            &project_registry,
+            &fallback_linter,
+        );
+        assert!(
+            !diags2.iter().any(|d| matches!(
+                &d.code,
+                Some(NumberOrString::String(c)) if c.contains("HOST_MISSING_MACRO_TYPE_DEP")
+            )),
+            "second call should NOT contain HOST_MISSING_MACRO_TYPE_DEP after dep loaded, got: {diags2:?}"
+        );
     }
 }
