@@ -2749,15 +2749,20 @@ impl VerterLanguageServer {
     }
 
     /// Resolve a child component with full context for cross-file editing.
+    ///
+    /// When `component_name` is provided and the import resolves to a non-`.vue`
+    /// file (e.g. a barrel `index.ts`), follows re-export chains via
+    /// `get_export_span_follow_reexports` to reach the terminal `.vue` file.
     fn resolve_component_context(
         &self,
         parent_uri: &Uri,
         import_source: &str,
+        component_name: Option<&str>,
     ) -> Option<crate::features::cross_file::ChildComponentContext> {
         let canonical_id = uri_to_canonical_id(parent_uri);
 
         // Resolve the child's canonical ID
-        let child_canonical_id = self
+        let mut child_canonical_id = self
             .resolve_import_specifier(&canonical_id, import_source)
             .unwrap_or_else(|| {
                 if import_source.starts_with('.') {
@@ -2775,6 +2780,35 @@ impl VerterLanguageServer {
                     }
                 }
             });
+
+        // Follow barrel re-export chains: if the resolved file is not a .vue file
+        // and we know the component name, look up the re-export chain to find the
+        // terminal .vue file (e.g. ./components/index.ts → ./components/Button.vue).
+        if !child_canonical_id.ends_with(".vue") {
+            if let Some(name) = component_name {
+                // Ensure the barrel file is loaded so we can inspect its exports
+                if self
+                    .documents
+                    .host()
+                    .get_analysis(&child_canonical_id)
+                    .is_none()
+                {
+                    let _ = crate::compile_blockers::ensure_source_loaded_into_host(
+                        self.documents.host(),
+                        &child_canonical_id,
+                    );
+                }
+                if let Some((resolved_id, _, _)) = self
+                    .documents
+                    .host()
+                    .get_export_span_follow_reexports(&child_canonical_id, name)
+                {
+                    if resolved_id.ends_with(".vue") {
+                        child_canonical_id = resolved_id;
+                    }
+                }
+            }
+        }
 
         if self
             .documents
@@ -2804,6 +2838,18 @@ impl VerterLanguageServer {
         let analysis = self
             .resolve_component(parent_uri, import_source)
             .or_else(|| self.documents.host().get_analysis(&child_canonical_id))?;
+
+        // If the analysis came from the barrel file but we resolved to a .vue file,
+        // prefer the .vue file's analysis for accurate prop/emit information.
+        let analysis = if child_canonical_id.ends_with(".vue") {
+            self.documents
+                .host()
+                .get_analysis(&child_canonical_id)
+                .unwrap_or(analysis)
+        } else {
+            analysis
+        };
+
         // Get the child's source
         let child_source_arc = self.documents.host().get_source(&child_canonical_id)?;
         let child_source = child_source_arc.to_string();
@@ -2828,7 +2874,11 @@ impl VerterLanguageServer {
     ) -> Option<Hover> {
         match target {
             hover::ChildHoverTarget::ComponentTag(target) => {
-                let child = self.resolve_component_context(parent_uri, &target.import_source)?;
+                let child = self.resolve_component_context(
+                    parent_uri,
+                    &target.import_source,
+                    Some(&target.component_name),
+                )?;
                 let public_api = self
                     .documents
                     .host()
@@ -2864,7 +2914,8 @@ impl VerterLanguageServer {
                 ))
             }
             hover::ChildHoverTarget::EventAttribute(target) => {
-                let child = self.resolve_component_context(parent_uri, &target.import_source)?;
+                let child =
+                    self.resolve_component_context(parent_uri, &target.import_source, None)?;
                 let public_api = self
                     .documents
                     .host()
@@ -6841,53 +6892,75 @@ impl LanguageServer for VerterLanguageServer {
             let analysis = self.documents.get_analysis(uri);
             let blocks = scan_sfc_blocks(&doc.source);
             let canonical_id = crate::documents::uri_to_canonical_id(uri);
-            let resolve_component =
-                |import_source: &str| -> Option<verter_host::FileAnalysisSnapshot> {
-                    // Try 1: Relative import → resolve against current file
-                    if import_source.starts_with('.') {
-                        let parts: Vec<&str> = canonical_id.split('/').collect();
-                        let dir = parts[..parts.len().saturating_sub(1)].join("/");
-                        let resolved = if let Some(stripped) = import_source.strip_prefix("./") {
-                            format!("{}/{}", dir, stripped)
-                        } else if import_source.starts_with("../") {
-                            // Simple parent resolution
-                            let mut dir_parts: Vec<&str> = dir.split('/').collect();
-                            let mut rel = import_source;
-                            while let Some(rest) = rel.strip_prefix("../") {
-                                dir_parts.pop();
-                                rel = rest;
-                            }
-                            format!(
-                                "{}/{}",
-                                dir_parts.join("/"),
-                                rel.strip_prefix("./").unwrap_or(rel)
-                            )
-                        } else {
-                            format!("{}/{}", dir, import_source)
-                        };
-                        if let Some(a) = self.documents.host().get_analysis(&resolved) {
-                            return Some(a);
+            let resolve_component = |import_source: &str,
+                                     component_name: Option<&str>|
+             -> Option<verter_host::FileAnalysisSnapshot> {
+                let try_follow_reexport =
+                    |resolved: &str,
+                     comp_name: Option<&str>|
+                     -> Option<verter_host::FileAnalysisSnapshot> {
+                        if resolved.ends_with(".vue") {
+                            return self.documents.host().get_analysis(resolved);
                         }
-                    }
-
-                    // Try 2: Path alias resolution (per-project)
-                    {
-                        let registry_guard = self.project_registry.read();
-                        if let Some(ref registry) = *registry_guard {
-                            if let Some(resolved_path) =
-                                registry.resolve_alias(&canonical_id, import_source)
+                        // For non-.vue files (barrel/index), follow re-export chains if we know the component name
+                        if let Some(name) = comp_name {
+                            if let Some((terminal_id, _, _)) = self
+                                .documents
+                                .host()
+                                .get_export_span_follow_reexports(resolved, name)
                             {
-                                if let Some(a) = self.documents.host().get_analysis(&resolved_path)
-                                {
-                                    return Some(a);
+                                if terminal_id.ends_with(".vue") {
+                                    return self.documents.host().get_analysis(&terminal_id);
                                 }
                             }
                         }
-                    }
+                        self.documents.host().get_analysis(resolved)
+                    };
 
-                    // Try 3: Direct lookup (bare specifiers, already-resolved)
-                    self.documents.host().get_analysis(import_source)
-                };
+                // Try 1: Relative import → resolve against current file
+                if import_source.starts_with('.') {
+                    let parts: Vec<&str> = canonical_id.split('/').collect();
+                    let dir = parts[..parts.len().saturating_sub(1)].join("/");
+                    let resolved = if let Some(stripped) = import_source.strip_prefix("./") {
+                        format!("{}/{}", dir, stripped)
+                    } else if import_source.starts_with("../") {
+                        // Simple parent resolution
+                        let mut dir_parts: Vec<&str> = dir.split('/').collect();
+                        let mut rel = import_source;
+                        while let Some(rest) = rel.strip_prefix("../") {
+                            dir_parts.pop();
+                            rel = rest;
+                        }
+                        format!(
+                            "{}/{}",
+                            dir_parts.join("/"),
+                            rel.strip_prefix("./").unwrap_or(rel)
+                        )
+                    } else {
+                        format!("{}/{}", dir, import_source)
+                    };
+                    if let Some(a) = try_follow_reexport(&resolved, component_name) {
+                        return Some(a);
+                    }
+                }
+
+                // Try 2: Path alias resolution (per-project)
+                {
+                    let registry_guard = self.project_registry.read();
+                    if let Some(ref registry) = *registry_guard {
+                        if let Some(resolved_path) =
+                            registry.resolve_alias(&canonical_id, import_source)
+                        {
+                            if let Some(a) = try_follow_reexport(&resolved_path, component_name) {
+                                return Some(a);
+                            }
+                        }
+                    }
+                }
+
+                // Try 3: Direct lookup (bare specifiers, already-resolved)
+                try_follow_reexport(import_source, component_name)
+            };
             // Build workspace component list for auto-import
             let ws_components = build_workspace_components(&self.documents.host, &canonical_id);
             completions_at_position(
@@ -8133,7 +8206,7 @@ impl LanguageServer for VerterLanguageServer {
                 if let Some(ref analysis) = analysis {
                     let comp_actions = crate::features::component_actions::component_code_actions(
                         analysis,
-                        &|import_source| self.resolve_component_context(uri, import_source),
+                        &|import_source| self.resolve_component_context(uri, import_source, None),
                     );
                     all_actions.extend(comp_actions);
 
@@ -8144,7 +8217,9 @@ impl LanguageServer for VerterLanguageServer {
                             &doc.source,
                             &doc.line_index,
                             uri,
-                            &|import_source| self.resolve_component_context(uri, import_source),
+                            &|import_source| {
+                                self.resolve_component_context(uri, import_source, None)
+                            },
                         );
                     all_actions.extend(suggest_actions);
 

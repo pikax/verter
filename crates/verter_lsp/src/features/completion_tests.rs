@@ -2371,8 +2371,8 @@ fn test_component_prop_completions_from_macros() {
     let cursor_pos = source.find("<MyChild >").unwrap() + "<MyChild ".len();
     let pos = line_index.offset_to_position(cursor_pos as u32).unwrap();
 
-    let resolve: Box<dyn Fn(&str) -> Option<FileAnalysisSnapshot>> =
-        Box::new(move |source_path: &str| {
+    let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
+        Box::new(move |source_path: &str, _component_name: Option<&str>| {
             if source_path == "./MyChild.vue" {
                 Some(child_analysis.clone())
             } else {

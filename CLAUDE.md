@@ -132,8 +132,7 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 
 **TSGO known limitations**:
 1. Re-exported `.vue` components (e.g. barrel files like `export { default as MyComp } from './MyComp.vue'`) lose their typing when imported in another SFC.
-2. Path aliases from composite/referenced tsconfig files (e.g., `paths` in `tsconfig.app.json` referenced by root `tsconfig.json`) are not resolved. This is a TSGO upstream limitation — TSGO does not follow `references` in solution-style tsconfig setups. Users with composite tsconfigs should use tsserver instead.
-3. Without a `tsconfig.json` on disk, TSGO cannot discover project configuration. Projects without a tsconfig should use tsserver instead (which supports inferred project options). The server sends `$/verter/tsgoLimitation` when this is detected.
+2. Without a `tsconfig.json` on disk, TSGO cannot discover project configuration. Projects without a tsconfig should use tsserver instead (which supports inferred project options). The server sends `$/verter/tsgoLimitation` when this is detected.
 
 This is why `auto` mode defaults to tsserver. A warning is shown when TSGO is active. Remove the warning once these are resolved.
 

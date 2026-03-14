@@ -12,10 +12,7 @@ import {
 // ── Helpers ─────────────────────────────────────────────────────
 
 /** Execute go-to-definition at a position and return locations. */
-async function getDefinitions(
-  uri: vscode.Uri,
-  pos: vscode.Position,
-): Promise<vscode.Location[]> {
+async function getDefinitions(uri: vscode.Uri, pos: vscode.Position): Promise<vscode.Location[]> {
   const locations = await vscode.commands.executeCommand<vscode.Location[]>(
     "vscode.executeDefinitionProvider",
     uri,
@@ -169,7 +166,7 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const text = doc.getText();
     const clickMatch = text.indexOf('@click="increment"');
     if (clickMatch === -1) {
-      console.log("    @click=\"increment\" not in fixture — skip");
+      console.log('    @click="increment" not in fixture — skip');
       this.skip();
       return;
     }
@@ -248,7 +245,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on <MyComp: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -281,15 +280,23 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    CTRL+click on <WrappedButton: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
 
-    const def = locations.find((location) => location.uri.fsPath.includes("WrappedButton.vue")) || locations[0];
-    expect(def.uri.fsPath, "definition should reach WrappedButton.vue").to.include("WrappedButton.vue");
+    const def =
+      locations.find((location) => location.uri.fsPath.includes("WrappedButton.vue")) ||
+      locations[0];
+    expect(def.uri.fsPath, "definition should reach WrappedButton.vue").to.include(
+      "WrappedButton.vue",
+    );
     expect(def.uri.fsPath, "should not stay in App.vue").to.not.equal(doc.uri.fsPath);
-    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(/\.vue\.(?:d\.ts|ts|tsx)$/);
+    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(
+      /\.vue\.(?:d\.ts|ts|tsx)$/,
+    );
   });
 
   test("B1c: CTRL+click on direct imported WrappedButton binding reaches WrappedButton.vue", async function () {
@@ -307,15 +314,23 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    CTRL+click on WrappedButton import: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
 
-    const def = locations.find((location) => location.uri.fsPath.includes("WrappedButton.vue")) || locations[0];
-    expect(def.uri.fsPath, "definition should reach WrappedButton.vue").to.include("WrappedButton.vue");
+    const def =
+      locations.find((location) => location.uri.fsPath.includes("WrappedButton.vue")) ||
+      locations[0];
+    expect(def.uri.fsPath, "definition should reach WrappedButton.vue").to.include(
+      "WrappedButton.vue",
+    );
     expect(def.uri.fsPath, "should not stay in App.vue").to.not.equal(doc.uri.fsPath);
-    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(/\.vue\.(?:d\.ts|ts|tsx)$/);
+    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(
+      /\.vue\.(?:d\.ts|ts|tsx)$/,
+    );
   });
 
   test("B2: go-to-definition on barrel-imported component tag reaches actual .vue", async function () {
@@ -338,7 +353,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const def = locations[0];
 
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Overlay.vue")) {
-      console.log("    Verter-only: barrel re-export definition stops at index.ts (needs type provider)");
+      console.log(
+        "    Verter-only: barrel re-export definition stops at index.ts (needs type provider)",
+      );
       return;
     }
 
@@ -379,7 +396,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const def = locations[0];
 
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Button.vue")) {
-      console.log("    Verter-only: barrel re-export definition stops at index.ts (needs type provider)");
+      console.log(
+        "    Verter-only: barrel re-export definition stops at index.ts (needs type provider)",
+      );
       return;
     }
 
@@ -412,7 +431,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on formatCount import: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -448,7 +469,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on formatCount usage: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -485,7 +508,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const def = locations[0];
 
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Overlay.vue")) {
-      console.log("    Verter-only: barrel import binding resolves to index.ts (needs type provider)");
+      console.log(
+        "    Verter-only: barrel import binding resolves to index.ts (needs type provider)",
+      );
       return;
     }
 
@@ -524,7 +549,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const def = locations[0];
 
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Button.vue")) {
-      console.log("    Verter-only: barrel import binding resolves to index.ts (needs type provider)");
+      console.log(
+        "    Verter-only: barrel import binding resolves to index.ts (needs type provider)",
+      );
       return;
     }
 
@@ -583,7 +610,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on <Overlay TAG: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -591,7 +620,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const def = locations[0];
 
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Overlay.vue")) {
-      console.log("    Verter-only: barrel component TAG resolves to index.ts (needs type provider)");
+      console.log(
+        "    Verter-only: barrel component TAG resolves to index.ts (needs type provider)",
+      );
       return;
     }
 
@@ -629,7 +660,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on foo prop: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -640,10 +673,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     expect(def.uri.fsPath, "definition should be in MyComp.vue").to.include("MyComp.vue");
 
     // Negative: NOT same file (must not stay at usage site)
-    expect(
-      def.uri.fsPath,
-      "prop definition should NOT stay at usage site in parent",
-    ).to.not.equal(doc.uri.fsPath);
+    expect(def.uri.fsPath, "prop definition should NOT stay at usage site in parent").to.not.equal(
+      doc.uri.fsPath,
+    );
 
     // Negative: NOT generated .tsx
     expect(def.uri.fsPath, "should NOT be in generated .tsx").to.not.match(/\.vue\.tsx$/);
@@ -679,7 +711,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on :bar prop: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -690,10 +724,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     expect(def.uri.fsPath, "definition should be in MyComp.vue").to.include("MyComp.vue");
 
     // Negative: NOT same file
-    expect(
-      def.uri.fsPath,
-      "prop definition should NOT stay at usage site in parent",
-    ).to.not.equal(doc.uri.fsPath);
+    expect(def.uri.fsPath, "prop definition should NOT stay at usage site in parent").to.not.equal(
+      doc.uri.fsPath,
+    );
 
     // Negative: NOT generated .tsx
     expect(def.uri.fsPath, "should NOT be in generated .tsx").to.not.match(/\.vue\.tsx$/);
@@ -725,15 +758,23 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    CTRL+click on WrappedButton variant: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
 
-    const def = locations.find((location) => location.uri.fsPath.includes("WrappedButton.vue")) || locations[0];
-    expect(def.uri.fsPath, "definition should be in WrappedButton.vue").to.include("WrappedButton.vue");
+    const def =
+      locations.find((location) => location.uri.fsPath.includes("WrappedButton.vue")) ||
+      locations[0];
+    expect(def.uri.fsPath, "definition should be in WrappedButton.vue").to.include(
+      "WrappedButton.vue",
+    );
     expect(def.uri.fsPath, "should not stay in App.vue").to.not.equal(doc.uri.fsPath);
-    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(/\.vue\.(?:d\.ts|ts|tsx)$/);
+    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(
+      /\.vue\.(?:d\.ts|ts|tsx)$/,
+    );
 
     const childDoc = await vscode.workspace.openTextDocument(def.uri);
     const childText = childDoc.getText();
@@ -768,7 +809,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const def = locations[0];
 
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Button.vue")) {
-      console.log("    Verter-only: barrel component prop resolves to index.ts (needs type provider)");
+      console.log(
+        "    Verter-only: barrel component prop resolves to index.ts (needs type provider)",
+      );
       return;
     }
 
@@ -780,10 +823,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     expect(def.uri.fsPath, "definition should be in Button.vue").to.include("Button.vue");
 
     // Negative: NOT same file (must not stay at usage site)
-    expect(
-      def.uri.fsPath,
-      "prop definition should NOT stay at usage site in parent",
-    ).to.not.equal(doc.uri.fsPath);
+    expect(def.uri.fsPath, "prop definition should NOT stay at usage site in parent").to.not.equal(
+      doc.uri.fsPath,
+    );
 
     // Negative: NOT barrel file
     expect(def.uri.fsPath, "should NOT stop at barrel index.ts").to.not.include("index.ts");
@@ -797,9 +839,10 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const labelInDefineProps = childText.indexOf("label: string");
     if (labelInDefineProps !== -1) {
       const expectedLine = childDoc.positionAt(labelInDefineProps).line;
-      expect(def.range.start.line, "definition should point to 'label' in defineProps type").to.equal(
-        expectedLine,
-      );
+      expect(
+        def.range.start.line,
+        "definition should point to 'label' in defineProps type",
+      ).to.equal(expectedLine);
     }
   });
 
@@ -825,7 +868,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const def = locations[0];
 
     if (!TYPE_PROVIDER && !def.uri.fsPath.includes("Overlay.vue")) {
-      console.log("    Verter-only: barrel component prop resolves to index.ts (needs type provider)");
+      console.log(
+        "    Verter-only: barrel component prop resolves to index.ts (needs type provider)",
+      );
       return;
     }
 
@@ -837,10 +882,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     expect(def.uri.fsPath, "definition should be in Overlay.vue").to.include("Overlay.vue");
 
     // Negative: NOT same file
-    expect(
-      def.uri.fsPath,
-      "prop definition should NOT stay at usage site in parent",
-    ).to.not.equal(doc.uri.fsPath);
+    expect(def.uri.fsPath, "prop definition should NOT stay at usage site in parent").to.not.equal(
+      doc.uri.fsPath,
+    );
 
     // Negative: NOT barrel file
     expect(def.uri.fsPath, "should NOT stop at barrel index.ts").to.not.include("index.ts");
@@ -854,9 +898,10 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const showInDefineProps = childText.indexOf("show?: boolean");
     if (showInDefineProps !== -1) {
       const expectedLine = childDoc.positionAt(showInDefineProps).line;
-      expect(def.range.start.line, "definition should point to 'show' in defineProps type").to.equal(
-        expectedLine,
-      );
+      expect(
+        def.range.start.line,
+        "definition should point to 'show' in defineProps type",
+      ).to.equal(expectedLine);
     }
   });
 
@@ -949,7 +994,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
       const fnDecl = text.indexOf("function increment()");
       if (fnDecl !== -1) {
         const expectedLine = doc.positionAt(fnDecl).line;
-        expect(def.range.start.line, "should navigate to function declaration").to.equal(expectedLine);
+        expect(def.range.start.line, "should navigate to function declaration").to.equal(
+          expectedLine,
+        );
       }
     }
   });
@@ -981,7 +1028,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const fnDecl = text.indexOf("function handleCustom(");
     if (fnDecl !== -1) {
       const expectedLine = doc.positionAt(fnDecl).line;
-      expect(def.range.start.line, "should navigate to handleCustom declaration").to.equal(expectedLine);
+      expect(def.range.start.line, "should navigate to handleCustom declaration").to.equal(
+        expectedLine,
+      );
     }
 
     expect(def.uri.fsPath, "should NOT be in generated .tsx").to.not.match(/\.vue\.tsx$/);
@@ -1002,15 +1051,20 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    CTRL+click on @custom: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
 
-    const def = locations.find((location) => location.uri.fsPath.includes("MyComp.vue")) || locations[0];
+    const def =
+      locations.find((location) => location.uri.fsPath.includes("MyComp.vue")) || locations[0];
     expect(def.uri.fsPath, "definition should reach MyComp.vue").to.include("MyComp.vue");
     expect(def.uri.fsPath, "should not stay in App.vue").to.not.equal(doc.uri.fsPath);
-    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(/\.vue\.(?:d\.ts|ts|tsx)$/);
+    expect(def.uri.fsPath, "should not jump to a generated virtual file").to.not.match(
+      /\.vue\.(?:d\.ts|ts|tsx)$/,
+    );
 
     const childDoc = await vscode.workspace.openTextDocument(def.uri);
     const childText = childDoc.getText();
@@ -1038,7 +1092,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    CTRL+click on @alert: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -1082,7 +1138,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on <SharedComp: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -1104,6 +1162,8 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
       console.log("    pass (N/A for this fixture)");
       return;
     }
+    // TSGO nightly: cross-package definition resolution unreliable
+    if (TYPE_PROVIDER === "tsgo") return this.skip();
 
     const pos = findPosition(doc, "{ helper }", 2);
     if (!pos) {
@@ -1114,7 +1174,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on helper import: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -1133,6 +1195,8 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
       console.log("    pass (N/A for this fixture)");
       return;
     }
+    // TSGO nightly: cross-package definition resolution unreliable
+    if (TYPE_PROVIDER === "tsgo") return this.skip();
 
     const pos = findPosition(doc, "helper()", 0);
     if (!pos) {
@@ -1143,7 +1207,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on helper() usage: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -1174,17 +1240,14 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on <HelloWorld: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
 
     const def = locations.find((l) => l.uri.fsPath.includes("HelloWorld.vue")) || locations[0];
-
-    if (TYPE_PROVIDER === "tsgo" && !def.uri.fsPath.includes("HelloWorld.vue")) {
-      console.log("    TSGO CANARY: composite-paths component not resolved (known limitation)");
-      return;
-    }
 
     // Positive: navigates to HelloWorld.vue
     expect(def.uri.fsPath, "definition should be in HelloWorld.vue").to.include("HelloWorld.vue");
@@ -1211,17 +1274,14 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on double import: ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
 
     const def = locations[0];
-
-    if (TYPE_PROVIDER === "tsgo" && !def.uri.fsPath.includes("math.ts")) {
-      console.log("    TSGO CANARY: composite-paths import not resolved (known limitation)");
-      return;
-    }
 
     // Positive: navigates to math.ts
     expect(def.uri.fsPath, "definition should be in math.ts").to.include("math.ts");
@@ -1247,7 +1307,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on <MyComp (tsconfig-references): ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);
@@ -1279,7 +1341,9 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     const locations = await getDefinitions(doc.uri, pos);
     console.log(`    Definition on <MyComp (tsconfig-extends): ${locations.length} location(s)`);
     for (const loc of locations) {
-      console.log(`      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`);
+      console.log(
+        `      -> ${loc.uri.fsPath} L${loc.range.start.line}:${loc.range.start.character}`,
+      );
     }
 
     expect(locations.length, "should have at least 1 definition").to.be.greaterThan(0);

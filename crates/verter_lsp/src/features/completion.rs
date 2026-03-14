@@ -34,7 +34,8 @@ pub struct WorkspaceComponent {
 /// 3. For expression contexts, TypeProvider supplements/replaces verter completions
 ///
 /// The optional `resolve_component` callback takes an import source (e.g., `./Button.vue`)
-/// and returns that component's analysis snapshot, enabling cross-file prop completions.
+/// and an optional component name (for barrel re-export following), returning that
+/// component's analysis snapshot for cross-file prop completions.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn completions_at_position(
     position: &Position,
@@ -42,7 +43,7 @@ pub fn completions_at_position(
     blocks: &[SfcBlock],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
-    resolve_component: Option<&dyn Fn(&str) -> Option<FileAnalysisSnapshot>>,
+    resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
     workspace_components: Option<&[WorkspaceComponent]>,
     doc_uri: Option<&str>,
     ssr_context: bool,
@@ -1202,7 +1203,7 @@ fn component_prop_completions(
     offset: usize,
     source: &str,
     analysis: &FileAnalysisSnapshot,
-    resolve_component: Option<&dyn Fn(&str) -> Option<FileAnalysisSnapshot>>,
+    resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
 ) -> Option<Vec<CompletionItem>> {
     let template = analysis.template.as_deref()?;
 
@@ -1217,9 +1218,9 @@ fn component_prop_completions(
 
     let import_source = comp_usage.import_source.as_ref()?;
 
-    // Resolve the component's analysis
+    // Resolve the component's analysis (pass component name for barrel re-export following)
     let resolve_fn = resolve_component?;
-    let child_analysis = resolve_fn(import_source)?;
+    let child_analysis = resolve_fn(import_source, Some(&comp_usage.name))?;
 
     let mut items = Vec::new();
 

@@ -29,15 +29,18 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
   };
 
   const formatDiagnostics = (diagnostics: vscode.Diagnostic[]): string =>
-    diagnostics.map((diagnostic) => `${diagnostic.source ?? "unknown"}:${diagnosticCode(diagnostic)} ${diagnostic.message}`).join("; ");
+    diagnostics
+      .map(
+        (diagnostic) =>
+          `${diagnostic.source ?? "unknown"}:${diagnosticCode(diagnostic)} ${diagnostic.message}`,
+      )
+      .join("; ");
 
   const isModuleNotFoundDiagnostic = (diagnostic: vscode.Diagnostic): boolean =>
-    diagnostic.message.includes("Cannot find module") &&
-    diagnosticCode(diagnostic) === "2307";
+    diagnostic.message.includes("Cannot find module") && diagnosticCode(diagnostic) === "2307";
 
   const isVueTsModuleDiagnostic = (diagnostic: vscode.Diagnostic): boolean =>
-    isModuleNotFoundDiagnostic(diagnostic) &&
-    diagnostic.message.includes(".vue.ts");
+    isModuleNotFoundDiagnostic(diagnostic) && diagnostic.message.includes(".vue.ts");
 
   const isTsExtensionDiagnostic = (diagnostic: vscode.Diagnostic): boolean =>
     diagnosticCode(diagnostic) === "5097" ||
@@ -72,22 +75,6 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
     const doc = await openVueFile(getAppVuePath());
     await waitForFileReady(doc);
 
-    // TSGO CANARY: composite-paths with TSGO should have module errors because
-    // TSGO cannot resolve path aliases from referenced tsconfigs (upstream limitation).
-    // If this test starts FAILING, TSGO has fixed the limitation — update auto-mode
-    // detection in main.rs and remove this canary.
-    if (FIXTURE_NAME === "composite-paths" && TYPE_PROVIDER === "tsgo") {
-      const diags = vscode.languages.getDiagnostics(doc.uri);
-      const moduleErrors = diags.filter(isModuleNotFoundDiagnostic);
-      expect(
-        moduleErrors.length,
-        "TSGO CANARY: composite-paths @/ aliases should fail on TSGO (known upstream limitation). " +
-          "If this fails, TSGO may have fixed composite tsconfig path resolution — " +
-          "update auto-mode detection in main.rs and remove this canary.",
-      ).to.be.greaterThan(0);
-      return;
-    }
-
     await expectNoForbiddenDiagnostics(
       doc,
       isModuleNotFoundDiagnostic,
@@ -106,19 +93,8 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
 
     const diags = vscode.languages.getDiagnostics(doc.uri);
     const aliasErrors = diags.filter(
-      (d) =>
-        d.message.includes("Cannot find module") && d.message.includes("@/"),
+      (d) => d.message.includes("Cannot find module") && d.message.includes("@/"),
     );
-
-    // TSGO CANARY: same as above — @/ aliases should fail on TSGO for composite-paths.
-    if (FIXTURE_NAME === "composite-paths" && TYPE_PROVIDER === "tsgo") {
-      expect(
-        aliasErrors.length,
-        "TSGO CANARY: @/ alias imports should fail on TSGO for composite-paths. " +
-          "If this fails, TSGO may have fixed composite tsconfig path resolution.",
-      ).to.be.greaterThan(0);
-      return;
-    }
 
     expect(
       aliasErrors,
@@ -135,24 +111,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
     const doc = await openVueFile(getAppVuePath());
     await waitForFileReady(doc);
 
-    // TSGO CANARY: composite-paths .vue.ts errors are caused by unresolved @/ aliases
-    // (same root cause as the path alias canary above).
-    if (FIXTURE_NAME === "composite-paths" && TYPE_PROVIDER === "tsgo") {
-      const diags = vscode.languages.getDiagnostics(doc.uri);
-      const vueTsErrors = diags.filter(isVueTsModuleDiagnostic);
-      // Don't assert error count — .vue.ts errors here are a side effect of the
-      // @/ alias limitation, not a separate .vue.ts resolution issue.
-      console.log(
-        `    TSGO canary: ${vueTsErrors.length} .vue.ts error(s) expected (composite path alias limitation)`,
-      );
-      return;
-    }
-
-    await expectNoForbiddenDiagnostics(
-      doc,
-      isVueTsModuleDiagnostic,
-      ".vue.ts resolution errors",
-    );
+    await expectNoForbiddenDiagnostics(doc, isVueTsModuleDiagnostic, ".vue.ts resolution errors");
   });
 
   test(".vue imports do not trigger TS5097 .ts-extension diagnostics", async function () {
@@ -183,8 +142,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
 
     await expectNoForbiddenDiagnostics(
       doc,
-      (diagnostic) =>
-        isModuleNotFoundDiagnostic(diagnostic) || isTsExtensionDiagnostic(diagnostic),
+      (diagnostic) => isModuleNotFoundDiagnostic(diagnostic) || isTsExtensionDiagnostic(diagnostic),
       "Nested Vue import diagnostics",
     );
   });
