@@ -428,7 +428,7 @@ fn direct_vue_import_binding_hover_target(
     analysis: &FileAnalysisSnapshot,
 ) -> Option<ImportBindingHoverTarget> {
     for import in &analysis.imports {
-        if import.is_type_only || !import.source.ends_with(".vue") {
+        if import.is_type_only {
             continue;
         }
         if let Some(binding) = import

@@ -462,12 +462,6 @@ struct ResolvedComponentDocument {
     line_index: LineIndex,
 }
 
-enum ComponentEventDefinitionResolution {
-    NotApplicable,
-    NoDefinition,
-    Resolved(GotoDefinitionResponse),
-}
-
 /// The Verter language server implementation.
 ///
 /// Wraps `verter_host` for SFC analysis and optionally a `TypeProvider`
@@ -1622,10 +1616,59 @@ impl VerterLanguageServer {
             binding_name.as_deref().and_then(|binding| {
                 self.documents
                     .host()
-                    .get_export_span_follow_reexports(&resolved_target, binding, 10)
+                    .get_export_span_follow_reexports(&resolved_target, binding)
                     .map(|(resolved_id, _, _)| resolved_id)
                     .filter(|resolved_id| resolved_id.ends_with(".vue"))
             })
+        })?;
+
+        let child_analysis = self.documents.host().get_analysis(&child_canonical_id)?;
+        let child_source = self.documents.host().get_source(&child_canonical_id)?;
+        let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
+        let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
+
+        Some(ResolvedComponentDocument {
+            uri: child_uri,
+            analysis: child_analysis,
+            line_index: child_line_index,
+        })
+    }
+
+    fn resolve_component_document_for_import_binding(
+        &self,
+        parent_uri: &Uri,
+        parent_analysis: &verter_host::FileAnalysisSnapshot,
+        import_source: &str,
+        binding_name: &str,
+    ) -> Option<ResolvedComponentDocument> {
+        let parent_canonical_id = uri_to_canonical_id(parent_uri);
+        let import = parent_analysis
+            .imports
+            .iter()
+            .find(|import| import.source == import_source);
+        let mut resolved_targets = Vec::new();
+        if let Some(resolved) = import.and_then(|entry| entry.resolved_canonical_id.clone()) {
+            resolved_targets.push(resolved);
+        }
+        if let Some(resolved) = self.resolve_import_specifier(&parent_canonical_id, import_source) {
+            if !resolved_targets
+                .iter()
+                .any(|candidate| candidate == &resolved)
+            {
+                resolved_targets.push(resolved);
+            }
+        }
+
+        let child_canonical_id = resolved_targets.into_iter().find_map(|resolved_target| {
+            if resolved_target.ends_with(".vue") {
+                return Some(resolved_target);
+            }
+
+            self.documents
+                .host()
+                .get_export_span_follow_reexports(&resolved_target, binding_name)
+                .map(|(resolved_id, _, _)| resolved_id)
+                .filter(|resolved_id| resolved_id.ends_with(".vue"))
         })?;
 
         let child_analysis = self.documents.host().get_analysis(&child_canonical_id)?;
@@ -1736,81 +1779,148 @@ impl VerterLanguageServer {
         locations
     }
 
-    fn resolve_component_event_definition(
-        &self,
-        uri: &Uri,
-        position: &Position,
-    ) -> ComponentEventDefinitionResolution {
-        let Some(doc) = self.documents.get(uri) else {
-            return ComponentEventDefinitionResolution::NotApplicable;
-        };
-        let Some(analysis) = self.documents.get_analysis(uri) else {
-            return ComponentEventDefinitionResolution::NotApplicable;
-        };
-        let Some(template) = analysis.template.as_ref() else {
-            return ComponentEventDefinitionResolution::NotApplicable;
-        };
-        let Some(offset) = doc.line_index.position_to_offset(position) else {
-            return ComponentEventDefinitionResolution::NotApplicable;
-        };
-
-        for element in &template.elements {
-            if !element.is_component {
-                continue;
-            }
-            let Some(component) = template.components.iter().find(|component| {
-                offset >= component.span.start
-                    && offset < component.span.end
-                    && (component.name == element.tag
-                        || component.name == to_pascal_case(&element.tag))
-            }) else {
-                continue;
-            };
-
-            for directive in &element.directives {
-                if directive.name != "on" {
-                    continue;
-                }
-                let Some(arg_span) = directive.arg_span else {
-                    continue;
-                };
-                if offset < arg_span.start || offset >= arg_span.end {
-                    continue;
-                }
-
-                let Some(event_name) = directive.argument.as_deref() else {
-                    return ComponentEventDefinitionResolution::NoDefinition;
-                };
-                let Some(child) =
-                    self.resolve_component_document_for_usage(uri, &analysis, component)
-                else {
-                    return ComponentEventDefinitionResolution::NoDefinition;
-                };
-                let locations =
-                    self.collect_component_event_definition_locations(&child, event_name);
-                return if locations.is_empty() {
-                    ComponentEventDefinitionResolution::NoDefinition
-                } else {
-                    ComponentEventDefinitionResolution::Resolved(goto_response_from_locations(
-                        locations,
-                    ))
-                };
+    fn resolve_definition_path(&self, canonical_id: &str, specifier: &str) -> Option<String> {
+        if let Some(registry) = self.project_registry.read().as_ref() {
+            if let Some(resolved) = registry.resolve_alias(canonical_id, specifier) {
+                return Some(resolved);
             }
         }
 
-        ComponentEventDefinitionResolution::NotApplicable
+        if specifier.starts_with('.') {
+            let resolved = verter_host::resolve_external(canonical_id, specifier);
+            let candidates = if std::path::Path::new(&resolved).extension().is_some() {
+                vec![resolved.clone()]
+            } else {
+                vec![
+                    format!("{resolved}.ts"),
+                    format!("{resolved}.tsx"),
+                    format!("{resolved}.js"),
+                    format!("{resolved}.vue"),
+                    format!("{resolved}/index.ts"),
+                    format!("{resolved}/index.js"),
+                    format!("{resolved}/index.vue"),
+                ]
+            };
+            for candidate in candidates {
+                if std::path::Path::new(&candidate).exists() {
+                    return Some(candidate);
+                }
+            }
+            if resolved.ends_with(".vue") {
+                return Some(resolved);
+            }
+        }
+
+        None
     }
 
-    /// Get external IDE context for a `.vue.tsx` path (used by merge functions for
-    /// cross-file position mapping, e.g., CTRL+CLICK on component navigates to target file).
-    /// Resolve a component prop attribute to the child component's defineProps field.
-    ///
-    /// When the cursor is on `foo` in `<MyComp foo="literal">`, this finds:
-    /// 1. Which component the prop belongs to (via template analysis)
-    /// 2. The child component's analysis (via documents registry)
-    /// 3. The matching prop field in the child's defineProps macro
-    /// 4. Returns a cross-file definition pointing to the prop's span
-    fn resolve_component_prop_definition(
+    fn resolve_precise_export_location(
+        &self,
+        target_canonical_id: &str,
+        binding_name: &str,
+    ) -> Option<Location> {
+        let host = &self.documents.host;
+        let (resolved_id, start, end) = host
+            .get_export_span_follow_reexports(target_canonical_id, binding_name)
+            .or_else(|| {
+                let (s, e) = host.get_export_span(target_canonical_id, binding_name)?;
+                Some((target_canonical_id.to_string(), s, e))
+            })?;
+        let target_source = host.get_source(&resolved_id)?;
+        let target_li = LineIndex::new(&target_source, self.position_encoding.read().clone());
+        let start_pos = target_li.offset_to_position(start)?;
+        let end_pos = target_li.offset_to_position(end)?;
+        Some(Location {
+            uri: merge::file_path_to_uri(&resolved_id)?,
+            range: Range {
+                start: start_pos,
+                end: end_pos,
+            },
+        })
+    }
+
+    fn resolve_template_identifier(
+        &self,
+        uri: &Uri,
+        analysis: &verter_host::FileAnalysisSnapshot,
+        line_index: &LineIndex,
+        word: &str,
+    ) -> Option<GotoDefinitionResponse> {
+        for import in &analysis.imports {
+            for binding in &import.bindings {
+                if binding.name != word {
+                    continue;
+                }
+
+                if let Some(canonical_id) = import.resolved_canonical_id.as_deref() {
+                    if let Some(location) =
+                        self.resolve_precise_export_location(canonical_id, &binding.name)
+                    {
+                        return Some(GotoDefinitionResponse::Scalar(location));
+                    }
+                    if canonical_id.ends_with(".vue") {
+                        if let Some(location) =
+                            self.resolve_precise_export_location(canonical_id, "default")
+                        {
+                            return Some(GotoDefinitionResponse::Scalar(location));
+                        }
+                    }
+                }
+
+                if let Some(resolved) =
+                    self.resolve_definition_path(&uri_to_canonical_id(uri), &import.source)
+                {
+                    if let Some(location) =
+                        self.resolve_precise_export_location(&resolved, &binding.name)
+                    {
+                        return Some(GotoDefinitionResponse::Scalar(location));
+                    }
+                    if resolved.ends_with(".vue") {
+                        if let Some(location) =
+                            self.resolve_precise_export_location(&resolved, "default")
+                        {
+                            return Some(GotoDefinitionResponse::Scalar(location));
+                        }
+                    }
+                }
+
+                if let Some(location) = location_from_span(uri, line_index, binding.span) {
+                    return Some(GotoDefinitionResponse::Scalar(location));
+                }
+            }
+        }
+
+        if let Some(binding) = analysis
+            .bindings
+            .iter()
+            .find(|binding| binding.name == word)
+        {
+            if let Some(location) = location_from_span(uri, line_index, binding.span) {
+                return Some(GotoDefinitionResponse::Scalar(location));
+            }
+        }
+
+        for mac in analysis.macros.iter() {
+            if let Some(prop_field) = mac.prop_fields.iter().find(|field| field.name == word) {
+                if let Some(location) = location_from_span(uri, line_index, prop_field.span) {
+                    return Some(GotoDefinitionResponse::Scalar(location));
+                }
+            }
+
+            if mac.binding_name.as_deref() == Some(word) {
+                if let Some(location) = location_from_span(uri, line_index, mac.span) {
+                    return Some(GotoDefinitionResponse::Scalar(location));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Unified component contract resolution: props, events, v-model, slots.
+    /// Runs BEFORE `definition_at_position` and returns `Some` if any contract
+    /// surface was hit, or `None` to fall through to normal definition logic.
+    fn try_component_contract_definition(
         &self,
         uri: &Uri,
         position: &Position,
@@ -1820,46 +1930,527 @@ impl VerterLanguageServer {
         let template = analysis.template.as_ref()?;
         let offset = doc.line_index.position_to_offset(position)?;
 
-        // Find which component prop the cursor is on
-        for comp in &template.components {
-            for prop in &comp.props {
-                if offset >= prop.span.start && offset < prop.span.end {
-                    // Cursor is inside this prop's span — resolve to child component
-                    let child = self.resolve_component_document_for_usage(uri, &analysis, comp)?;
+        for element in &template.elements {
+            if !element.is_component && element.tag != "template" {
+                continue;
+            }
+
+            // For <template #slot> elements, find the parent component
+            let (component, child) = if element.tag == "template" {
+                // Walk up to the parent element to find the component
+                let parent_idx = match element.parent_index {
+                    Some(idx) => idx as usize,
+                    None => continue,
+                };
+                let parent_element = match template.elements.get(parent_idx) {
+                    Some(element) => element,
+                    None => continue,
+                };
+                if !parent_element.is_component {
+                    continue;
+                }
+                let comp = match template.components.iter().find(|c| {
+                    offset >= c.span.start
+                        && offset < c.span.end
+                        && (c.name == parent_element.tag
+                            || c.name == to_pascal_case(&parent_element.tag))
+                }) {
+                    Some(component) => component,
+                    None => continue,
+                };
+                let child = match self.resolve_component_document_for_usage(uri, &analysis, comp) {
+                    Some(child) => child,
+                    None => continue,
+                };
+                (comp, child)
+            } else {
+                let comp = template.components.iter().find(|c| {
+                    offset >= c.span.start
+                        && offset < c.span.end
+                        && (c.name == element.tag || c.name == to_pascal_case(&element.tag))
+                });
+                let comp = match comp {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let child = match self.resolve_component_document_for_usage(uri, &analysis, comp) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                (comp, child)
+            };
+
+            // ── Props ───────────────────────────────────────────────
+            for prop in &component.props {
+                if offset >= prop.name_span.start && offset < prop.name_span.end {
+                    let mut locations = Vec::new();
+
+                    // For shorthand props, also resolve the parent binding
+                    if prop.is_shorthand {
+                        if let Some(parent_def) = self.resolve_template_identifier(
+                            uri,
+                            &analysis,
+                            &doc.line_index,
+                            &prop.name,
+                        ) {
+                            match parent_def {
+                                GotoDefinitionResponse::Scalar(loc) => locations.push(loc),
+                                GotoDefinitionResponse::Array(locs) => locations.extend(locs),
+                                GotoDefinitionResponse::Link(links) => {
+                                    locations.extend(links.into_iter().map(|link| Location {
+                                        uri: link.target_uri,
+                                        range: link.target_selection_range,
+                                    }));
+                                }
+                            }
+                        }
+                    }
 
                     // Find matching prop field in child's defineProps
+                    let mut child_found = false;
                     for mac in child.analysis.macros.iter() {
                         if let Some(prop_field) =
-                            mac.prop_fields.iter().find(|field| field.name == prop.name)
+                            mac.prop_fields.iter().find(|f| f.name == prop.name)
                         {
-                            if let Some(location) =
+                            if let Some(loc) =
                                 location_from_span(&child.uri, &child.line_index, prop_field.span)
                             {
-                                return Some(GotoDefinitionResponse::Scalar(location));
+                                locations.push(loc);
+                                child_found = true;
                             }
                         }
                     }
-                    if let Some(child_template) = child.analysis.template.as_ref() {
-                        if let Some(prop_definition) = child_template
-                            .prop_definitions
-                            .iter()
-                            .find(|definition| definition.name == prop.name)
-                        {
-                            if let Some(location) = location_from_span(
-                                &child.uri,
-                                &child.line_index,
-                                prop_definition.span,
-                            ) {
-                                return Some(GotoDefinitionResponse::Scalar(location));
+                    // Fallback: template-level prop definitions
+                    if !child_found {
+                        if let Some(child_template) = child.analysis.template.as_ref() {
+                            if let Some(prop_def) = child_template
+                                .prop_definitions
+                                .iter()
+                                .find(|d| d.name == prop.name)
+                            {
+                                if let Some(loc) =
+                                    location_from_span(&child.uri, &child.line_index, prop_def.span)
+                                {
+                                    locations.push(loc);
+                                    child_found = true;
+                                }
                             }
                         }
+                    }
+                    // Final fallback: navigate to child file
+                    if !child_found && !prop.is_shorthand {
+                        locations.push(Location {
+                            uri: child.uri.clone(),
+                            range: Range::default(),
+                        });
                     }
 
-                    // Prop not found in child defineProps — fall back to navigating to child file
-                    return Some(GotoDefinitionResponse::Scalar(Location {
-                        uri: child.uri,
-                        range: Range::default(),
-                    }));
+                    if !locations.is_empty() {
+                        return Some(goto_response_from_locations(locations));
+                    }
+                }
+            }
+
+            // ── Events (v-on) ───────────────────────────────────────
+            for directive in &element.directives {
+                if directive.name == "on" {
+                    if let Some(arg_span) = directive.arg_span {
+                        if offset >= arg_span.start && offset < arg_span.end {
+                            let event_name = directive.argument.as_deref()?;
+                            let locations = self
+                                .collect_component_event_definition_locations(&child, event_name);
+                            return if locations.is_empty() {
+                                None
+                            } else {
+                                Some(goto_response_from_locations(locations))
+                            };
+                        }
+                    }
+                }
+            }
+
+            // ── V-model ─────────────────────────────────────────────
+            for directive in &element.directives {
+                if directive.name != "model" {
+                    continue;
+                }
+
+                // Named v-model: `v-model:title="t"` — cursor on "title" (the arg)
+                if let Some(arg_span) = directive.arg_span {
+                    if offset >= arg_span.start && offset < arg_span.end {
+                        let model_name = directive.argument.as_deref().unwrap_or("modelValue");
+                        return self.resolve_vmodel_definition(&child, model_name);
+                    }
+                }
+
+                // Plain v-model: `v-model="val"` — cursor on the directive name ("v-model")
+                // The name area spans from directive.span.start up to name_end
+                if directive.argument.is_none()
+                    && offset >= directive.span.start
+                    && offset < directive.name_end
+                {
+                    return self.resolve_vmodel_definition(&child, "modelValue");
+                }
+            }
+
+            // ── Slot name (v-slot / #) ──────────────────────────────
+            for directive in &element.directives {
+                if directive.name != "slot" {
+                    continue;
+                }
+
+                // Slot name: cursor on arg_span (#header → "header")
+                if let Some(arg_span) = directive.arg_span {
+                    if offset >= arg_span.start && offset < arg_span.end {
+                        let slot_name = directive.argument.as_deref().unwrap_or("default");
+                        return self.resolve_slot_name_definition(&child, slot_name);
+                    }
+                }
+
+                // Slot-prop binding: cursor inside expression_span (#default="{ item }")
+                if let Some(expr_span) = directive.expression_span {
+                    if offset >= expr_span.start && offset < expr_span.end {
+                        let slot_name = directive.argument.as_deref().unwrap_or("default");
+                        // Find the word under cursor
+                        let source_bytes = doc.source.as_bytes();
+                        let word = extract_word_at_offset(source_bytes, offset, expr_span);
+                        if let Some(word) = word {
+                            return self.resolve_slot_binding_definition(&child, slot_name, &word);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Resolve barrel-file export clicks to terminal target.
+    ///
+    /// When the cursor is on an `ExportSignature` that is a re-export
+    /// (has `reexport_source`), follow the chain to the terminal declaration.
+    fn try_barrel_export_definition(
+        &self,
+        uri: &Uri,
+        position: &Position,
+    ) -> Option<GotoDefinitionResponse> {
+        let doc = self.documents.get(uri)?;
+        let analysis = self.documents.get_analysis(uri)?;
+        let offset = doc.line_index.position_to_offset(position)?;
+
+        let encoding = self.position_encoding.read().clone();
+        let host = &self.documents.host;
+        let canonical_id = uri_to_canonical_id(uri);
+
+        for sig in analysis.export_signatures.iter() {
+            // Only handle re-exports (has a source module)
+            if sig.reexport_source.is_none() {
+                continue;
+            }
+
+            // Check if cursor is on the exported name span
+            let on_exported = offset >= sig.span.start && offset < sig.span.end;
+
+            // Check if cursor is on the local name span (for aliased re-exports)
+            let on_local = sig
+                .local_span
+                .as_ref()
+                .is_some_and(|ls| offset >= ls.start && offset < ls.end);
+
+            if !on_exported && !on_local {
+                continue;
+            }
+
+            // Determine the binding name to follow in the target module
+            let binding_to_follow = if on_local {
+                // Clicking on local side (e.g., `default` in `export { default as Popup }`)
+                // Follow this local name in the target
+                sig.reexport_local.as_deref().unwrap_or(sig.name.as_str())
+            } else {
+                // Clicking on exported side (e.g., `Overlay` in `export { default as Overlay }`)
+                // The name exported from this file; follow via get_export_span_follow_reexports
+                sig.name.as_str()
+            };
+
+            // Follow the re-export chain to the terminal
+            let terminal = if on_local {
+                // For local side, resolve the source module first, then follow
+                let resolved = host.resolve_import(&canonical_id, sig.reexport_source.as_ref()?)?;
+                let local_name = sig.reexport_local.as_deref().unwrap_or(sig.name.as_str());
+                host.get_export_span_follow_reexports(&resolved, local_name)
+            } else {
+                host.get_export_span_follow_reexports(&canonical_id, binding_to_follow)
+            };
+
+            if let Some((resolved_id, start, end)) = terminal {
+                let target_source = host.get_source(&resolved_id)?;
+                let target_li = LineIndex::new(&target_source, encoding);
+                let start_pos = target_li.offset_to_position(start)?;
+                let end_pos = target_li.offset_to_position(end)?;
+                let target_uri = merge::file_path_to_uri(&resolved_id)?;
+                return Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target_uri,
+                    range: Range {
+                        start: start_pos,
+                        end: end_pos,
+                    },
+                }));
+            }
+        }
+
+        None
+    }
+
+    fn canonicalize_provider_path(path: &str) -> String {
+        let normalized = path.trim().replace('\\', "/");
+        if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
+            let mut chars = normalized.chars();
+            let first = chars.next().unwrap_or_default().to_ascii_lowercase();
+            format!("{first}{}", chars.as_str())
+        } else {
+            normalized
+        }
+    }
+
+    /// Resolve a raw type-provider location that lands on a barrel file to the terminal target.
+    fn resolve_barrel_type_provider_location(
+        &self,
+        path: &str,
+        start: u32,
+        end: u32,
+    ) -> Option<Location> {
+        let canonical = Self::canonicalize_provider_path(path);
+        let host = &self.documents.host;
+        let analysis = host.get_analysis(&canonical)?;
+        let (sig, matched_local) = analysis.export_signatures.iter().find_map(|sig| {
+            if sig.reexport_source.is_none() {
+                return None;
+            }
+            if sig.span.start <= start && end <= sig.span.end {
+                return Some((sig, false));
+            }
+            if let Some(local_span) = sig.local_span.as_ref() {
+                if local_span.start <= start && end <= local_span.end {
+                    return Some((sig, true));
+                }
+            }
+            None
+        })?;
+
+        let (terminal_id, terminal_start, terminal_end) = if matched_local {
+            let target = host.resolve_import(&canonical, sig.reexport_source.as_ref()?)?;
+            let binding = sig.reexport_local.as_deref().unwrap_or(sig.name.as_str());
+            host.get_export_span_follow_reexports(&target, binding)?
+        } else {
+            host.get_export_span_follow_reexports(&canonical, &sig.name)?
+        };
+
+        let source = host.get_source(&terminal_id)?;
+        let line_index = LineIndex::new(&source, self.position_encoding.read().clone());
+        let start_pos = line_index.offset_to_position(terminal_start)?;
+        let end_pos = line_index.offset_to_position(terminal_end)?;
+        let uri = merge::file_path_to_uri(&terminal_id)?;
+        Some(Location {
+            uri,
+            range: Range {
+                start: start_pos,
+                end: end_pos,
+            },
+        })
+    }
+
+    /// Post-process type provider definition results to follow barrel re-exports.
+    ///
+    /// When the type provider returns a location in a barrel file (`.ts`/`.js` with
+    /// re-exports), resolve each location to the terminal declaration so the user
+    /// doesn't land in the barrel file.
+    fn resolve_barrel_locations(
+        &self,
+        response: Option<GotoDefinitionResponse>,
+    ) -> Option<GotoDefinitionResponse> {
+        let response = response?;
+        let encoding = self.position_encoding.read().clone();
+        let host = &self.documents.host;
+
+        let resolve_location = |loc: Location| -> Location {
+            let canonical = uri_to_canonical_id(&loc.uri);
+            // Check if this file has re-export signatures at the target position
+            if let Some(analysis) = host.get_analysis(&canonical) {
+                // Find which export signature the target position falls within
+                if let Some(source) = host.get_source(&canonical) {
+                    let target_li = LineIndex::new(&source, encoding.clone());
+                    if let Some(offset) = target_li.position_to_offset(&loc.range.start) {
+                        for sig in analysis.export_signatures.iter() {
+                            if sig.reexport_source.is_none() {
+                                continue;
+                            }
+                            let on_sig = offset >= sig.span.start && offset < sig.span.end;
+                            let on_local = sig
+                                .local_span
+                                .as_ref()
+                                .is_some_and(|ls| offset >= ls.start && offset < ls.end);
+                            if !on_sig && !on_local {
+                                continue;
+                            }
+                            // Follow to terminal
+                            if let Some(end_offset) = target_li.position_to_offset(&loc.range.end) {
+                                if let Some(resolved) = self.resolve_barrel_type_provider_location(
+                                    &canonical, offset, end_offset,
+                                ) {
+                                    return resolved;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            loc
+        };
+
+        Some(match response {
+            GotoDefinitionResponse::Scalar(loc) => {
+                GotoDefinitionResponse::Scalar(resolve_location(loc))
+            }
+            GotoDefinitionResponse::Array(locs) => {
+                GotoDefinitionResponse::Array(locs.into_iter().map(resolve_location).collect())
+            }
+            other => other,
+        })
+    }
+
+    /// Resolve v-model to child defineModel (Tier 1), then classic prop+emit (Tier 2),
+    /// then template-level definitions (Tier 3).
+    fn resolve_vmodel_definition(
+        &self,
+        child: &ResolvedComponentDocument,
+        model_name: &str,
+    ) -> Option<GotoDefinitionResponse> {
+        let mut locations = Vec::new();
+
+        // Tier 1: defineModel macro
+        for mac in child.analysis.macros.iter() {
+            if mac.kind != verter_analysis::AnalyzedMacroKind::DefineModel {
+                continue;
+            }
+            let macro_model_name = mac.model_name.as_deref().unwrap_or("modelValue");
+            if macro_model_name == model_name {
+                if let Some(loc) = location_from_span(&child.uri, &child.line_index, mac.span) {
+                    locations.push(loc);
+                }
+            }
+        }
+
+        if !locations.is_empty() {
+            return Some(goto_response_from_locations(locations));
+        }
+
+        // Tier 2: classic prop + emit pattern
+        // The prop is the model_name itself (e.g., "modelValue" or "title")
+        for mac in child.analysis.macros.iter() {
+            if let Some(prop_field) = mac.prop_fields.iter().find(|f| f.name == model_name) {
+                if let Some(loc) =
+                    location_from_span(&child.uri, &child.line_index, prop_field.span)
+                {
+                    locations.push(loc);
+                }
+            }
+            // The emit is `update:modelName`
+            let emit_name = format!("update:{model_name}");
+            if let Some(emit_field) = mac.emit_fields.iter().find(|f| f.name == emit_name) {
+                if let Some(loc) =
+                    location_from_span(&child.uri, &child.line_index, emit_field.span)
+                {
+                    locations.push(loc);
+                }
+            }
+        }
+
+        if !locations.is_empty() {
+            return Some(goto_response_from_locations(locations));
+        }
+
+        // Tier 3: template-level definitions
+        if let Some(child_template) = child.analysis.template.as_ref() {
+            if let Some(prop_def) = child_template
+                .prop_definitions
+                .iter()
+                .find(|d| d.name == model_name)
+            {
+                if let Some(loc) = location_from_span(&child.uri, &child.line_index, prop_def.span)
+                {
+                    locations.push(loc);
+                }
+            }
+        }
+
+        if !locations.is_empty() {
+            return Some(goto_response_from_locations(locations));
+        }
+
+        None
+    }
+
+    /// Resolve a slot name (#header) to the child's defineSlots field or template DefinedSlot.
+    fn resolve_slot_name_definition(
+        &self,
+        child: &ResolvedComponentDocument,
+        slot_name: &str,
+    ) -> Option<GotoDefinitionResponse> {
+        // Check defineSlots macro first
+        for mac in child.analysis.macros.iter() {
+            if mac.kind != verter_analysis::AnalyzedMacroKind::DefineSlots {
+                continue;
+            }
+            if let Some(slot_field) = mac.slot_fields.iter().find(|f| f.name == slot_name) {
+                if let Some(loc) =
+                    location_from_span(&child.uri, &child.line_index, slot_field.span)
+                {
+                    return Some(GotoDefinitionResponse::Scalar(loc));
+                }
+            }
+        }
+
+        // Fallback: template-level DefinedSlot
+        if let Some(child_template) = child.analysis.template.as_ref() {
+            if let Some(defined_slot) = child_template
+                .defined_slots
+                .iter()
+                .find(|s| s.name == slot_name)
+            {
+                if let Some(loc) =
+                    location_from_span(&child.uri, &child.line_index, defined_slot.span)
+                {
+                    return Some(GotoDefinitionResponse::Scalar(loc));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Resolve a slot-prop binding (e.g., "item" in `#default="{ item }"`) to
+    /// the child's defineSlots binding span.
+    fn resolve_slot_binding_definition(
+        &self,
+        child: &ResolvedComponentDocument,
+        slot_name: &str,
+        binding_name: &str,
+    ) -> Option<GotoDefinitionResponse> {
+        // Check defineSlots macro
+        for mac in child.analysis.macros.iter() {
+            if mac.kind != verter_analysis::AnalyzedMacroKind::DefineSlots {
+                continue;
+            }
+            if let Some(slot_field) = mac.slot_fields.iter().find(|f| f.name == slot_name) {
+                if let Some(binding) = slot_field.bindings.iter().find(|b| b.name == binding_name) {
+                    if binding.span.start != 0 || binding.span.end != 0 {
+                        if let Some(loc) =
+                            location_from_span(&child.uri, &child.line_index, binding.span)
+                        {
+                            return Some(GotoDefinitionResponse::Scalar(loc));
+                        }
+                    }
                 }
             }
         }
@@ -2114,11 +2705,17 @@ impl VerterLanguageServer {
                 ))
             }
             hover::ChildHoverTarget::ImportBinding(target) => {
-                let child = self.resolve_component_context(parent_uri, &target.import_source)?;
+                let parent_analysis = self.documents.get_analysis(parent_uri)?;
+                let child = self.resolve_component_document_for_import_binding(
+                    parent_uri,
+                    &parent_analysis,
+                    &target.import_source,
+                    &target.binding_name,
+                )?;
                 let public_api = self
                     .documents
                     .host()
-                    .get_public_api(&child.canonical_id)
+                    .get_public_api(&crate::documents::uri_to_canonical_id(&child.uri))
                     .map(|api| api.code.to_string());
                 Some(hover::build_child_component_hover(
                     &target.binding_name,
@@ -3255,6 +3852,41 @@ fn source_id_from_provider_vue_path(
     Some(candidate)
 }
 
+/// Extract the identifier word surrounding a byte offset within a given span.
+/// Returns `None` if the offset is not on an identifier character.
+fn extract_word_at_offset(source: &[u8], offset: u32, span: verter_span::Span) -> Option<String> {
+    let off = offset as usize;
+    let start_bound = span.start as usize;
+    let end_bound = span.end as usize;
+    if off >= source.len() || off < start_bound || off >= end_bound {
+        return None;
+    }
+    if !source[off].is_ascii_alphanumeric() && source[off] != b'_' && source[off] != b'$' {
+        return None;
+    }
+    let mut word_start = off;
+    while word_start > start_bound
+        && (source[word_start - 1].is_ascii_alphanumeric()
+            || source[word_start - 1] == b'_'
+            || source[word_start - 1] == b'$')
+    {
+        word_start -= 1;
+    }
+    let mut word_end = off;
+    while word_end < end_bound
+        && word_end < source.len()
+        && (source[word_end].is_ascii_alphanumeric()
+            || source[word_end] == b'_'
+            || source[word_end] == b'$')
+    {
+        word_end += 1;
+    }
+    if word_start == word_end {
+        return None;
+    }
+    String::from_utf8(source[word_start..word_end].to_vec()).ok()
+}
+
 struct LspProjectResolverReader<'a> {
     documents: &'a DocumentRegistry,
 }
@@ -3713,7 +4345,8 @@ fn did_open_startup_policy(kind: crate::TypeProviderKind) -> DidOpenStartupPolic
         // When a type provider is active, eagerly sync imported .vue files so that
         // hover/completions/go-to-definition work on <ChildComponent> immediately.
         sync_imported_vue_files: !matches!(kind, crate::TypeProviderKind::None),
-        publish_diagnostics: true,
+        // Diagnostics are pushed by the sync coordinator after open/change settles.
+        publish_diagnostics: false,
     }
 }
 
@@ -5148,9 +5781,9 @@ impl LanguageServer for VerterLanguageServer {
         let current_canonical_id = self.documents.get_canonical_id(uri);
         // Touch MRU for snapshot drain ordering (after did_open registers the canonical ID)
         if let Some(canonical_id) = current_canonical_id.as_ref() {
-            self.touch_mru(&canonical_id);
+            self.touch_mru(canonical_id);
             if canonical_id.ends_with(".vue") {
-                self.refresh_vue_dependency_tracking(&canonical_id);
+                self.refresh_vue_dependency_tracking(canonical_id);
             }
         }
         if result.diagnostics.has_errors {
@@ -6450,9 +7083,9 @@ impl LanguageServer for VerterLanguageServer {
             let host = &self.documents.host;
             let resolve_export =
                 |target_canonical_id: &str, binding_name: &str| -> Option<Location> {
-                    // Follow re-exports (up to 10 levels deep) to find the actual definition
+                    // Follow re-exports (cycle-detected) to find the actual definition
                     let (resolved_id, start, end) = host
-                        .get_export_span_follow_reexports(target_canonical_id, binding_name, 10)
+                        .get_export_span_follow_reexports(target_canonical_id, binding_name)
                         .or_else(|| {
                             // Fallback to non-following version for backwards compat
                             let (s, e) = host.get_export_span(target_canonical_id, binding_name)?;
@@ -6482,6 +7115,18 @@ impl LanguageServer for VerterLanguageServer {
             #[allow(clippy::type_complexity)]
             let resolve_export_fn =
                 Some(&resolve_export as &dyn Fn(&str, &str) -> Option<Location>);
+
+            // Unified component contract resolution runs FIRST: props, events,
+            // v-model, slots. Returns early if any contract surface was hit.
+            if let Some(contract_def) = self.try_component_contract_definition(uri, position) {
+                return Some(contract_def);
+            }
+
+            // Barrel-file export symbol click: if the cursor is on an export
+            // signature in a re-export statement, follow the chain to the terminal.
+            if let Some(barrel_def) = self.try_barrel_export_definition(uri, position) {
+                return Some(barrel_def);
+            }
 
             let mut def = definition_at_position(
                 position,
@@ -6514,20 +7159,10 @@ impl LanguageServer for VerterLanguageServer {
             }
         }
 
-        // Native cross-file prop navigation: cursor on a component prop attribute
-        // → navigate to the matching prop field in the child's defineProps.
-        if verter_result.is_none() {
-            match self.resolve_component_event_definition(uri, position) {
-                ComponentEventDefinitionResolution::NotApplicable => {}
-                ComponentEventDefinitionResolution::NoDefinition => return Ok(None),
-                ComponentEventDefinitionResolution::Resolved(definition) => {
-                    return Ok(Some(definition));
-                }
-            }
-            if let Some(prop_def) = self.resolve_component_prop_definition(uri, position) {
-                return Ok(Some(prop_def));
-            }
-        }
+        // Component contract resolution (props, events, v-model, slots) now runs
+        // BEFORE definition_at_position inside the closure above via
+        // try_component_contract_definition. The old separate resolve_component_event_definition
+        // and resolve_component_prop_definition calls are subsumed by it.
 
         // Enhance with TypeProvider for cross-file definitions.
         // Extract all context synchronously — no DashMap guard held across await.
@@ -6553,7 +7188,11 @@ impl LanguageServer for VerterLanguageServer {
                             );
                             let vue_source_exists =
                                 |p: &str| self.documents.host().get_source(p).is_some();
-                            return Ok(merge::merge_definitions(
+                            let barrel_resolver =
+                                |path: &str, start: u32, end: u32| -> Option<Location> {
+                                    self.resolve_barrel_type_provider_location(path, start, end)
+                                };
+                            let merged = merge::merge_definitions_with_barrel_resolver(
                                 verter_result,
                                 type_defs,
                                 &ctx.tsx_line_index,
@@ -6562,7 +7201,11 @@ impl LanguageServer for VerterLanguageServer {
                                 Some(&|ide_path: &str| self.external_ide_context(ide_path)),
                                 uri,
                                 &vue_source_exists,
-                            ));
+                                Some(&barrel_resolver),
+                            );
+                            // Post-process: if type provider resolved to a barrel file,
+                            // follow re-exports to the terminal declaration.
+                            return Ok(self.resolve_barrel_locations(merged));
                         }
                         Err(e) => {
                             tracing::warn!("definition: type provider error: {e}");
@@ -6612,6 +7255,11 @@ impl LanguageServer for VerterLanguageServer {
                             .filter_map(|d| {
                                 let vue_source_exists =
                                     |p: &str| self.documents.host().get_source(p).is_some();
+                                if let Some(location) = self
+                                    .resolve_barrel_type_provider_location(&d.path, d.start, d.end)
+                                {
+                                    return Some(location);
+                                }
                                 let target_path =
                                     merge::normalize_vue_path_owned(&d.path, &vue_source_exists);
                                 let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
@@ -6661,7 +7309,11 @@ impl LanguageServer for VerterLanguageServer {
                             );
                             let vue_source_exists =
                                 |p: &str| self.documents.host().get_source(p).is_some();
-                            return Ok(merge::merge_definitions(
+                            let barrel_resolver =
+                                |path: &str, start: u32, end: u32| -> Option<Location> {
+                                    self.resolve_barrel_type_provider_location(path, start, end)
+                                };
+                            return Ok(merge::merge_definitions_with_barrel_resolver(
                                 None,
                                 type_defs,
                                 &ctx.tsx_line_index,
@@ -6670,6 +7322,7 @@ impl LanguageServer for VerterLanguageServer {
                                 Some(&|ide_path: &str| self.external_ide_context(ide_path)),
                                 uri,
                                 &vue_source_exists,
+                                Some(&barrel_resolver),
                             ));
                         }
                         Err(e) => {
@@ -9527,7 +10180,7 @@ mod tests {
             server
                 .documents
                 .host()
-                .get_export_span_follow_reexports(&barrel_canonical_id, "BarrelComp", 10)
+                .get_export_span_follow_reexports(&barrel_canonical_id, "BarrelComp")
                 .is_some(),
             "barrel export should resolve to the re-exported child"
         );
@@ -9649,6 +10302,794 @@ mod tests {
                 .iter()
                 .any(|call| matches!(call, MockCall::GetDefinition { .. })),
             "native component event resolution should skip the type provider entirely"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    // =========================================================================
+    // Unified component contract resolution tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn contract_prop_name_navigates_to_child_define_props_field() {
+        let child_source = "<script setup lang=\"ts\">\ndefineProps<{ title: string; count: number }>()\n</script>\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp title=\"hello\" />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        // Click on "title" in `title="hello"`
+        let position = find_document_position(server, &app_uri, "title=\"hello\"", 1);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("prop should resolve to child");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("definition should point to child component");
+
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(child_source, "title: string"),
+            "definition should point to the child defineProps title field"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn contract_shorthand_prop_returns_both_parent_binding_and_child_field() {
+        let child_source =
+            "<script setup lang=\"ts\">\ndefineProps<{ bar: string }>()\n</script>\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst bar = 'hello'\n</script>\n<template>\n  <MyComp :bar />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        // Click on "bar" in `:bar`
+        let position = find_document_position(server, &app_uri, ":bar", 1);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("shorthand prop should resolve");
+        let locations = definition_locations(response);
+
+        assert!(
+            locations.len() >= 2,
+            "shorthand prop should return at least parent binding + child prop, got {}",
+            locations.len()
+        );
+        // One location in parent (the `bar` binding), one in child (the prop field)
+        let parent_loc = locations
+            .iter()
+            .find(|loc| loc.uri == app_uri)
+            .expect("should include parent binding location");
+        let child_loc = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("should include child prop location");
+        assert_eq!(
+            parent_loc.range.start.line,
+            line_for_snippet(parent_source, "const bar = 'hello'"),
+            "parent location should point to the bar binding"
+        );
+        assert_eq!(
+            child_loc.range.start.line,
+            line_for_snippet(child_source, "bar: string"),
+            "child location should point to the defineProps bar field"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn contract_shorthand_prop_uses_import_target_for_parent_location() {
+        let child_source =
+            "<script setup lang=\"ts\">\ndefineProps<{ bar: string }>()\n</script>\n";
+        let helper_source = "export const bar = 'hello'\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nimport { bar } from './helpers'\n</script>\n<template>\n  <MyComp :bar />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/helpers.ts", "typescript", helper_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let helper_uri = workspace_uri(&workspace_id, "src/helpers.ts");
+        let server = service.inner();
+        let position = find_document_position(server, &app_uri, ":bar", 1);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("shorthand prop should resolve");
+        let locations = definition_locations(response);
+
+        let parent_loc = locations
+            .iter()
+            .find(|loc| loc.uri == helper_uri)
+            .expect("should include imported parent binding target");
+        let child_loc = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("should include child prop location");
+
+        assert_eq!(
+            parent_loc.range.start.line,
+            line_for_snippet(helper_source, "export const bar"),
+            "import-backed shorthand should resolve to the imported declaration, not the local import statement"
+        );
+        assert_eq!(
+            child_loc.range.start.line,
+            line_for_snippet(child_source, "bar: string"),
+            "child location should point to the defineProps bar field"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn contract_shorthand_prop_uses_parent_define_props_field() {
+        let child_source =
+            "<script setup lang=\"ts\">\ndefineProps<{ bar: string }>()\n</script>\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\ndefineProps<{ bar: string }>()\n</script>\n<template>\n  <MyComp :bar />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        let position = find_document_position(server, &app_uri, ":bar", 1);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("shorthand prop should resolve");
+        let locations = definition_locations(response);
+
+        let parent_loc = locations
+            .iter()
+            .find(|loc| loc.uri == app_uri)
+            .expect("should include parent defineProps field");
+        let child_loc = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("should include child prop location");
+
+        assert_eq!(
+            parent_loc.range.start.line,
+            line_for_snippet(parent_source, "bar: string"),
+            "shorthand should resolve to the parent defineProps field when the binding comes from defineProps"
+        );
+        assert_eq!(
+            child_loc.range.start.line,
+            line_for_snippet(child_source, "bar: string"),
+            "child location should point to the defineProps bar field"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn unresolved_slot_template_does_not_block_later_contract_resolution() {
+        let child_source =
+            "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <UnknownComp>\n    <template #default=\"{ item }\">{{ item }}</template>\n  </UnknownComp>\n  <MyComp title=\"hello\" />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        let position = find_document_position(server, &app_uri, "title=\"hello\"", 1);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("later prop contract should still resolve");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("definition should point to child component");
+
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(child_source, "title: string"),
+            "unrelated unresolved slot templates should not prevent later contract resolution"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn contract_event_click_navigates_to_child_define_emits() {
+        // This tests that events still work through the unified contract handler
+        let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("event should resolve to child defineEmits");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("definition should point to child");
+
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(child_source, "custom: [payload: string]"),
+            "event should navigate to child defineEmits field"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn contract_vmodel_named_navigates_to_child_define_model() {
+        let child_source =
+            "<script setup lang=\"ts\">\nconst title = defineModel<string>('title')\n</script>\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst t = ref('hello')\n</script>\n<template>\n  <MyComp v-model:title=\"t\" />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        // Cursor on "title" in `v-model:title="t"`
+        let position = find_document_position(server, &app_uri, "v-model:title", 8);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("v-model:title should resolve");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("definition should point to child");
+
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(child_source, "defineModel<string>('title')"),
+            "v-model:title should navigate to child defineModel('title')"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn contract_vmodel_default_navigates_to_child_define_model() {
+        let child_source =
+            "<script setup lang=\"ts\">\nconst modelValue = defineModel<string>()\n</script>\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst val = ref('hello')\n</script>\n<template>\n  <MyComp v-model=\"val\" />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        // Cursor on "model" in `v-model="val"` — this is the directive name area
+        let position = find_document_position(server, &app_uri, "v-model=\"val\"", 3);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("v-model should resolve");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("definition should point to child");
+
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(child_source, "defineModel<string>()"),
+            "v-model should navigate to child default defineModel()"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn contract_slot_name_navigates_to_child_define_slots_field() {
+        let child_source = "<script setup lang=\"ts\">\ndefineSlots<{ header(props: { title: string }): any }>()\n</script>\n<template>\n  <slot name=\"header\" />\n</template>\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp>\n    <template #header=\"{ title }\">\n      {{ title }}\n    </template>\n  </MyComp>\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        // Cursor on "header" in `#header`
+        let position = find_document_position(server, &app_uri, "#header", 1);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("slot name should resolve");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("definition should point to child");
+
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(child_source, "header(props:"),
+            "slot name should navigate to child defineSlots header field"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn contract_slot_prop_binding_navigates_to_child_slot_binding() {
+        let child_source = "<script setup lang=\"ts\">\ndefineSlots<{ default(props: { item: string; index: number }): any }>()\n</script>\n<template>\n  <slot :item=\"row\" :index=\"i\" />\n</template>\n";
+        let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp #default=\"{ item }\">\n    {{ item }}\n  </MyComp>\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        // Cursor on "item" inside `#default="{ item }"`
+        let position = find_document_position(server, &app_uri, "{ item }", 2);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("slot prop binding should resolve");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == child_uri)
+            .expect("definition should point to child");
+
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(child_source, "item: string"),
+            "slot prop binding should navigate to child defineSlots binding"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    // =========================================================================
+    // Step 4: Barrel-file export symbol clicks → terminal target
+    // =========================================================================
+
+    #[tokio::test]
+    async fn barrel_export_navigates_to_terminal_vue_component() {
+        // Barrel: `export { default as Overlay } from './Overlay.vue'`
+        // Clicking on `Overlay` in the barrel should navigate to Overlay.vue
+        let overlay_source = "<script setup lang=\"ts\">\nconst visible = ref(false)\n</script>\n<template>\n  <div>Overlay</div>\n</template>\n";
+        let barrel_source = "export { default as Overlay } from './Overlay.vue'\nexport { default as Dialog } from './Dialog.vue'\n";
+        let dialog_source = "<script setup lang=\"ts\">\nconst open = ref(false)\n</script>\n<template>\n  <div>Dialog</div>\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/Overlay.vue", "vue", overlay_source),
+                ("src/Dialog.vue", "vue", dialog_source),
+                ("src/index.ts", "typescript", barrel_source),
+            ])
+            .await;
+
+        let barrel_uri = workspace_uri(&workspace_id, "src/index.ts");
+        let overlay_uri = workspace_uri(&workspace_id, "src/Overlay.vue");
+        let server = service.inner();
+        // Cursor on `Overlay` in `export { default as Overlay }`
+        let position = find_document_position(server, &barrel_uri, "as Overlay }", 3);
+
+        let response = server
+            .goto_definition(goto_definition_params(&barrel_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("barrel export should resolve to terminal");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == overlay_uri)
+            .expect("definition should point to Overlay.vue");
+
+        // Should navigate to the component file — `default` export resolves
+        // to the first script binding (line 1: `const visible = ref(false)`)
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(overlay_source, "const visible"),
+            "barrel export should navigate to the terminal Vue component"
+        );
+
+        // Negative: should NOT stay in barrel file
+        assert!(
+            !locations.iter().any(|loc| loc.uri == barrel_uri),
+            "barrel export should NOT resolve to barrel file itself"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn barrel_multi_level_navigates_to_terminal() {
+        // Two-level barrel: index.ts → components.ts → Button.vue
+        let button_source = "<script setup lang=\"ts\">\ndefineProps<{ label: string }>()\n</script>\n<template>\n  <button>{{ label }}</button>\n</template>\n";
+        let mid_barrel_source = "export { default as Button } from './Button.vue'\n";
+        let top_barrel_source = "export { Button } from './components'\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/Button.vue", "vue", button_source),
+                ("src/components.ts", "typescript", mid_barrel_source),
+                ("src/index.ts", "typescript", top_barrel_source),
+            ])
+            .await;
+
+        let top_barrel_uri = workspace_uri(&workspace_id, "src/index.ts");
+        let button_uri = workspace_uri(&workspace_id, "src/Button.vue");
+        let server = service.inner();
+        // Cursor on `Button` in `export { Button } from './components'`
+        let position = find_document_position(server, &top_barrel_uri, "{ Button }", 2);
+
+        let response = server
+            .goto_definition(goto_definition_params(&top_barrel_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("multi-level barrel should resolve to terminal");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == button_uri)
+            .expect("definition should point to Button.vue");
+
+        // `default` export resolves to first binding (line 1: `defineProps<...>()`)
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(button_source, "defineProps"),
+            "multi-level barrel should navigate to terminal Vue component"
+        );
+
+        // Negative: should NOT stay in any barrel file
+        assert!(
+            !locations.iter().any(|loc| loc.uri == top_barrel_uri),
+            "should NOT resolve to top barrel itself"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn barrel_import_binding_in_vue_script_navigates_to_terminal() {
+        let overlay_source = "<script setup lang=\"ts\">\nconst visible = ref(false)\n</script>\n<template>\n  <div>Overlay</div>\n</template>\n";
+        let barrel_source = "export { default as Overlay } from './Overlay.vue'\n";
+        let app_source = "<script setup lang=\"ts\">\nimport { Overlay } from './components'\n</script>\n<template>\n  <Overlay />\n</template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/components/Overlay.vue", "vue", overlay_source),
+                ("src/components/index.ts", "typescript", barrel_source),
+                ("src/App.vue", "vue", app_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let overlay_uri = workspace_uri(&workspace_id, "src/components/Overlay.vue");
+        let server = service.inner();
+        let position = find_document_position(server, &app_uri, "{ Overlay }", 2);
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("import binding should resolve");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == overlay_uri)
+            .expect("definition should point to Overlay.vue");
+
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(overlay_source, "const visible"),
+            "Vue script import binding should resolve through barrel to the terminal component"
+        );
+        assert!(
+            !locations
+                .iter()
+                .any(|loc| loc.uri.as_str().ends_with("/src/components/index.ts")),
+            "Vue script import binding should not stop at the barrel file"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn barrel_import_binding_in_vue_script_skips_type_provider_barrel_result() {
+        let overlay_source = "<script setup lang=\"ts\">\nconst visible = ref(false)\n</script>\n<template>\n  <div>Overlay</div>\n</template>\n";
+        let barrel_source = "export { default as Overlay } from './Overlay.vue'\nexport { default as Button } from './Button.vue'\n";
+        let button_source =
+            "<script setup lang=\"ts\">\ndefineProps<{ label: string }>()\n</script>\n";
+        let app_source = "<script setup lang=\"ts\">\nimport { ref, computed } from 'vue'\nimport { Overlay, Button } from './components'\n\nconst count = ref(0)\nconst doubled = computed(() => count.value * 2)\nconst showOverlay = ref(false)\n\nfunction increment() { count.value++ }\n</script>\n<template>\n  <div>\n    <p>{{ count }} x 2 = {{ doubled }}</p>\n    <button @click=\"increment\">+</button>\n    <Button label=\"Open\" @click=\"showOverlay = true\" />\n    <Overlay :show=\"showOverlay\" :zIndex=\"100\" :lockScroll=\"true\">\n      <p>Overlay content</p>\n    </Overlay>\n  </div>\n</template>\n";
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/components/Overlay.vue", "vue", overlay_source),
+                ("src/components/Button.vue", "vue", button_source),
+                ("src/components/index.ts", "typescript", barrel_source),
+                ("src/App.vue", "vue", app_source),
+            ])
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let overlay_uri = workspace_uri(&workspace_id, "src/components/Overlay.vue");
+        let barrel_path = format!("{workspace_id}/src/components/index.ts");
+        let server = service.inner();
+        let position = find_document_position(server, &app_uri, "{ Overlay, Button }", 2);
+        let ctx = server
+            .type_provider_context(&app_uri)
+            .expect("provider context should exist");
+        let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+            &position,
+            &ctx.vue_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("import position should map into TSX");
+        provider.set_definitions(
+            &ctx.tsx_path,
+            tsx_offset,
+            vec![TypeLocation {
+                path: barrel_path,
+                start: 20,
+                end: 27,
+            }],
+        );
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("import binding should resolve");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == overlay_uri)
+            .expect("definition should point to Overlay.vue");
+
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(overlay_source, "const visible"),
+            "Vue script import binding should resolve through barrel to the terminal component even when the type provider returns the barrel"
+        );
+        assert!(
+            !locations
+                .iter()
+                .any(|loc| loc.uri.as_str().ends_with("/src/components/index.ts")),
+            "Vue script import binding should not stop at the barrel file"
+        );
+        assert!(
+            !provider
+                .calls()
+                .iter()
+                .any(|call| matches!(call, MockCall::GetDefinition { .. })),
+            "native import binding resolution should skip the type provider entirely"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn barrel_aliased_local_side_navigates_to_source() {
+        // `export { default as Popup } from './Popup.vue'`
+        // Clicking on `default` (the local side) should navigate to Popup.vue too
+        let popup_source = "<script setup lang=\"ts\">\nconst shown = ref(true)\n</script>\n<template>\n  <div>Popup</div>\n</template>\n";
+        let barrel_source = "export { default as Popup } from './Popup.vue'\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/Popup.vue", "vue", popup_source),
+                ("src/index.ts", "typescript", barrel_source),
+            ])
+            .await;
+
+        let barrel_uri = workspace_uri(&workspace_id, "src/index.ts");
+        let popup_uri = workspace_uri(&workspace_id, "src/Popup.vue");
+        let server = service.inner();
+        // Cursor on `default` in `export { default as Popup }`
+        let position = find_document_position(server, &barrel_uri, "{ default", 2);
+
+        let response = server
+            .goto_definition(goto_definition_params(&barrel_uri, position))
+            .await
+            .expect("goto definition should succeed")
+            .expect("local side of aliased re-export should resolve");
+        let locations = definition_locations(response);
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == popup_uri)
+            .expect("definition should point to Popup.vue");
+
+        // `default` export resolves to first binding (line 1: `const shown = ref(true)`)
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(popup_source, "const shown"),
+            "local side of aliased barrel export should navigate to terminal"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    // =========================================================================
+    // Step 5: Resolve type-provider barrel locations to terminal declarations
+    // =========================================================================
+
+    #[tokio::test]
+    async fn resolve_barrel_locations_follows_reexport_to_terminal() {
+        // Setup: barrel re-exports a Vue component
+        let comp_source = "<script setup lang=\"ts\">\nconst count = ref(0)\n</script>\n<template><div/></template>\n";
+        let barrel_source = "export { default as Counter } from './Counter.vue'\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/Counter.vue", "vue", comp_source),
+                ("src/index.ts", "typescript", barrel_source),
+            ])
+            .await;
+
+        let barrel_id = format!("{workspace_id}/src/index.ts");
+        let comp_uri = workspace_uri(&workspace_id, "src/Counter.vue");
+        let server = service.inner();
+
+        // Simulate a type provider returning a location in the barrel file
+        // pointing to the `Counter` export signature (offset 20..27 in barrel source)
+        let barrel_source_stored = server.documents.host.get_source(&barrel_id).unwrap();
+        let counter_offset = barrel_source_stored
+            .find("Counter")
+            .expect("Counter in barrel source") as u32;
+        let barrel_li = LineIndex::new(&barrel_source_stored, PositionEncodingKind::UTF16);
+        let start_pos = barrel_li
+            .offset_to_position(counter_offset)
+            .expect("start pos");
+        let end_pos = barrel_li
+            .offset_to_position(counter_offset + 7)
+            .expect("end pos");
+        let barrel_uri = workspace_uri(&workspace_id, "src/index.ts");
+
+        let input = Some(GotoDefinitionResponse::Scalar(Location {
+            uri: barrel_uri.clone(),
+            range: Range {
+                start: start_pos,
+                end: end_pos,
+            },
+        }));
+
+        let result = server.resolve_barrel_locations(input);
+        let locations = definition_locations(result.expect("should resolve"));
+        let target = locations
+            .iter()
+            .find(|loc| loc.uri == comp_uri)
+            .expect("should resolve barrel to Counter.vue");
+
+        // Should navigate to first binding in Counter.vue
+        assert_eq!(
+            target.range.start.line,
+            line_for_snippet(comp_source, "const count"),
+            "type provider barrel location should resolve to terminal"
+        );
+
+        // Negative: should NOT stay in barrel
+        assert!(
+            !locations.iter().any(|loc| loc.uri == barrel_uri),
+            "should NOT remain in barrel file"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+
+    #[tokio::test]
+    async fn resolve_barrel_locations_preserves_non_barrel() {
+        // A location that doesn't point to a barrel should pass through unchanged
+        let comp_source =
+            "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template><div/></template>\n";
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[("src/App.vue", "vue", comp_source)]).await;
+
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let server = service.inner();
+
+        let input = Some(GotoDefinitionResponse::Scalar(Location {
+            uri: app_uri.clone(),
+            range: Range::default(),
+        }));
+
+        let result = server.resolve_barrel_locations(input);
+        let locations = definition_locations(result.expect("should pass through"));
+        assert_eq!(locations.len(), 1);
+        assert_eq!(
+            locations[0].uri, app_uri,
+            "non-barrel location should pass through unchanged"
+        );
+        assert_eq!(
+            locations[0].range,
+            Range::default(),
+            "range should be unchanged"
         );
 
         drain_handle.abort();
@@ -9945,6 +11386,85 @@ import MyComp from './MyComp.vue'
         assert!(
             !text.contains("DefineComponent<{}, {}>"),
             "hover must not degrade to fallback component shell, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hover_prefers_child_component_summary_over_barrel_import_alias_on_vue_import_binding()
+    {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_source = r#"<script setup lang="ts">
+defineProps<{ show?: boolean; zIndex?: number }>()
+</script>
+<template><div /></template>
+"#;
+        let barrel_uri: Uri = "file:///workspace/src/components/index.ts"
+            .parse()
+            .expect("valid barrel uri");
+        let _ = server.documents.did_open(&TextDocumentItem {
+            uri: barrel_uri,
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: "export { default as Overlay } from './Overlay.vue'\n".to_string(),
+        });
+        let _child_uri = open_test_vue(
+            server,
+            "/workspace/src/components/Overlay.vue",
+            child_source,
+        );
+        let app_uri = open_test_vue(
+            server,
+            "/workspace/src/App.vue",
+            r#"<script setup lang="ts">
+import { Overlay } from './components'
+</script>
+
+<template>
+  <Overlay />
+</template>
+"#,
+        );
+
+        let position = Position {
+            line: 1,
+            character: 9,
+        };
+
+        set_type_hover_at_vue_position(
+            server,
+            &provider,
+            &app_uri,
+            position,
+            "```typescript\n(const) const Overlay: __OmitNew<DefineComponent<{}, {}>>\n```",
+        );
+
+        let text = hover_text(
+            server
+                .hover(hover_params(&app_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+
+        assert!(
+            text.contains("Props:"),
+            "hover should show props for barrel-imported components, got: {text}"
+        );
+        assert!(
+            text.contains("show"),
+            "hover should include show prop, got: {text}"
+        );
+        assert!(
+            text.contains("zIndex"),
+            "hover should include zIndex prop, got: {text}"
+        );
+        assert!(
+            !text.contains("DefineComponent<{}, {}>"),
+            "hover must not degrade to the raw type provider shell, got: {text}"
         );
     }
 

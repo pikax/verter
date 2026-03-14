@@ -69,9 +69,9 @@ fn test_go_to_definition_from_template_to_script_via_span() {
 }
 
 #[test]
-fn test_go_to_import_with_resolved_canonical_id_no_export_resolver_returns_none() {
-    // When resolved_canonical_id is set but no resolve_export_location callback,
-    // returns None to let the type provider handle it (can't resolve to exact location)
+fn test_go_to_import_with_resolved_canonical_id_no_export_resolver_falls_back_to_import_span() {
+    // When resolved_canonical_id is set but no precise export resolver is available,
+    // fall back to the import statement span instead of returning None.
     let source = "<script setup>\nimport { ref } from 'vue'\n</script>\n";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
@@ -105,11 +105,17 @@ fn test_go_to_import_with_resolved_canonical_id_no_export_resolver_returns_none(
         None,
         None,
     );
-    // No resolve_export_location → returns None, type provider takes over
-    assert!(
-        result.is_none(),
-        "should return None without export resolver"
+    let response = result.expect("should fall back to import span");
+    let location = match response {
+        GotoDefinitionResponse::Scalar(location) => location,
+        other => panic!("expected scalar fallback location, got {other:?}"),
+    };
+    assert_eq!(
+        location.uri.as_str(),
+        crate::features::definition::SAME_FILE_URI_STR
     );
+    assert_eq!(location.range.start.line, 1);
+    assert_eq!(location.range.end.line, 1);
 }
 
 #[test]
@@ -180,6 +186,72 @@ fn test_go_to_import_with_resolved_canonical_id_and_export_resolver() {
     } else {
         panic!("expected scalar location");
     }
+}
+
+#[test]
+fn test_go_to_import_falls_back_to_path_resolution_when_resolved_canonical_id_fails() {
+    let source = "<script setup>\nimport { Overlay } from './components'\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis(
+        vec![],
+        vec![AnalyzedImport {
+            source: "./components".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Overlay".to_string(),
+                is_type_only: false,
+                vue_api: None,
+                span: verter_span::Span::new(24, 31),
+            }],
+            span: verter_span::Span::new(15, 51),
+            resolved_canonical_id: Some("/project/components".to_string()),
+        }],
+        vec![],
+    );
+
+    let overlay_offset = source.find("Overlay").unwrap();
+    let position = line_index
+        .offset_to_position(overlay_offset as u32)
+        .unwrap();
+
+    let resolve_path = |specifier: &str| -> Option<String> {
+        (specifier == "./components").then(|| "/project/components/index.ts".to_string())
+    };
+    let export_resolver = |canonical_id: &str, binding_name: &str| -> Option<Location> {
+        if canonical_id == "/project/components/index.ts" && binding_name == "Overlay" {
+            Some(Location {
+                uri: "file:///project/components/Overlay.vue".parse().unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 1,
+                        character: 6,
+                    },
+                    end: Position {
+                        line: 1,
+                        character: 13,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        Some(&resolve_path),
+        Some(&export_resolver),
+    );
+    let Some(GotoDefinitionResponse::Scalar(loc)) = result else {
+        panic!("expected scalar location");
+    };
+    assert_eq!(loc.uri.as_str(), "file:///project/components/Overlay.vue");
 }
 
 #[test]

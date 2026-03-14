@@ -137,6 +137,10 @@ pub struct TemplatePropUsage {
     pub from_spread: bool,
     /// Byte span in SFC source.
     pub span: Span,
+    /// Byte span of just the prop name in SFC source.
+    pub name_span: Span,
+    /// True when this is a same-name shorthand (`:bar` with no expression).
+    pub is_shorthand: bool,
 }
 
 /// How a prop value expression is classified at a call site.
@@ -1427,6 +1431,13 @@ impl serde::Serialize for TemplatePropUsage {
         map.serialize_entry("fromSpread", &self.from_spread)?;
         map.serialize_entry("spanStart", &self.span.start)?;
         map.serialize_entry("spanEnd", &self.span.end)?;
+        if self.name_span.start > 0 || self.name_span.end > 0 {
+            map.serialize_entry("nameSpanStart", &self.name_span.start)?;
+            map.serialize_entry("nameSpanEnd", &self.name_span.end)?;
+        }
+        if self.is_shorthand {
+            map.serialize_entry("isShorthand", &true)?;
+        }
         map.end()
     }
 }
@@ -1448,6 +1459,12 @@ impl<'de> serde::Deserialize<'de> for TemplatePropUsage {
             span_start: u32,
             #[serde(default)]
             span_end: u32,
+            #[serde(default)]
+            name_span_start: u32,
+            #[serde(default)]
+            name_span_end: u32,
+            #[serde(default)]
+            is_shorthand: bool,
         }
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
@@ -1457,6 +1474,8 @@ impl<'de> serde::Deserialize<'de> for TemplatePropUsage {
             referenced_bindings: w.referenced_bindings,
             from_spread: w.from_spread,
             span: Span::new(w.span_start, w.span_end),
+            name_span: Span::new(w.name_span_start, w.name_span_end),
+            is_shorthand: w.is_shorthand,
         })
     }
 }
@@ -2330,6 +2349,8 @@ mod tests {
                     referenced_bindings: vec![],
                     from_spread: false,
                     span: Span::new(0, 0),
+                    name_span: Span::new(0, 0),
+                    is_shorthand: false,
                 }],
                 has_spread: false,
                 slots_used: vec!["default".to_string()],
@@ -2601,6 +2622,8 @@ mod tests {
             referenced_bindings: vec!["obj".to_string()],
             from_spread: true,
             span: Span::new(0, 0),
+            name_span: Span::new(0, 0),
+            is_shorthand: false,
         };
 
         assert!(prop.from_spread);

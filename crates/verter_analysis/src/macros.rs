@@ -1704,6 +1704,7 @@ fn extract_slot_bindings_from_type_literal(
                 key_name.map(|name| AnalyzedSlotFieldBinding {
                     name,
                     type_annotation,
+                    span: prop.key.span().into(),
                 })
             } else {
                 None
@@ -2685,6 +2686,34 @@ defineExpose({ props })
         assert_eq!(
             fields[1].bindings[0].type_annotation.as_deref(),
             Some("number")
+        );
+    }
+
+    #[test]
+    fn slot_field_binding_span_is_correct() {
+        let code = "defineSlots<{ default: (props: { item: string, index: number }) => any }>()";
+        let macros = parse_macros(code);
+        let bindings = &macros[0].slot_fields[0].bindings;
+        assert_eq!(bindings.len(), 2);
+
+        // Verify span points to the binding key in source
+        assert_eq!(
+            &code[bindings[0].span.start as usize..bindings[0].span.end as usize],
+            "item"
+        );
+        assert_eq!(
+            &code[bindings[1].span.start as usize..bindings[1].span.end as usize],
+            "index"
+        );
+
+        // Negative: span should not be zero
+        assert!(
+            bindings[0].span.start > 0 || bindings[0].span.end > 0,
+            "item span should be non-zero"
+        );
+        assert!(
+            bindings[1].span.start > 0 || bindings[1].span.end > 0,
+            "index span should be non-zero"
         );
     }
 

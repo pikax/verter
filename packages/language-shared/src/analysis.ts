@@ -87,6 +87,11 @@ export interface TemplatePropUsage {
   fromSpread: boolean;
   spanStart: number;
   spanEnd: number;
+  /** Span of just the prop name (skipped when zero). */
+  nameSpanStart?: number;
+  nameSpanEnd?: number;
+  /** True for same-name shorthand (`:bar` with no expression). */
+  isShorthand?: boolean;
 }
 
 export interface TemplateComponentVModel {

@@ -274,12 +274,15 @@ pub(crate) fn resolve_import_to_canonical(
         return Some(normalized.to_string());
     }
 
-    if import_source.starts_with('.') {
+    let resolved_relative = if import_source.starts_with('.') {
         let relative = crate::id::resolve_external(&parent_entry.canonical_id, import_source);
         if files.contains_key(relative.as_str()) {
-            return Some(relative);
+            return Some(relative.clone());
         }
-    }
+        Some(relative)
+    } else {
+        None
+    };
 
     // Host alias map (tsconfig paths, vite aliases)
     for candidate in [import_source, normalized] {
@@ -330,9 +333,19 @@ pub(crate) fn resolve_import_to_canonical(
         }
     }
 
-    // Try common Vue extensions
-    for candidate in [import_source, normalized] {
-        for ext in &[".vue", "/index.vue"] {
+    // Try common extensions (.vue, .ts, .js, index files)
+    // Include the resolved relative path if available (handles `./components` → `src/components.ts`)
+    let resolved_ref = resolved_relative.as_deref().unwrap_or(import_source);
+    for candidate in [import_source, normalized, resolved_ref] {
+        for ext in &[
+            ".vue",
+            "/index.vue",
+            ".ts",
+            ".tsx",
+            ".js",
+            "/index.ts",
+            "/index.js",
+        ] {
             let with_ext = format!("{}{}", candidate, ext);
             if files.contains_key(&with_ext) {
                 return Some(with_ext);

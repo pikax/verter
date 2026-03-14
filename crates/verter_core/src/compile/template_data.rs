@@ -57,6 +57,13 @@ pub struct RawPropData {
     pub from_spread: bool,
     /// Byte span of the prop attribute in the SFC source.
     pub span: Span,
+    /// Byte span of just the prop name (e.g., `bar` in `:bar="val"`).
+    /// For bound props, covers the directive argument; for static props, covers
+    /// the attribute name up to `=`.
+    pub name_span: Span,
+    /// True when this is a same-name shorthand (`:bar` with no expression,
+    /// equivalent to `:bar="bar"`).
+    pub is_same_name_shorthand: bool,
 }
 
 /// A script binding referenced at a specific position in the template.
@@ -976,6 +983,20 @@ fn extract_component_usage(
             .map(|ve| ve + 1) // +1 to skip past the closing quote
             .unwrap_or(prop.name_end);
 
+        // Compute name_span: for bound props use the directive argument span,
+        // for static props use start..name_end (the attribute name before `=`).
+        let name_span = if is_bound {
+            prop.arg_start
+                .zip(prop.arg_end)
+                .map(|(s, e)| Span::new(s, e))
+                .unwrap_or(Span::new(prop.start, prop.name_end))
+        } else {
+            Span::new(prop.start, prop.name_end)
+        };
+
+        // Same-name shorthand: `:bar` with no expression (spread props are handled separately)
+        let is_same_name_shorthand = is_bound && expression.is_none();
+
         props.push(RawPropData {
             name: actual_name,
             is_bound,
@@ -984,6 +1005,8 @@ fn extract_component_usage(
             all_bindings_static: all_static,
             from_spread: false,
             span: Span::new(prop.start, prop_span_end),
+            name_span,
+            is_same_name_shorthand,
         });
     }
 
@@ -997,6 +1020,8 @@ fn extract_component_usage(
             all_bindings_static: None,
             from_spread: true,
             span: Span::new(0, 0),
+            name_span: Span::new(0, 0),
+            is_same_name_shorthand: false,
         });
     }
 

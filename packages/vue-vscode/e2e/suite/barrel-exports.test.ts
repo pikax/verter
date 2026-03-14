@@ -8,19 +8,22 @@ import {
   measureHover,
   FIXTURE_NAME,
   TYPE_PROVIDER,
+  revealDefinition,
 } from "../helpers";
 
 /** Execute go-to-definition at a position and return locations. */
-async function getDefinitions(
-  uri: vscode.Uri,
-  pos: vscode.Position,
-): Promise<vscode.Location[]> {
-  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
-    "vscode.executeDefinitionProvider",
-    uri,
-    pos,
+async function getDefinitions(uri: vscode.Uri, pos: vscode.Position): Promise<vscode.Location[]> {
+  const locations = await vscode.commands.executeCommand<
+    Array<vscode.Location | vscode.LocationLink>
+  >("vscode.executeDefinitionProvider", uri, pos);
+  return (locations || []).map((location) =>
+    "uri" in location
+      ? location
+      : new vscode.Location(
+          location.targetUri,
+          location.targetSelectionRange ?? location.targetRange,
+        ),
   );
-  return locations || [];
 }
 
 /** Find position of `needle` in document text, offset by `charOffset` into the match. */
@@ -66,9 +69,7 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
     // TSGO should resolve barrel re-exports correctly. If this fails, the VFS
     // sync is incomplete or TSGO has a regression.
     if (TYPE_PROVIDER === "tsgo") {
-      console.log(
-        `    TSGO: ${moduleErrors.length} module error(s)`,
-      );
+      console.log(`    TSGO: ${moduleErrors.length} module error(s)`);
       // TSGO with full VFS should not have module errors on barrel imports.
       // If this fails, check that workspace scanner syncs all .vue files
       // before non-Vue files (two-phase scan).
@@ -98,18 +99,14 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
     const pos = doc.positionAt(overlayMatch + 1);
     const { hovers, latencyMs } = await measureHover(doc.uri, pos);
 
-    console.log(
-      `    Hover on <Overlay: ${latencyMs}ms, ${hovers.length} result(s)`,
-    );
+    console.log(`    Hover on <Overlay: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     if (hovers.length === 0) {
       console.log("    WARNING: No hover results — type provider may not be running");
       return;
     }
 
-    const content = hovers[0].contents
-      .map((c) => (typeof c === "string" ? c : c.value))
-      .join("\n");
+    const content = hovers[0].contents.map((c) => (typeof c === "string" ? c : c.value)).join("\n");
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
@@ -136,8 +133,7 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
     // NEGATIVE: should NOT show the degraded DefineComponent<{}, {}>
     const isDegraded =
-      content.includes("DefineComponent<{}, {}") ||
-      content.includes("DefineComponent<{}, {}, {}");
+      content.includes("DefineComponent<{}, {}") || content.includes("DefineComponent<{}, {}, {}");
 
     expect(
       isDegraded,
@@ -162,18 +158,14 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
     const pos = doc.positionAt(buttonMatch + 1);
     const { hovers, latencyMs } = await measureHover(doc.uri, pos);
 
-    console.log(
-      `    Hover on <Button: ${latencyMs}ms, ${hovers.length} result(s)`,
-    );
+    console.log(`    Hover on <Button: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     if (hovers.length === 0) {
       console.log("    WARNING: No hover results — type provider may not be running");
       return;
     }
 
-    const content = hovers[0].contents
-      .map((c) => (typeof c === "string" ? c : c.value))
-      .join("\n");
+    const content = hovers[0].contents.map((c) => (typeof c === "string" ? c : c.value)).join("\n");
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
@@ -254,9 +246,7 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const content = hovers[0].contents
-      .map((c) => (typeof c === "string" ? c : c.value))
-      .join("\n");
+    const content = hovers[0].contents.map((c) => (typeof c === "string" ? c : c.value)).join("\n");
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
@@ -345,9 +335,7 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const content = hovers[0].contents
-      .map((c) => (typeof c === "string" ? c : c.value))
-      .join("\n");
+    const content = hovers[0].contents.map((c) => (typeof c === "string" ? c : c.value)).join("\n");
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
@@ -363,9 +351,131 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
     );
 
     // NEGATIVE: should NOT be `any`
-    expect(content).to.not.match(
-      /:\s*any\b/,
-      "import binding should not be 'any'",
+    expect(content).to.not.match(/:\s*any\b/, "import binding should not be 'any'");
+  });
+
+  // ── Terminal Navigation Tests (Step 4/5) ──
+
+  test("D5: barrel export name → terminal Vue component", async function () {
+    if (!isBarrelFixture) {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) {
+      this.skip();
+      return;
+    }
+
+    // Open the barrel index.ts file
+    const indexPath = path.join(workspaceFolders[0].uri.fsPath, "src/components/index.ts");
+    const tsDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(indexPath));
+    await vscode.window.showTextDocument(tsDoc);
+    await waitForFileReady(tsDoc);
+
+    // Go-to-definition on "Overlay" in `export { default as Overlay } from './Overlay.vue'`
+    const pos = findPosition(tsDoc, "as Overlay", 3); // on "O" of Overlay
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const locations = await getDefinitions(tsDoc.uri, pos);
+    console.log(`    Barrel export definition on Overlay: ${locations.length} location(s)`);
+
+    // Verter's barrel export resolution should follow the re-export chain
+    expect(locations.length, "should have definition results").to.be.greaterThan(0);
+
+    const def = locations[0];
+    // POSITIVE: should navigate to Overlay.vue
+    expect(def.uri.fsPath, "should navigate to Overlay.vue").to.include("Overlay.vue");
+
+    // NEGATIVE: should NOT stay in the barrel index.ts
+    expect(def.uri.fsPath, "should NOT stay in barrel file").to.not.include("index.ts");
+
+    // NEGATIVE: should NOT open virtual files
+    expect(def.uri.fsPath, "should NOT open virtual file").to.not.match(/\.vue\.(d\.ts|ts|tsx)$/);
+  });
+
+  test("D6: barrel import binding in .vue file → terminal component (not barrel)", async function () {
+    if (!isBarrelFixture) {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    // In App.vue, go-to-definition on "Overlay" in `import { Overlay, Button } from './components'`
+    const pos = findPosition(doc, "{ Overlay, Button }", 2); // on "O"
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const locations = await getDefinitions(doc.uri, pos);
+    console.log(`    Import binding definition on Overlay: ${locations.length} location(s)`);
+
+    // In verter-only mode, import binding definition may resolve via type provider
+    if (locations.length === 0 && !TYPE_PROVIDER) {
+      console.log("    Verter-only: no definition on import binding (needs type provider)");
+      return;
+    }
+
+    expect(locations.length, "should have definition results").to.be.greaterThan(0);
+
+    // Check if any location points to the terminal component
+    const hasTerminal = locations.some((l) => l.uri.fsPath.includes("Overlay.vue"));
+    const hasBarrel = locations.some((l) => l.uri.fsPath.includes("index.ts"));
+
+    console.log(`    terminal=${hasTerminal} barrel=${hasBarrel}`);
+
+    if (TYPE_PROVIDER) {
+      // With type provider + barrel resolution, should reach the terminal
+      expect(hasTerminal, "should navigate to Overlay.vue terminal").to.be.true;
+
+      // NEGATIVE: should NOT resolve only to barrel
+      if (!hasTerminal && hasBarrel) {
+        throw new Error(
+          "Definition resolved to barrel index.ts but should reach terminal Overlay.vue",
+        );
+      }
+    }
+
+    // NEGATIVE: should NOT open virtual files
+    for (const loc of locations) {
+      expect(loc.uri.fsPath, "should NOT open virtual file").to.not.match(/\.vue\.(d\.ts|ts|tsx)$/);
+    }
+  });
+
+  test("D7: revealDefinition on barrel export name opens terminal Vue component", async function () {
+    if (!isBarrelFixture) {
+      console.log("    pass (N/A for this fixture)");
+      return;
+    }
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) {
+      this.skip();
+      return;
+    }
+
+    const indexPath = path.join(workspaceFolders[0].uri.fsPath, "src/components/index.ts");
+    const tsDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(indexPath));
+    await vscode.window.showTextDocument(tsDoc);
+    await waitForFileReady(tsDoc);
+
+    const pos = findPosition(tsDoc, "as Overlay", 3);
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const revealed = await revealDefinition(tsDoc.uri, pos);
+    console.log(`    revealDefinition target: ${revealed.uri.fsPath}`);
+
+    expect(revealed.uri.fsPath, "should open Overlay.vue").to.include("Overlay.vue");
+    expect(revealed.uri.fsPath, "should not stay in barrel index.ts").to.not.include("index.ts");
+    expect(revealed.uri.fsPath, "should not open virtual files").to.not.match(
+      /\.vue\.(d\.ts|ts|tsx)$/,
     );
   });
 });

@@ -910,6 +910,10 @@ pub struct AnalyzedSlotFieldBinding {
     /// Type annotation text extracted from source (e.g., `"string"`, `"MyItem"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
+    /// SFC-absolute byte span of the binding key in `defineSlots` type.
+    /// Zero-span fallback for backward compat with older JSON.
+    #[serde(default)]
+    pub span: Span,
 }
 
 // ── Options API Analysis Types ──
@@ -1229,6 +1233,10 @@ pub struct ExportSignature {
     /// Original name in source module (e.g., `"default"`). None for local exports.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reexport_local: Option<String>,
+    /// Byte span of the local name in aliased re-exports (e.g., `foo` in `export { foo as bar }`).
+    /// `None` when local == exported (no alias) or for local/declaration exports.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub local_span: Option<Span>,
 }
 
 fn serialize_analysis_flags<S: serde::Serializer>(

@@ -49,6 +49,8 @@ fn make_prop(name: &str) -> TemplatePropUsage {
         referenced_bindings: vec![],
         from_spread: false,
         span: verter_span::Span::new(10, 20),
+        name_span: verter_span::Span::new(0, 0),
+        is_shorthand: false,
     }
 }
 

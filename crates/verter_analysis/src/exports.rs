@@ -53,6 +53,11 @@ pub(crate) fn extract_export_signatures_from_program(
                         let name = spec.exported.name().to_string();
                         let local_name = spec.local.name().to_string();
                         let hash_input = format!("reexport:{}:{}", source.value, name);
+                        let local_span = if spec.local.name() != spec.exported.name() {
+                            Some(spec.local.span().into())
+                        } else {
+                            None
+                        };
                         out.push(ExportSignature {
                             name,
                             declaration_hash: hash_16(hash_input.as_bytes()),
@@ -60,6 +65,7 @@ pub(crate) fn extract_export_signatures_from_program(
                             span: spec.exported.span().into(),
                             reexport_source: Some(source.value.to_string()),
                             reexport_local: Some(local_name),
+                            local_span,
                         });
                     }
                     continue;
@@ -76,6 +82,11 @@ pub(crate) fn extract_export_signatures_from_program(
                             let hash_input = format!("local-reexport:{}:{}", local_name, name);
                             hash_16(hash_input.as_bytes())
                         };
+                        let local_span = if spec.local.name() != spec.exported.name() {
+                            Some(spec.local.span().into())
+                        } else {
+                            None
+                        };
                         out.push(ExportSignature {
                             name,
                             declaration_hash: hash,
@@ -83,6 +94,7 @@ pub(crate) fn extract_export_signatures_from_program(
                             span: spec.exported.span().into(),
                             reexport_source: None,
                             reexport_local: None,
+                            local_span,
                         });
                     }
                     continue;
@@ -117,6 +129,7 @@ pub(crate) fn extract_export_signatures_from_program(
                     span: target_span.into(),
                     reexport_source: None,
                     reexport_local: None,
+                    local_span: None,
                 });
             }
             Statement::ExportAllDeclaration(decl) => {
@@ -128,6 +141,7 @@ pub(crate) fn extract_export_signatures_from_program(
                     span: decl.span.into(),
                     reexport_source: Some(decl.source.value.to_string()),
                     reexport_local: Some("*".to_string()),
+                    local_span: None,
                 });
             }
             _ => {}
@@ -156,6 +170,7 @@ fn extract_declaration_signatures(
                         span: id_span,
                         reexport_source: None,
                         reexport_local: None,
+                        local_span: None,
                     });
                 }
             }
@@ -171,6 +186,7 @@ fn extract_declaration_signatures(
                     span: id.span.into(),
                     reexport_source: None,
                     reexport_local: None,
+                    local_span: None,
                 });
             }
         }
@@ -185,6 +201,7 @@ fn extract_declaration_signatures(
                     span: id.span.into(),
                     reexport_source: None,
                     reexport_local: None,
+                    local_span: None,
                 });
             }
         }
@@ -198,6 +215,7 @@ fn extract_declaration_signatures(
                 span: iface.id.span.into(),
                 reexport_source: None,
                 reexport_local: None,
+                local_span: None,
             });
         }
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -210,6 +228,7 @@ fn extract_declaration_signatures(
                 span: alias.id.span.into(),
                 reexport_source: None,
                 reexport_local: None,
+                local_span: None,
             });
         }
         Declaration::TSEnumDeclaration(en) => {
@@ -222,6 +241,7 @@ fn extract_declaration_signatures(
                 span: en.id.span.into(),
                 reexport_source: None,
                 reexport_local: None,
+                local_span: None,
             });
         }
         _ => {}
@@ -669,6 +689,65 @@ export function helper() {}
         assert!(
             span.end > span.start,
             "export all should have a non-empty span"
+        );
+    }
+
+    #[test]
+    fn local_span_set_for_aliased_reexport() {
+        let code = "export { foo as bar } from './x'";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].name, "bar");
+        // local_span should cover "foo" (the local name)
+        let local_span = sigs[0]
+            .local_span
+            .expect("aliased re-export should have local_span");
+        assert_eq!(
+            &code[local_span.start as usize..local_span.end as usize],
+            "foo"
+        );
+        // span should cover "bar" (the exported name)
+        assert_eq!(
+            &code[sigs[0].span.start as usize..sigs[0].span.end as usize],
+            "bar"
+        );
+    }
+
+    #[test]
+    fn local_span_none_for_same_name_reexport() {
+        let code = "export { foo } from './x'";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].name, "foo");
+        assert!(
+            sigs[0].local_span.is_none(),
+            "same-name re-export should NOT have local_span"
+        );
+    }
+
+    #[test]
+    fn local_span_for_default_as_named() {
+        let code = "export { default as Button } from './Button.vue'";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].name, "Button");
+        let local_span = sigs[0]
+            .local_span
+            .expect("aliased default re-export should have local_span");
+        assert_eq!(
+            &code[local_span.start as usize..local_span.end as usize],
+            "default"
+        );
+    }
+
+    #[test]
+    fn local_span_none_for_declaration_export() {
+        let code = "export function myFn() {}";
+        let sigs = parse_exports(code);
+        assert_eq!(sigs.len(), 1);
+        assert!(
+            sigs[0].local_span.is_none(),
+            "declaration export should NOT have local_span"
         );
     }
 }

@@ -110,6 +110,48 @@ export async function openAndReady(
   return doc;
 }
 
+export async function revealDefinition(
+  uri: vscode.Uri,
+  position: vscode.Position,
+): Promise<{
+  uri: vscode.Uri;
+  selection: vscode.Selection;
+}> {
+  const config = vscode.workspace.getConfiguration("editor");
+  await config.update(
+    "gotoLocation.multipleDefinitions",
+    "goto",
+    vscode.ConfigurationTarget.Workspace,
+  );
+
+  const doc = await vscode.workspace.openTextDocument(uri);
+  const editor = await vscode.window.showTextDocument(doc);
+  editor.selection = new vscode.Selection(position, position);
+  editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+
+  const sourceUri = uri.toString();
+  await vscode.commands.executeCommand("editor.action.revealDefinition");
+
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const active = vscode.window.activeTextEditor;
+    if (active && active.document.uri.toString() !== sourceUri) {
+      return {
+        uri: active.document.uri,
+        selection: active.selection,
+      };
+    }
+    await sleep(100);
+  }
+
+  const active = vscode.window.activeTextEditor;
+  assert.ok(active, "Expected an active editor after revealDefinition");
+  return {
+    uri: active.document.uri,
+    selection: active.selection,
+  };
+}
+
 /**
  * Wait until the type provider has processed a file by probing completions.
  * When the type provider hasn't synced yet, completions return Text-kind or

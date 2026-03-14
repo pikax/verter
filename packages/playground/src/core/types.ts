@@ -358,6 +358,9 @@ export interface AnalysisTemplatePropUsage {
   fromSpread: boolean;
   spanStart: number;
   spanEnd: number;
+  nameSpanStart?: number;
+  nameSpanEnd?: number;
+  isShorthand?: boolean;
 }
 
 export type AnalysisBindingUsageKind =

@@ -572,6 +572,14 @@ impl VerterHost {
                         return Some((first_binding.span.start, first_binding.span.end));
                     }
                 }
+                // No bindings — try first macro (e.g., `defineProps<...>()` without assignment)
+                if let Some(first_macro) = entry.script_analysis.macros.first() {
+                    if first_macro.span.start > 0 || first_macro.span.end > 0 {
+                        return Some((first_macro.span.start, first_macro.span.end));
+                    }
+                }
+                // Last resort: point to file start
+                return Some((0, 0));
             }
             return None;
         }
@@ -596,30 +604,37 @@ impl VerterHost {
     /// this follows the chain to find where `Popup` is actually defined.
     /// Returns `(canonical_id, start, end)` of the final definition.
     ///
-    /// `max_depth` limits recursion to prevent infinite loops on circular re-exports.
-    /// For local exports (no re-export), returns the span in the same file.
+    /// Uses cycle detection (visited set keyed on `(canonical_id, binding_name)`)
+    /// instead of a depth counter. For local exports (no re-export), returns the
+    /// span in the same file.
     pub fn get_export_span_follow_reexports(
         &self,
         canonical_or_alias: &str,
         binding_name: &str,
-        max_depth: u32,
     ) -> Option<(String, u32, u32)> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let files = read_lock(&self.files);
         let alias_map = read_lock(&self.alias_to_canonical);
+        let mut visited = rustc_hash::FxHashSet::default();
 
-        self.follow_reexport_chain(&files, &alias_map, &canonical, binding_name, max_depth)
+        self.follow_reexport_chain(&files, &alias_map, &canonical, binding_name, &mut visited)
     }
 
     /// Internal recursive helper for following re-export chains.
+    /// Uses a visited set keyed on `(canonical_id, binding_name)` to detect cycles.
     fn follow_reexport_chain(
         &self,
         files: &rustc_hash::FxHashMap<String, crate::FileEntry>,
         alias_map: &rustc_hash::FxHashMap<String, String>,
         canonical_id: &str,
         binding_name: &str,
-        remaining_depth: u32,
+        visited: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<(String, u32, u32)> {
+        // Cycle detection: if we've seen this (file, binding) pair before, stop
+        if !visited.insert((canonical_id.to_string(), binding_name.to_string())) {
+            return None;
+        }
+
         let entry = files.get(canonical_id)?;
 
         // For Vue SFCs, resolve directly (they don't have re-exports in export_signatures)
@@ -647,7 +662,7 @@ impl VerterHost {
                     return Some((canonical_id.to_string(), mac.span.start, mac.span.end));
                 }
             }
-            // "default" export → first binding
+            // "default" export → first binding, then first macro, then file start
             if binding_name == "default" {
                 if let Some(first_binding) = entry.script_analysis.bindings.first() {
                     if first_binding.span.start > 0 || first_binding.span.end > 0 {
@@ -658,6 +673,18 @@ impl VerterHost {
                         ));
                     }
                 }
+                // No bindings — try first macro (e.g., `defineProps<...>()` without assignment)
+                if let Some(first_macro) = entry.script_analysis.macros.first() {
+                    if first_macro.span.start > 0 || first_macro.span.end > 0 {
+                        return Some((
+                            canonical_id.to_string(),
+                            first_macro.span.start,
+                            first_macro.span.end,
+                        ));
+                    }
+                }
+                // Last resort: point to file start (the SFC itself IS the default export)
+                return Some((canonical_id.to_string(), 0, 0));
             }
             return None;
         }
@@ -668,25 +695,23 @@ impl VerterHost {
             .iter()
             .find(|s| s.name == binding_name)
         {
-            // If it's a re-export and we have depth budget, follow the chain
+            // If it's a re-export, follow the chain
             if let (Some(ref source), Some(ref local_name)) =
                 (&sig.reexport_source, &sig.reexport_local)
             {
-                if remaining_depth > 0 {
-                    // Resolve the source module to a canonical ID
-                    if let Some(target_canonical) = crate::cross_file::resolve_import_to_canonical(
-                        files, alias_map, entry, source,
-                    ) {
-                        return self.follow_reexport_chain(
-                            files,
-                            alias_map,
-                            &target_canonical,
-                            local_name,
-                            remaining_depth - 1,
-                        );
-                    }
+                // Resolve the source module to a canonical ID
+                if let Some(target_canonical) =
+                    crate::cross_file::resolve_import_to_canonical(files, alias_map, entry, source)
+                {
+                    return self.follow_reexport_chain(
+                        files,
+                        alias_map,
+                        &target_canonical,
+                        local_name,
+                        visited,
+                    );
                 }
-                // Can't follow further (no depth or unresolved source)
+                // Can't resolve source → stop
                 return None;
             }
 
@@ -1339,7 +1364,7 @@ const { x, y, reset } = useMouse()
         );
 
         // Follow the re-export: "Popup" in index.ts → default in Popup.vue
-        let result = host.get_export_span_follow_reexports("index.ts", "Popup", 5);
+        let result = host.get_export_span_follow_reexports("index.ts", "Popup");
 
         assert!(result.is_some(), "should follow re-export to Popup.vue");
         let (canonical_id, start, end) = result.unwrap();
@@ -1373,11 +1398,8 @@ const { x, y, reset } = useMouse()
             "export { default as BarrelComp } from './BarrelComp.vue'",
         );
 
-        let result = host.get_export_span_follow_reexports(
-            "/project/src/components/index.ts",
-            "BarrelComp",
-            5,
-        );
+        let result =
+            host.get_export_span_follow_reexports("/project/src/components/index.ts", "BarrelComp");
 
         assert!(
             result.is_some(),
@@ -1405,7 +1427,7 @@ const { x, y, reset } = useMouse()
             "export { helper as myHelper } from './utils.ts'",
         );
 
-        let result = host.get_export_span_follow_reexports("index.ts", "myHelper", 5);
+        let result = host.get_export_span_follow_reexports("index.ts", "myHelper");
 
         assert!(result.is_some(), "should follow named re-export");
         let (canonical_id, start, end) = result.unwrap();
@@ -1416,23 +1438,16 @@ const { x, y, reset } = useMouse()
     }
 
     #[test]
-    fn get_export_span_stops_at_max_depth() {
+    fn get_export_span_follows_multi_hop_chain() {
         let host = make_host();
 
         upsert_ts(&host, "a.ts", "export { b } from './b.ts'");
         upsert_ts(&host, "b.ts", "export { c as b } from './c.ts'");
         upsert_ts(&host, "c.ts", "export const c = 42");
 
-        // max_depth=0 → should return None (can't follow any re-exports)
-        let result = host.get_export_span_follow_reexports("a.ts", "b", 0);
-        assert!(
-            result.is_none(),
-            "max_depth=0 should not follow any re-exports"
-        );
-
-        // max_depth=2 → should follow a→b→c
-        let result = host.get_export_span_follow_reexports("a.ts", "b", 2);
-        assert!(result.is_some(), "max_depth=2 should follow the chain");
+        // Should follow a→b→c (no depth limit, cycle detection only)
+        let result = host.get_export_span_follow_reexports("a.ts", "b");
+        assert!(result.is_some(), "should follow the chain");
         let (canonical_id, _, _) = result.unwrap();
         assert_eq!(canonical_id, "c.ts", "should reach c.ts");
     }
@@ -1444,7 +1459,7 @@ const { x, y, reset } = useMouse()
         upsert_ts(&host, "utils.ts", "export function foo() { return 1 }");
 
         // Local export — no re-export, returns span in same file
-        let result = host.get_export_span_follow_reexports("utils.ts", "foo", 5);
+        let result = host.get_export_span_follow_reexports("utils.ts", "foo");
 
         assert!(result.is_some(), "should find local export");
         let (canonical_id, start, end) = result.unwrap();
@@ -1453,6 +1468,204 @@ const { x, y, reset } = useMouse()
             "local export should return same file"
         );
         assert!(start < end, "should have a valid span");
+    }
+
+    #[test]
+    fn follow_reexport_cycle_same_binding() {
+        let host = make_host();
+
+        // A re-exports foo from B, B re-exports foo from A → cycle
+        upsert_ts(&host, "a.ts", "export { foo } from './b.ts'");
+        upsert_ts(&host, "b.ts", "export { foo } from './a.ts'");
+
+        let result = host.get_export_span_follow_reexports("a.ts", "foo");
+        assert!(
+            result.is_none(),
+            "cycle on same binding should return None, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn follow_reexport_same_file_different_binding() {
+        let host = make_host();
+
+        // A re-exports foo from B (as foo→bar), B re-exports bar from A (as bar→baz),
+        // A has a local baz export. Different bindings each hop → not a cycle.
+        upsert_ts(
+            &host,
+            "a.ts",
+            "export { bar as foo } from './b.ts'\nexport const baz = 99",
+        );
+        upsert_ts(&host, "b.ts", "export { baz as bar } from './a.ts'");
+
+        let result = host.get_export_span_follow_reexports("a.ts", "foo");
+        assert!(
+            result.is_some(),
+            "different bindings through same files should resolve, not be treated as cycle"
+        );
+        let (canonical_id, _, _) = result.unwrap();
+        assert_eq!(
+            canonical_id, "a.ts",
+            "should resolve to a.ts local baz export"
+        );
+    }
+
+    #[test]
+    fn follow_reexport_indirect_cycle() {
+        let host = make_host();
+
+        // A→B→C→A with same binding name "x" at each hop
+        upsert_ts(&host, "a.ts", "export { x } from './b.ts'");
+        upsert_ts(&host, "b.ts", "export { x } from './c.ts'");
+        upsert_ts(&host, "c.ts", "export { x } from './a.ts'");
+
+        let result = host.get_export_span_follow_reexports("a.ts", "x");
+        assert!(
+            result.is_none(),
+            "indirect 3-file cycle should return None, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn follow_reexport_deep_chain_no_limit() {
+        let host = make_host();
+
+        // 15-hop chain: f0→f1→f2→...→f14→terminal.ts
+        // Each hop renames: val0→val1→...→val14→val
+        for i in 0..15 {
+            let next = if i < 14 {
+                format!("f{}.ts", i + 1)
+            } else {
+                "terminal.ts".to_string()
+            };
+            let next_binding = if i < 14 {
+                format!("val{}", i + 1)
+            } else {
+                "val".to_string()
+            };
+            let src = format!(
+                "export {{ {} as val{} }} from './{}'",
+                next_binding, i, next
+            );
+            upsert_ts(&host, &format!("f{}.ts", i), &src);
+        }
+        upsert_ts(&host, "terminal.ts", "export const val = 'done'");
+
+        let result = host.get_export_span_follow_reexports("f0.ts", "val0");
+        assert!(
+            result.is_some(),
+            "15-hop chain should resolve without depth limit"
+        );
+        let (canonical_id, start, end) = result.unwrap();
+        assert_eq!(canonical_id, "terminal.ts", "should reach terminal.ts");
+        assert!(start < end, "should have a valid span");
+    }
+
+    fn compile_template(host: &VerterHost, id: &str) {
+        host.get_virtual_file(crate::types::VirtualQuery {
+            raw_id: Some(format!("{id}?vue&type=template")),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: crate::types::CompileProfile::default(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn prop_shorthand_detected() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "MyComp.vue",
+            "<script setup>\ndefineProps<{ bar: number }>()\n</script>\n<template><div/></template>",
+        );
+        // `:bar` with no value → shorthand; `:bar="bar"` → not shorthand
+        upsert_vue(
+            &host,
+            "App.vue",
+            r#"<script setup>
+import MyComp from './MyComp.vue'
+const bar = 1
+</script>
+<template><MyComp :bar /><MyComp :bar="bar" /></template>"#,
+        );
+        compile_template(&host, "App.vue");
+
+        let analysis = host.get_analysis("App.vue").unwrap();
+        let tmpl = analysis
+            .template
+            .as_ref()
+            .expect("should have template analysis");
+        assert!(
+            tmpl.components.len() >= 2,
+            "should have at least 2 component usages, got {}",
+            tmpl.components.len()
+        );
+
+        // First usage: `:bar` (shorthand)
+        let comp1 = &tmpl.components[0];
+        assert_eq!(comp1.props.len(), 1, "first usage has 1 prop");
+        assert!(
+            comp1.props[0].is_shorthand,
+            "`:bar` (no value) should be shorthand"
+        );
+
+        // Second usage: `:bar="bar"` (not shorthand)
+        let comp2 = &tmpl.components[1];
+        assert_eq!(comp2.props.len(), 1, "second usage has 1 prop");
+        assert!(
+            !comp2.props[0].is_shorthand,
+            "`:bar=\"bar\"` should NOT be shorthand"
+        );
+    }
+
+    #[test]
+    fn prop_name_span_covers_name() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "MyComp.vue",
+            "<script setup>\ndefineProps<{ bar: number }>()\n</script>\n<template><div/></template>",
+        );
+        let sfc = r#"<script setup>
+import MyComp from './MyComp.vue'
+const bar = 1
+</script>
+<template><MyComp :bar="bar" foo="static" /></template>"#;
+        upsert_vue(&host, "App.vue", sfc);
+        compile_template(&host, "App.vue");
+
+        let analysis = host.get_analysis("App.vue").unwrap();
+        let tmpl = analysis
+            .template
+            .as_ref()
+            .expect("should have template analysis");
+        assert!(!tmpl.components.is_empty());
+
+        let comp = &tmpl.components[0];
+        // Find the bound prop `:bar`
+        let bound_prop = comp.props.iter().find(|p| p.name == "bar").unwrap();
+        let source = host.get_source("App.vue").unwrap();
+        let name_text =
+            &source[bound_prop.name_span.start as usize..bound_prop.name_span.end as usize];
+        assert_eq!(
+            name_text, "bar",
+            "name_span should cover 'bar' (the arg, not ':')"
+        );
+        assert!(
+            bound_prop.name_span.start >= bound_prop.span.start,
+            "name_span should be within the full prop span"
+        );
+
+        // Find the static prop `foo`
+        let static_prop = comp.props.iter().find(|p| p.name == "foo").unwrap();
+        let name_text =
+            &source[static_prop.name_span.start as usize..static_prop.name_span.end as usize];
+        assert_eq!(name_text, "foo", "static prop name_span should cover 'foo'");
+        assert!(
+            !static_prop.is_shorthand,
+            "static prop should not be shorthand"
+        );
     }
 
     #[test]

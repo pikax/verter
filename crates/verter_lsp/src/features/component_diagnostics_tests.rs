@@ -54,6 +54,8 @@ fn make_prop(name: &str) -> TemplatePropUsage {
         referenced_bindings: vec![],
         from_spread: false,
         span: verter_span::Span::new(10, 20),
+        name_span: verter_span::Span::new(0, 0),
+        is_shorthand: false,
     }
 }
 
@@ -131,6 +133,8 @@ fn builtin_attrs_not_flagged() {
                 referenced_bindings: vec![],
                 from_spread: false,
                 span: verter_span::Span::new(10, 21),
+                name_span: verter_span::Span::new(0, 0),
+                is_shorthand: false,
             },
             TemplatePropUsage {
                 name: "style".to_string(),
@@ -139,6 +143,8 @@ fn builtin_attrs_not_flagged() {
                 referenced_bindings: vec![],
                 from_spread: false,
                 span: verter_span::Span::new(22, 40),
+                name_span: verter_span::Span::new(0, 0),
+                is_shorthand: false,
             },
         ],
     )]);
@@ -381,6 +387,8 @@ fn diagnostics_have_correct_code_and_source() {
             referenced_bindings: vec![],
             from_spread: false,
             span: verter_span::Span::new(15, 30),
+            name_span: verter_span::Span::new(0, 0),
+            is_shorthand: false,
         }],
     )]);
     let child = make_child_with_props(&["msg"]); // needs at least one prop to trigger checking
@@ -444,6 +452,8 @@ fn spread_prop_entry_ignored() {
             referenced_bindings: vec![],
             from_spread: true,
             span: verter_span::Span::new(0, 0),
+            name_span: verter_span::Span::new(0, 0),
+            is_shorthand: false,
         }],
     )]);
     let child = make_child_with_props(&[]);

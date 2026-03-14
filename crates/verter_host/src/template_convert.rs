@@ -65,6 +65,8 @@ pub fn convert_raw_to_analysis(
                         referenced_bindings: p.referenced_bindings.clone(),
                         from_spread: p.from_spread,
                         span: p.span,
+                        name_span: p.name_span,
+                        is_shorthand: p.is_same_name_shorthand,
                     }
                 })
                 .collect();
@@ -538,6 +540,8 @@ mod tests {
                     all_bindings_static: None,
                     from_spread: false,
                     span: Span::new(0, 0),
+                    name_span: Span::new(0, 0),
+                    is_same_name_shorthand: false,
                 }],
                 has_spread: false,
                 slots_used: vec![],
@@ -663,6 +667,8 @@ mod tests {
                         all_bindings_static: None,
                         from_spread: false,
                         span: Span::new(0, 0),
+                        name_span: Span::new(0, 0),
+                        is_same_name_shorthand: false,
                     },
                     RawPropData {
                         name: "const_bound".to_string(),
@@ -672,6 +678,8 @@ mod tests {
                         all_bindings_static: Some(true),
                         from_spread: false,
                         span: Span::new(0, 0),
+                        name_span: Span::new(0, 0),
+                        is_same_name_shorthand: false,
                     },
                     RawPropData {
                         name: "dynamic_bound".to_string(),
@@ -681,6 +689,8 @@ mod tests {
                         all_bindings_static: Some(false),
                         from_spread: false,
                         span: Span::new(0, 0),
+                        name_span: Span::new(0, 0),
+                        is_same_name_shorthand: false,
                     },
                     RawPropData {
                         name: "".to_string(),
@@ -690,6 +700,8 @@ mod tests {
                         all_bindings_static: None,
                         from_spread: true,
                         span: Span::new(0, 0),
+                        name_span: Span::new(0, 0),
+                        is_same_name_shorthand: false,
                     },
                 ],
                 has_spread: true,

@@ -11,12 +11,14 @@ import {
   stripVueVirtualSuffix,
   toVueVirtualFileName,
 } from "./helpers/utils";
-import {
-  parseFile,
-  FALLBACK_STUB,
-  remapVirtualSpan,
-} from "./helpers/getDtsSnapshot";
+import { parseFile, FALLBACK_STUB, remapVirtualSpan } from "./helpers/getDtsSnapshot";
 import type { MacroTypeDependencyAccess } from "./helpers/macroTypeHydration";
+import {
+  getAliasedNavigationResult,
+  getAliasedQuickInfo,
+  getModuleSpecifierNavigationResult,
+  retargetAliasedDefinitionInfos,
+} from "./helpers/barrelNavigation";
 import { isTestFileWithContext } from "./helpers/testFileDetection";
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
 
@@ -57,14 +59,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const _readFile = info.serverHost.readFile.bind(info.serverHost);
 
     const resolvePublicApiMode = (containingFile: string) =>
-      resolveVuePublicApiMode(
-        exposeBindingsTesting,
-        containingFile,
-        (sourceFileName) =>
-          isTestFileWithContext(normalizeSourcePath(sourceFileName), {
-            fileExists: _fileExists,
-            readFile: _readFile,
-          }),
+      resolveVuePublicApiMode(exposeBindingsTesting, containingFile, (sourceFileName) =>
+        isTestFileWithContext(normalizeSourcePath(sourceFileName), {
+          fileExists: _fileExists,
+          readFile: _readFile,
+        }),
       );
 
     const createModuleResolver =
@@ -90,10 +89,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         if (isRelativeVueTs(moduleName)) {
           const resolved = path.resolve(path.dirname(containingFile), moduleName);
           logger.info(
-            "[Verter] createModuleResolver relative vue.ts - " +
-              moduleName +
-              " -- " +
-              resolved,
+            "[Verter] createModuleResolver relative vue.ts - " + moduleName + " -- " + resolved,
           );
           return {
             extension: ts.Extension.Ts,
@@ -105,10 +101,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         if (isRelativeVue(moduleName)) {
           const resolved = path.resolve(path.dirname(containingFile), moduleName);
           logger.info(
-            "[Verter] createModuleResolver relative vue - " +
-              moduleName +
-              " -- " +
-              resolved,
+            "[Verter] createModuleResolver relative vue - " + moduleName + " -- " + resolved,
           );
           return {
             extension: ts.Extension.Ts,
@@ -162,19 +155,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         containingFile,
         ...rest
       ) => {
-        const resolvedModules = _resolveModuleNameLiterals(
-          moduleNames,
-          containingFile,
-          ...rest,
-        );
+        const resolvedModules = _resolveModuleNameLiterals(moduleNames, containingFile, ...rest);
         const moduleResolver = createModuleResolver(containingFile);
 
         return moduleNames.map(({ text: moduleName }, index) => {
           try {
-            const resolvedModule = moduleResolver(
-              moduleName,
-              () => resolvedModules[index] as any,
-            );
+            const resolvedModule = moduleResolver(moduleName, () => resolvedModules[index] as any);
             if (resolvedModule) {
               return { resolvedModule };
             }
@@ -277,9 +263,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     }
 
     function cleanupVueVirtualImportPath(text: string): string {
-      return text
-        .replace(/\.vue\.__verter_test\.ts/g, ".vue")
-        .replace(/\.vue\.(d\.)?ts/g, ".vue");
+      return text.replace(/\.vue\.__verter_test\.ts/g, ".vue").replace(/\.vue\.(d\.)?ts/g, ".vue");
     }
 
     function remapDefinitionLike<
@@ -314,26 +298,197 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       return definition;
     }
 
+    function getProgramSourceContext(fileName: string): {
+      checker: tsModule.TypeChecker;
+      sourceFile: tsModule.SourceFile;
+    } | null {
+      const program = languageService.getProgram?.();
+      if (!program) {
+        return null;
+      }
+
+      const sourceFile = program.getSourceFile(fileName);
+      if (!sourceFile) {
+        return null;
+      }
+
+      return {
+        checker: program.getTypeChecker(),
+        sourceFile,
+      };
+    }
+
+    function getIdentifierTextAtPosition(
+      sourceFile: tsModule.SourceFile,
+      position: number,
+    ): string | undefined {
+      const runtimeTs = ts as typeof tsModule & {
+        getTouchingPropertyName?: (
+          sourceFile: tsModule.SourceFile,
+          position: number,
+        ) => tsModule.Node | undefined;
+        getTokenAtPosition?: (
+          sourceFile: tsModule.SourceFile,
+          position: number,
+        ) => tsModule.Node | undefined;
+      };
+
+      const token =
+        runtimeTs.getTouchingPropertyName?.(sourceFile, position) ??
+        runtimeTs.getTokenAtPosition?.(sourceFile, position);
+      if (!token) {
+        return undefined;
+      }
+
+      const text = token.getText(sourceFile);
+      return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) ? text : undefined;
+    }
+
+    function resolveModuleFileName(containingFile: string, moduleName: string): string | undefined {
+      const publicApiMode = resolvePublicApiMode(containingFile);
+
+      if (moduleName === "@verter/types" && !verterTypesInstalled) {
+        return verterTypesVirtualPath;
+      }
+
+      if (isRelativeVueTs(moduleName)) {
+        return path.resolve(path.dirname(containingFile), moduleName);
+      }
+
+      if (isRelativeVue(moduleName)) {
+        const resolved = path.resolve(path.dirname(containingFile), moduleName);
+        return toVueVirtualFileName(resolved, publicApiMode);
+      }
+
+      const result = ts.resolveModuleName(
+        moduleName,
+        normalizeSourcePath(containingFile),
+        info.project.getCompilerOptions(),
+        {
+          fileExists: _fileExists,
+          readFile: _readFile,
+          directoryExists: info.serverHost.directoryExists?.bind(info.serverHost),
+          getCurrentDirectory: () => directory,
+          getDirectories: info.serverHost.getDirectories?.bind(info.serverHost),
+          realpath: info.serverHost.realpath?.bind(info.serverHost),
+          useCaseSensitiveFileNames: () => info.serverHost.useCaseSensitiveFileNames,
+        },
+      );
+
+      return result.resolvedModule?.resolvedFileName;
+    }
+
+    function retargetAliasedDefinitions(
+      definitions: readonly tsModule.DefinitionInfo[] | undefined,
+    ): tsModule.DefinitionInfo[] | undefined {
+      if (!definitions?.length) {
+        return undefined;
+      }
+
+      const program = languageService.getProgram?.();
+      if (!program) {
+        return [...definitions];
+      }
+
+      return (
+        retargetAliasedDefinitionInfos(
+          ts,
+          program.getTypeChecker(),
+          (candidateFileName) => program.getSourceFile(candidateFileName),
+          definitions,
+        ) ?? [...definitions]
+      );
+    }
+
     const _getDefinitionAndBoundSpan =
       languageService.getDefinitionAndBoundSpan.bind(languageService);
     languageService.getDefinitionAndBoundSpan = (fileName, position) => {
+      const context = getProgramSourceContext(fileName);
+      if (context) {
+        const aliased = getAliasedNavigationResult(
+          ts,
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (aliased?.definitions.length) {
+          for (const def of aliased.definitions) {
+            remapDefinitionLike(def);
+          }
+          return {
+            textSpan: aliased.textSpan,
+            definitions: aliased.definitions,
+          };
+        }
+
+        const moduleNavigation = getModuleSpecifierNavigationResult(
+          ts,
+          context.sourceFile,
+          position,
+          (moduleName) => resolveModuleFileName(fileName, moduleName),
+        );
+        if (moduleNavigation?.definitions.length) {
+          for (const def of moduleNavigation.definitions) {
+            remapDefinitionLike(def);
+          }
+          return {
+            textSpan: moduleNavigation.textSpan,
+            definitions: moduleNavigation.definitions,
+          };
+        }
+      }
+
       const result = _getDefinitionAndBoundSpan(fileName, position);
       if (result?.definitions) {
-        for (const def of result.definitions) {
+        const definitions = retargetAliasedDefinitions(result.definitions) ?? [
+          ...result.definitions,
+        ];
+        for (const def of definitions) {
           remapDefinitionLike(def);
         }
+        result.definitions = definitions;
       }
       return result;
     };
 
-    const _getDefinitionAtPosition =
-      languageService.getDefinitionAtPosition.bind(languageService);
+    const _getDefinitionAtPosition = languageService.getDefinitionAtPosition.bind(languageService);
     languageService.getDefinitionAtPosition = (fileName, position) => {
+      const context = getProgramSourceContext(fileName);
+      if (context) {
+        const aliased = getAliasedNavigationResult(
+          ts,
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (aliased?.definitions.length) {
+          for (const def of aliased.definitions) {
+            remapDefinitionLike(def);
+          }
+          return aliased.definitions;
+        }
+
+        const moduleNavigation = getModuleSpecifierNavigationResult(
+          ts,
+          context.sourceFile,
+          position,
+          (moduleName) => resolveModuleFileName(fileName, moduleName),
+        );
+        if (moduleNavigation?.definitions.length) {
+          for (const def of moduleNavigation.definitions) {
+            remapDefinitionLike(def);
+          }
+          return moduleNavigation.definitions;
+        }
+      }
+
       const result = _getDefinitionAtPosition(fileName, position);
       if (result) {
-        for (const def of result) {
+        const definitions = retargetAliasedDefinitions(result) ?? [...result];
+        for (const def of definitions) {
           remapDefinitionLike(def);
         }
+        return definitions;
       }
       return result;
     };
@@ -341,13 +496,71 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const _getTypeDefinitionAtPosition =
       languageService.getTypeDefinitionAtPosition.bind(languageService);
     languageService.getTypeDefinitionAtPosition = (fileName, position) => {
-      const result = _getTypeDefinitionAtPosition(fileName, position);
-      if (result) {
-        for (const def of result) {
-          remapDefinitionLike(def);
+      const context = getProgramSourceContext(fileName);
+      if (context) {
+        const aliased = getAliasedNavigationResult(
+          ts,
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (aliased?.definitions.length) {
+          for (const def of aliased.definitions) {
+            remapDefinitionLike(def);
+          }
+          return aliased.definitions;
         }
       }
+
+      const result = _getTypeDefinitionAtPosition(fileName, position);
+      if (result) {
+        const definitions = retargetAliasedDefinitions(result) ?? [...result];
+        for (const def of definitions) {
+          remapDefinitionLike(def);
+        }
+        return definitions;
+      }
       return result;
+    };
+
+    const _getQuickInfoAtPosition = languageService.getQuickInfoAtPosition.bind(languageService);
+    languageService.getQuickInfoAtPosition = (fileName, position) => {
+      const originalQuickInfo = _getQuickInfoAtPosition(fileName, position);
+      const context = getProgramSourceContext(fileName);
+      if (context) {
+        const quickInfo = getAliasedQuickInfo(
+          ts,
+          { getQuickInfoAtPosition: _getQuickInfoAtPosition },
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (quickInfo) {
+          return quickInfo;
+        }
+      }
+
+      const originalDefinitions = _getDefinitionAtPosition(fileName, position);
+      const retargeted = retargetAliasedDefinitions(originalDefinitions);
+      if (originalDefinitions?.length && retargeted?.length) {
+        const original = originalDefinitions[0];
+        const target = retargeted[0];
+        if (
+          target.fileName !== original.fileName ||
+          target.textSpan.start !== original.textSpan.start ||
+          target.textSpan.length !== original.textSpan.length
+        ) {
+          const targetQuickInfo = _getQuickInfoAtPosition(target.fileName, target.textSpan.start);
+          if (targetQuickInfo) {
+            return {
+              ...targetQuickInfo,
+              textSpan: originalQuickInfo?.textSpan ?? targetQuickInfo.textSpan,
+            };
+          }
+        }
+      }
+
+      return originalQuickInfo;
     };
 
     const _getCompletionEntryDetails =
@@ -397,12 +610,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       options,
       formattingSettings,
     ) => {
-      const result = _getCompletionsAtPosition(
-        fileName,
-        position,
-        options,
-        formattingSettings,
-      );
+      const result = _getCompletionsAtPosition(fileName, position, options, formattingSettings);
       if (result?.entries) {
         for (const entry of result.entries) {
           if (entry.sourceDisplay) {

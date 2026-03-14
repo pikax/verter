@@ -90,7 +90,6 @@ pub fn definition_at_position(
                             }
                             return resolved_import_definition(canonical_id);
                         }
-                        return None;
                     }
                     // Try path alias resolution (tsconfig paths)
                     if let Some(resolved) = resolve_path.as_ref().and_then(|rp| rp(&import.source))
@@ -706,7 +705,9 @@ fn import_source_definition(
                 // Check cursor is within the string literal
                 if offset >= str_start && offset < str_end {
                     if let Some(ref canonical_id) = import.resolved_canonical_id {
-                        return resolved_import_definition(canonical_id);
+                        if let Some(result) = resolved_import_definition(canonical_id) {
+                            return Some(result);
+                        }
                     }
                     // Try path alias resolution (tsconfig paths)
                     if let Some(resolved) = resolve_path.as_ref().and_then(|rp| rp(&import.source))

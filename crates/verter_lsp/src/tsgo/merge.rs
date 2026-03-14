@@ -33,6 +33,14 @@ pub struct ExternalIdeContext {
 /// Returns `None` if the file isn't tracked or hasn't been compiled yet.
 pub type ExternalIdeResolver<'a> = &'a dyn Fn(&str) -> Option<ExternalIdeContext>;
 
+/// Resolver for following a type-provider location through barrel re-exports.
+///
+/// The input is the raw provider path plus its byte-offset range in that file.
+/// Returns a fully resolved LSP location when the file/range matches a known
+/// re-export signature; otherwise returns `None` and merge logic keeps the
+/// original provider location unchanged.
+pub type BarrelResolver<'a> = &'a dyn Fn(&str, u32, u32) -> Option<Location>;
+
 /// Map an LSP `Position` (in the Vue file) to a byte offset in the generated TSX.
 ///
 /// Steps: LSP Position → byte offset via LineIndex → line/col → PositionMapper → TSX line/col → TSX byte offset via TSX LineIndex.
@@ -694,6 +702,30 @@ pub fn merge_definitions(
     document_uri: &Uri,
     vue_source_exists: &dyn Fn(&str) -> bool,
 ) -> Option<GotoDefinitionResponse> {
+    merge_definitions_with_barrel_resolver(
+        verter_def,
+        type_defs,
+        tsx_line_index,
+        mapper,
+        vue_line_index,
+        external_resolver,
+        document_uri,
+        vue_source_exists,
+        None,
+    )
+}
+
+pub fn merge_definitions_with_barrel_resolver(
+    verter_def: Option<GotoDefinitionResponse>,
+    type_defs: Vec<TypeLocation>,
+    tsx_line_index: &LineIndex,
+    mapper: &PositionMapper,
+    vue_line_index: &LineIndex,
+    external_resolver: Option<ExternalIdeResolver<'_>>,
+    document_uri: &Uri,
+    vue_source_exists: &dyn Fn(&str) -> bool,
+    barrel_resolver: Option<BarrelResolver<'_>>,
+) -> Option<GotoDefinitionResponse> {
     // If verter provides a definition, prefer it when:
     // - TSGO returned nothing, or
     // - verter resolved cross-file (TSGO often returns *.vue shim declarations)
@@ -716,6 +748,17 @@ pub fn merge_definitions(
         let mut locations: Vec<Location> = type_defs
             .into_iter()
             .filter_map(|loc| {
+                if !(loc.path.ends_with(".vue.tsx")
+                    || loc.path.ends_with(".vue.jsx")
+                    || loc.path.ends_with(".vue"))
+                {
+                    if let Some(resolver) = barrel_resolver {
+                        if let Some(location) = resolver(&loc.path, loc.start, loc.end) {
+                            return Some(location);
+                        }
+                    }
+                }
+
                 // TypeProvider returns paths; convert to URIs
                 // For .vue files, strip virtual suffixes (.tsx or .d.ts)
                 let file_path = normalize_vue_path(&loc.path, vue_source_exists);
@@ -2096,6 +2139,53 @@ mod tests {
             &vue_exists,
         );
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn merge_definitions_uses_barrel_resolver_for_non_vue_targets() {
+        let (mapper, vue_li, tsx_li) = make_mapper_and_indexes();
+        let type_defs = vec![TypeLocation {
+            path: "/home/user/index.ts".to_string(),
+            start: 20,
+            end: 27,
+        }];
+        let expected = Location {
+            uri: file_path_to_uri("/home/user/Overlay.vue").unwrap(),
+            range: Range {
+                start: Position {
+                    line: 3,
+                    character: 2,
+                },
+                end: Position {
+                    line: 3,
+                    character: 9,
+                },
+            },
+        };
+        let resolver = |path: &str, start: u32, end: u32| {
+            if path == "/home/user/index.ts" && start == 20 && end == 27 {
+                Some(expected.clone())
+            } else {
+                None
+            }
+        };
+
+        let result = merge_definitions_with_barrel_resolver(
+            None,
+            type_defs,
+            &tsx_li,
+            &mapper,
+            &vue_li,
+            None,
+            &test_doc_uri(),
+            &vue_exists,
+            Some(&resolver),
+        );
+
+        match result {
+            Some(GotoDefinitionResponse::Scalar(loc)) => assert_eq!(loc, expected),
+            other => panic!("expected scalar resolved location, got {:?}", other),
+        }
     }
 
     /// Regression: when verter resolves to a same-file import and TSGO resolves

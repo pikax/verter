@@ -525,6 +525,7 @@ mod tests {
             span: Default::default(),
             reexport_source: None,
             reexport_local: None,
+            local_span: None,
         }];
         let changed = compute_changed_exports(&old, &new);
         assert!(changed.contains("MyType"));
@@ -547,6 +548,7 @@ mod tests {
             span: Default::default(),
             reexport_source: None,
             reexport_local: None,
+            local_span: None,
         }];
         let new = vec![verter_analysis::ExportSignature {
             name: "MyType".to_string(),
@@ -555,6 +557,7 @@ mod tests {
             span: Default::default(),
             reexport_source: None,
             reexport_local: None,
+            local_span: None,
         }];
         let changed = compute_changed_exports(&old, &new);
         assert!(changed.contains("MyType"));
@@ -571,6 +574,7 @@ mod tests {
                 span: Default::default(),
                 reexport_source: None,
                 reexport_local: None,
+                local_span: None,
             },
             verter_analysis::ExportSignature {
                 name: "Changed".to_string(),
@@ -579,6 +583,7 @@ mod tests {
                 span: Default::default(),
                 reexport_source: None,
                 reexport_local: None,
+                local_span: None,
             },
             verter_analysis::ExportSignature {
                 name: "Removed".to_string(),
@@ -587,6 +592,7 @@ mod tests {
                 span: Default::default(),
                 reexport_source: None,
                 reexport_local: None,
+                local_span: None,
             },
         ];
         let new = vec![
@@ -597,6 +603,7 @@ mod tests {
                 span: Default::default(),
                 reexport_source: None,
                 reexport_local: None,
+                local_span: None,
             },
             verter_analysis::ExportSignature {
                 name: "Changed".to_string(),
@@ -605,6 +612,7 @@ mod tests {
                 span: Default::default(),
                 reexport_source: None,
                 reexport_local: None,
+                local_span: None,
             },
             verter_analysis::ExportSignature {
                 name: "Added".to_string(),
@@ -613,6 +621,7 @@ mod tests {
                 span: Default::default(),
                 reexport_source: None,
                 reexport_local: None,
+                local_span: None,
             },
         ];
         let changed = compute_changed_exports(&old, &new);
@@ -633,6 +642,7 @@ mod tests {
             span: Default::default(),
             reexport_source: None,
             reexport_local: None,
+            local_span: None,
         }];
         let new = vec![];
         let changed = compute_changed_exports(&old, &new);
@@ -649,6 +659,7 @@ mod tests {
             span: Default::default(),
             reexport_source: None,
             reexport_local: None,
+            local_span: None,
         }];
         let new = vec![verter_analysis::ExportSignature {
             name: "MyType".to_string(),
@@ -657,6 +668,7 @@ mod tests {
             span: Default::default(),
             reexport_source: None,
             reexport_local: None,
+            local_span: None,
         }];
         let changed = compute_changed_exports(&old, &new);
         assert!(changed.is_empty());
