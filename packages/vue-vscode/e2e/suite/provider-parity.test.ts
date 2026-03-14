@@ -41,6 +41,8 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
   // provider-specific regression.
 
   test("P1: hover on ref binding returns number type", async function () {
+    // TSGO cannot work without tsconfig.json on disk
+    if (FIXTURE_NAME === "no-config" && TYPE_PROVIDER === "tsgo") return this.skip();
     const pos = findPosition(doc, "{{ count }}", 3);
     if (!pos) {
       this.skip();
@@ -48,7 +50,9 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     }
 
     const { hovers } = await measureHover(doc.uri, pos);
-    console.log(`    [${TYPE_PROVIDER || "verter-only"}] hover on count: ${hovers.length} result(s)`);
+    console.log(
+      `    [${TYPE_PROVIDER || "verter-only"}] hover on count: ${hovers.length} result(s)`,
+    );
 
     expect(hovers.length, "hover should return results").to.be.greaterThan(0);
 
@@ -71,7 +75,9 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     }
 
     const { hovers } = await measureHover(doc.uri, pos);
-    console.log(`    [${TYPE_PROVIDER || "verter-only"}] hover on <MyComp: ${hovers.length} result(s)`);
+    console.log(
+      `    [${TYPE_PROVIDER || "verter-only"}] hover on <MyComp: ${hovers.length} result(s)`,
+    );
 
     expect(hovers.length, "hover should return results").to.be.greaterThan(0);
 
@@ -80,7 +86,9 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     expect(content, "should mention foo prop").to.include("foo");
     expect(content, "should mention bar prop").to.include("bar");
     // Must NOT show degraded empty shell
-    expect(content, "should NOT show DefineComponent<{}, {}>").to.not.include("DefineComponent<{}, {}>");
+    expect(content, "should NOT show DefineComponent<{}, {}>").to.not.include(
+      "DefineComponent<{}, {}>",
+    );
   });
 
   test("P3: completions on member access return typed properties", async function () {
@@ -100,7 +108,9 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     expect(completions!.items.length, "completions should not be empty").to.be.greaterThan(0);
 
     const labels = completionLabels(completions!);
-    console.log(`    [${TYPE_PROVIDER || "verter-only"}] action. completions: ${labels.join(", ")}`);
+    console.log(
+      `    [${TYPE_PROVIDER || "verter-only"}] action. completions: ${labels.join(", ")}`,
+    );
 
     expect(labels, "should include disabled").to.include("disabled");
     expect(labels, "should include label").to.include("label");
@@ -120,7 +130,9 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     }
 
     const locations = await getDefinitions(doc.uri, pos);
-    console.log(`    [${TYPE_PROVIDER || "verter-only"}] definition on <MyComp: ${locations.length} location(s)`);
+    console.log(
+      `    [${TYPE_PROVIDER || "verter-only"}] definition on <MyComp: ${locations.length} location(s)`,
+    );
 
     expect(locations.length, "should have definition results").to.be.greaterThan(0);
 
@@ -142,7 +154,9 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     }
 
     const { hovers } = await measureHover(doc.uri, pos);
-    console.log(`    [${TYPE_PROVIDER || "verter-only"}] hover on MyComp import: ${hovers.length} result(s)`);
+    console.log(
+      `    [${TYPE_PROVIDER || "verter-only"}] hover on MyComp import: ${hovers.length} result(s)`,
+    );
 
     expect(hovers.length, "hover should return results").to.be.greaterThan(0);
 
@@ -150,7 +164,9 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     expect(content, "should mention foo prop").to.include("foo");
     expect(content, "should mention bar prop").to.include("bar");
     expect(content, "should NOT be any").to.not.match(/:\s*any\b/);
-    expect(content, "should NOT show DefineComponent<{}, {}>").to.not.include("DefineComponent<{}, {}>");
+    expect(content, "should NOT show DefineComponent<{}, {}>").to.not.include(
+      "DefineComponent<{}, {}>",
+    );
   });
 
   // ── Component Prop Validation ────────────────────────────────
@@ -191,19 +207,16 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
       tsDiags.length,
       `expected exactly one TS diagnostic for InvalidPropCase.vue, got: ${JSON.stringify(tsDiags.map((d) => ({ msg: d.message, code: d.code, src: d.source })))}`,
     ).to.equal(1);
-    expect(
-      tsDiags[0].message,
-      "the TS diagnostic should be about the unknown prop",
-    ).to.include("thisDoesNotExist");
+    expect(tsDiags[0].message, "the TS diagnostic should be about the unknown prop").to.include(
+      "thisDoesNotExist",
+    );
 
     // Negative: no verter/unknown-prop diagnostics (TypeProvider is source of truth)
     const verterPropDiag = allDiags.find(
       (d) => d.source === "verter" && d.message.includes("Unknown prop"),
     );
-    expect(
-      verterPropDiag,
-      "verter/unknown-prop should be suppressed when TypeProvider is active",
-    ).to.be.undefined;
+    expect(verterPropDiag, "verter/unknown-prop should be suppressed when TypeProvider is active")
+      .to.be.undefined;
   });
 
   // ── Barrel Re-Export Parity Tests ────────────────────────────
@@ -239,7 +252,8 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     const hasRealProps = content.includes("label") && content.includes("disabled");
     const isDegraded = content.includes("DefineComponent<{}, {}>");
 
-    expect(hasRealProps, `barrel Button should show props, got: ${content.slice(0, 200)}`).to.be.true;
+    expect(hasRealProps, `barrel Button should show props, got: ${content.slice(0, 200)}`).to.be
+      .true;
     expect(isDegraded, "barrel Button should NOT be degraded").to.be.false;
   });
 
@@ -257,7 +271,9 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
 
     const locations = await getDefinitions(doc.uri, pos);
     if (locations.length === 0) {
-      console.log(`    [${TYPE_PROVIDER || "verter-only"}] No definition — provider may not be running`);
+      console.log(
+        `    [${TYPE_PROVIDER || "verter-only"}] No definition — provider may not be running`,
+      );
       return;
     }
 
@@ -281,10 +297,9 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
       console.log(`    Active provider: ${providerMatch[1]}`);
 
       if (TYPE_PROVIDER) {
-        expect(
-          providerMatch[1],
-          `Requested ${TYPE_PROVIDER} but got ${providerMatch[1]}`,
-        ).to.equal(TYPE_PROVIDER);
+        expect(providerMatch[1], `Requested ${TYPE_PROVIDER} but got ${providerMatch[1]}`).to.equal(
+          TYPE_PROVIDER,
+        );
       }
     } else if (log.includes("verter-only mode")) {
       console.log("    Active provider: verter-only (no type provider)");

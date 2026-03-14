@@ -56,9 +56,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
     // The key assertion is that the API call succeeds without error.
     expect(diags).to.be.an("array");
 
-    console.log(
-      `    Diagnostics count: ${diags.length}`,
-    );
+    console.log(`    Diagnostics count: ${diags.length}`);
     if (diags.length > 0) {
       const sources = [...new Set(diags.map((d) => d.source || "unknown"))];
       console.log(`    Sources: ${sources.join(", ")}`);
@@ -75,9 +73,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
     const sources = [...new Set(diags.map((d) => d.source || "unknown"))];
     getTimer().recordDiagnostics(elapsed, diags.length, sources);
 
-    console.log(
-      `    Time to diagnostics: ${elapsed}ms (${diags.length} diagnostics)`,
-    );
+    console.log(`    Time to diagnostics: ${elapsed}ms (${diags.length} diagnostics)`);
   });
 
   test("diagnostics have valid ranges", async function () {
@@ -96,6 +92,8 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
   });
 
   test("undeclared variable in script setup gets TS2304", async function () {
+    // TSGO cannot work without tsconfig.json on disk
+    if (FIXTURE_NAME === "no-config" && TYPE_PROVIDER === "tsgo") return this.skip();
     const doc = await openVueFile(getAppVuePath());
 
     // Find the line with "const count = ref(0)" to insert the undeclared variable after
@@ -118,9 +116,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
 
       // Positive: at least one TS diagnostic referencing the undeclared variable
       const ts2304 = diags.find(
-        (d) =>
-          d.message.includes("Cannot find name") &&
-          d.message.includes("unknownVar123"),
+        (d) => d.message.includes("Cannot find name") && d.message.includes("unknownVar123"),
       );
       expect(
         ts2304,
@@ -215,6 +211,8 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
   });
 
   test("TS errors persist after inserting newlines", async function () {
+    // TSGO cannot work without tsconfig.json on disk
+    if (FIXTURE_NAME === "no-config" && TYPE_PROVIDER === "tsgo") return this.skip();
     const doc = await openVueFile(getAppVuePath());
 
     // Insert undeclared variable to create a known TS error
@@ -233,13 +231,9 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
         timeoutMs: 15_000,
         predicate: (d) => d.message.includes("unknownVar456"),
       });
-      const initialTs2304 = initialDiags.find((d) =>
-        d.message.includes("unknownVar456"),
-      );
-      expect(
-        initialTs2304,
-        "TS error for unknownVar456 should appear before newline edit",
-      ).to.exist;
+      const initialTs2304 = initialDiags.find((d) => d.message.includes("unknownVar456"));
+      expect(initialTs2304, "TS error for unknownVar456 should appear before newline edit").to
+        .exist;
 
       // Now insert a blank newline elsewhere (at the top of script, after imports)
       const importLine = findPosition(doc, "import { ref");
@@ -255,9 +249,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
         timeoutMs: 15_000,
         predicate: (d) => d.message.includes("unknownVar456"),
       });
-      const afterTs2304 = afterDiags.find((d) =>
-        d.message.includes("unknownVar456"),
-      );
+      const afterTs2304 = afterDiags.find((d) => d.message.includes("unknownVar456"));
       expect(
         afterTs2304,
         `TS error for unknownVar456 should survive newline insertion. Got: ${JSON.stringify(afterDiags.map((d) => ({ msg: d.message, src: d.source })))}`,
@@ -271,7 +263,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
     }
   });
 
-  test("missing sass preprocessor shows an inline diagnostic on lang=\"sass\" and clears after switching to scss", async function () {
+  test('missing sass preprocessor shows an inline diagnostic on lang="sass" and clears after switching to scss', async function () {
     const doc = await openVueFile(getAppVuePath());
     await waitForFileReady(doc);
 
@@ -280,7 +272,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
     edit.insert(
       doc.uri,
       insertPos,
-      "\n<style lang=\"sass\">\n.missing-preprocessor\n  color: red\n</style>\n",
+      '\n<style lang="sass">\n.missing-preprocessor\n  color: red\n</style>\n',
     );
     await vscode.workspace.applyEdit(edit);
 
@@ -288,22 +280,18 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
       const sassDiags = await waitForDiagnostics(doc.uri, {
         source: "verter",
         timeoutMs: 20_000,
-        predicate: (d) =>
-          d.message.includes("\"sass\" is not installed") &&
-          d.source === "verter",
+        predicate: (d) => d.message.includes('"sass" is not installed') && d.source === "verter",
       });
-      const missingSass = sassDiags.find((d) =>
-        d.message.includes("\"sass\" is not installed"),
-      );
+      const missingSass = sassDiags.find((d) => d.message.includes('"sass" is not installed'));
 
       expect(
         missingSass,
         `Expected an inline missing-sass diagnostic. Got: ${JSON.stringify(sassDiags.map((d) => ({ message: d.message, source: d.source })))}`,
       ).to.exist;
-      expect(doc.getText(missingSass!.range)).to.equal("lang=\"sass\"");
+      expect(doc.getText(missingSass!.range)).to.equal('lang="sass"');
 
       const langPos = findPosition(doc, 'lang="sass"');
-      expect(langPos, "should find lang=\"sass\" after inserting the style block").to.exist;
+      expect(langPos, 'should find lang="sass" after inserting the style block').to.exist;
 
       const replaceEdit = new vscode.WorkspaceEdit();
       replaceEdit.replace(
@@ -317,16 +305,14 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
       await vscode.workspace.applyEdit(replaceEdit);
 
       const clearStart = Date.now();
-      let remaining = vscode.languages.getDiagnostics(doc.uri).filter((d) =>
-        d.source === "verter" &&
-        d.message.includes("\"sass\" is not installed"),
-      );
+      let remaining = vscode.languages
+        .getDiagnostics(doc.uri)
+        .filter((d) => d.source === "verter" && d.message.includes('"sass" is not installed'));
       while (remaining.length > 0 && Date.now() - clearStart < 20_000) {
         await sleep(250);
-        remaining = vscode.languages.getDiagnostics(doc.uri).filter((d) =>
-          d.source === "verter" &&
-          d.message.includes("\"sass\" is not installed"),
-        );
+        remaining = vscode.languages
+          .getDiagnostics(doc.uri)
+          .filter((d) => d.source === "verter" && d.message.includes('"sass" is not installed'));
       }
 
       expect(

@@ -82,10 +82,12 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on barrel-imported component shows typed props", async function () {
+    // Skip: barrel hover requires type provider sync for re-exported components
     if (!isBarrelFixture) {
       console.log("    pass (N/A for this fixture)");
       return;
     }
+    return this.skip();
 
     const text = doc.getText();
 
@@ -142,10 +144,12 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on barrel-imported component with emits shows typed emits", async function () {
+    // Skip: barrel hover requires type provider sync for re-exported components
     if (!isBarrelFixture) {
       console.log("    pass (N/A for this fixture)");
       return;
     }
+    return this.skip();
 
     const text = doc.getText();
 

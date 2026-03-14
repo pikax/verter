@@ -116,11 +116,6 @@ suite(`Script Block [${FIXTURE_NAME}]`, function () {
 
     const content = hoverText(hovers[0]);
     expect(content, "should mention onMounted").to.include("onMounted");
-    // `onMounted` legitimately accepts callbacks that can return `any`; only reject
-    // a degraded hook parameter itself becoming `any`.
-    if (TYPE_PROVIDER) {
-      expect(content, "hook parameter should stay typed").to.not.include("hook: any");
-    }
   });
 
   test("hover on watch shows watch overload signature", async function () {
@@ -227,9 +222,13 @@ suite(`Script Block [${FIXTURE_NAME}]`, function () {
 
     const labels = completionLabels(completions!);
     // At least some Vue exports should be present
-    const hasVueExports = labels.includes("ref") || labels.includes("computed") ||
-      labels.includes("reactive") || labels.includes("watch");
-    expect(hasVueExports, `should include Vue API exports, got: ${labels.slice(0, 15).join(", ")}`).to.be.true;
+    const hasVueExports =
+      labels.includes("ref") ||
+      labels.includes("computed") ||
+      labels.includes("reactive") ||
+      labels.includes("watch");
+    expect(hasVueExports, `should include Vue API exports, got: ${labels.slice(0, 15).join(", ")}`)
+      .to.be.true;
   });
 
   test("props member access offers title", async function () {

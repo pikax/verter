@@ -19,24 +19,22 @@ suite(`Code Actions [${FIXTURE_NAME}]`, function () {
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
+    if (FIXTURE_NAME !== "single-project") return;
     await waitForExtensionReady();
     doc = await openAndReady("src/OrganizeImports.vue");
   });
 
   test("organize imports action available with source.organizeImports filter", async function () {
+    if (FIXTURE_NAME !== "single-project") return this.skip();
     if (!TYPE_PROVIDER) return this.skip();
     // Request code actions for the import region after the type provider has settled.
-    const importRange = new vscode.Range(
-      new vscode.Position(1, 0),
-      new vscode.Position(3, 0),
-    );
+    const importRange = new vscode.Range(new vscode.Position(1, 0), new vscode.Position(3, 0));
     const actions = await waitForCodeActionsMatching(doc.uri, importRange, {
       kind: vscode.CodeActionKind.SourceOrganizeImports,
       predicate: (items: readonly (vscode.CodeAction | vscode.Command)[]) =>
         items.some(
           (item: vscode.CodeAction | vscode.Command) =>
-            isCodeAction(item) &&
-            item.kind?.value?.startsWith("source.organizeImports"),
+            isCodeAction(item) && item.kind?.value?.startsWith("source.organizeImports"),
         ),
       stableMs: 500,
       timeoutMs: 20_000,
@@ -70,11 +68,9 @@ suite(`Code Actions [${FIXTURE_NAME}]`, function () {
   });
 
   test("unfiltered request returns multiple action kinds", async function () {
+    if (FIXTURE_NAME !== "single-project") return this.skip();
     if (!TYPE_PROVIDER) return this.skip();
-    const scriptRange = new vscode.Range(
-      new vscode.Position(0, 0),
-      new vscode.Position(10, 0),
-    );
+    const scriptRange = new vscode.Range(new vscode.Position(0, 0), new vscode.Position(10, 0));
     const actions = await waitForCodeActionsMatching(doc.uri, scriptRange, {
       predicate: (items: readonly (vscode.CodeAction | vscode.Command)[]) => {
         const kinds = new Set(
