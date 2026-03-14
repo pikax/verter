@@ -30,8 +30,13 @@ impl ActionProvider for RemoveImport {
             return vec![];
         }
 
-        // Extend to include trailing newline if present
-        let remove_end = if end < source.len() && source.as_bytes()[end] == b'\n' {
+        // Extend to include trailing newline (CRLF or LF) if present
+        let remove_end = if end + 1 < source.len()
+            && source.as_bytes()[end] == b'\r'
+            && source.as_bytes()[end + 1] == b'\n'
+        {
+            end + 2
+        } else if end < source.len() && source.as_bytes()[end] == b'\n' {
             end + 1
         } else {
             end
@@ -89,6 +94,81 @@ mod tests {
             actions[0].edits[0].replacement.is_empty(),
             "should delete the import"
         );
+    }
+
+    #[test]
+    fn removes_import_with_crlf_line_endings() {
+        let source = "import { defineProps } from 'vue'\r\nconst props = defineProps()";
+        let end = source.find('\r').unwrap(); // end of import statement, before \r\n
+        let diag = LintDiagnostic {
+            rule: "no-import-compiler-macros".to_string(),
+            category: "script".to_string(),
+            severity: Severity::Warning,
+            message: "do not import compiler macros".to_string(),
+            span: verter_span::Span::new(0, end as u32),
+            tags: vec![],
+            span_kind: DiagnosticSpanKind::ScriptCallSite,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        };
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "/src/App.vue",
+            diagnostics: &set,
+            template: None,
+            script: None,
+            styles: &[],
+        };
+        let actions = RemoveImport.fixes_for_diagnostic(&diag, &ctx);
+        assert_eq!(actions.len(), 1);
+        let edit = &actions[0].edits[0];
+        let remove_end = edit.span.end as usize;
+        // Must consume both \r and \n
+        assert_eq!(
+            remove_end,
+            end + 2,
+            "removal span should include both \\r and \\n"
+        );
+        // The remaining text should start cleanly with "const"
+        assert!(
+            source[remove_end..].starts_with("const"),
+            "text after removal should start with 'const', got: {:?}",
+            &source[remove_end..]
+        );
+    }
+
+    #[test]
+    fn removes_import_with_lf_still_works() {
+        let source = "import { defineProps } from 'vue'\nconst props = defineProps()";
+        let end = source.find('\n').unwrap();
+        let diag = LintDiagnostic {
+            rule: "no-import-compiler-macros".to_string(),
+            category: "script".to_string(),
+            severity: Severity::Warning,
+            message: "do not import compiler macros".to_string(),
+            span: verter_span::Span::new(0, end as u32),
+            tags: vec![],
+            span_kind: DiagnosticSpanKind::ScriptCallSite,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        };
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "/src/App.vue",
+            diagnostics: &set,
+            template: None,
+            script: None,
+            styles: &[],
+        };
+        let actions = RemoveImport.fixes_for_diagnostic(&diag, &ctx);
+        assert_eq!(actions.len(), 1);
+        let edit = &actions[0].edits[0];
+        let remove_end = edit.span.end as usize;
+        assert_eq!(remove_end, end + 1, "removal span should include \\n");
     }
 
     #[test]

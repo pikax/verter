@@ -105,7 +105,7 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
                     bindings.push(AnalyzedImportBinding {
                         name: s.local.name.to_string(),
-                        is_type_only: false,
+                        is_type_only,
                         vue_api: None,
                         span: s.local.span.into(),
                     });
@@ -113,7 +113,7 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
                     bindings.push(AnalyzedImportBinding {
                         name: s.local.name.to_string(),
-                        is_type_only: false,
+                        is_type_only,
                         vue_api: None,
                         span: s.local.span.into(),
                     });
@@ -269,6 +269,52 @@ mod tests {
         assert_eq!(
             imports[0].bindings[1].vue_api,
             Some(VueApiClassification::Other)
+        );
+    }
+
+    /// @ai-generated - Declaration-level type-only default import
+    #[test]
+    fn type_only_default_import() {
+        let imports = analyze_imports("import type Foo from './types';");
+        assert_eq!(imports.len(), 1);
+        assert!(
+            imports[0].bindings[0].is_type_only,
+            "default import from `import type` should be type-only"
+        );
+        assert_eq!(imports[0].bindings[0].name, "Foo");
+    }
+
+    /// @ai-generated - Declaration-level type-only namespace import
+    #[test]
+    fn type_only_namespace_import() {
+        let imports = analyze_imports("import type * as Utils from './utils';");
+        assert_eq!(imports.len(), 1);
+        assert!(
+            imports[0].bindings[0].is_type_only,
+            "namespace import from `import type` should be type-only"
+        );
+        assert_eq!(imports[0].bindings[0].name, "Utils");
+    }
+
+    /// @ai-generated - Value default import is NOT type-only
+    #[test]
+    fn value_default_import_not_type_only() {
+        let imports = analyze_imports("import Foo from './types';");
+        assert_eq!(imports.len(), 1);
+        assert!(
+            !imports[0].bindings[0].is_type_only,
+            "value default import should not be type-only"
+        );
+    }
+
+    /// @ai-generated - Value namespace import is NOT type-only
+    #[test]
+    fn value_namespace_import_not_type_only() {
+        let imports = analyze_imports("import * as Utils from './utils';");
+        assert_eq!(imports.len(), 1);
+        assert!(
+            !imports[0].bindings[0].is_type_only,
+            "value namespace import should not be type-only"
         );
     }
 

@@ -52,7 +52,7 @@ fn wrap_in_on_mounted(diag: &LintDiagnostic, ctx: &ActionContext) -> Vec<CodeAct
         }],
         is_preferred: false,
         diagnostic_rule: Some(diag.rule.clone()),
-        safety: AutofixSafety::Safe,
+        safety: AutofixSafety::Caution,
     }]
 }
 
@@ -77,7 +77,7 @@ fn wrap_in_client_only(diag: &LintDiagnostic, ctx: &ActionContext) -> Vec<CodeAc
         }],
         is_preferred: false,
         diagnostic_rule: Some(diag.rule.clone()),
-        safety: AutofixSafety::Safe,
+        safety: AutofixSafety::Caution,
     }]
 }
 
@@ -102,7 +102,7 @@ fn add_server_prefetch(diag: &LintDiagnostic, ctx: &ActionContext) -> Vec<CodeAc
         }],
         is_preferred: false,
         diagnostic_rule: Some(diag.rule.clone()),
-        safety: AutofixSafety::Safe,
+        safety: AutofixSafety::Caution,
     }]
 }
 
@@ -178,6 +178,42 @@ mod tests {
         assert!(
             actions[0].edits[0].replacement.contains("onServerPrefetch"),
             "replacement should add onServerPrefetch"
+        );
+    }
+
+    #[test]
+    fn on_mounted_wrap_uses_caution_safety() {
+        let source = "document.getElementById('x')";
+        let actions = run_fix("no-dom-query-in-setup", source);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].safety,
+            AutofixSafety::Caution,
+            "onMounted wrap changes runtime semantics, must be Caution"
+        );
+    }
+
+    #[test]
+    fn client_only_wrap_uses_caution_safety() {
+        let source = "<GoogleMap />";
+        let actions = run_fix("require-client-only-wrapper", source);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].safety,
+            AutofixSafety::Caution,
+            "ClientOnly wrap changes runtime semantics, must be Caution"
+        );
+    }
+
+    #[test]
+    fn server_prefetch_uses_caution_safety() {
+        let source = "onMounted(async () => { await fetch('/api') })";
+        let actions = run_fix("prefer-server-prefetch", source);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].safety,
+            AutofixSafety::Caution,
+            "server prefetch changes runtime semantics, must be Caution"
         );
     }
 
