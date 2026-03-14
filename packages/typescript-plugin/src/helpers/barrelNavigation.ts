@@ -248,6 +248,7 @@ function getAliasedDefinitionsForDefinition(
   checker: tsModule.TypeChecker,
   sourceFile: tsModule.SourceFile,
   definition: Pick<AliasedDefinitionInfo, "textSpan" | "contextSpan" | "name">,
+  preferredName?: string,
 ): AliasedDefinitionInfo[] | undefined {
   const direct = getAliasedNavigationResult(
     ts,
@@ -259,17 +260,14 @@ function getAliasedDefinitionsForDefinition(
     return direct;
   }
 
-  if (!definition.name || definition.name.startsWith('"')) {
+  const targetName =
+    definition.name && !definition.name.startsWith('"') ? definition.name : preferredName;
+  if (!targetName) {
     return undefined;
   }
 
   const searchSpan = definition.contextSpan ?? definition.textSpan;
-  for (const position of collectNamedIdentifierPositions(
-    ts,
-    sourceFile,
-    searchSpan,
-    definition.name,
-  )) {
+  for (const position of collectNamedIdentifierPositions(ts, sourceFile, searchSpan, targetName)) {
     const aliased = getAliasedNavigationResult(ts, checker, sourceFile, position)?.definitions;
     if (aliased?.length) {
       return aliased;
@@ -284,6 +282,7 @@ export function retargetAliasedDefinitionInfos<T extends DefinitionLike>(
   checker: tsModule.TypeChecker,
   getSourceFile: SourceFileLookup,
   definitions: readonly T[] | undefined,
+  preferredName?: string,
 ): T[] | undefined {
   if (!definitions?.length) {
     return undefined;
@@ -295,7 +294,7 @@ export function retargetAliasedDefinitionInfos<T extends DefinitionLike>(
   for (const definition of definitions) {
     const sourceFile = getSourceFile(definition.fileName);
     const aliased = sourceFile
-      ? getAliasedDefinitionsForDefinition(ts, checker, sourceFile, definition)
+      ? getAliasedDefinitionsForDefinition(ts, checker, sourceFile, definition, preferredName)
       : undefined;
     const candidates = aliased?.length ? aliased : [definition];
     for (const candidate of candidates) {

@@ -380,6 +380,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     function retargetAliasedDefinitions(
       definitions: readonly tsModule.DefinitionInfo[] | undefined,
+      preferredName?: string,
     ): tsModule.DefinitionInfo[] | undefined {
       if (!definitions?.length) {
         return undefined;
@@ -396,8 +397,18 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           program.getTypeChecker(),
           (candidateFileName) => program.getSourceFile(candidateFileName),
           definitions,
+          preferredName,
         ) ?? [...definitions]
       );
+    }
+
+    function getPreferredRetargetName(
+      fileName: string,
+      position: number,
+      context?: { sourceFile: tsModule.SourceFile } | null,
+    ): string | undefined {
+      const sourceFile = context?.sourceFile ?? getProgramSourceContext(fileName)?.sourceFile;
+      return sourceFile ? getIdentifierTextAtPosition(sourceFile, position) : undefined;
     }
 
     const _getDefinitionAndBoundSpan =
@@ -440,7 +451,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
       const result = _getDefinitionAndBoundSpan(fileName, position);
       if (result?.definitions) {
-        const definitions = retargetAliasedDefinitions(result.definitions) ?? [
+        const preferredName = getPreferredRetargetName(fileName, position, context);
+        const definitions = retargetAliasedDefinitions(result.definitions, preferredName) ?? [
           ...result.definitions,
         ];
         for (const def of definitions) {
@@ -484,7 +496,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
       const result = _getDefinitionAtPosition(fileName, position);
       if (result) {
-        const definitions = retargetAliasedDefinitions(result) ?? [...result];
+        const preferredName = getPreferredRetargetName(fileName, position, context);
+        const definitions = retargetAliasedDefinitions(result, preferredName) ?? [...result];
         for (const def of definitions) {
           remapDefinitionLike(def);
         }
@@ -514,7 +527,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
       const result = _getTypeDefinitionAtPosition(fileName, position);
       if (result) {
-        const definitions = retargetAliasedDefinitions(result) ?? [...result];
+        const preferredName = getPreferredRetargetName(fileName, position, context);
+        const definitions = retargetAliasedDefinitions(result, preferredName) ?? [...result];
         for (const def of definitions) {
           remapDefinitionLike(def);
         }
@@ -541,7 +555,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       }
 
       const originalDefinitions = _getDefinitionAtPosition(fileName, position);
-      const retargeted = retargetAliasedDefinitions(originalDefinitions);
+      const preferredName = getPreferredRetargetName(fileName, position, context);
+      const retargeted = retargetAliasedDefinitions(originalDefinitions, preferredName);
       if (originalDefinitions?.length && retargeted?.length) {
         const original = originalDefinitions[0];
         const target = retargeted[0];

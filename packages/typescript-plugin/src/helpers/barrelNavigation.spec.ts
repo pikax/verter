@@ -235,6 +235,78 @@ describe("barrel navigation helpers", () => {
     expect(retargeted?.[0]?.fileName).toBe("/src/Overlay.vue.d.ts");
   });
 
+  it("retargets coarse barrel definition spans when the caller provides the symbol name", () => {
+    const fixture = createLanguageServiceFixture({
+      "/src/Overlay.vue.d.ts":
+        "declare const Overlay: { new(): { $props: { show?: boolean } } }; export default Overlay",
+      "/src/components/index.ts": "export { default as Overlay } from '../Overlay.vue'",
+    });
+
+    const sourceFile = fixture.getSourceFile("/src/components/index.ts");
+    expect(sourceFile).toBeDefined();
+
+    const retargeted = retargetAliasedDefinitionInfos(
+      ts,
+      fixture.program.getTypeChecker(),
+      fixture.getSourceFile,
+      [
+        {
+          fileName: "/src/components/index.ts",
+          textSpan: { start: 0, length: sourceFile!.text.length },
+          contextSpan: { start: 0, length: sourceFile!.text.length },
+          name: "",
+          kind: ts.ScriptElementKind.unknown,
+          containerKind: ts.ScriptElementKind.unknown,
+          containerName: "",
+          isLocal: false,
+          isAmbient: false,
+          unverified: false,
+        },
+      ],
+      "Overlay",
+    );
+
+    expect(retargeted).toBeDefined();
+    expect(retargeted).toHaveLength(1);
+    expect(retargeted?.[0]?.fileName).toBe("/src/Overlay.vue.d.ts");
+  });
+
+  it("prefers the caller-provided symbol name over an unhelpful definition name", () => {
+    const fixture = createLanguageServiceFixture({
+      "/src/Overlay.vue.d.ts":
+        "declare const Overlay: { new(): { $props: { show?: boolean } } }; export default Overlay",
+      "/src/components/index.ts": "export { default as Overlay } from '../Overlay.vue'",
+    });
+
+    const sourceFile = fixture.getSourceFile("/src/components/index.ts");
+    expect(sourceFile).toBeDefined();
+
+    const retargeted = retargetAliasedDefinitionInfos(
+      ts,
+      fixture.program.getTypeChecker(),
+      fixture.getSourceFile,
+      [
+        {
+          fileName: "/src/components/index.ts",
+          textSpan: { start: 0, length: sourceFile!.text.length },
+          contextSpan: { start: 0, length: sourceFile!.text.length },
+          name: "default",
+          kind: ts.ScriptElementKind.unknown,
+          containerKind: ts.ScriptElementKind.unknown,
+          containerName: "",
+          isLocal: false,
+          isAmbient: false,
+          unverified: false,
+        },
+      ],
+      "Overlay",
+    );
+
+    expect(retargeted).toBeDefined();
+    expect(retargeted).toHaveLength(1);
+    expect(retargeted?.[0]?.fileName).toBe("/src/Overlay.vue.d.ts");
+  });
+
   it("resolves vue module specifier definitions directly", () => {
     const fixture = createLanguageServiceFixture({
       "/src/Overlay.vue.d.ts":
