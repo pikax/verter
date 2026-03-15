@@ -92,6 +92,7 @@ impl VerterHost {
                 options_api: script_analysis.options_api,
                 store_usages: Arc::new(script_analysis.store_usages),
                 store_definitions: Arc::new(script_analysis.store_definitions),
+                is_typescript: script_analysis.is_typescript,
             };
             self.resolve_snapshot_imports(&canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
@@ -213,6 +214,7 @@ impl VerterHost {
             options_api: entry.script_analysis.options_api.clone(),
             store_usages: Arc::clone(&entry.arc_script_cache.store_usages),
             store_definitions: Arc::clone(&entry.arc_script_cache.store_definitions),
+            is_typescript: entry.script_analysis.is_typescript,
         }
     }
 

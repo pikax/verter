@@ -683,6 +683,7 @@ fn build_script_snapshot(
         type_enhancements: None,
         options_api: snapshot.options_api.clone(),
         nested_macro_calls: Vec::new(),
+        is_typescript: snapshot.is_typescript,
     }
 }
 

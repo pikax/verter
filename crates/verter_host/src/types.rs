@@ -469,6 +469,10 @@ pub struct FileAnalysisSnapshot {
     /// Store definitions (defineStore, createStore, etc.).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub store_definitions: Arc<Vec<verter_analysis::types::StoreDefinition>>,
+
+    /// Whether the script block uses TypeScript (`lang="ts"`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_typescript: bool,
 }
 
 /// Compile-time dependencies that must be available before a Vue SFC can codegen.

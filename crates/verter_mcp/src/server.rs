@@ -226,6 +226,7 @@ fn build_script_snapshot(
         type_enhancements: None,
         options_api: analysis.options_api.clone(),
         nested_macro_calls: Vec::new(),
+        is_typescript: analysis.is_typescript,
     }
 }
 
