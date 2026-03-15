@@ -181,21 +181,6 @@ pub struct ViteConfigTrustRequiredParams {
     pub reason: String,
 }
 
-/// Server → client notification: TSGO is active but no project has a tsconfig.
-/// Without a `tsconfig.json`, TSGO cannot discover project configuration.
-/// The extension should warn the user to add a tsconfig or switch to tsserver.
-pub enum TsgoNoTsconfig {}
-
-impl tower_lsp_server::ls_types::notification::Notification for TsgoNoTsconfig {
-    type Params = TsgoNoTsconfigParams;
-    const METHOD: &'static str = "$/verter/tsgoLimitation";
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TsgoNoTsconfigParams {
-    pub message: String,
-}
-
 /// Server → client notification: type provider status.
 /// Sent during `initialized()` to inform the extension which type provider is active
 /// (or that none could be started, with a reason).
@@ -578,12 +563,6 @@ pub struct VerterLanguageServer {
     mcp_port: Option<u16>,
     /// Why no type provider could be started. Sent via `$/verter/typeProviderStatus`.
     type_provider_none_reason: Option<String>,
-    /// Tracks unique file URIs that hit "no project found" errors from TSGO.
-    /// After 3+ unique files hit this error, sends a `$/verter/tsgoLimitation`
-    /// notification suggesting the user check their tsconfig or switch to tsserver.
-    no_project_found_uris: DashSet<String>,
-    /// Whether the "no project found" limitation notification has already been sent.
-    no_project_found_notified: std::sync::atomic::AtomicBool,
     /// Most-recently-used canonical IDs. Updated on did_open, did_change, and
     /// interactive reads (hover, completion, definition). Used for MRU-ordered
     /// snapshot drain — most recently interacted files reconcile first.
@@ -666,8 +645,6 @@ impl VerterLanguageServer {
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mcp_port: config.mcp_port,
             type_provider_none_reason: config.type_provider_none_reason,
-            no_project_found_uris: DashSet::new(),
-            no_project_found_notified: std::sync::atomic::AtomicBool::new(false),
             mru_canonical_ids: parking_lot::Mutex::new(Vec::new()),
             hydration_cache: Arc::new(crate::compile_blockers::HydrationCache::new()),
         }
@@ -676,48 +653,6 @@ impl VerterLanguageServer {
     /// Compute verter diagnostics (host errors + lint rules + component usage) for a document.
     /// Caches results per document version to avoid redundant re-computation when both
     /// push (didChange) and pull (textDocument/diagnostic) paths request diagnostics.
-    /// Track a type provider error and detect "no project found" patterns.
-    /// After 3+ unique files hit this error, sends a `$/verter/tsgoLimitation`
-    /// notification once, suggesting the user check tsconfig or switch to tsserver.
-    fn track_type_provider_error(&self, file_path: &str, error_msg: &str) {
-        if !error_msg.contains("no project found") {
-            return;
-        }
-        if self
-            .no_project_found_notified
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return;
-        }
-        // Cap tracking at 10 entries to bound memory
-        if self.no_project_found_uris.len() < 10 {
-            self.no_project_found_uris.insert(file_path.to_string());
-        }
-        if self.no_project_found_uris.len() >= 3
-            && self
-                .no_project_found_notified
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::Relaxed,
-                    std::sync::atomic::Ordering::Relaxed,
-                )
-                .is_ok()
-        {
-            let client = self.client.clone();
-            tokio::spawn(async move {
-                client
-                    .send_notification::<TsgoNoTsconfig>(TsgoNoTsconfigParams {
-                        message: "Multiple .vue files are not covered by any tsconfig.json. \
-                                  Check your tsconfig.json \"include\" patterns, or switch to \
-                                  tsserver (which handles inferred projects)."
-                            .into(),
-                    })
-                    .await;
-            });
-        }
-    }
-
     fn compute_verter_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
         compute_verter_diagnostics_for(
             &self.documents,
@@ -5097,26 +5032,6 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         tracing::info!("init gen={my_gen} superseded, discarding registry");
         return Ok(());
     }
-    // 4a. TSGO limitation warning: no tsconfig found
-    if is_tsgo
-        && registry
-            .projects()
-            .iter()
-            .all(|p| p.tsconfig_path.is_none())
-    {
-        tracing::warn!(
-            "TSGO active but no project has a tsconfig.json — type checking will be limited"
-        );
-        client
-            .send_notification::<TsgoNoTsconfig>(TsgoNoTsconfigParams {
-                message: "No tsconfig.json found. TSGO requires a tsconfig.json for project \
-                          configuration discovery. Consider adding one or switching to tsserver \
-                          (verter.typeProvider: \"tsserver\")."
-                    .to_string(),
-            })
-            .await;
-    }
-
     let resolver = registry.to_native_project_resolver();
     *resolver_snapshot.write() = Some(ResolverSnapshot {
         generation: my_gen,
@@ -6925,7 +6840,7 @@ impl LanguageServer for VerterLanguageServer {
                         }
                         Err(e) => {
                             tracing::warn!("hover type provider error: {}", e);
-                            self.track_type_provider_error(&ctx.tsx_path, &e.to_string());
+
                             None
                         }
                     }
@@ -7457,7 +7372,6 @@ impl LanguageServer for VerterLanguageServer {
                         }
                         Err(e) => {
                             tracing::warn!("completion: type provider error: {e}");
-                            self.track_type_provider_error(&ctx.tsx_path, &e.to_string());
                         }
                     }
                 }
@@ -7789,7 +7703,6 @@ impl LanguageServer for VerterLanguageServer {
                         }
                         Err(e) => {
                             tracing::warn!("definition: type provider error: {e}");
-                            self.track_type_provider_error(&ctx.tsx_path, &e.to_string());
                         }
                     }
                 } else {
@@ -10803,6 +10716,7 @@ mod tests {
             type_enhancements: None,
             options_api: None,
             nested_macro_calls: Vec::new(),
+            is_typescript: false,
         };
 
         let ids = collect_imported_vue_priority_ids(&analysis);

@@ -55,10 +55,6 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     const content = hoverText(hovers[0]);
     console.log(`    <Button> hover: ${content.slice(0, 300)}`);
 
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking barrel Button hover for typed props");
-    }
-
     if (!TYPE_PROVIDER) {
       const hasProps = content.includes("disabled") || content.includes("size");
       if (!hasProps) {
@@ -100,10 +96,6 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     const content = hoverText(hovers[0]);
     console.log(`    <Overlay> hover: ${content.slice(0, 300)}`);
 
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking barrel Overlay hover for typed props");
-    }
-
     // Positive: must include actual prop names
     expect(content, "Overlay hover should mention zIndex").to.include("zIndex");
     expect(content, "Overlay hover should mention show or lockScroll").to.satisfy(
@@ -140,10 +132,6 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
 
     const labels = completionLabels(completions!);
     console.log(`    <Button > completions: ${labels.slice(0, 20).join(", ")}`);
-
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking barrel Button completions for typed props");
-    }
 
     if (!TYPE_PROVIDER && !labels.includes("label")) {
       console.log("    Verter-only: barrel Button completions lack props (needs type provider)");
@@ -183,10 +171,6 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     const labels = completionLabels(completions!);
     console.log(`    <Overlay > completions: ${labels.slice(0, 20).join(", ")}`);
 
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking barrel Overlay completions for typed props");
-    }
-
     if (!TYPE_PROVIDER && !labels.includes("zIndex")) {
       console.log("    Verter-only: barrel Overlay completions lack props (needs type provider)");
       return;
@@ -219,10 +203,6 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     const content = hoverText(hovers[0]);
     console.log(`    Button import hover: ${content.slice(0, 200)}`);
 
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking Button import binding for typed component");
-    }
-
     // Negative: must NOT be plain any or degraded shell
     expect(content, "Button import should NOT be DefineComponent<{}, {}>").to.not.include(
       "DefineComponent<{}, {}>",
@@ -248,10 +228,6 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
     const content = hoverText(hovers[0]);
     console.log(`    Overlay import hover: ${content.slice(0, 200)}`);
 
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking Overlay import binding for typed component");
-    }
-
     expect(content, "Overlay import should NOT be DefineComponent<{}, {}>").to.not.include(
       "DefineComponent<{}, {}>",
     );
@@ -260,7 +236,7 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
 
   // ── Prop Value Type Integrity ─────────────────────────────────
 
-  test("CANARY: hover on :show value shows boolean type", async function () {
+  test("hover on :show value shows boolean type", async function () {
     if (!isBarrelFixture) {
       console.log("    N/A");
       return;
@@ -277,12 +253,6 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
 
     const content = hoverText(hovers[0]);
     console.log(`    :show value hover: ${content.slice(0, 200)}`);
-
-    if (TYPE_PROVIDER === "tsgo") {
-      // TSGO: barrel-imported component prop value types not fully resolved
-      console.log(`    CANARY [tsgo]: :show hover content: ${content.slice(0, 200)}`);
-      return;
-    }
 
     expect(content, ":show value should mention showOverlay").to.include("showOverlay");
     expect(content, ":show value should mention boolean").to.include("boolean");
@@ -338,10 +308,6 @@ suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
 
     const content = hoverText(hovers[0]);
     console.log(`    label attr hover: ${content.slice(0, 200)}`);
-
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking label attr hover for typed prop");
-    }
 
     expect(content, "label attr should mention label").to.include("label");
     expect(content, "label attr should mention string").to.include("string");

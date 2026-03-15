@@ -36,8 +36,6 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on ref binding in template shows typed result", async function () {
-    // TSGO nightly hover format drift: returns `const count` without `: number`
-    if (TYPE_PROVIDER === "tsgo") return this.skip();
     const pos = findPosition(doc, "{{ count }}", 3);
     if (!pos) {
       this.skip();
@@ -58,8 +56,6 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on computed binding in template shows typed result", async function () {
-    // TSGO nightly hover format drift: returns `const doubled` without `: number`
-    if (TYPE_PROVIDER === "tsgo") return this.skip();
     const pos = findPosition(doc, "{{ doubled }}", 3);
     if (!pos) {
       this.skip();
@@ -89,12 +85,6 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     const { hovers, latencyMs } = await measureHover(doc.uri, pos);
     getTimer().recordHover("title (prop)", latencyMs);
     console.log(`    Hover on title: ${latencyMs}ms, ${hovers.length} result(s)`);
-
-    // TSGO: monorepo prop hover may return empty (known cross-package limitation)
-    if (hovers.length === 0 && TYPE_PROVIDER === "tsgo") {
-      console.log("    CANARY [tsgo]: prop hover returned 0 results");
-      return;
-    }
 
     expect(hovers.length, "prop hover should exist").to.be.greaterThan(0);
     expect(hovers[0].contents.length, "prop hover should have content").to.be.greaterThan(0);
@@ -825,9 +815,6 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
       console.log("    N/A");
       return;
     }
-    // TSGO nightly: cross-package component hover format drift
-    if (TYPE_PROVIDER === "tsgo") return this.skip();
-
     const pos = findPosition(doc, "<SharedComp", 1);
     if (!pos) {
       this.skip();
@@ -876,12 +863,6 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
       console.log(
         "    Verter-only: cross-package import type degrades to any (needs type provider)",
       );
-      return;
-    }
-
-    if (TYPE_PROVIDER === "tsgo") {
-      // TSGO: cross-package type resolution may degrade to `any`
-      console.log(`    CANARY [tsgo]: greeting hover content: ${content.slice(0, 200)}`);
       return;
     }
 

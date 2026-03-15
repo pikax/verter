@@ -359,10 +359,6 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log(`    TSGO: barrel definition resolved to ${def.uri.fsPath}`);
-    }
-
     // Positive: navigates to Overlay.vue
     expect(def.uri.fsPath, "definition should reach Overlay.vue").to.include("Overlay.vue");
 
@@ -400,10 +396,6 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
         "    Verter-only: barrel re-export definition stops at index.ts (needs type provider)",
       );
       return;
-    }
-
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log(`    TSGO: barrel definition resolved to ${def.uri.fsPath}`);
     }
 
     expect(def.uri.fsPath, "definition should reach Button.vue").to.include("Button.vue");
@@ -514,10 +506,6 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log(`    TSGO: barrel import definition resolved to ${def.uri.fsPath}`);
-    }
-
     // Positive: reaches Overlay.vue
     expect(def.uri.fsPath, "definition should reach Overlay.vue").to.include("Overlay.vue");
 
@@ -553,10 +541,6 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
         "    Verter-only: barrel import binding resolves to index.ts (needs type provider)",
       );
       return;
-    }
-
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log(`    TSGO: barrel import definition resolved to ${def.uri.fsPath}`);
     }
 
     expect(def.uri.fsPath, "definition should reach Button.vue").to.include("Button.vue");
@@ -624,10 +608,6 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
         "    Verter-only: barrel component TAG resolves to index.ts (needs type provider)",
       );
       return;
-    }
-
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log(`    TSGO: barrel component TAG definition resolved to ${def.uri.fsPath}`);
     }
 
     // Positive: reaches the actual .vue source
@@ -815,10 +795,6 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log(`    TSGO: barrel component prop definition resolved to ${def.uri.fsPath}`);
-    }
-
     // Positive: navigates to Button.vue
     expect(def.uri.fsPath, "definition should be in Button.vue").to.include("Button.vue");
 
@@ -872,10 +848,6 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
         "    Verter-only: barrel component prop resolves to index.ts (needs type provider)",
       );
       return;
-    }
-
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log(`    TSGO: barrel component prop definition resolved to ${def.uri.fsPath}`);
     }
 
     // Positive: navigates to Overlay.vue
@@ -1162,8 +1134,6 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
       console.log("    pass (N/A for this fixture)");
       return;
     }
-    // TSGO nightly: cross-package definition resolution unreliable
-    if (TYPE_PROVIDER === "tsgo") return this.skip();
 
     const pos = findPosition(doc, "{ helper }", 2);
     if (!pos) {
@@ -1195,8 +1165,6 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
       console.log("    pass (N/A for this fixture)");
       return;
     }
-    // TSGO nightly: cross-package definition resolution unreliable
-    if (TYPE_PROVIDER === "tsgo") return this.skip();
 
     const pos = findPosition(doc, "helper()", 0);
     if (!pos) {

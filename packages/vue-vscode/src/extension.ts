@@ -814,29 +814,6 @@ export async function activateVueLanguageServer(
   }
   registerTypeProviderStatusHandler(client);
 
-  // ── TSGO limitation handler ─────────────────────────────────────
-  // When the LSP sends $/verter/tsgoLimitation, show a warning with an option
-  // to switch to tsserver.
-  function registerTsgoLimitationHandler(lc: LanguageClient) {
-    lc.onNotification(
-      NotificationType.TsgoLimitation,
-      async (params: NotificationParams[typeof NotificationType.TsgoLimitation]) => {
-        const action = await window.showWarningMessage(
-          `Verter: ${params.message}`,
-          "Switch to tsserver",
-          "Dismiss",
-        );
-        if (action === "Switch to tsserver") {
-          await workspace
-            .getConfiguration("verter")
-            .update("typeProvider", "tsserver", ConfigurationTarget.Workspace);
-          await restartLS(false);
-        }
-      },
-    );
-  }
-  registerTsgoLimitationHandler(client);
-
   // ── Heartbeat watchdog ──────────────────────────────────────────
   // The Rust server sends $/verter/heartbeat every 5 seconds. If we don't
   // receive one for 30 seconds, the server is likely frozen (e.g., tokio
@@ -905,7 +882,8 @@ export async function activateVueLanguageServer(
       "$/verter/tsQuery",
       (params: { command: string; arguments: Record<string, unknown> }) => {
         if (!tsService) {
-          const { ExtensionTsService } = require("./extensionTsService") as typeof import("./extensionTsService");
+          const { ExtensionTsService } =
+            require("./extensionTsService") as typeof import("./extensionTsService");
           const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
           if (!wsRoot) throw new Error("No workspace root for extension TS service");
           tsService = new ExtensionTsService(wsRoot);
@@ -1017,7 +995,6 @@ export async function activateVueLanguageServer(
           registerMcpListener(client);
           registerViteConfigTrustHandler(client);
           registerTypeProviderStatusHandler(client);
-          registerTsgoLimitationHandler(client);
           tsService = undefined; // Reset TS service on restart
           registerTsQueryHandler(client);
           await client.start();
@@ -1060,8 +1037,8 @@ function buildServerOptions(
   const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
   const verterConfig = workspace.getConfiguration("verter");
   // E2E tests can override the type provider via environment variable
-  const typeProvider = readE2eEnv("TYPE_PROVIDER")
-    || verterConfig.get<string>("typeProvider", "auto");
+  const typeProvider =
+    readE2eEnv("TYPE_PROVIDER") || verterConfig.get<string>("typeProvider", "auto");
   const userTsdk = verterConfig.get<string>("typescript.tsdk", "");
   // Always pass --tsdk: user setting → bundled TypeScript (fallback for pnpm strict mode etc.)
   const bundledTsdk = join(extensionPath, "node_modules", "typescript", "lib");

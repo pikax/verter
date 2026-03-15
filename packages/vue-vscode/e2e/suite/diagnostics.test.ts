@@ -153,8 +153,6 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
   });
 
   test("undeclared variable in script setup gets TS2304", async function () {
-    // TSGO nightly doesn't return TS2304 diagnostics reliably
-    if (TYPE_PROVIDER === "tsgo") return this.skip();
     const doc = await openVueFile(getAppVuePath());
 
     // Find the line with "const count = ref(0)" to insert the undeclared variable after
@@ -272,8 +270,6 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
   });
 
   test("TS errors persist after inserting newlines", async function () {
-    // TSGO nightly doesn't return TS2304 diagnostics reliably
-    if (TYPE_PROVIDER === "tsgo") return this.skip();
     const doc = await openVueFile(getAppVuePath());
 
     // Insert undeclared variable to create a known TS error

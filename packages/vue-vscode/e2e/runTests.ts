@@ -104,7 +104,7 @@ function copyLspBinaryToTemp(extensionPath: string): string | undefined {
   }
 
   const ext = process.platform === "win32" ? ".exe" : "";
-  const tempDir = path.join(os.tmpdir(), "verter-e2e-bin");
+  const tempDir = path.join(os.tmpdir(), `verter-e2e-bin-${process.pid}`);
   fs.mkdirSync(tempDir, { recursive: true });
 
   const destPath = path.join(tempDir, `verter-lsp${ext}`);
@@ -160,7 +160,17 @@ async function main() {
         ? FIXTURES.filter((entry) => parseFixtureEntry(entry).typeProvider === envTypeProvider)
         : FIXTURES;
 
-  const vscodeExecutablePath = await downloadAndUnzipVSCode(vscodeVersion);
+  let vscodeExecutablePath = await downloadAndUnzipVSCode(vscodeVersion);
+
+  // VS Code 1.111+ changed its binary layout: Code.exe is now a Node.js
+  // launcher that doesn't accept CLI flags like --disable-extensions.
+  // Use bin/code.cmd (the CLI entry point) instead.
+  if (process.platform === "win32") {
+    const cliPath = path.resolve(vscodeExecutablePath, "../bin/code.cmd");
+    if (fs.existsSync(cliPath)) {
+      vscodeExecutablePath = cliPath;
+    }
+  }
 
   // Copy LSP binary to temp to prevent file locking
   const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);

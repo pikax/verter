@@ -66,7 +66,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
     await waitForExtensionReady();
   });
 
-  test("CANARY: no 'Cannot find module' diagnostics on App.vue", async function () {
+  test("no 'Cannot find module' diagnostics on App.vue", async function () {
     if (!TYPE_PROVIDER) return this.skip();
     if (!IMPORT_FIXTURES.includes(FIXTURE_NAME)) {
       console.log("    pass (N/A for this fixture)");
@@ -75,15 +75,6 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
     const doc = await openVueFile(getAppVuePath());
     await waitForFileReady(doc);
 
-    if (TYPE_PROVIDER === "tsgo") {
-      // TSGO: .vue.ts module resolution not fully supported yet
-      const diags = vscode.languages.getDiagnostics(doc.uri);
-      const moduleErrors = diags.filter(isModuleNotFoundDiagnostic);
-      console.log(`    CANARY [tsgo]: ${moduleErrors.length} module-not-found diagnostic(s)`);
-      for (const d of moduleErrors) console.log(`      ${d.message}`);
-      return;
-    }
-
     await expectNoForbiddenDiagnostics(
       doc,
       isModuleNotFoundDiagnostic,
@@ -91,7 +82,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
     );
   });
 
-  test("CANARY: @/ path alias imports resolve without errors", async function () {
+  test("@/ path alias imports resolve without errors", async function () {
     if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME !== "composite-paths" && FIXTURE_NAME !== "path-aliases") {
       console.log("    pass (N/A for this fixture)");
@@ -105,20 +96,13 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
       (d) => d.message.includes("Cannot find module") && d.message.includes("@/"),
     );
 
-    if (TYPE_PROVIDER === "tsgo") {
-      // TSGO: @/ alias resolution for .vue.ts not fully supported yet
-      console.log(`    CANARY [tsgo]: ${aliasErrors.length} @/ alias error(s)`);
-      for (const d of aliasErrors) console.log(`      ${d.message}`);
-      return;
-    }
-
     expect(
       aliasErrors,
       `@/ alias errors: ${aliasErrors.map((d) => d.message).join("; ")}`,
     ).to.have.lengthOf(0);
   });
 
-  test("CANARY: .vue imports resolve without .vue.ts errors", async function () {
+  test(".vue imports resolve without .vue.ts errors", async function () {
     if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME === "no-config" || FIXTURE_NAME === "single-file") {
       console.log("    pass (N/A for this fixture)");
@@ -126,15 +110,6 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
     }
     const doc = await openVueFile(getAppVuePath());
     await waitForFileReady(doc);
-
-    if (TYPE_PROVIDER === "tsgo") {
-      // TSGO: .vue.ts virtual file resolution not fully supported yet
-      const diags = vscode.languages.getDiagnostics(doc.uri);
-      const vueTsErrors = diags.filter(isVueTsModuleDiagnostic);
-      console.log(`    CANARY [tsgo]: ${vueTsErrors.length} .vue.ts resolution error(s)`);
-      for (const d of vueTsErrors) console.log(`      ${d.message}`);
-      return;
-    }
 
     await expectNoForbiddenDiagnostics(doc, isVueTsModuleDiagnostic, ".vue.ts resolution errors");
   });

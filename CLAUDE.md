@@ -130,12 +130,6 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 - `tsserver`: tsserver only
 - `off`: no type provider (verter-only mode)
 
-**TSGO known limitations**:
-1. Re-exported `.vue` components (e.g. barrel files like `export { default as MyComp } from './MyComp.vue'`) lose their typing when imported in another SFC.
-2. Without a `tsconfig.json` on disk, TSGO cannot discover project configuration. Projects without a tsconfig should use tsserver instead (which supports inferred project options). The server sends `$/verter/tsgoLimitation` when this is detected.
-
-This is why `auto` mode defaults to tsserver. A warning is shown when TSGO is active. Remove the warning once these are resolved.
-
 Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/traits.rs`) with 14+ methods (hover, completions, diagnostics, definition, references, rename, etc.). Both are wrapped in a `ResilientTypeProvider` that detects crashes, auto-restarts (max 3 with exponential backoff), and replays the file cache.
 
 **tsserver kind mapping**: `parse_tsserver_completion()` in `tsserver/ipc.rs` maps tsserver's `ScriptElementKind` strings to LSP `CompletionItemKind`. This mapping MUST match VS Code's `MyCompletionItem.convertKind()` exactly. Test coverage: `test_parse_tsserver_completion_kinds_match_vscode`. Sync with VS Code source when updating TypeScript dependencies.

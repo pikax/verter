@@ -66,16 +66,6 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
       return code === 2307 || code === "2307" || String(code) === "2307";
     });
 
-    // After full VFS sync (all workspace + node_modules files synced to provider),
-    // TSGO should resolve barrel re-exports correctly. If this fails, the VFS
-    // sync is incomplete or TSGO has a regression.
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log(`    TSGO: ${moduleErrors.length} module error(s)`);
-      // TSGO with full VFS should not have module errors on barrel imports.
-      // If this fails, check that workspace scanner syncs all .vue files
-      // before non-Vue files (two-phase scan).
-    }
-
     expect(
       moduleErrors,
       `Expected no TS2307 errors but found: ${moduleErrors.map((d) => d.message).join("; ")}`,
@@ -83,12 +73,10 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on barrel-imported component shows typed props", async function () {
-    // Skip: barrel hover requires type provider sync for re-exported components
     if (!isBarrelFixture) {
       console.log("    pass (N/A for this fixture)");
       return;
     }
-    return this.skip();
 
     const text = doc.getText();
 
@@ -113,16 +101,6 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
-    // POSITIVE: The hover should show props from the Overlay component.
-    // If barrel re-exports work correctly, the type includes $props with
-    // zIndex, show, lockScroll, etc.
-
-    // With full VFS sync, both TSGO and tsserver should resolve barrel-imported
-    // component types correctly, showing typed props in hover.
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking barrel-imported component hover for typed props");
-    }
-
     const hasTypedProps =
       content.includes("zIndex") ||
       content.includes("show") ||
@@ -145,12 +123,10 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on barrel-imported component with emits shows typed emits", async function () {
-    // Skip: barrel hover requires type provider sync for re-exported components
     if (!isBarrelFixture) {
       console.log("    pass (N/A for this fixture)");
       return;
     }
-    return this.skip();
 
     const text = doc.getText();
 
@@ -174,11 +150,6 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
-    // With full VFS sync, both providers should resolve barrel-imported component types.
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking barrel-imported Button hover for typed props");
-    }
-
     const hasProps = content.includes("label") || content.includes("disabled");
 
     expect(
@@ -187,7 +158,7 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
     ).to.be.true;
   });
 
-  test("CANARY: barrel-imported component prop passes type check", async function () {
+  test("barrel-imported component prop passes type check", async function () {
     if (!isBarrelFixture) {
       console.log("    pass (N/A for this fixture)");
       return;
@@ -204,13 +175,6 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
       const numCode = typeof code === "string" ? parseInt(code, 10) : code;
       return numCode === 2322 || numCode === 2769;
     });
-
-    if (TYPE_PROVIDER === "tsgo") {
-      // TSGO: barrel re-exported component prop types not fully resolved
-      console.log(`    CANARY [tsgo]: ${propErrors.length} prop error(s)`);
-      for (const d of propErrors) console.log(`      TS${d.code}: ${d.message.slice(0, 120)}`);
-      return;
-    }
 
     expect(
       propErrors,
@@ -257,11 +221,6 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
 
-    // With full VFS sync, both providers should show typed props in barrel file hover.
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking TS plugin hover for typed component");
-    }
-
     // NEGATIVE: should NOT show plain DefineComponent<{}, {}>
     expect(content).to.not.include(
       "DefineComponent<{}, {}",
@@ -275,7 +234,7 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
     );
   });
 
-  test("CANARY: TS plugin: definition from barrel file navigates to .vue (not .vue.d.ts)", async function () {
+  test("TS plugin: definition from barrel file navigates to .vue (not .vue.d.ts)", async function () {
     if (!isBarrelFixture) {
       console.log("    pass (N/A for this fixture)");
       return;
@@ -316,12 +275,6 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    if (TYPE_PROVIDER === "tsgo") {
-      // TSGO: barrel file definition resolution not fully supported
-      for (const loc of locations) console.log(`    CANARY [tsgo]: -> ${loc.uri.fsPath}`);
-      return;
-    }
-
     expect(locations.length, "should have definition results").to.be.greaterThan(0);
 
     const def = locations[0];
@@ -359,11 +312,6 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
     const content = hovers[0].contents.map((c) => (typeof c === "string" ? c : c.value)).join("\n");
 
     console.log(`    Hover content: ${content.slice(0, 200)}`);
-
-    // With full VFS sync, both providers should show typed import bindings.
-    if (TYPE_PROVIDER === "tsgo") {
-      console.log("    TSGO: checking import binding hover for typed component");
-    }
 
     // NEGATIVE: should NOT be plain DefineComponent<{}, {}>
     expect(content).to.not.include(
