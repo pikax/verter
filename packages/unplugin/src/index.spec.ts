@@ -324,6 +324,57 @@ const x = 1
     // SASS
     expect(plugin.transformInclude("/path/to/App.vue?vue&type=style&index=0&lang.sass")).toBe(true);
   });
+
+  it("main module includes style imports for each <style> block", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "WithStyles.vue").replace(/\\/g, "/");
+    const sfc = `<template><div class="app">hello</div></template>
+<style scoped>
+.app { color: red; }
+</style>`;
+
+    const result = await plugin.transform(sfc, file);
+
+    expect(result).toBeDefined();
+    // Main module must import the style sub-request so Vite processes and injects it.
+    // Regression guard: styles were previously absent, causing scoped CSS to never load.
+    expect(result.code).toContain(`?vue&type=style&index=0`);
+    expect(result.code).toContain(`lang.css`);
+    // Must still import the script sub-request and export the component
+    expect(result.code).toContain(`?vue&type=script`);
+    expect(result.code).toContain(`export default _sfc_main`);
+  });
+
+  it("main module includes one style import per <style> block", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "MultiStyle.vue").replace(/\\/g, "/");
+    const sfc = `<template><div>x</div></template>
+<style>
+.a { color: red; }
+</style>
+<style lang="scss" scoped>
+.b { color: blue; }
+</style>`;
+
+    const result = await plugin.transform(sfc, file);
+
+    expect(result).toBeDefined();
+    expect(result.code).toContain(`?vue&type=style&index=0&lang.css`);
+    expect(result.code).toContain(`?vue&type=style&index=1&lang.scss`);
+  });
+
+  it("main module has no style imports when <style> is absent", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "NoStyle.vue").replace(/\\/g, "/");
+    const sfc = `<template><div>no styles here</div></template>
+<script setup>const x = 1</script>`;
+
+    const result = await plugin.transform(sfc, file);
+
+    expect(result).toBeDefined();
+    expect(result.code).not.toContain(`?vue&type=style`);
+    expect(result.code).toContain(`?vue&type=script`);
+  });
 });
 
 describe("vite compat shim", () => {

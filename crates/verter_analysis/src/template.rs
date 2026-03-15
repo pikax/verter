@@ -1312,33 +1312,33 @@ pub enum MacroKind {
 
 impl serde::Serialize for TemplateComponentUsage {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("name", &self.name)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TemplateComponentUsage", 6)?;
+        s.serialize_field("name", &self.name)?;
         if self.import_source.is_some() {
-            map.serialize_entry("importSource", &self.import_source)?;
+            s.serialize_field("importSource", &self.import_source)?;
         }
-        map.serialize_entry("isDynamic", &self.is_dynamic)?;
+        s.serialize_field("isDynamic", &self.is_dynamic)?;
         if !self.props.is_empty() {
-            map.serialize_entry("props", &self.props)?;
+            s.serialize_field("props", &self.props)?;
         }
-        map.serialize_entry("hasSpread", &self.has_spread)?;
+        s.serialize_field("hasSpread", &self.has_spread)?;
         if !self.slots_used.is_empty() {
-            map.serialize_entry("slotsUsed", &self.slots_used)?;
+            s.serialize_field("slotsUsed", &self.slots_used)?;
         }
         if !self.static_classes.is_empty() {
-            map.serialize_entry("staticClasses", &self.static_classes)?;
+            s.serialize_field("staticClasses", &self.static_classes)?;
         }
-        map.serialize_entry("hasDynamicClass", &self.has_dynamic_class)?;
+        s.serialize_field("hasDynamicClass", &self.has_dynamic_class)?;
         if !self.dynamic_classes.is_empty() {
-            map.serialize_entry("dynamicClasses", &self.dynamic_classes)?;
+            s.serialize_field("dynamicClasses", &self.dynamic_classes)?;
         }
         if !self.v_models.is_empty() {
-            map.serialize_entry("vModels", &self.v_models)?;
+            s.serialize_field("vModels", &self.v_models)?;
         }
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -1390,12 +1390,12 @@ impl<'de> serde::Deserialize<'de> for TemplateComponentUsage {
 
 impl serde::Serialize for TemplateComponentVModel {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("bindingName", &self.binding_name)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TemplateComponentVModel", 3)?;
+        s.serialize_field("bindingName", &self.binding_name)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -1420,25 +1420,25 @@ impl<'de> serde::Deserialize<'de> for TemplateComponentVModel {
 
 impl serde::Serialize for TemplatePropUsage {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("name", &self.name)?;
-        map.serialize_entry("isBound", &self.is_bound)?;
-        map.serialize_entry("constness", &self.constness)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TemplatePropUsage", 5)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("isBound", &self.is_bound)?;
+        s.serialize_field("constness", &self.constness)?;
         if !self.referenced_bindings.is_empty() {
-            map.serialize_entry("referencedBindings", &self.referenced_bindings)?;
+            s.serialize_field("referencedBindings", &self.referenced_bindings)?;
         }
-        map.serialize_entry("fromSpread", &self.from_spread)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
+        s.serialize_field("fromSpread", &self.from_spread)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
         if self.name_span.start > 0 || self.name_span.end > 0 {
-            map.serialize_entry("nameSpanStart", &self.name_span.start)?;
-            map.serialize_entry("nameSpanEnd", &self.name_span.end)?;
+            s.serialize_field("nameSpanStart", &self.name_span.start)?;
+            s.serialize_field("nameSpanEnd", &self.name_span.end)?;
         }
         if self.is_shorthand {
-            map.serialize_entry("isShorthand", &true)?;
+            s.serialize_field("isShorthand", &true)?;
         }
-        map.end()
+        s.end()
     }
 }
 
@@ -1482,13 +1482,13 @@ impl<'de> serde::Deserialize<'de> for TemplatePropUsage {
 
 impl serde::Serialize for TemplateBindingOccurrence {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("name", &self.name)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.serialize_entry("usageKind", &self.usage_kind)?;
-        map.end()
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TemplateBindingOccurrence", 4)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.serialize_field("usageKind", &self.usage_kind)?;
+        s.end()
     }
 }
 
@@ -1515,12 +1515,12 @@ impl<'de> serde::Deserialize<'de> for TemplateBindingOccurrence {
 
 impl serde::Serialize for UnresolvedBinding {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("name", &self.name)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("UnresolvedBinding", 3)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -1545,23 +1545,23 @@ impl<'de> serde::Deserialize<'de> for UnresolvedBinding {
 
 impl serde::Serialize for DefinedSlot {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("name", &self.name)?;
-        map.serialize_entry("hasBindings", &self.has_bindings)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("DefinedSlot", 4)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("hasBindings", &self.has_bindings)?;
         if !self.binding_names.is_empty() {
-            map.serialize_entry("bindingNames", &self.binding_names)?;
+            s.serialize_field("bindingNames", &self.binding_names)?;
         }
         if !self.binding_expressions.is_empty() {
-            map.serialize_entry("bindingExpressions", &self.binding_expressions)?;
+            s.serialize_field("bindingExpressions", &self.binding_expressions)?;
         }
         // binding_value_spans are SFC-absolute and not serialized (internal use only)
         if self.has_fallback_content {
-            map.serialize_entry("hasFallbackContent", &self.has_fallback_content)?;
+            s.serialize_field("hasFallbackContent", &self.has_fallback_content)?;
         }
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -1599,17 +1599,17 @@ impl<'de> serde::Deserialize<'de> for DefinedSlot {
 
 impl serde::Serialize for TemplateEventHandler {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("eventName", &self.event_name)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TemplateEventHandler", 5)?;
+        s.serialize_field("eventName", &self.event_name)?;
         if self.handler_binding.is_some() {
-            map.serialize_entry("handlerBinding", &self.handler_binding)?;
+            s.serialize_field("handlerBinding", &self.handler_binding)?;
         }
-        map.serialize_entry("isInline", &self.is_inline)?;
-        map.serialize_entry("targetTag", &self.target_tag)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        s.serialize_field("isInline", &self.is_inline)?;
+        s.serialize_field("targetTag", &self.target_tag)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -1642,36 +1642,36 @@ impl<'de> serde::Deserialize<'de> for TemplateEventHandler {
 
 impl serde::Serialize for TemplateDirective {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("name", &self.name)?;
-        map.serialize_entry("rawName", &self.raw_name)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TemplateDirective", 4)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("rawName", &self.raw_name)?;
         if self.argument.is_some() {
-            map.serialize_entry("argument", &self.argument)?;
+            s.serialize_field("argument", &self.argument)?;
         }
         if !self.modifiers.is_empty() {
-            map.serialize_entry("modifiers", &self.modifiers)?;
+            s.serialize_field("modifiers", &self.modifiers)?;
         }
         if self.expression.is_some() {
-            map.serialize_entry("expression", &self.expression)?;
+            s.serialize_field("expression", &self.expression)?;
         }
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
         if self.name_end != 0 {
-            map.serialize_entry("nameEnd", &self.name_end)?;
+            s.serialize_field("nameEnd", &self.name_end)?;
         }
         if let Some(ref arg) = self.arg_span {
-            map.serialize_entry("argSpanStart", &arg.start)?;
-            map.serialize_entry("argSpanEnd", &arg.end)?;
+            s.serialize_field("argSpanStart", &arg.start)?;
+            s.serialize_field("argSpanEnd", &arg.end)?;
         }
         if let Some(ref expr) = self.expression_span {
-            map.serialize_entry("expressionSpanStart", &expr.start)?;
-            map.serialize_entry("expressionSpanEnd", &expr.end)?;
+            s.serialize_field("expressionSpanStart", &expr.start)?;
+            s.serialize_field("expressionSpanEnd", &expr.end)?;
         }
         if !self.modifier_spans.is_empty() {
-            map.serialize_entry("modifierSpans", &self.modifier_spans)?;
+            s.serialize_field("modifierSpans", &self.modifier_spans)?;
         }
-        map.end()
+        s.end()
     }
 }
 
@@ -1729,21 +1729,21 @@ impl<'de> serde::Deserialize<'de> for TemplateDirective {
 
 impl serde::Serialize for VForDirective {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("variable", &self.variable)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("VForDirective", 5)?;
+        s.serialize_field("variable", &self.variable)?;
         if self.index.is_some() {
-            map.serialize_entry("index", &self.index)?;
+            s.serialize_field("index", &self.index)?;
         }
-        map.serialize_entry("iterable", &self.iterable)?;
-        map.serialize_entry("hasKey", &self.has_key)?;
+        s.serialize_field("iterable", &self.iterable)?;
+        s.serialize_field("hasKey", &self.has_key)?;
         if self.key_expression.is_some() {
-            map.serialize_entry("keyExpression", &self.key_expression)?;
+            s.serialize_field("keyExpression", &self.key_expression)?;
         }
-        map.serialize_entry("keyUsesIndex", &self.key_uses_index)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        s.serialize_field("keyUsesIndex", &self.key_uses_index)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -1782,17 +1782,17 @@ impl<'de> serde::Deserialize<'de> for VForDirective {
 
 impl serde::Serialize for VModelDirective {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("bindingName", &self.binding_name)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("VModelDirective", 4)?;
+        s.serialize_field("bindingName", &self.binding_name)?;
         if !self.modifiers.is_empty() {
-            map.serialize_entry("modifiers", &self.modifiers)?;
+            s.serialize_field("modifiers", &self.modifiers)?;
         }
-        map.serialize_entry("targetIsComponent", &self.target_is_component)?;
-        map.serialize_entry("targetTag", &self.target_tag)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        s.serialize_field("targetIsComponent", &self.target_is_component)?;
+        s.serialize_field("targetTag", &self.target_tag)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -1825,66 +1825,66 @@ impl<'de> serde::Deserialize<'de> for VModelDirective {
 
 impl serde::Serialize for TemplateElement {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("tag", &self.tag)?;
-        map.serialize_entry("isComponent", &self.is_component)?;
-        map.serialize_entry("isSelfClosing", &self.is_self_closing)?;
-        map.serialize_entry("namespace", &self.namespace)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TemplateElement", 10)?;
+        s.serialize_field("tag", &self.tag)?;
+        s.serialize_field("isComponent", &self.is_component)?;
+        s.serialize_field("isSelfClosing", &self.is_self_closing)?;
+        s.serialize_field("namespace", &self.namespace)?;
         if !self.attributes.is_empty() {
-            map.serialize_entry("attributes", &self.attributes)?;
+            s.serialize_field("attributes", &self.attributes)?;
         }
         if !self.directives.is_empty() {
-            map.serialize_entry("directives", &self.directives)?;
+            s.serialize_field("directives", &self.directives)?;
         }
         if self.v_for.is_some() {
-            map.serialize_entry("vFor", &self.v_for)?;
+            s.serialize_field("vFor", &self.v_for)?;
         }
         if self.v_model.is_some() {
-            map.serialize_entry("vModel", &self.v_model)?;
+            s.serialize_field("vModel", &self.v_model)?;
         }
-        map.serialize_entry("hasVIf", &self.has_v_if)?;
-        map.serialize_entry("hasVElse", &self.has_v_else)?;
-        map.serialize_entry("hasVElseIf", &self.has_v_else_if)?;
+        s.serialize_field("hasVIf", &self.has_v_if)?;
+        s.serialize_field("hasVElse", &self.has_v_else)?;
+        s.serialize_field("hasVElseIf", &self.has_v_else_if)?;
         if self.v_if_condition.is_some() {
-            map.serialize_entry("vIfCondition", &self.v_if_condition)?;
+            s.serialize_field("vIfCondition", &self.v_if_condition)?;
         }
-        map.serialize_entry("hasVShow", &self.has_v_show)?;
-        map.serialize_entry("hasVHtml", &self.has_v_html)?;
-        map.serialize_entry("hasVText", &self.has_v_text)?;
-        map.serialize_entry("hasTextContent", &self.has_text_content)?;
+        s.serialize_field("hasVShow", &self.has_v_show)?;
+        s.serialize_field("hasVHtml", &self.has_v_html)?;
+        s.serialize_field("hasVText", &self.has_v_text)?;
+        s.serialize_field("hasTextContent", &self.has_text_content)?;
         if self.has_bare_text {
-            map.serialize_entry("hasBareText", &self.has_bare_text)?;
+            s.serialize_field("hasBareText", &self.has_bare_text)?;
         }
         if self.has_element_children {
-            map.serialize_entry("hasElementChildren", &self.has_element_children)?;
+            s.serialize_field("hasElementChildren", &self.has_element_children)?;
         }
-        map.serialize_entry("nestingDepth", &self.nesting_depth)?;
+        s.serialize_field("nestingDepth", &self.nesting_depth)?;
         if self.parent_tag.is_some() {
-            map.serialize_entry("parentTag", &self.parent_tag)?;
+            s.serialize_field("parentTag", &self.parent_tag)?;
         }
         if self.parent_index.is_some() {
-            map.serialize_entry("parentIndex", &self.parent_index)?;
+            s.serialize_field("parentIndex", &self.parent_index)?;
         }
         if !self.dynamic_classes.is_empty() {
-            map.serialize_entry("dynamicClasses", &self.dynamic_classes)?;
+            s.serialize_field("dynamicClasses", &self.dynamic_classes)?;
         }
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
         if self.tag_span_end != 0 {
-            map.serialize_entry("tagSpanEnd", &self.tag_span_end)?;
+            s.serialize_field("tagSpanEnd", &self.tag_span_end)?;
         }
         if self.content_end != 0 {
-            map.serialize_entry("contentEnd", &self.content_end)?;
+            s.serialize_field("contentEnd", &self.content_end)?;
         }
         if !self.dynamic_style_vars.is_empty() {
-            map.serialize_entry("dynamicStyleVars", &self.dynamic_style_vars)?;
+            s.serialize_field("dynamicStyleVars", &self.dynamic_style_vars)?;
         }
         if !self.static_style_vars.is_empty() {
-            map.serialize_entry("staticStyleVars", &self.static_style_vars)?;
+            s.serialize_field("staticStyleVars", &self.static_style_vars)?;
         }
         // text_children omitted from serialization (Rust-only, not crossing FFI)
-        map.end()
+        s.end()
     }
 }
 
@@ -1981,23 +1981,23 @@ impl<'de> serde::Deserialize<'de> for TemplateElement {
 
 impl serde::Serialize for TemplateAttribute {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("name", &self.name)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TemplateAttribute", 4)?;
+        s.serialize_field("name", &self.name)?;
         if self.value.is_some() {
-            map.serialize_entry("value", &self.value)?;
+            s.serialize_field("value", &self.value)?;
         }
-        map.serialize_entry("isDynamic", &self.is_dynamic)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
+        s.serialize_field("isDynamic", &self.is_dynamic)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
         if self.name_end != 0 {
-            map.serialize_entry("nameEnd", &self.name_end)?;
+            s.serialize_field("nameEnd", &self.name_end)?;
         }
         if let Some(ref vs) = self.value_span {
-            map.serialize_entry("valueSpanStart", &vs.start)?;
-            map.serialize_entry("valueSpanEnd", &vs.end)?;
+            s.serialize_field("valueSpanStart", &vs.start)?;
+            s.serialize_field("valueSpanEnd", &vs.end)?;
         }
-        map.end()
+        s.end()
     }
 }
 
@@ -2039,20 +2039,20 @@ impl<'de> serde::Deserialize<'de> for TemplateAttribute {
 
 impl serde::Serialize for AnalyzedPropDefinition {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("name", &self.name)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("AnalyzedPropDefinition", 8)?;
+        s.serialize_field("name", &self.name)?;
         if self.type_annotation.is_some() {
-            map.serialize_entry("typeAnnotation", &self.type_annotation)?;
+            s.serialize_field("typeAnnotation", &self.type_annotation)?;
         }
-        map.serialize_entry("hasDefault", &self.has_default)?;
-        map.serialize_entry("isRequired", &self.is_required)?;
-        map.serialize_entry("isBoolean", &self.is_boolean)?;
-        map.serialize_entry("usedInTemplate", &self.used_in_template)?;
-        map.serialize_entry("usedInScript", &self.used_in_script)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        s.serialize_field("hasDefault", &self.has_default)?;
+        s.serialize_field("isRequired", &self.is_required)?;
+        s.serialize_field("isBoolean", &self.is_boolean)?;
+        s.serialize_field("usedInTemplate", &self.used_in_template)?;
+        s.serialize_field("usedInScript", &self.used_in_script)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -2095,17 +2095,17 @@ impl<'de> serde::Deserialize<'de> for AnalyzedPropDefinition {
 
 impl serde::Serialize for AnalyzedEmitDefinition {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("eventName", &self.event_name)?;
-        map.serialize_entry("hasValidator", &self.has_validator)?;
-        map.serialize_entry("isDeclared", &self.is_declared)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("AnalyzedEmitDefinition", 5)?;
+        s.serialize_field("eventName", &self.event_name)?;
+        s.serialize_field("hasValidator", &self.has_validator)?;
+        s.serialize_field("isDeclared", &self.is_declared)?;
         if !self.emit_locations.is_empty() {
-            map.serialize_entry("emitLocations", &self.emit_locations)?;
+            s.serialize_field("emitLocations", &self.emit_locations)?;
         }
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -2139,16 +2139,16 @@ impl<'de> serde::Deserialize<'de> for AnalyzedEmitDefinition {
 
 impl serde::Serialize for CommentDirective {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("kind", &self.kind)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("CommentDirective", 4)?;
+        s.serialize_field("kind", &self.kind)?;
         if self.message.is_some() {
-            map.serialize_entry("message", &self.message)?;
+            s.serialize_field("message", &self.message)?;
         }
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.serialize_entry("affectsNextLine", &self.affects_next_line)?;
-        map.end()
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.serialize_field("affectsNextLine", &self.affects_next_line)?;
+        s.end()
     }
 }
 
@@ -2179,14 +2179,14 @@ impl<'de> serde::Deserialize<'de> for CommentDirective {
 
 impl serde::Serialize for TypeMismatch {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.serialize_entry("expected", &self.expected)?;
-        map.serialize_entry("actual", &self.actual)?;
-        map.serialize_entry("message", &self.message)?;
-        map.end()
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TypeMismatch", 5)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.serialize_field("expected", &self.expected)?;
+        s.serialize_field("actual", &self.actual)?;
+        s.serialize_field("message", &self.message)?;
+        s.end()
     }
 }
 
@@ -2215,46 +2215,46 @@ impl<'de> serde::Deserialize<'de> for TypeMismatch {
 
 impl serde::Serialize for AnalyzedMacroUsage {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("kind", &self.kind)?;
-        map.serialize_entry("isTypeBased", &self.is_type_based)?;
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("AnalyzedMacroUsage", 4)?;
+        s.serialize_field("kind", &self.kind)?;
+        s.serialize_field("isTypeBased", &self.is_type_based)?;
         if self.type_param.is_some() {
-            map.serialize_entry("typeParam", &self.type_param)?;
+            s.serialize_field("typeParam", &self.type_param)?;
         }
         if self.runtime_arg.is_some() {
-            map.serialize_entry("runtimeArg", &self.runtime_arg)?;
+            s.serialize_field("runtimeArg", &self.runtime_arg)?;
         }
         if self.binding_name.is_some() {
-            map.serialize_entry("bindingName", &self.binding_name)?;
+            s.serialize_field("bindingName", &self.binding_name)?;
         }
         if self.props.is_some() {
-            map.serialize_entry("props", &self.props)?;
+            s.serialize_field("props", &self.props)?;
         }
         if self.emits.is_some() {
-            map.serialize_entry("emits", &self.emits)?;
+            s.serialize_field("emits", &self.emits)?;
         }
         if self.model_name.is_some() {
-            map.serialize_entry("modelName", &self.model_name)?;
+            s.serialize_field("modelName", &self.model_name)?;
         }
         if self.slots.is_some() {
-            map.serialize_entry("slots", &self.slots)?;
+            s.serialize_field("slots", &self.slots)?;
         }
         if self.exposed.is_some() {
-            map.serialize_entry("exposed", &self.exposed)?;
+            s.serialize_field("exposed", &self.exposed)?;
         }
         if self.defaults.is_some() {
-            map.serialize_entry("defaults", &self.defaults)?;
+            s.serialize_field("defaults", &self.defaults)?;
         }
         if !self.type_references.is_empty() {
-            map.serialize_entry("typeReferences", &self.type_references)?;
+            s.serialize_field("typeReferences", &self.type_references)?;
         }
         if self.type_enhancement.is_some() {
-            map.serialize_entry("typeEnhancement", &self.type_enhancement)?;
+            s.serialize_field("typeEnhancement", &self.type_enhancement)?;
         }
-        map.serialize_entry("spanStart", &self.span.start)?;
-        map.serialize_entry("spanEnd", &self.span.end)?;
-        map.end()
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
     }
 }
 
@@ -2911,5 +2911,579 @@ mod tests {
         assert_eq!(unwrap_reactive_type("string"), None);
         assert_eq!(unwrap_reactive_type("'a' | 'b'"), None);
         assert_eq!(unwrap_reactive_type("MyType"), None);
+    }
+
+    // =========================================================================
+    // Serialization encoding tests
+    //
+    // These tests verify two invariants:
+    //   1. All types use serialize_struct (not serialize_map) so that
+    //      serde_wasm_bindgen produces plain JS objects, not Map instances.
+    //      The StructEnforcingSerializer returns an error when serialize_map
+    //      is called — the tests are RED until all impls use serialize_struct.
+    //   2. Span fields are always flat (spanStart / spanEnd at top level) —
+    //      no nested "span" object. Verified via serde_json.
+    // =========================================================================
+
+    mod serialize_encoding {
+        use super::*;
+        use serde::ser::{self, Serialize};
+        use std::fmt;
+
+        // -----------------------------------------------------------------
+        // StructEnforcingSerializer — errors on serialize_map
+        // -----------------------------------------------------------------
+
+        #[derive(Debug)]
+        struct MapUsedError;
+
+        impl fmt::Display for MapUsedError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "serialize_map used — must use serialize_struct instead")
+            }
+        }
+
+        impl ser::Error for MapUsedError {
+            fn custom<T: fmt::Display>(msg: T) -> Self {
+                eprintln!("serde error: {msg}");
+                MapUsedError
+            }
+        }
+
+        impl std::error::Error for MapUsedError {}
+
+        /// Serializer that errors when `serialize_map` is called on a type
+        /// that should be using `serialize_struct`. Call it with a value:
+        /// `value.serialize(StructEnforcingSerializer).unwrap()`
+        struct StructEnforcingSerializer;
+
+        struct PassSeq;
+        struct PassStruct;
+
+        impl ser::SerializeSeq for PassSeq {
+            type Ok = ();
+            type Error = MapUsedError;
+            fn serialize_element<T: ?Sized + Serialize>(
+                &mut self,
+                v: &T,
+            ) -> Result<(), MapUsedError> {
+                v.serialize(StructEnforcingSerializer)
+            }
+            fn end(self) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+        }
+
+        impl ser::SerializeTuple for PassSeq {
+            type Ok = ();
+            type Error = MapUsedError;
+            fn serialize_element<T: ?Sized + Serialize>(
+                &mut self,
+                v: &T,
+            ) -> Result<(), MapUsedError> {
+                v.serialize(StructEnforcingSerializer)
+            }
+            fn end(self) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+        }
+
+        impl ser::SerializeTupleStruct for PassSeq {
+            type Ok = ();
+            type Error = MapUsedError;
+            fn serialize_field<T: ?Sized + Serialize>(
+                &mut self,
+                v: &T,
+            ) -> Result<(), MapUsedError> {
+                v.serialize(StructEnforcingSerializer)
+            }
+            fn end(self) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+        }
+
+        impl ser::SerializeTupleVariant for PassSeq {
+            type Ok = ();
+            type Error = MapUsedError;
+            fn serialize_field<T: ?Sized + Serialize>(
+                &mut self,
+                v: &T,
+            ) -> Result<(), MapUsedError> {
+                v.serialize(StructEnforcingSerializer)
+            }
+            fn end(self) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+        }
+
+        impl ser::SerializeStruct for PassStruct {
+            type Ok = ();
+            type Error = MapUsedError;
+            fn serialize_field<T: ?Sized + Serialize>(
+                &mut self,
+                _key: &'static str,
+                v: &T,
+            ) -> Result<(), MapUsedError> {
+                v.serialize(StructEnforcingSerializer)
+            }
+            fn end(self) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+        }
+
+        impl ser::SerializeStructVariant for PassStruct {
+            type Ok = ();
+            type Error = MapUsedError;
+            fn serialize_field<T: ?Sized + Serialize>(
+                &mut self,
+                _key: &'static str,
+                v: &T,
+            ) -> Result<(), MapUsedError> {
+                v.serialize(StructEnforcingSerializer)
+            }
+            fn end(self) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+        }
+
+        impl serde::Serializer for StructEnforcingSerializer {
+            type Ok = ();
+            type Error = MapUsedError;
+            type SerializeSeq = PassSeq;
+            type SerializeTuple = PassSeq;
+            type SerializeTupleStruct = PassSeq;
+            type SerializeTupleVariant = PassSeq;
+            // SerializeMap is Impossible — calling serialize_map returns Err.
+            type SerializeMap = ser::Impossible<(), MapUsedError>;
+            type SerializeStruct = PassStruct;
+            type SerializeStructVariant = PassStruct;
+
+            fn serialize_bool(self, _: bool) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_i8(self, _: i8) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_i16(self, _: i16) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_i32(self, _: i32) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_i64(self, _: i64) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_u8(self, _: u8) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_u16(self, _: u16) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_u32(self, _: u32) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_u64(self, _: u64) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_f32(self, _: f32) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_f64(self, _: f64) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_char(self, _: char) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_str(self, _: &str) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_bytes(self, _: &[u8]) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_none(self) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_some<T: ?Sized + Serialize>(self, v: &T) -> Result<(), MapUsedError> {
+                v.serialize(Self)
+            }
+            fn serialize_unit(self) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_unit_struct(self, _: &'static str) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_unit_variant(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+            ) -> Result<(), MapUsedError> {
+                Ok(())
+            }
+            fn serialize_newtype_struct<T: ?Sized + Serialize>(
+                self,
+                _: &'static str,
+                v: &T,
+            ) -> Result<(), MapUsedError> {
+                v.serialize(Self)
+            }
+            fn serialize_newtype_variant<T: ?Sized + Serialize>(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+                v: &T,
+            ) -> Result<(), MapUsedError> {
+                v.serialize(Self)
+            }
+            fn serialize_seq(self, _: Option<usize>) -> Result<PassSeq, MapUsedError> {
+                Ok(PassSeq)
+            }
+            fn serialize_tuple(self, _: usize) -> Result<PassSeq, MapUsedError> {
+                Ok(PassSeq)
+            }
+            fn serialize_tuple_struct(
+                self,
+                _: &'static str,
+                _: usize,
+            ) -> Result<PassSeq, MapUsedError> {
+                Ok(PassSeq)
+            }
+            fn serialize_tuple_variant(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+                _: usize,
+            ) -> Result<PassSeq, MapUsedError> {
+                Ok(PassSeq)
+            }
+            /// Returns Err — any type calling serialize_map fails the test.
+            fn serialize_map(
+                self,
+                _: Option<usize>,
+            ) -> Result<ser::Impossible<(), MapUsedError>, MapUsedError> {
+                Err(MapUsedError)
+            }
+            fn serialize_struct(
+                self,
+                _: &'static str,
+                _: usize,
+            ) -> Result<PassStruct, MapUsedError> {
+                Ok(PassStruct)
+            }
+            fn serialize_struct_variant(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+                _: usize,
+            ) -> Result<PassStruct, MapUsedError> {
+                Ok(PassStruct)
+            }
+        }
+
+        // Helper: assert serialize_struct is used and span fields are flat.
+        fn assert_uses_struct<T: Serialize>(v: &T) {
+            v.serialize(StructEnforcingSerializer)
+                .expect("type must use serialize_struct, not serialize_map");
+        }
+
+        fn json<T: Serialize>(v: &T) -> serde_json::Value {
+            serde_json::to_value(v).expect("serialize to json")
+        }
+
+        fn assert_flat_span(j: &serde_json::Value, start: u32, end: u32) {
+            assert_eq!(j["spanStart"], start, "spanStart must be top-level");
+            assert_eq!(j["spanEnd"], end, "spanEnd must be top-level");
+            assert!(
+                j.get("span").is_none(),
+                "nested 'span' object must not appear"
+            );
+        }
+
+        // -----------------------------------------------------------------
+        // Tests — one per type
+        // -----------------------------------------------------------------
+
+        #[test]
+        fn template_component_usage_uses_struct() {
+            let v = TemplateComponentUsage {
+                name: "MyComp".into(),
+                import_source: None,
+                is_dynamic: false,
+                props: vec![],
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_classes: vec![],
+                v_models: vec![],
+                span: Span::new(10, 20),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 10, 20);
+            assert_eq!(j["name"], "MyComp");
+        }
+
+        #[test]
+        fn template_component_vmodel_uses_struct() {
+            let v = TemplateComponentVModel {
+                binding_name: "modelValue".into(),
+                span: Span::new(5, 15),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 5, 15);
+            assert_eq!(j["bindingName"], "modelValue");
+        }
+
+        #[test]
+        fn template_prop_usage_uses_struct() {
+            let v = TemplatePropUsage {
+                name: "foo".into(),
+                is_bound: true,
+                constness: PropValueConstness::Const,
+                referenced_bindings: vec![],
+                from_spread: false,
+                span: Span::new(3, 9),
+                name_span: Span::new(0, 0),
+                is_shorthand: false,
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 3, 9);
+            assert_eq!(j["name"], "foo");
+        }
+
+        #[test]
+        fn template_binding_occurrence_uses_struct() {
+            let v = TemplateBindingOccurrence {
+                name: "count".into(),
+                span: Span::new(20, 25),
+                usage_kind: BindingUsageKind::Interpolation,
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 20, 25);
+            assert_eq!(j["name"], "count");
+        }
+
+        #[test]
+        fn unresolved_binding_uses_struct() {
+            let v = UnresolvedBinding {
+                name: "unknown".into(),
+                span: Span::new(30, 37),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 30, 37);
+            assert_eq!(j["name"], "unknown");
+        }
+
+        #[test]
+        fn defined_slot_uses_struct() {
+            let v = DefinedSlot {
+                name: "header".into(),
+                has_bindings: false,
+                binding_names: vec![],
+                binding_expressions: vec![],
+                binding_value_spans: vec![],
+                has_fallback_content: false,
+                span: Span::new(40, 60),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 40, 60);
+            assert_eq!(j["name"], "header");
+            assert!(
+                j.get("bindingValueSpans").is_none(),
+                "bindingValueSpans must not be serialized"
+            );
+        }
+
+        #[test]
+        fn template_event_handler_uses_struct() {
+            let v = TemplateEventHandler {
+                event_name: "click".into(),
+                handler_binding: Some("handleClick".into()),
+                is_inline: false,
+                target_tag: "button".into(),
+                span: Span::new(50, 70),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 50, 70);
+            assert_eq!(j["eventName"], "click");
+        }
+
+        #[test]
+        fn template_directive_uses_struct() {
+            let v = TemplateDirective {
+                name: "if".into(),
+                raw_name: "v-if".into(),
+                argument: None,
+                modifiers: vec![],
+                expression: Some("show".into()),
+                span: Span::new(1, 10),
+                name_end: 4,
+                arg_span: None,
+                expression_span: None,
+                modifier_spans: vec![],
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 1, 10);
+            assert_eq!(j["name"], "if");
+        }
+
+        #[test]
+        fn v_for_directive_uses_struct() {
+            let v = VForDirective {
+                variable: "item".into(),
+                index: None,
+                iterable: "items".into(),
+                has_key: false,
+                key_expression: None,
+                key_uses_index: false,
+                span: Span::new(2, 20),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 2, 20);
+            assert_eq!(j["variable"], "item");
+        }
+
+        #[test]
+        fn v_model_directive_uses_struct() {
+            let v = VModelDirective {
+                binding_name: "modelValue".into(),
+                modifiers: vec![],
+                target_is_component: true,
+                target_tag: "MyInput".into(),
+                span: Span::new(6, 25),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 6, 25);
+            assert_eq!(j["bindingName"], "modelValue");
+        }
+
+        #[test]
+        fn template_element_uses_struct_no_text_children() {
+            let v = TemplateElement {
+                tag: "div".into(),
+                span: Span::new(0, 50),
+                ..Default::default()
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 0, 50);
+            assert_eq!(j["tag"], "div");
+            assert!(
+                j.get("textChildren").is_none(),
+                "textChildren must not be serialized"
+            );
+        }
+
+        #[test]
+        fn template_attribute_uses_struct() {
+            let v = TemplateAttribute {
+                name: "class".into(),
+                value: Some("foo".into()),
+                is_dynamic: false,
+                span: Span::new(7, 18),
+                name_end: 12,
+                value_span: None,
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 7, 18);
+            assert_eq!(j["name"], "class");
+        }
+
+        #[test]
+        fn analyzed_prop_definition_uses_struct() {
+            let v = AnalyzedPropDefinition {
+                name: "msg".into(),
+                type_annotation: Some("string".into()),
+                has_default: false,
+                is_required: true,
+                is_boolean: false,
+                used_in_template: true,
+                used_in_script: false,
+                span: Span::new(8, 18),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 8, 18);
+            assert_eq!(j["name"], "msg");
+        }
+
+        #[test]
+        fn analyzed_emit_definition_uses_struct() {
+            let v = AnalyzedEmitDefinition {
+                event_name: "update".into(),
+                has_validator: false,
+                is_declared: true,
+                emit_locations: vec![],
+                span: Span::new(9, 22),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 9, 22);
+            assert_eq!(j["eventName"], "update");
+        }
+
+        #[test]
+        fn comment_directive_uses_struct() {
+            let v = CommentDirective {
+                kind: CommentDirectiveKind::Disable,
+                message: None,
+                span: Span::new(11, 35),
+                affects_next_line: false,
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 11, 35);
+        }
+
+        #[test]
+        fn type_mismatch_uses_struct() {
+            let v = TypeMismatch {
+                span: Span::new(12, 20),
+                expected: "string".into(),
+                actual: "number".into(),
+                message: "Type mismatch".into(),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 12, 20);
+            assert_eq!(j["expected"], "string");
+        }
+
+        #[test]
+        fn analyzed_macro_usage_uses_struct() {
+            let v = AnalyzedMacroUsage {
+                kind: MacroKind::DefineProps,
+                is_type_based: false,
+                type_param: None,
+                runtime_arg: None,
+                binding_name: None,
+                props: None,
+                emits: None,
+                model_name: None,
+                slots: None,
+                exposed: None,
+                defaults: None,
+                type_references: vec![],
+                type_enhancement: None,
+                span: Span::new(13, 40),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 13, 40);
+        }
     }
 }

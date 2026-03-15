@@ -143,6 +143,7 @@ const AstNode = defineComponent({
       const indent = node.depth * 16;
 
       const children: ReturnType<typeof h>[] = [];
+      const tagLabel = el.tag || "(unknown)";
 
       children.push(
         h("div", {
@@ -157,7 +158,7 @@ const AstNode = defineComponent({
               }, "\u25B6")
             : h("span", { class: "ast-toggle-icon placeholder" }, " "),
           h("span", { class: el.isComponent ? "tag-component" : "tag-html" },
-            el.isSelfClosing ? `<${el.tag} />` : `<${el.tag}>`),
+            el.isSelfClosing ? `<${tagLabel} />` : `<${tagLabel}>`),
           attrs ? h("span", { class: "attr-summary" }, ` ${attrs}`) : null,
           ...badges.map((b: string) => h("span", { class: "directive-badge" }, b)),
           ...(el.dynamicClasses ?? []).slice(0, 2).map((c: string) =>

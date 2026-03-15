@@ -6,34 +6,34 @@ const props = defineProps<{
   store: Store;
 }>();
 
-interface VarFlowEntry {
+interface CssPropEntry {
   name: string;
-  /** CSS definition sites (from style customProperties) */
-  cssDefinitions: Array<{ styleIndex: number }>;
-  /** v-bind() usages in CSS (style → script bridge) */
-  vBindUsages: Array<{ expression: string; styleIndex: number }>;
-  /** Template inline style usage (from template cssVarNames) */
-  templateUsages: boolean;
-  /** Script DOM manipulations (setProperty/getPropertyValue/removeProperty) */
+  /** Style blocks that define this property */
+  definitions: Array<{ styleIndex: number }>;
+  /** Used in template inline style */
+  templateUsage: boolean;
+  /** Script DOM manipulations (setProperty / getPropertyValue / removeProperty) */
   scriptManipulations: Array<{ kind: string; valueExpr?: string | null }>;
 }
 
-const flowEntries = computed<VarFlowEntry[]>(() => {
+interface VBindEntry {
+  expression: string;
+  /** Actual generated CSS var name (e.g. "--a4f2eed6-color"), if available */
+  generatedVarName: string | null;
+  /** Which style blocks use this v-bind() */
+  styleIndices: number[];
+}
+
+const cssPropEntries = computed<CssPropEntry[]>(() => {
   const analysis = props.store.activeFile?.compiled.analysis;
   if (!analysis) return [];
 
-  const map = new Map<string, VarFlowEntry>();
+  const map = new Map<string, CssPropEntry>();
 
-  function getOrCreate(name: string): VarFlowEntry {
+  function getOrCreate(name: string): CssPropEntry {
     let entry = map.get(name);
     if (!entry) {
-      entry = {
-        name,
-        cssDefinitions: [],
-        vBindUsages: [],
-        templateUsages: false,
-        scriptManipulations: [],
-      };
+      entry = { name, definitions: [], templateUsage: false, scriptManipulations: [] };
       map.set(name, entry);
     }
     return entry;
@@ -43,20 +43,13 @@ const flowEntries = computed<VarFlowEntry[]>(() => {
   for (let i = 0; i < (analysis.styles?.length ?? 0); i++) {
     const style = analysis.styles![i]!;
     for (const prop of style.css?.customProperties ?? []) {
-      getOrCreate(prop.name).cssDefinitions.push({ styleIndex: i });
-    }
-    // v-bind() usages bridge CSS → script
-    for (const vBind of style.vBinds ?? []) {
-      getOrCreate(`--v-bind(${vBind.expression})`).vBindUsages.push({
-        expression: vBind.expression,
-        styleIndex: i,
-      });
+      getOrCreate(prop.name).definitions.push({ styleIndex: i });
     }
   }
 
-  // Template cssVarNames (inline style --var usage)
+  // Template inline style --var usages
   for (const name of analysis.template?.cssVarNames ?? []) {
-    getOrCreate(name).templateUsages = true;
+    getOrCreate(name).templateUsage = true;
   }
 
   // Script DOM manipulations
@@ -67,72 +60,116 @@ const flowEntries = computed<VarFlowEntry[]>(() => {
     });
   }
 
-  // Sort by name
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
 });
 
-function flowColor(type: "css" | "vbind" | "template" | "script"): string {
-  switch (type) {
-    case "css": return "#22c55e";
-    case "vbind": return "#3b82f6";
-    case "template": return "#a855f7";
-    case "script": return "#f97316";
+const vBindEntries = computed<VBindEntry[]>(() => {
+  const analysis = props.store.activeFile?.compiled.analysis;
+  if (!analysis) return [];
+
+  const entries: VBindEntry[] = [];
+
+  for (let i = 0; i < (analysis.styles?.length ?? 0); i++) {
+    const style = analysis.styles![i]!;
+    for (const vBind of style.vBinds ?? []) {
+      // Check if we already have an entry for this expression
+      const existing = entries.find((e) => e.expression === vBind.expression);
+      if (existing) {
+        if (!existing.styleIndices.includes(i)) {
+          existing.styleIndices.push(i);
+        }
+        // Prefer non-null generatedVarName
+        if (!existing.generatedVarName && vBind.generatedVarName) {
+          existing.generatedVarName = vBind.generatedVarName;
+        }
+      } else {
+        entries.push({
+          expression: vBind.expression,
+          generatedVarName: vBind.generatedVarName ?? null,
+          styleIndices: [i],
+        });
+      }
+    }
   }
-}
+
+  return entries.sort((a, b) => a.expression.localeCompare(b.expression));
+});
+
+const isEmpty = computed(() => cssPropEntries.value.length === 0 && vBindEntries.value.length === 0);
 </script>
 
 <template>
   <div class="flow-panel">
-    <div v-if="!flowEntries.length" class="empty-state">
+    <div v-if="isEmpty" class="empty-state">
       No CSS variables detected
     </div>
 
-    <div v-else class="flow-list">
-      <div v-for="entry in flowEntries" :key="entry.name" class="flow-card">
-        <div class="var-name">{{ entry.name }}</div>
-        <div class="flow-items">
-          <div
-            v-for="(def, i) in entry.cssDefinitions"
-            :key="'css-' + i"
-            class="flow-item"
-            :style="{ borderLeftColor: flowColor('css') }"
-          >
-            <span class="flow-badge" :style="{ background: flowColor('css') }">CSS</span>
-            Defined in &lt;style{{ def.styleIndex > 0 ? ` #${def.styleIndex}` : '' }}&gt;
-          </div>
+    <template v-else>
+      <!-- CSS Custom Properties section -->
+      <div v-if="cssPropEntries.length > 0" class="section">
+        <div class="section-header">CSS Custom Properties</div>
+        <div class="entry-list">
+          <div v-for="entry in cssPropEntries" :key="entry.name" class="flow-card">
+            <div class="var-name">{{ entry.name }}</div>
+            <div class="flow-items">
+              <div
+                v-for="(def, i) in entry.definitions"
+                :key="'def-' + i"
+                class="flow-item"
+                style="border-left-color: #22c55e"
+              >
+                <span class="flow-badge" style="background: #22c55e">CSS</span>
+                Defined in &lt;style{{ def.styleIndex > 0 ? ` #${def.styleIndex}` : '' }}&gt;
+              </div>
 
-          <div
-            v-for="(vb, i) in entry.vBindUsages"
-            :key="'vbind-' + i"
-            class="flow-item"
-            :style="{ borderLeftColor: flowColor('vbind') }"
-          >
-            <span class="flow-badge" :style="{ background: flowColor('vbind') }">v-bind</span>
-            <code>v-bind({{ vb.expression }})</code> in &lt;style{{ vb.styleIndex > 0 ? ` #${vb.styleIndex}` : '' }}&gt;
-          </div>
+              <div
+                v-if="entry.templateUsage"
+                class="flow-item"
+                style="border-left-color: #a855f7"
+              >
+                <span class="flow-badge" style="background: #a855f7">Template</span>
+                Used in inline style
+              </div>
 
-          <div
-            v-if="entry.templateUsages"
-            class="flow-item"
-            :style="{ borderLeftColor: flowColor('template') }"
-          >
-            <span class="flow-badge" :style="{ background: flowColor('template') }">Template</span>
-            Used in inline style
-          </div>
-
-          <div
-            v-for="(m, i) in entry.scriptManipulations"
-            :key="'script-' + i"
-            class="flow-item"
-            :style="{ borderLeftColor: flowColor('script') }"
-          >
-            <span class="flow-badge" :style="{ background: flowColor('script') }">Script</span>
-            <code>{{ m.kind }}</code>
-            <span v-if="m.valueExpr"> = {{ m.valueExpr }}</span>
+              <div
+                v-for="(m, i) in entry.scriptManipulations"
+                :key="'script-' + i"
+                class="flow-item"
+                style="border-left-color: #f97316"
+              >
+                <span class="flow-badge" style="background: #f97316">Script</span>
+                <code>{{ m.kind }}</code>
+                <span v-if="m.valueExpr"> = {{ m.valueExpr }}</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+
+      <!-- v-bind() Bindings section -->
+      <div v-if="vBindEntries.length > 0" class="section">
+        <div class="section-header">v-bind() Bindings</div>
+        <div class="entry-list">
+          <div v-for="entry in vBindEntries" :key="entry.expression" class="flow-card">
+            <div class="var-name">
+              <code class="expression">v-bind({{ entry.expression }})</code>
+              <span v-if="entry.generatedVarName" class="generated-name">→ {{ entry.generatedVarName }}</span>
+            </div>
+            <div class="flow-items">
+              <div
+                v-for="(idx, i) in entry.styleIndices"
+                :key="'vbind-style-' + i"
+                class="flow-item"
+                style="border-left-color: #3b82f6"
+              >
+                <span class="flow-badge" style="background: #3b82f6">v-bind</span>
+                Bound in &lt;style{{ idx > 0 ? ` #${idx}` : '' }}&gt;
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -145,6 +182,9 @@ function flowColor(type: "css" | "vbind" | "template" | "script"): string {
   color: var(--text-primary);
   font-size: 13px;
   font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .empty-state {
@@ -156,10 +196,21 @@ function flowColor(type: "css" | "vbind" | "template" | "script"): string {
   font-style: italic;
 }
 
-.flow-list {
+.section-header {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.entry-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
 .flow-card {
@@ -171,9 +222,26 @@ function flowColor(type: "css" | "vbind" | "template" | "script"): string {
 
 .var-name {
   font-weight: 600;
-  font-size: 14px;
-  margin-bottom: 8px;
+  font-size: 13px;
+  margin-bottom: 6px;
   color: var(--accent-color, #4299e1);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.expression {
+  font-size: 13px;
+  background: transparent;
+  color: var(--accent-color, #4299e1);
+  padding: 0;
+}
+
+.generated-name {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 400;
 }
 
 .flow-items {

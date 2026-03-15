@@ -52,7 +52,14 @@ fn parse_wasm_input<T: serde::de::DeserializeOwned>(value: JsValue) -> Result<T,
 }
 
 fn to_wasm_value<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(value)
+    // serde_wasm_bindgen 0.6 serializes `serialize_map` calls as JS `Map` objects by default.
+    // `JSON.stringify(new Map(...))` returns `{}`, which breaks the playground's Raw view and
+    // any JS code that accesses fields via plain property access.
+    // All analysis types use `serialize_struct` (not `serialize_map`), so this flag is a
+    // defense-in-depth guard against future regressions.
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    value
+        .serialize(&serializer)
         .map_err(|e| JsValue::from_str(&format!("Host serialization error: {}", e)))
 }
 

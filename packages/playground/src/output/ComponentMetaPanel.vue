@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { Store } from "../core/store";
 import type { ComponentMeta } from "@verter/component-meta/browser";
 import { snapshotToMeta } from "@verter/component-meta/browser";
@@ -9,10 +9,18 @@ const props = defineProps<{
   store: Store;
 }>();
 
-const meta = computed<ComponentMeta | null>(() => {
+const showRaw = ref(false);
+
+const rawAnalysis = computed(() => {
   const file = props.store.activeFile;
   if (!file?.compiled.analysis) return null;
-  return snapshotToMeta(file.compiled.analysis, file.filename);
+  return file.compiled.analysis;
+});
+
+const meta = computed<ComponentMeta | null>(() => {
+  if (!rawAnalysis.value) return null;
+  const file = props.store.activeFile!;
+  return snapshotToMeta(rawAnalysis.value, file.filename);
 });
 
 const activeFlagChips = computed<string[]>(() => {
@@ -34,9 +42,15 @@ const activeFlagChips = computed<string[]>(() => {
 
 <template>
   <div class="analysis-panel">
-    <div v-if="!meta" class="empty-state">
+    <div v-if="!meta && !rawAnalysis" class="empty-state">
       Component meta not available
     </div>
+    <template v-else>
+      <div class="panel-toolbar">
+        <button :class="['toggle-btn', !showRaw && 'active']" @click="showRaw = false">Meta</button>
+        <button :class="['toggle-btn', showRaw && 'active']" @click="showRaw = true">Raw</button>
+      </div>
+      <pre v-if="showRaw" class="raw-json">{{ JSON.stringify(rawAnalysis, null, 2) }}</pre>
     <div v-else class="analysis-content">
       <!-- Component Info -->
       <details class="analysis-section" open>
@@ -188,6 +202,40 @@ const activeFlagChips = computed<string[]>(() => {
         </div>
       </details>
 
+      <!-- Imports -->
+      <details v-if="meta.imports.length > 0" class="analysis-section">
+        <summary class="section-title">Imports ({{ meta.imports.length }})</summary>
+        <div class="import-list">
+          <div v-for="(imp, i) in meta.imports" :key="i" class="import-item">
+            <div class="binding-item">
+              <code class="binding-name">{{ imp.source }}</code>
+              <span v-if="imp.isTypeOnly" class="badge badge-kind">type</span>
+            </div>
+            <div v-if="imp.bindings.length > 0" class="import-bindings">
+              <span v-for="(b, j) in imp.bindings" :key="j" class="binding-tag">
+                <code>{{ b.name }}</code>
+                <span v-if="b.isTypeOnly" class="badge badge-kind">type</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <!-- Bindings -->
+      <details v-if="meta.bindings.length > 0" class="analysis-section">
+        <summary class="section-title">Bindings ({{ meta.bindings.length }})</summary>
+        <div class="import-list">
+          <div v-for="(b, i) in meta.bindings" :key="i" class="binding-item">
+            <code class="binding-name">{{ b.name }}</code>
+            <span class="badge badge-kind">{{ b.kind }}</span>
+            <span v-if="b.reactivityKind !== 'none'" class="badge badge-reactive">{{ b.reactivityKind }}</span>
+            <span v-if="b.typeAnnotation" class="badge badge-type">{{ b.typeAnnotation }}</span>
+            <span v-if="b.usedInTemplate" class="badge badge-vue">template</span>
+            <span v-if="b.usedInStyle" class="badge badge-vue">style</span>
+          </div>
+        </div>
+      </details>
+
       <!-- Styles -->
       <details v-if="meta.styles.length > 0" class="analysis-section">
         <summary class="section-title">Styles ({{ meta.styles.length }})</summary>
@@ -217,6 +265,7 @@ const activeFlagChips = computed<string[]>(() => {
         </div>
       </details>
     </div>
+    </template>
   </div>
 </template>
 
@@ -224,10 +273,53 @@ const activeFlagChips = computed<string[]>(() => {
 .analysis-panel {
   height: 100%;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 13px;
   font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+}
+
+.panel-toolbar {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.toggle-btn {
+  padding: 2px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.toggle-btn.active {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.raw-json {
+  flex: 1;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font-size: 12px;
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+  white-space: pre;
+  color: var(--text-primary);
+}
+
+.analysis-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
 }
 
 .empty-state {
@@ -237,10 +329,6 @@ const activeFlagChips = computed<string[]>(() => {
   height: 100%;
   color: var(--text-secondary);
   font-style: italic;
-}
-
-.analysis-content {
-  padding: 12px;
 }
 
 .analysis-section {

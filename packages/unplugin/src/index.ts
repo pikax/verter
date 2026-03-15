@@ -669,8 +669,28 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         });
 
         const scriptRequest = `${filename}?vue&type=script&lang.${mainLang}`;
+        // Build style imports. Prefer the compiler-parsed cache (accurate lang, scoped flag);
+        // fall back to a simple regex scan of the raw SFC source when compiler-sfc is absent.
+        const cachedStyles = styleBlockCache.get(filename);
+        const styleEntries: Array<{ lang: string }> =
+          cachedStyles ??
+          (() => {
+            const entries: Array<{ lang: string }> = [];
+            const re = /<style\b([^>]*)>/gi;
+            let m;
+            while ((m = re.exec(code)) !== null) {
+              const langMatch = /\blang\s*=\s*["']([^"']+)["']/.exec(m[1]);
+              entries.push({ lang: langMatch?.[1] ?? "css" });
+            }
+            return entries;
+          })();
+        const styleImports = styleEntries.map(
+          (entry, i) =>
+            `import "${filename}?vue&type=style&index=${i}&lang.${entry.lang ?? "css"}"`,
+        );
         const mainModule = [
           `import _sfc_main from "${scriptRequest}"`,
+          ...styleImports,
           `export * from "${scriptRequest}"`,
           `export default _sfc_main`,
         ].join("\n");

@@ -220,6 +220,8 @@ export interface AnalysisVBind {
   quoted: boolean;
   start: number;
   end: number;
+  /** Actual generated CSS variable name (e.g. "--a4f2eed6-color"). */
+  generatedVarName?: string;
 }
 
 export interface AnalysisSpecialPseudo {
@@ -236,6 +238,13 @@ export interface AnalysisCss {
   customProperties: AnalysisCssCustomProperty[];
   atRules: AnalysisCssAtRule[];
   ruleCount: number;
+  varUsages?: AnalysisCssVarUsage[];
+}
+
+export interface AnalysisCssVarUsage {
+  name: string;
+  start: number;
+  end: number;
 }
 
 export interface AnalysisCssSelector {
