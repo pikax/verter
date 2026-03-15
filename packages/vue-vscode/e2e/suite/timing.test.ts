@@ -5,6 +5,7 @@ import {
   parseStartupTiming,
   isLspReady,
   FIXTURE_NAME,
+  TYPE_PROVIDER,
 } from "../helpers";
 import { getTimer } from "../timer";
 
@@ -24,10 +25,9 @@ suite(`Startup Timing [${FIXTURE_NAME}]`, function () {
       getTimer().recordStartup(timing.activationToReadyMs);
       console.log(`    Startup time: ${timing.activationToReadyMs}ms`);
 
-      expect(
-        timing.activationToReadyMs,
-        "Startup should complete within 60s",
-      ).to.be.lessThan(60_000);
+      expect(timing.activationToReadyMs, "Startup should complete within 60s").to.be.lessThan(
+        60_000,
+      );
     } else {
       console.log("    Warning: Could not parse timing markers from log");
     }
@@ -48,5 +48,15 @@ suite(`Startup Timing [${FIXTURE_NAME}]`, function () {
     getTimer().recordTypeProvider(providerKind, timing.typeProviderStartedMs);
 
     console.log(`    Type provider: ${providerKind}`);
+    if (timing.typeProviderReason) {
+      console.log(`    Type provider reason: ${timing.typeProviderReason}`);
+    }
+
+    if (TYPE_PROVIDER) {
+      expect(
+        providerKind,
+        `Requested ${TYPE_PROVIDER} but got ${providerKind}${timing.typeProviderReason ? ` (${timing.typeProviderReason})` : ""}`,
+      ).to.equal(TYPE_PROVIDER);
+    }
   });
 });

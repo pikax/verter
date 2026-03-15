@@ -4,10 +4,11 @@
 //! the Language Server Protocol over stdin/stdout with JSON-RPC framing.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
@@ -2452,44 +2453,102 @@ fn extract_markup_string(v: &serde_json::Value) -> Option<String> {
 ///
 /// Checks (in order):
 /// 1. `tsgo` on PATH
-/// 2. Native binary from npx cache (`@typescript/native-preview-{platform}/lib/tsgo`)
-/// 3. npx shim in cache
-pub fn find_tsgo_binary() -> Option<String> {
-    // Check if tsgo is on PATH
-    if let Some(path) = which_cmd("tsgo") {
-        return Some(path);
+/// 2. Native binary from npm/npx cache (`@typescript/native-preview-{platform}/lib/tsgo`)
+/// 3. npm/npx shims in cache
+pub fn find_tsgo_binary() -> Result<String, TsgoBinaryLookupError> {
+    let cache_roots = collect_npm_cache_roots(
+        npm_config_cache_from_env(),
+        npm_config_get_cache(),
+        default_npm_cache_root(),
+    );
+    tracing::debug!("TSGO discovery: cache roots = {:?}", cache_roots);
+
+    let result = find_tsgo_binary_in(which_cmd("tsgo"), &cache_roots);
+    match &result {
+        Ok(path) => tracing::debug!("TSGO discovery: selected binary at {path}"),
+        Err(err) => tracing::debug!("TSGO discovery failed: {err}"),
+    }
+    result
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TsgoBinaryLookupError {
+    checked_locations: Vec<String>,
+}
+
+impl TsgoBinaryLookupError {
+    fn new(checked_locations: Vec<String>) -> Self {
+        Self { checked_locations }
+    }
+}
+
+impl std::fmt::Display for TsgoBinaryLookupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.checked_locations.is_empty() {
+            write!(f, "tsgo binary not found")
+        } else {
+            write!(
+                f,
+                "tsgo binary not found; checked {}",
+                self.checked_locations.join(", ")
+            )
+        }
+    }
+}
+
+impl std::error::Error for TsgoBinaryLookupError {}
+
+fn find_tsgo_binary_in(
+    path_hit: Option<String>,
+    cache_roots: &[PathBuf],
+) -> Result<String, TsgoBinaryLookupError> {
+    if let Some(path) = path_hit {
+        tracing::debug!("TSGO discovery: found on PATH at {path}");
+        return Ok(path);
     }
 
-    // Search npx cache for the native binary
-    if let Some(cache_dir) = npm_cache_npx_dir() {
-        // Walk npx cache dirs looking for the native binary
-        if let Ok(entries) = std::fs::read_dir(&cache_dir) {
-            for entry in entries.flatten() {
-                let native_bin = entry
-                    .path()
-                    .join("node_modules/@typescript/native-preview-win32-x64/lib/tsgo.exe");
-                if native_bin.exists() {
-                    return Some(native_bin.to_string_lossy().to_string());
-                }
-                // Also check unix paths
-                for platform in &["linux-x64", "darwin-x64", "darwin-arm64"] {
-                    let bin = entry.path().join(format!(
-                        "node_modules/@typescript/native-preview-{platform}/lib/tsgo"
-                    ));
-                    if bin.exists() {
-                        return Some(bin.to_string_lossy().to_string());
-                    }
-                }
-                // Check the shim (.bin/tsgo)
-                let shim = entry.path().join("node_modules/.bin/tsgo");
-                if shim.exists() {
-                    return Some(shim.to_string_lossy().to_string());
-                }
+    let mut checked_locations = Vec::new();
+    let mut npx_entries = Vec::new();
+
+    for cache_root in cache_roots {
+        push_checked_location(&mut checked_locations, cache_root.display().to_string());
+        let npx_dir = cache_root.join("_npx");
+        push_checked_location(&mut checked_locations, npx_dir.display().to_string());
+
+        let Ok(entries) = std::fs::read_dir(&npx_dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                npx_entries.push(entry.path());
             }
         }
     }
 
-    None
+    npx_entries.sort_by(|a, b| entry_modified(b).cmp(&entry_modified(a)));
+
+    for entry in &npx_entries {
+        for rel_path in tsgo_native_binary_rel_paths() {
+            let candidate = entry.join(rel_path);
+            push_checked_location(&mut checked_locations, candidate.display().to_string());
+            if candidate.exists() {
+                return Ok(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    for entry in &npx_entries {
+        for rel_path in tsgo_shim_rel_paths() {
+            let candidate = entry.join(rel_path);
+            push_checked_location(&mut checked_locations, candidate.display().to_string());
+            if candidate.exists() {
+                return Ok(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    Err(TsgoBinaryLookupError::new(checked_locations))
 }
 
 fn which_cmd(cmd: &str) -> Option<String> {
@@ -2538,20 +2597,145 @@ fn pick_best_which_candidate(output: &str) -> Option<&str> {
     Some(candidates[0])
 }
 
-fn npm_cache_npx_dir() -> Option<std::path::PathBuf> {
-    // On Windows: %LOCALAPPDATA%/npm-cache/_npx/
-    // On Unix: ~/.npm/_npx/
-    if cfg!(windows) {
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .map(|d| std::path::PathBuf::from(d).join("npm-cache/_npx"))
+fn collect_npm_cache_roots(
+    env_cache: Option<PathBuf>,
+    npm_config_cache: Option<PathBuf>,
+    default_root: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    push_cache_root(&mut roots, env_cache);
+    push_cache_root(&mut roots, npm_config_cache);
+    push_cache_root(&mut roots, default_root);
+    roots
+}
+
+fn npm_config_cache_from_env() -> Option<PathBuf> {
+    std::env::var_os("NPM_CONFIG_CACHE")
+        .or_else(|| std::env::var_os("npm_config_cache"))
+        .map(PathBuf::from)
+}
+
+fn npm_config_get_cache() -> Option<PathBuf> {
+    let npm_cmd = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let output = std::process::Command::new(npm_cmd)
+        .args(["config", "get", "cache"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let cache = stdout.lines().next()?.trim();
+    if cache.is_empty() || matches!(cache, "undefined" | "null") {
+        None
     } else {
-        dirs_or_home().map(|d| d.join(".npm/_npx"))
+        Some(PathBuf::from(cache))
     }
 }
 
-fn dirs_or_home() -> Option<std::path::PathBuf> {
-    std::env::var("HOME").ok().map(std::path::PathBuf::from)
+fn default_npm_cache_root() -> Option<PathBuf> {
+    // On Windows: %LOCALAPPDATA%/npm-cache
+    // On Unix: ~/.npm
+    if cfg!(windows) {
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .map(|d| PathBuf::from(d).join("npm-cache"))
+    } else {
+        dirs_or_home().map(|d| d.join(".npm"))
+    }
+}
+
+fn dirs_or_home() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+fn tsgo_native_binary_rel_paths() -> Vec<&'static str> {
+    let mut rel_paths = Vec::new();
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    rel_paths.push("node_modules/@typescript/native-preview-win32-x64/lib/tsgo.exe");
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    rel_paths.push("node_modules/@typescript/native-preview-win32-arm64/lib/tsgo.exe");
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    rel_paths.push("node_modules/@typescript/native-preview-linux-x64/lib/tsgo");
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    rel_paths.push("node_modules/@typescript/native-preview-linux-arm64/lib/tsgo");
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    rel_paths.push("node_modules/@typescript/native-preview-darwin-x64/lib/tsgo");
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    rel_paths.push("node_modules/@typescript/native-preview-darwin-arm64/lib/tsgo");
+
+    for rel_path in [
+        "node_modules/@typescript/native-preview-win32-x64/lib/tsgo.exe",
+        "node_modules/@typescript/native-preview-win32-arm64/lib/tsgo.exe",
+        "node_modules/@typescript/native-preview-linux-x64/lib/tsgo",
+        "node_modules/@typescript/native-preview-linux-arm64/lib/tsgo",
+        "node_modules/@typescript/native-preview-darwin-x64/lib/tsgo",
+        "node_modules/@typescript/native-preview-darwin-arm64/lib/tsgo",
+    ] {
+        if !rel_paths.contains(&rel_path) {
+            rel_paths.push(rel_path);
+        }
+    }
+
+    rel_paths
+}
+
+fn tsgo_shim_rel_paths() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &[
+            "node_modules/.bin/tsgo.cmd",
+            "node_modules/.bin/tsgo.bat",
+            "node_modules/.bin/tsgo",
+        ]
+    } else {
+        &["node_modules/.bin/tsgo"]
+    }
+}
+
+fn entry_modified(path: &Path) -> std::time::SystemTime {
+    path.metadata()
+        .and_then(|meta| meta.modified())
+        .unwrap_or(UNIX_EPOCH)
+}
+
+fn push_checked_location(checked_locations: &mut Vec<String>, location: String) {
+    if !checked_locations
+        .iter()
+        .any(|existing| existing == &location)
+    {
+        checked_locations.push(location);
+    }
+}
+
+fn push_cache_root(roots: &mut Vec<PathBuf>, root: Option<PathBuf>) {
+    let Some(root) = root.map(normalize_npm_cache_root) else {
+        return;
+    };
+    if !roots
+        .iter()
+        .any(|existing| cache_root_key(existing) == cache_root_key(&root))
+    {
+        roots.push(root);
+    }
+}
+
+fn normalize_npm_cache_root(root: PathBuf) -> PathBuf {
+    if root.file_name().and_then(|name| name.to_str()) == Some("_npx") {
+        root.parent().map(PathBuf::from).unwrap_or(root)
+    } else {
+        root
+    }
+}
+
+fn cache_root_key(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if cfg!(windows) {
+        value.replace('\\', "/").to_ascii_lowercase()
+    } else {
+        value.into_owned()
+    }
 }
 
 /// Create a temporary project directory with tsconfig.json for testing.
@@ -2733,17 +2917,17 @@ import Bar from './Bar.vue'"#;
 
     fn tsgo_bin_or_skip() -> Option<String> {
         match find_tsgo_binary() {
-            Some(bin) => Some(bin),
-            None => {
+            Ok(bin) => Some(bin),
+            Err(err) => {
                 if std::env::var("VERTER_REQUIRE_TSGO")
                     .map(|v| v == "1")
                     .unwrap_or(false)
                 {
                     panic!(
-                        "tsgo not found, but VERTER_REQUIRE_TSGO=1 is set; install tsgo or prewarm npx cache",
+                        "tsgo not found, but VERTER_REQUIRE_TSGO=1 is set; install tsgo or prewarm npx cache ({err})",
                     );
                 }
-                eprintln!("skipping: tsgo not found");
+                eprintln!("skipping: {err}");
                 None
             }
         }
@@ -4817,6 +5001,110 @@ const msg = "hi";
         // .cmd preferred over .bat
         let output2 = "C:\\tsgo.bat\nC:\\tsgo.cmd\n";
         assert_eq!(pick_best_which_candidate(output2), Some("C:\\tsgo.cmd"));
+    }
+
+    #[test]
+    fn test_collect_npm_cache_roots_uses_env_then_npm_then_default() {
+        let roots = collect_npm_cache_roots(
+            Some(std::path::PathBuf::from("/env-cache")),
+            Some(std::path::PathBuf::from("/npm-cache")),
+            Some(std::path::PathBuf::from("/default-cache")),
+        );
+
+        assert_eq!(
+            roots,
+            vec![
+                std::path::PathBuf::from("/env-cache"),
+                std::path::PathBuf::from("/npm-cache"),
+                std::path::PathBuf::from("/default-cache")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_npm_cache_roots_deduplicates_preserving_order() {
+        let roots = collect_npm_cache_roots(
+            Some(std::path::PathBuf::from("/shared-cache")),
+            Some(std::path::PathBuf::from("/shared-cache")),
+            Some(std::path::PathBuf::from("/default-cache")),
+        );
+
+        assert_eq!(
+            roots,
+            vec![
+                std::path::PathBuf::from("/shared-cache"),
+                std::path::PathBuf::from("/default-cache")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_find_tsgo_binary_in_prefers_path_hit() {
+        let cache_root = std::env::temp_dir().join(format!(
+            "verter_tsgo_lookup_path_preference_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&cache_root);
+        std::fs::create_dir_all(cache_root.join("_npx/entry/node_modules/.bin")).unwrap();
+        std::fs::write(cache_root.join("_npx/entry/node_modules/.bin/tsgo"), "shim").unwrap();
+
+        let result = find_tsgo_binary_in(
+            Some("/usr/local/bin/tsgo".to_string()),
+            &[cache_root.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(result, "/usr/local/bin/tsgo");
+
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn test_find_tsgo_binary_in_prefers_native_binary_over_shim() {
+        let cache_root = std::env::temp_dir().join(format!(
+            "verter_tsgo_lookup_native_preference_{}",
+            std::process::id()
+        ));
+        let native_rel = tsgo_native_binary_rel_paths()
+            .into_iter()
+            .next()
+            .expect("expected at least one native tsgo path");
+        let native_path = cache_root.join("_npx/entry").join(&native_rel);
+        let shim_path = cache_root.join("_npx/entry/node_modules/.bin/tsgo");
+
+        let _ = std::fs::remove_dir_all(&cache_root);
+        std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(shim_path.parent().unwrap()).unwrap();
+        std::fs::write(&native_path, "native").unwrap();
+        std::fs::write(&shim_path, "shim").unwrap();
+
+        let result = find_tsgo_binary_in(None, &[cache_root.clone()]).unwrap();
+
+        assert_eq!(std::path::PathBuf::from(result), native_path);
+
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn test_find_tsgo_binary_in_reports_checked_roots_when_not_found() {
+        let cache_root =
+            std::env::temp_dir().join(format!("verter_tsgo_lookup_missing_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache_root);
+        std::fs::create_dir_all(cache_root.join("_npx/entry")).unwrap();
+
+        let err = find_tsgo_binary_in(None, &[cache_root.clone()]).unwrap_err();
+        let display = err.to_string();
+
+        assert!(
+            display.contains(cache_root.to_string_lossy().as_ref()),
+            "error should mention cache root, got: {display}"
+        );
+        assert!(
+            display.contains("_npx"),
+            "error should mention the _npx search path, got: {display}"
+        );
+
+        let _ = std::fs::remove_dir_all(cache_root);
     }
 
     /// Verify that kill_on_drop prevents orphaned child processes.

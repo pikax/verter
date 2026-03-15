@@ -23,6 +23,7 @@ export interface StartupTiming {
   firstTypedCompletionKind?: string;
   firstDiagnosticMs?: number;
   providerKind?: "tsgo" | "tsserver" | "verter-only";
+  typeProviderReason?: string;
   activationToReadyMs?: number;
   activationToFirstTypedCompletionMs?: number;
   readyToFirstTypedCompletionMs?: number;
@@ -650,6 +651,10 @@ export function parseStartupTiming(): StartupTiming {
     /\[TIMING\] first_typed_completion (\d+) ([^\s]+) ([^\s]+)/,
   );
   const firstDiagnosticMatch = log.match(/\[TIMING\] first_diagnostic (\d+)/);
+  const typeProviderStatusMatches = Array.from(
+    log.matchAll(/Type provider status:\s+(tsgo|tsserver|none)(?: \((.+?)\))?/g),
+  );
+  const lastTypeProviderStatus = typeProviderStatusMatches[typeProviderStatusMatches.length - 1];
 
   const activationStartMs = activationMatch ? parseInt(activationMatch[1], 10) : undefined;
   const typeProviderStartedMs = typeProviderMatch ? parseInt(typeProviderMatch[1], 10) : undefined;
@@ -664,9 +669,12 @@ export function parseStartupTiming(): StartupTiming {
     : undefined;
   const providerKind = typeProviderMatch
     ? (typeProviderMatch[2] as StartupTiming["providerKind"])
-    : log.includes("verter-only mode")
+    : lastTypeProviderStatus?.[1] === "none"
       ? "verter-only"
-      : undefined;
+      : ((lastTypeProviderStatus?.[1] as Exclude<StartupTiming["providerKind"], "verter-only">) ??
+        (log.includes("verter-only mode") ? "verter-only" : undefined));
+  const typeProviderReason =
+    lastTypeProviderStatus?.[1] === "none" ? lastTypeProviderStatus[2] : undefined;
 
   const segments = computeStartupSegments({
     activationStartMs,
@@ -684,6 +692,7 @@ export function parseStartupTiming(): StartupTiming {
     firstTypedCompletionKind,
     firstDiagnosticMs,
     providerKind,
+    typeProviderReason,
     ...segments,
   };
 }
