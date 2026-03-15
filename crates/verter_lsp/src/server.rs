@@ -4587,6 +4587,59 @@ fn did_open_provider_sync_policy(kind: crate::TypeProviderKind) -> DidOpenProvid
     }
 }
 
+/// Standalone version of `resolve_import_specifier` that takes shared state
+/// explicitly instead of `&self`. Used by `resync_aliased_imports_for_open_files`
+/// in `background_init` after the project registry becomes available.
+fn resolve_import_specifier_standalone(
+    host: &verter_host::VerterHost,
+    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
+    parent_canonical_id: &str,
+    specifier: &str,
+) -> Option<String> {
+    // 1. Host resolution (dependency map from compile)
+    if let Some(resolved) = host.resolve_import(parent_canonical_id, specifier) {
+        return Some(resolved);
+    }
+
+    // 2. Project registry alias resolution (tsconfig paths)
+    {
+        let registry_guard = project_registry.read();
+        if let Some(registry) = registry_guard.as_ref() {
+            if let Some(resolved) = registry.resolve_alias(parent_canonical_id, specifier) {
+                return Some(resolved);
+            }
+        }
+    }
+
+    // 3. Relative FS fallback
+    if specifier.starts_with('.') {
+        let resolved = verter_host::resolve_external(parent_canonical_id, specifier);
+        let candidates = if std::path::Path::new(&resolved).extension().is_some() {
+            vec![resolved.clone()]
+        } else {
+            vec![
+                format!("{resolved}.ts"),
+                format!("{resolved}.tsx"),
+                format!("{resolved}.js"),
+                format!("{resolved}.vue"),
+                format!("{resolved}/index.ts"),
+                format!("{resolved}/index.js"),
+                format!("{resolved}/index.vue"),
+            ]
+        };
+        for candidate in candidates {
+            if std::path::Path::new(&candidate).exists() {
+                return Some(candidate);
+            }
+        }
+        if resolved.ends_with(".vue") {
+            return Some(resolved);
+        }
+    }
+
+    None
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn collect_imported_vue_priority_ids(
     analysis: &verter_analysis::ScriptAnalysisSnapshot,
@@ -5082,6 +5135,28 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     )
     .await;
 
+    // 4b. Re-resolve aliased imports for open files now that project_registry is built.
+    // During did_open, aliased imports (e.g., @/components/MyComp.vue) could not
+    // be resolved because project_registry was None. Now that it's available,
+    // re-run the import collection pipeline and sync any missing .vue.ts files.
+    let aliased_imports_synced = resync_aliased_imports_for_open_files(
+        &documents,
+        &project_registry,
+        project_sync.as_ref(),
+        &resolver_snapshot,
+        &provider_sync_states,
+        is_tsgo,
+    )
+    .await;
+
+    // If new imported .vue.ts files were synced, re-open the active files in tsserver
+    // so it picks up the newly available modules and clears stale TS2307 diagnostics.
+    if aliased_imports_synced {
+        if let Some(tp) = &type_provider {
+            let _ = tp.resync_open_files().await;
+        }
+    }
+
     // 5. Materialize @verter/types (spawn_blocking — blocking FS)
     let roots_for_types = roots.clone();
     let materialize_types =
@@ -5287,6 +5362,143 @@ async fn drain_pending_snapshot_provider_sync(
             pending_snapshot_provider_sync.remove(&canonical_id);
         }
     }
+}
+
+/// Re-resolve aliased imports for all currently open `.vue` files and sync any
+/// newly-discovered imported `.vue.ts` files to the type provider.
+///
+/// During `did_open`, aliased imports (e.g., `@/components/MyComp.vue`) fail to
+/// resolve because `project_registry` is `None` — it's populated later by
+/// `background_init`. This function runs **after** the registry is committed and
+/// re-runs the same import-collection pipeline, so the provider gets the missing
+/// `.vue.ts` files before the E2E diagnostic check.
+async fn resync_aliased_imports_for_open_files(
+    documents: &DocumentRegistry,
+    project_registry: &parking_lot::RwLock<Option<crate::config::ProjectRegistry>>,
+    project_sync: Option<&ProjectSync>,
+    resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    _is_tsgo: bool,
+) -> bool {
+    let Some(sync) = project_sync else {
+        return false;
+    };
+    let snapshot = match resolver_snapshot.read().clone() {
+        Some(s) => s,
+        None => return false,
+    };
+
+    let host = documents.host();
+    let mut synced_any = false;
+    let mut all_import_ids: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+
+    for uri_str in documents.open_uris() {
+        let Ok(uri) = uri_str.parse::<Uri>() else {
+            continue;
+        };
+        let Some(canonical_id) = documents.get_canonical_id(&uri) else {
+            continue;
+        };
+        if !canonical_id.ends_with(".vue") {
+            continue;
+        }
+        let Some(analysis) = host.get_analysis(&canonical_id) else {
+            continue;
+        };
+
+        // Static imports (same pipeline as did_open line 6103)
+        let ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+            &analysis.imports,
+            Some(&canonical_id),
+            |parent, specifier| {
+                resolve_import_specifier_standalone(host, project_registry, parent, specifier)
+            },
+        );
+
+        // Dynamic imports via module_references
+        let reader = LspProjectResolverReader::new(documents);
+        let dynamic_ids = collect_priority_vue_targets_from_module_references(
+            Some(&snapshot),
+            &reader,
+            &canonical_id,
+            &analysis.module_references,
+        );
+
+        for id in ids.into_iter().chain(dynamic_ids) {
+            if seen.insert(id.clone()) {
+                all_import_ids.push(id);
+            }
+        }
+    }
+
+    // Lightweight sync: compile + sync DTS only for each imported .vue file
+    // that doesn't already have an API path loaded.
+    for import_id in &all_import_ids {
+        if let Some(state) = provider_sync_states.get(import_id.as_str()) {
+            if state.api_background_loaded {
+                continue;
+            }
+        }
+
+        // Load from disk if not in host
+        let loaded = crate::compile_blockers::ensure_source_loaded_into_host(host, import_id);
+        if !loaded {
+            continue;
+        }
+
+        // Hydrate compile blockers with the now-available resolver
+        crate::compile_blockers::hydrate_cached(
+            &crate::compile_blockers::HydrationCache::default(),
+            host,
+            &snapshot.resolver,
+            &crate::compile_blockers::HostFsProjectResolverReader::new(host),
+            import_id,
+            snapshot.generation,
+        );
+
+        // Compile to generate public API
+        let profile = documents.tsx_profile.read().clone();
+        if host.ensure_compiled(import_id, &profile).is_err() {
+            continue;
+        }
+
+        let Some(api) = host.get_public_api(import_id) else {
+            continue;
+        };
+
+        // Build sync state and sync DTS
+        let Some(next_state) =
+            crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, import_id, false)
+        else {
+            continue;
+        };
+        let transition = crate::provider_sync::prepare_sync_transition(
+            provider_sync_states,
+            import_id,
+            next_state,
+        );
+
+        let mut committed_state = transition.next;
+        if let Some(dts_path) = committed_state.api_path.clone() {
+            let result = if committed_state.api_background_loaded {
+                sync.sync_dts(&dts_path, &api.code).await
+            } else {
+                sync.open_dts(&dts_path, &api.code).await
+            };
+            if result.is_ok() {
+                committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                crate::provider_sync::commit_sync_transition(
+                    provider_sync_states,
+                    import_id,
+                    committed_state,
+                );
+                synced_any = true;
+            }
+        }
+    }
+
+    synced_any
 }
 
 async fn sync_pending_snapshot_provider_file(
@@ -15375,6 +15587,59 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         assert!(!is_vue_file("file:///project/vue.config.js"));
     }
 
+    #[test]
+    fn compute_verter_diagnostics_ignores_plain_typescript_files() {
+        let host = Arc::new(VerterHost::new(verter_host::HostConfig::default()));
+        let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+
+        let uri: Uri = "file:///workspace/src/__verter_mayberef_repro__.ts"
+            .parse()
+            .unwrap();
+        let source = "type MaybeRef<T> = T\n\nexport function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {\n  return target\n}\n";
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+
+        let cached_verter_diags = Arc::new(DashMap::new());
+        let project_registry = Arc::new(parking_lot::RwLock::new(None));
+        let fallback_linter = Arc::new(parking_lot::RwLock::new(verter_diagnostics::Linter::new(
+            verter_diagnostics::LintConfig::default(),
+        )));
+
+        let diags = compute_verter_diagnostics_for(
+            &documents,
+            &uri,
+            &cached_verter_diags,
+            &project_registry,
+            &fallback_linter,
+        );
+
+        assert!(
+            documents.get(&uri).is_some(),
+            "the typescript document should be tracked"
+        );
+        assert!(
+            documents.get_ide(&uri).is_none(),
+            "plain typescript files should not have Vue IDE output"
+        );
+        assert!(
+            !diags.iter().any(|d| {
+                matches!(
+                    &d.code,
+                    Some(NumberOrString::String(code)) if code == "XMissingEndTag"
+                )
+            }),
+            "plain typescript files must not surface Verter template parse diagnostics, got: {diags:?}"
+        );
+        assert!(
+            diags.is_empty(),
+            "plain typescript files should not publish Verter diagnostics, got: {diags:?}"
+        );
+    }
+
     /// Proves that `compute_verter_diagnostics_for` bypasses its cache when the
     /// host's `diagnostics_generation` changes (even if the document version hasn't).
     #[test]
@@ -15447,5 +15712,161 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             )),
             "second call should NOT contain HOST_MISSING_MACRO_TYPE_DEP after dep loaded, got: {diags2:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resync_aliased_imports_resolves_and_syncs_after_registry_built() {
+        // Setup: temp dir with workspace/src/App.vue importing @/components/Child.vue
+        // Use a non-dot-prefixed directory so tsconfig discovery doesn't skip it
+        // (TsConfigDiscovery skips dot-directories).
+        let temp_base = std::env::temp_dir().join("verter_test_resync_aliased");
+        let _ = std::fs::remove_dir_all(&temp_base);
+        let workspace = temp_base.join("workspace");
+        std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
+
+        // Write a tsconfig.json with @/* -> src/* alias
+        std::fs::write(
+            workspace.join("tsconfig.json"),
+            r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}"#,
+        )
+        .expect("write tsconfig");
+
+        // Write the child component on disk
+        let child_source = r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#;
+        std::fs::write(workspace.join("src/components/Child.vue"), child_source)
+            .expect("write Child.vue");
+
+        // Canonicalize workspace path for consistent IDs
+        let workspace_id_raw = std::fs::canonicalize(&workspace)
+            .expect("canonical workspace")
+            .to_string_lossy()
+            .replace('\\', "/");
+        // Strip Windows extended-length prefix that canonicalize() produces
+        let workspace_id = workspace_id_raw
+            .strip_prefix("//?/")
+            .unwrap_or(&workspace_id_raw)
+            .to_string();
+        let app_id = format!("{workspace_id}/src/App.vue");
+        let child_id = format!("{workspace_id}/src/components/Child.vue");
+
+        // App.vue imports Child via alias
+        let app_source = format!(
+            r#"<script setup lang="ts">
+import Child from '@/components/Child.vue'
+</script>
+<template><Child msg="hello" /></template>"#
+        );
+
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: app_source,
+        });
+
+        // Phase 1: project_registry is None — aliased import should NOT resolve
+        let project_registry = parking_lot::RwLock::new(None);
+        let analysis = host.get_analysis(&app_id).expect("analysis for App.vue");
+        let ids_before = collect_imported_vue_priority_ids_from_imports_with_fallback(
+            &analysis.imports,
+            Some(&app_id),
+            |parent, specifier| {
+                resolve_import_specifier_standalone(&host, &project_registry, parent, specifier)
+            },
+        );
+        assert!(
+            ids_before.is_empty(),
+            "aliased imports should NOT resolve when project_registry is None, got: {ids_before:?}"
+        );
+
+        // Phase 2: Build and populate project registry with tsconfig alias
+        let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+        let vite_opts = crate::vite_config::ViteConfigOptions::default();
+        let build_result =
+            crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
+        let registry = build_result.registry;
+
+        let resolver = registry.to_native_project_resolver();
+        let resolver_snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
+            generation: 1,
+            resolver,
+        }));
+        *project_registry.write() = Some(registry);
+
+        // Now aliased import should resolve
+        let ids_after = collect_imported_vue_priority_ids_from_imports_with_fallback(
+            &analysis.imports,
+            Some(&app_id),
+            |parent, specifier| {
+                resolve_import_specifier_standalone(&host, &project_registry, parent, specifier)
+            },
+        );
+        assert!(
+            !ids_after.is_empty(),
+            "aliased imports should resolve after project_registry is populated"
+        );
+        assert!(
+            ids_after.iter().any(|id| id.ends_with("Child.vue")),
+            "resolved imports should include Child.vue, got: {ids_after:?}"
+        );
+
+        // Phase 3: resync_aliased_imports_for_open_files should sync .vue.ts
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let provider_sync_states = DashMap::new();
+
+        resync_aliased_imports_for_open_files(
+            &documents,
+            &project_registry,
+            Some(&sync),
+            &resolver_snapshot,
+            &provider_sync_states,
+            false,
+        )
+        .await;
+
+        // Positive: Child.vue should have its .vue.ts synced
+        let calls = provider.file_sync_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path.contains("Child.vue.ts")
+            )),
+            "resync should open Child.vue.ts in the type provider, calls={calls:?}"
+        );
+
+        // Positive: provider_sync_states should have the child entry
+        assert!(
+            provider_sync_states.get(&child_id).is_some()
+                || provider_sync_states
+                    .iter()
+                    .any(|entry| entry.key().ends_with("Child.vue")),
+            "provider_sync_states should contain Child.vue entry"
+        );
+
+        // Negative: .ts imports should NOT be synced via this path
+        assert!(
+            !calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path.ends_with(".ts") && !path.ends_with(".vue.ts")
+            )),
+            "resync should NOT sync non-.vue files, calls={calls:?}"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_base);
     }
 }

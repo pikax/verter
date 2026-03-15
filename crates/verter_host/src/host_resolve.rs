@@ -339,6 +339,14 @@ impl VerterHost {
                     canonical_id: canonical.clone(),
                 })?;
 
+            // Non-SFC files (.ts/.js) are tracked for dependency/type resolution
+            // only. Compiling them as Vue SFCs is always wrong — their source
+            // contains TypeScript generics (e.g. `<HTMLElement>`) that the Vue
+            // parser would misinterpret as tags.
+            if entry.file_kind == FileKind::NonSfc {
+                return Ok(());
+            }
+
             let soh = entry
                 .style_overrides
                 .get(&profile_hash)

@@ -412,6 +412,14 @@ impl DocumentRegistry {
     /// that may have changed the TSX output. Without this, hover would query correct
     /// TSX with stale position offsets.
     pub fn recompile_and_refresh_mapper(&self, uri: &Uri) -> Option<IdeResponse> {
+        let is_vue = self
+            .documents
+            .get(uri.as_str())
+            .map(|d| d.language_id == "vue")
+            .unwrap_or(false);
+        if !is_vue {
+            return None;
+        }
         let canonical_id = self.get_canonical_id(uri)?;
         let profile = self.tsx_profile.read().clone();
         self.host.ensure_compiled(&canonical_id, &profile).ok()?;

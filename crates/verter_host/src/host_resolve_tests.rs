@@ -1650,3 +1650,27 @@ fn invalidate_compile_slots_is_noop_for_missing_file() {
     host.invalidate_compile_slots("/nonexistent.vue");
     // Should not panic
 }
+
+#[test]
+fn ensure_compiled_skips_non_sfc_files() {
+    let host = strict_host();
+    // TypeScript source with angle-bracket generics that the Vue parser
+    // would misinterpret as HTML tags (producing XMissingEndTag).
+    let ts_source = r#"import { type MaybeRef } from 'vue'
+export function useEl(el: MaybeRef<HTMLElement | null>) { return el }
+"#;
+    upsert_non_sfc(&host, "/src/utils.ts", ts_source);
+
+    let p = profile();
+    // ensure_compiled on a NonSfc file must be a no-op — no compilation,
+    // no diagnostics stored.
+    let result = host.ensure_compiled("/src/utils.ts", &p);
+    assert!(result.is_ok(), "ensure_compiled should succeed for NonSfc");
+
+    // Must NOT produce any diagnostics (especially not XMissingEndTag)
+    let diags = host.get_diagnostics("/src/utils.ts", &p);
+    assert!(
+        diags.is_none(),
+        "NonSfc file should have no diagnostics, got: {diags:?}"
+    );
+}
