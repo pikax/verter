@@ -42,6 +42,9 @@ impl LintRule for DefineModelTypeRequired {
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {
+        if !script.is_typescript {
+            return;
+        }
         for mac in &script.macros {
             if mac.kind != AnalyzedMacroKind::DefineModel {
                 continue;
@@ -93,6 +96,7 @@ mod tests {
                 resolved_local_types: Vec::new(),
                 span: Span::new(20, 34),
             }],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
@@ -131,6 +135,7 @@ mod tests {
                 resolved_local_types: Vec::new(),
                 span: Span::new(20, 42),
             }],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
@@ -177,6 +182,7 @@ mod tests {
                     span: Span::new(50, 72),
                 },
             ],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
@@ -206,6 +212,7 @@ mod tests {
                 resolved_local_types: Vec::new(),
                 span: Span::new(20, 40),
             }],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
@@ -217,5 +224,38 @@ mod tests {
         let script = ScriptAnalysisSnapshot::default();
         let diags = run_rule(&script);
         assert!(diags.is_empty(), "should pass with no macros");
+    }
+
+    #[test]
+    fn js_script_does_not_report() {
+        let script = ScriptAnalysisSnapshot {
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineModel,
+                is_type_based: false,
+                type_references: vec![],
+                binding_name: Some("model".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: vec![],
+                emit_fields: vec![],
+                slot_fields: vec![],
+                default_keys: vec![],
+                expose_fields: vec![],
+                default_values: Vec::new(),
+                resolved_local_types: Vec::new(),
+                span: Span::new(20, 34),
+            }],
+            is_typescript: false,
+            ..Default::default()
+        };
+        let diags = run_rule(&script);
+        assert!(
+            diags.is_empty(),
+            "define-model-type-required must not fire for JS SFCs"
+        );
+        assert!(
+            !diags.iter().any(|d| d.rule == "define-model-type-required"),
+            "must not produce define-model-type-required diagnostic for JS"
+        );
     }
 }

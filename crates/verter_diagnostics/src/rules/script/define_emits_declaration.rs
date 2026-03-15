@@ -23,6 +23,9 @@ impl LintRule for DefineEmitsDeclaration {
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {
+        if !script.is_typescript {
+            return;
+        }
         for m in &script.macros {
             if m.kind == AnalyzedMacroKind::DefineEmits && !m.is_type_based {
                 ctx.report_with_severity(
@@ -73,6 +76,7 @@ mod tests {
     fn runtime_define_emits_reports() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![make_emit_macro(false)],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
@@ -88,9 +92,28 @@ mod tests {
     fn type_based_define_emits_passes() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![make_emit_macro(true)],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
         assert!(diags.is_empty(), "type-based defineEmits should pass");
+    }
+
+    #[test]
+    fn js_script_does_not_report() {
+        let script = ScriptAnalysisSnapshot {
+            macros: vec![make_emit_macro(false)],
+            is_typescript: false,
+            ..Default::default()
+        };
+        let diags = run_rule(&script);
+        assert!(
+            diags.is_empty(),
+            "define-emits-declaration must not fire for JS SFCs"
+        );
+        assert!(
+            !diags.iter().any(|d| d.rule == "define-emits-declaration"),
+            "must not produce define-emits-declaration diagnostic for JS"
+        );
     }
 }

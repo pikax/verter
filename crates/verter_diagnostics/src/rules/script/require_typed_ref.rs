@@ -31,6 +31,9 @@ impl LintRule for RequireTypedRef {
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {
+        if !script.is_typescript {
+            return;
+        }
         for call in &script.vue_api_calls {
             if call.api == VueApiClassification::Ref && !call.has_type_params {
                 ctx.report_with_severity(
@@ -87,6 +90,7 @@ mod tests {
     fn ref_without_type_params_reports() {
         let script = ScriptAnalysisSnapshot {
             vue_api_calls: vec![make_ref_call(false, None)],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
@@ -124,6 +128,7 @@ mod tests {
         // ref(0) — has arg value but no type param
         let script = ScriptAnalysisSnapshot {
             vue_api_calls: vec![make_ref_call(false, Some("0"))],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
@@ -180,6 +185,24 @@ mod tests {
             RequireTypedRef.default_severity(),
             None,
             "require-typed-ref should be off by default (None severity)"
+        );
+    }
+
+    #[test]
+    fn js_script_does_not_report() {
+        let script = ScriptAnalysisSnapshot {
+            vue_api_calls: vec![make_ref_call(false, Some("0"))],
+            is_typescript: false,
+            ..Default::default()
+        };
+        let diags = run_rule(&script);
+        assert!(
+            diags.is_empty(),
+            "require-typed-ref must not fire for JS SFCs"
+        );
+        assert!(
+            !diags.iter().any(|d| d.rule == "require-typed-ref"),
+            "must not produce require-typed-ref diagnostic for JS"
         );
     }
 }

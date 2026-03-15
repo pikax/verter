@@ -1,6 +1,8 @@
 //! Built-in action providers.
 
 mod add_component_is;
+mod convert_to_typed_emits;
+mod convert_to_typed_props;
 mod extract_bare_text;
 mod html_self_close;
 mod insert_attribute;
@@ -25,6 +27,8 @@ mod unwrap_binding;
 mod v_bind_shorthand;
 
 pub use add_component_is::AddComponentIs;
+pub use convert_to_typed_emits::ConvertToTypedEmits;
+pub use convert_to_typed_props::ConvertToTypedProps;
 pub use extract_bare_text::ExtractBareText;
 pub use html_self_close::HtmlSelfClose;
 pub use insert_attribute::InsertAttribute;
@@ -75,4 +79,6 @@ pub fn register_builtin_providers(engine: &mut ActionEngine) {
     engine.register(Box::new(ExtractBareText));
     engine.register(Box::new(SsrWrap));
     engine.register(Box::new(InsertTypeParam));
+    engine.register(Box::new(ConvertToTypedProps));
+    engine.register(Box::new(ConvertToTypedEmits));
 }

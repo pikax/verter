@@ -505,6 +505,7 @@ pub fn build_script_analysis_with_scope(
         nested_macro_calls,
         store_usages,
         store_definitions,
+        is_typescript: source_type.is_typescript(),
     }
 }
 

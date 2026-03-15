@@ -23,6 +23,9 @@ impl LintRule for DefinePropsDeclaration {
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {
+        if !script.is_typescript {
+            return;
+        }
         for m in &script.macros {
             if m.kind == AnalyzedMacroKind::DefineProps && !m.is_type_based {
                 ctx.report_with_severity(
@@ -73,6 +76,7 @@ mod tests {
     fn runtime_define_props_reports() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![make_props_macro(false)],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
@@ -84,9 +88,28 @@ mod tests {
     fn type_based_define_props_passes() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![make_props_macro(true)],
+            is_typescript: true,
             ..Default::default()
         };
         let diags = run_rule(&script);
         assert!(diags.is_empty(), "type-based defineProps should pass");
+    }
+
+    #[test]
+    fn js_script_does_not_report() {
+        let script = ScriptAnalysisSnapshot {
+            macros: vec![make_props_macro(false)],
+            is_typescript: false,
+            ..Default::default()
+        };
+        let diags = run_rule(&script);
+        assert!(
+            diags.is_empty(),
+            "define-props-declaration must not fire for JS SFCs"
+        );
+        assert!(
+            !diags.iter().any(|d| d.rule == "define-props-declaration"),
+            "must not produce define-props-declaration diagnostic for JS"
+        );
     }
 }

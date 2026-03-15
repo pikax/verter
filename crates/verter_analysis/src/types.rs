@@ -120,6 +120,13 @@ pub struct ScriptAnalysisSnapshot {
     /// Store definitions (`defineStore`, `createStore`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub store_definitions: Vec<StoreDefinition>,
+
+    /// Whether the script block uses TypeScript (`lang="ts"`).
+    ///
+    /// Used by lint rules that only apply to TypeScript SFCs (e.g., `define-props-declaration`,
+    /// `define-emits-declaration`, `define-model-type-required`, `require-typed-ref`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_typescript: bool,
 }
 
 impl ScriptAnalysisSnapshot {
@@ -855,6 +862,10 @@ pub struct AnalyzedPropField {
 
 fn is_rust_resolution(src: &TypeResolutionSource) -> bool {
     matches!(src, TypeResolutionSource::Rust)
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 /// An individual emit field from `defineEmits`.
