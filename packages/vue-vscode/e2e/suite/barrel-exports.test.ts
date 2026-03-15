@@ -9,6 +9,7 @@ import {
   FIXTURE_NAME,
   TYPE_PROVIDER,
   revealDefinition,
+  sleep,
 } from "../helpers";
 
 /** Execute go-to-definition at a position and return locations. */
@@ -298,7 +299,15 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const locations = await getDefinitions(tsDoc.uri, pos);
+    // Poll for definition results — on CI, tsserver may not have finished syncing
+    // the imported .vue.ts file by the time the barrel .ts file is opened.
+    let locations: vscode.Location[] = [];
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      locations = await getDefinitions(tsDoc.uri, pos);
+      if (locations.length > 0) break;
+      await sleep(200);
+    }
     console.log(`    TS plugin definition on './Overlay.vue': ${locations.length} location(s)`);
 
     // In verter-only mode, TS plugin definition in .ts files may not resolve

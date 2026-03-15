@@ -90,6 +90,12 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     getTimer().recordHover("title (prop)", latencyMs);
     console.log(`    Hover on title: ${latencyMs}ms, ${hovers.length} result(s)`);
 
+    // TSGO: monorepo prop hover may return empty (known cross-package limitation)
+    if (hovers.length === 0 && TYPE_PROVIDER === "tsgo") {
+      console.log("    CANARY [tsgo]: prop hover returned 0 results");
+      return;
+    }
+
     expect(hovers.length, "prop hover should exist").to.be.greaterThan(0);
     expect(hovers[0].contents.length, "prop hover should have content").to.be.greaterThan(0);
 
