@@ -6,7 +6,8 @@
 //! - Uses the type annotation already mapped from runtime constructors
 //!   (`String → string`, `Number → number`, etc.)
 //! - Falls back to `unknown` for unresolvable types
-//! - Props with a default value (in `default_keys`) become optional (`?`)
+//! - Uses `field.is_optional` to determine optionality: `false` only when `required: true` was set
+//!   (Vue semantics: runtime props are optional by default)
 //!
 //! When any prop has a default value, wraps the result in `withDefaults(...)`:
 //! ```ts
@@ -45,16 +46,14 @@ impl ActionProvider for ConvertToTypedProps {
             None => return vec![],
         };
 
-        // Build the TypeScript type from prop_fields
+        // Build the TypeScript type from prop_fields.
+        // `is_optional` reflects Vue semantics: `true` by default, `false` only when
+        // the runtime declaration had `required: true`.
         let type_parts: Vec<String> = mac
             .prop_fields
             .iter()
             .map(|field| {
-                let optional = if mac.default_keys.contains(&field.name) {
-                    "?"
-                } else {
-                    ""
-                };
+                let optional = if field.is_optional { "?" } else { "" };
                 let ts_type = field.type_annotation.as_deref().unwrap_or("unknown");
                 format!("{}{}: {}", field.name, optional, ts_type)
             })
@@ -91,7 +90,7 @@ impl ActionProvider for ConvertToTypedProps {
             }],
             is_preferred: true,
             diagnostic_rule: Some(diag.rule.clone()),
-            safety: AutofixSafety::Safe,
+            safety: AutofixSafety::Caution,
         }]
     }
 }
@@ -100,9 +99,12 @@ impl ActionProvider for ConvertToTypedProps {
 mod tests {
     use super::*;
     use crate::provider::ActionContext;
+    use oxc_allocator::Allocator;
+    use oxc_span::SourceType;
+    use verter_analysis::build_script_analysis;
     use verter_analysis::types::{
-        AnalyzedDefaultValue, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField,
-        ScriptAnalysisSnapshot, TypeResolutionSource,
+        AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, ScriptAnalysisSnapshot,
+        TypeResolutionSource,
     };
     use verter_diagnostics::{
         Certainty, DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity,
@@ -124,7 +126,26 @@ mod tests {
         }
     }
 
-    fn make_prop(name: &str, ts_type: Option<&str>) -> AnalyzedPropField {
+    /// Run real source analysis and return the `ScriptAnalysisSnapshot`.
+    fn analyze(source: &str, alloc: &Allocator) -> ScriptAnalysisSnapshot {
+        build_script_analysis(source, SourceType::ts(), alloc)
+    }
+
+    /// Find the `defineProps` macro span from a real analysis result.
+    fn props_span(script: &ScriptAnalysisSnapshot) -> Span {
+        script
+            .macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .expect("no defineProps macro found")
+            .span
+    }
+
+    // =========================================================================
+    // Guardrail tests — hand-built structs (structural conditions, not output)
+    // =========================================================================
+
+    fn make_prop_required(name: &str, ts_type: Option<&str>) -> AnalyzedPropField {
         AnalyzedPropField {
             name: name.to_string(),
             is_optional: false,
@@ -137,12 +158,7 @@ mod tests {
         }
     }
 
-    fn make_macro(
-        prop_fields: Vec<AnalyzedPropField>,
-        default_keys: Vec<String>,
-        default_values: Vec<AnalyzedDefaultValue>,
-        span: Span,
-    ) -> AnalyzedMacro {
+    fn make_macro_struct(prop_fields: Vec<AnalyzedPropField>, span: Span) -> AnalyzedMacro {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: false,
@@ -153,155 +169,18 @@ mod tests {
             prop_fields,
             emit_fields: vec![],
             slot_fields: vec![],
-            default_keys,
+            default_keys: vec![],
             expose_fields: vec![],
-            default_values,
+            default_values: vec![],
             resolved_local_types: vec![],
             span,
         }
     }
 
     #[test]
-    fn converts_simple_object_props() {
-        let span = Span::new(0, 40);
-        let mac = make_macro(
-            vec![
-                make_prop("count", Some("number")),
-                make_prop("label", Some("string")),
-            ],
-            vec![],
-            vec![],
-            span,
-        );
-        let script = ScriptAnalysisSnapshot {
-            macros: vec![mac],
-            is_typescript: true,
-            ..Default::default()
-        };
-        let diag = make_diag(span);
-        let set = DiagnosticSet::new();
-        let ctx = ActionContext {
-            source: "defineProps({ count: Number, label: String })",
-            file_id: "/src/Comp.vue",
-            diagnostics: &set,
-            template: None,
-            script: Some(&script),
-            styles: &[],
-        };
-        let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
-        assert_eq!(actions.len(), 1, "should produce one fix");
-        assert_eq!(
-            actions[0].edits[0].replacement,
-            "defineProps<{ count: number; label: string }>()"
-        );
-        assert!(
-            !actions[0].edits[0].replacement.contains("withDefaults"),
-            "should not wrap in withDefaults when no defaults"
-        );
-        assert_eq!(actions[0].edits[0].span, span, "should replace macro span");
-    }
-
-    #[test]
-    fn wraps_with_defaults_when_defaults_present() {
-        let span = Span::new(0, 60);
-        let mac = make_macro(
-            vec![
-                make_prop("count", Some("number")),
-                make_prop("label", Some("string")),
-            ],
-            vec!["count".to_string()],
-            vec![AnalyzedDefaultValue {
-                key: "count".to_string(),
-                value: "0".to_string(),
-                span: Span::new(30, 31),
-            }],
-            span,
-        );
-        let script = ScriptAnalysisSnapshot {
-            macros: vec![mac],
-            is_typescript: true,
-            ..Default::default()
-        };
-        let diag = make_diag(span);
-        let set = DiagnosticSet::new();
-        let ctx = ActionContext {
-            source: "defineProps({ count: { type: Number, default: 0 }, label: String })",
-            file_id: "/src/Comp.vue",
-            diagnostics: &set,
-            template: None,
-            script: Some(&script),
-            styles: &[],
-        };
-        let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
-        assert_eq!(actions.len(), 1);
-        let replacement = &actions[0].edits[0].replacement;
-        assert!(
-            replacement.starts_with("withDefaults("),
-            "should wrap in withDefaults"
-        );
-        assert!(
-            replacement.contains("count?: number"),
-            "should mark count as optional (has default)"
-        );
-        assert!(
-            replacement.contains("label: string"),
-            "should keep label as required (no default)"
-        );
-        assert!(
-            replacement.contains("{ count: 0 }"),
-            "should include default value"
-        );
-        assert!(
-            !replacement.contains("defineProps({ "),
-            "should not contain original runtime syntax"
-        );
-    }
-
-    #[test]
-    fn array_form_uses_unknown_type() {
-        let span = Span::new(0, 30);
-        let mac = make_macro(
-            vec![make_prop("title", None), make_prop("active", None)],
-            vec![],
-            vec![],
-            span,
-        );
-        let script = ScriptAnalysisSnapshot {
-            macros: vec![mac],
-            is_typescript: true,
-            ..Default::default()
-        };
-        let diag = make_diag(span);
-        let set = DiagnosticSet::new();
-        let ctx = ActionContext {
-            source: "defineProps(['title', 'active'])",
-            file_id: "/src/Comp.vue",
-            diagnostics: &set,
-            template: None,
-            script: Some(&script),
-            styles: &[],
-        };
-        let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
-        assert_eq!(actions.len(), 1);
-        let replacement = &actions[0].edits[0].replacement;
-        assert!(
-            replacement.contains("title: unknown"),
-            "should use unknown for untyped props"
-        );
-        assert!(
-            replacement.contains("active: unknown"),
-            "should use unknown for untyped props"
-        );
-        assert!(
-            !replacement.contains("None"),
-            "should not contain Rust None in output"
-        );
-    }
-
-    #[test]
     fn no_fix_for_empty_prop_fields() {
         let span = Span::new(0, 15);
-        let mac = make_macro(vec![], vec![], vec![], span);
+        let mac = make_macro_struct(vec![], span);
         let script = ScriptAnalysisSnapshot {
             macros: vec![mac],
             is_typescript: true,
@@ -325,12 +204,7 @@ mod tests {
     fn no_fix_when_span_does_not_match() {
         let mac_span = Span::new(0, 40);
         let diag_span = Span::new(50, 90); // different span
-        let mac = make_macro(
-            vec![make_prop("count", Some("number"))],
-            vec![],
-            vec![],
-            mac_span,
-        );
+        let mac = make_macro_struct(vec![make_prop_required("count", Some("number"))], mac_span);
         let script = ScriptAnalysisSnapshot {
             macros: vec![mac],
             is_typescript: true,
@@ -353,12 +227,7 @@ mod tests {
     #[test]
     fn ignores_unrelated_rule() {
         let span = Span::new(0, 40);
-        let mac = make_macro(
-            vec![make_prop("count", Some("number"))],
-            vec![],
-            vec![],
-            span,
-        );
+        let mac = make_macro_struct(vec![make_prop_required("count", Some("number"))], span);
         let script = ScriptAnalysisSnapshot {
             macros: vec![mac],
             is_typescript: true,
@@ -377,5 +246,218 @@ mod tests {
         };
         let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not handle unrelated rules");
+    }
+
+    // =========================================================================
+    // Behavioral tests — use real source analysis (TDD: fail first, then implement)
+    // =========================================================================
+
+    #[test]
+    fn converts_simple_object_props() {
+        // Vue semantics: props without required:true are optional by default
+        let source = "defineProps({ count: Number, label: String })";
+        let alloc = Allocator::new();
+        let script = analyze(source, &alloc);
+        let span = props_span(&script);
+        let diag = make_diag(span);
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "/src/Comp.vue",
+            diagnostics: &set,
+            template: None,
+            script: Some(&script),
+            styles: &[],
+        };
+        let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
+        assert_eq!(actions.len(), 1, "should produce one fix");
+        assert_eq!(
+            actions[0].edits[0].replacement, "defineProps<{ count?: number; label?: string }>()",
+            "props without required:true should be optional"
+        );
+        assert!(
+            !actions[0].edits[0].replacement.contains("withDefaults"),
+            "should not wrap in withDefaults when no defaults"
+        );
+        assert_eq!(actions[0].edits[0].span, span, "should replace macro span");
+    }
+
+    #[test]
+    fn wraps_with_defaults_when_defaults_present() {
+        // Props with defaults are optional; props without required:true are also optional
+        let source = "defineProps({ count: { type: Number, default: 0 }, label: String })";
+        let alloc = Allocator::new();
+        let script = analyze(source, &alloc);
+        let span = props_span(&script);
+        let diag = make_diag(span);
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "/src/Comp.vue",
+            diagnostics: &set,
+            template: None,
+            script: Some(&script),
+            styles: &[],
+        };
+        let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
+        assert_eq!(actions.len(), 1);
+        let replacement = &actions[0].edits[0].replacement;
+        assert!(
+            replacement.starts_with("withDefaults("),
+            "should wrap in withDefaults"
+        );
+        assert!(
+            replacement.contains("count?: number"),
+            "count should be optional (has default)"
+        );
+        assert!(
+            replacement.contains("label?: string"),
+            "label should be optional (no required:true)"
+        );
+        assert!(
+            replacement.contains("{ count: 0 }"),
+            "should include default value"
+        );
+        assert!(
+            !replacement.contains("defineProps({ "),
+            "should not contain original runtime syntax"
+        );
+    }
+
+    #[test]
+    fn required_true_prop_is_not_optional() {
+        // `required: true` makes a prop required (no `?`)
+        let source = "defineProps({ foo: { type: String, required: true }, bar: Number })";
+        let alloc = Allocator::new();
+        let script = analyze(source, &alloc);
+        let span = props_span(&script);
+        let diag = make_diag(span);
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "/src/Comp.vue",
+            diagnostics: &set,
+            template: None,
+            script: Some(&script),
+            styles: &[],
+        };
+        let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
+        assert_eq!(actions.len(), 1);
+        let replacement = &actions[0].edits[0].replacement;
+        assert!(
+            replacement.contains("foo: string"),
+            "foo with required:true should not have ?"
+        );
+        assert!(
+            !replacement.contains("foo?: string"),
+            "foo must not be marked optional"
+        );
+        assert!(
+            replacement.contains("bar?: number"),
+            "bar without required:true should be optional"
+        );
+    }
+
+    #[test]
+    fn array_form_uses_unknown_type() {
+        // Array form: no type info → unknown, all optional
+        let source = "defineProps(['title', 'active'])";
+        let alloc = Allocator::new();
+        let script = analyze(source, &alloc);
+        let span = props_span(&script);
+        let diag = make_diag(span);
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "/src/Comp.vue",
+            diagnostics: &set,
+            template: None,
+            script: Some(&script),
+            styles: &[],
+        };
+        let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
+        assert_eq!(actions.len(), 1);
+        let replacement = &actions[0].edits[0].replacement;
+        assert!(
+            replacement.contains("title?: unknown"),
+            "should use unknown for untyped props and mark optional"
+        );
+        assert!(
+            replacement.contains("active?: unknown"),
+            "should use unknown for untyped props and mark optional"
+        );
+        assert!(
+            !replacement.contains("None"),
+            "should not contain Rust None in output"
+        );
+    }
+
+    #[test]
+    fn mixed_fixture_with_ts_assertions() {
+        // Full regression: PropType<T>, () => T, required:true, defaults
+        let source = r#"defineProps({
+  bar: Number,
+  foo: { type: String, required: true },
+  baz: { type: Object as () => typeof Card, default: () => { return Card } },
+  foz: { type: Object as PropType<typeof Card>, default: () => { return Card } }
+})"#;
+        let alloc = Allocator::new();
+        let script = analyze(source, &alloc);
+        let span = props_span(&script);
+        let diag = make_diag(span);
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "/src/Comp.vue",
+            diagnostics: &set,
+            template: None,
+            script: Some(&script),
+            styles: &[],
+        };
+        let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
+        assert_eq!(actions.len(), 1);
+        let replacement = &actions[0].edits[0].replacement;
+
+        // bar: Number → optional, number type
+        assert!(
+            replacement.contains("bar?: number"),
+            "bar should be optional number"
+        );
+        // foo: required:true → required, string type
+        assert!(
+            replacement.contains("foo: string"),
+            "foo should be required string"
+        );
+        assert!(!replacement.contains("foo?: string"), "foo must not have ?");
+        // baz: Object as () => typeof Card → optional, typeof Card
+        assert!(
+            replacement.contains("baz?: typeof Card"),
+            "baz should be optional typeof Card"
+        );
+        // foz: Object as PropType<typeof Card> → optional, typeof Card
+        assert!(
+            replacement.contains("foz?: typeof Card"),
+            "foz should be optional typeof Card"
+        );
+
+        // Negative: asserted types must not degrade
+        assert!(
+            !replacement.contains(": object"),
+            "no prop should degrade to 'object'"
+        );
+        assert!(
+            !replacement.contains(": unknown"),
+            "no prop should degrade to 'unknown'"
+        );
+        assert!(
+            !replacement.contains(": Function"),
+            "no prop should degrade to 'Function'"
+        );
+
+        // baz and foz have defaults → wraps in withDefaults
+        assert!(
+            replacement.starts_with("withDefaults("),
+            "should wrap in withDefaults because baz/foz have defaults"
+        );
     }
 }

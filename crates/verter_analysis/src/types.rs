@@ -836,7 +836,8 @@ pub struct JsdocTag {
 pub struct AnalyzedPropField {
     /// Prop name as declared (e.g., `"count"` from `defineProps<{ count: number }>()`).
     pub name: String,
-    /// Whether the prop is optional (`?` in type param). Always `false` for runtime props.
+    /// Whether the prop is optional. For type-based props: `true` when declared with `?`.
+    /// For runtime props: `true` unless `required: true` is explicitly set (Vue default).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_optional: bool,
     /// SFC-absolute byte span of the prop name in the declaration.

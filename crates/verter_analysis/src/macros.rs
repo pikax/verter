@@ -1145,6 +1145,45 @@ fn constructor_to_ts_type(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Extract the meaningful TypeScript type from a `TSAsExpression` on a runtime prop `type:` field.
+///
+/// Rules:
+/// - `X as PropType<T>`  → `T` (extracts the first type argument)
+/// - `X as () => T`      → `T` (extracts the return type, not the callable)
+/// - `X as new () => T`  → `T` (extracts the return type, not the constructor)
+/// - Other assertions    → `None` (caller falls back to `constructor_to_ts_type`)
+fn extract_ts_as_type(ts_as: &TSAsExpression<'_>, source: &str) -> Option<String> {
+    match &ts_as.type_annotation {
+        TSType::TSTypeReference(type_ref) => {
+            // `X as PropType<T>` → extract T
+            if let TSTypeName::IdentifierReference(id) = &type_ref.type_name {
+                if id.name == "PropType" {
+                    if let Some(args) = &type_ref.type_arguments {
+                        if let Some(first) = args.params.first() {
+                            let span = first.span();
+                            return Some(
+                                source[span.start as usize..span.end as usize].to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            None
+        }
+        TSType::TSFunctionType(fn_type) => {
+            // `X as () => T` → extract T (the return type, not the callable signature)
+            let span = fn_type.return_type.type_annotation.span();
+            Some(source[span.start as usize..span.end as usize].to_string())
+        }
+        TSType::TSConstructorType(ctor_type) => {
+            // `X as new () => T` → extract T (the return type, not the constructor signature)
+            let span = ctor_type.return_type.type_annotation.span();
+            Some(source[span.start as usize..span.end as usize].to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Extract prop fields from a runtime argument (object or array).
 ///
 /// For object form, detects both shorthand (`name: String`) and expanded
@@ -1167,6 +1206,8 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>, source: &str) -> Runt
                 };
 
                 let mut type_annotation = None;
+                // Vue semantics: props are optional by default unless `required: true` is set.
+                let mut is_optional = true;
 
                 // Check if value is a constructor (shorthand: `name: String`)
                 if let Expression::Identifier(id) = &p.value {
@@ -1185,14 +1226,25 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>, source: &str) -> Runt
                         };
                         match sub_key {
                             "type" => {
-                                // Unwrap `X as PropType<T>` to get the base identifier
-                                let expr = match &sp.value {
-                                    Expression::TSAsExpression(ts_as) => &ts_as.expression,
-                                    other => other,
-                                };
-                                if let Expression::Identifier(id) = expr {
+                                // Try to extract an explicit type assertion first (`X as PropType<T>`,
+                                // `X as () => T`, `X as new () => T`), then fall back to mapping the
+                                // base constructor identifier via `constructor_to_ts_type`.
+                                if let Expression::TSAsExpression(ts_as) = &sp.value {
+                                    if let Some(extracted) = extract_ts_as_type(ts_as, source) {
+                                        type_annotation = Some(extracted);
+                                    } else if let Expression::Identifier(id) = &ts_as.expression {
+                                        type_annotation =
+                                            constructor_to_ts_type(&id.name).map(String::from);
+                                    }
+                                } else if let Expression::Identifier(id) = &sp.value {
                                     type_annotation =
                                         constructor_to_ts_type(&id.name).map(String::from);
+                                }
+                            }
+                            "required" => {
+                                // `required: true` makes the prop required (not optional).
+                                if let Expression::BooleanLiteral(b) = &sp.value {
+                                    is_optional = !b.value;
                                 }
                             }
                             "default" => {
@@ -1211,7 +1263,7 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>, source: &str) -> Runt
 
                 fields.push(AnalyzedPropField {
                     name: key_name,
-                    is_optional: false,
+                    is_optional,
                     span: p.key.span().into(),
                     type_annotation,
                     description: None,
@@ -1235,7 +1287,8 @@ fn extract_prop_fields_from_runtime(expr: &Expression<'_>, source: &str) -> Runt
                     if let ArrayExpressionElement::StringLiteral(lit) = elem {
                         Some(AnalyzedPropField {
                             name: lit.value.to_string(),
-                            is_optional: false,
+                            // Array form has no type or required info — optional by Vue default.
+                            is_optional: true,
                             span: lit.span.into(),
                             type_annotation: None,
                             description: None,
@@ -2857,24 +2910,26 @@ defineExpose({ props })
     }
 
     #[test]
-    fn prop_field_optional_runtime_always_false() {
+    fn prop_field_optional_runtime_default() {
+        // Vue semantics: runtime props are optional by default (unless required: true)
         let code = "defineProps({ count: Number })";
         let macros = parse_macros(code);
         let field = &macros[0].prop_fields[0];
         assert!(
-            !field.is_optional,
-            "runtime props should default to is_optional=false"
+            field.is_optional,
+            "runtime props without required:true should be optional (Vue default)"
         );
     }
 
     #[test]
-    fn prop_field_optional_array_always_false() {
+    fn prop_field_optional_array_default() {
+        // Vue semantics: array-form props have no required info → optional by default
         let code = "defineProps(['count'])";
         let macros = parse_macros(code);
         let field = &macros[0].prop_fields[0];
         assert!(
-            !field.is_optional,
-            "array props should default to is_optional=false"
+            field.is_optional,
+            "array-form props should be optional by default"
         );
     }
 
@@ -3395,5 +3450,225 @@ defineExpose({ props })
             .find(|d| d.key == "active")
             .unwrap();
         assert_eq!(act_default.value, "true");
+    }
+
+    // =========================================================================
+    // TSAsExpression type assertion extraction tests
+    // =========================================================================
+
+    #[test]
+    fn prop_ts_as_prop_type_angle() {
+        // `Object as PropType<typeof Card>` should extract `typeof Card`, not `object`
+        let code = "defineProps({ foz: { type: Object as PropType<typeof Card> } })";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert_eq!(field.name, "foz");
+        assert_eq!(
+            field.type_annotation.as_deref(),
+            Some("typeof Card"),
+            "PropType<T> assertion should yield T, not the base constructor type"
+        );
+        assert!(
+            field.type_annotation.as_deref() != Some("object"),
+            "should not degrade to 'object'"
+        );
+    }
+
+    #[test]
+    fn prop_ts_as_arrow_return() {
+        // `Object as () => typeof Card` should extract `typeof Card` (the return type)
+        let code = "defineProps({ baz: { type: Object as () => typeof Card } })";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert_eq!(field.name, "baz");
+        assert_eq!(
+            field.type_annotation.as_deref(),
+            Some("typeof Card"),
+            "() => T assertion should yield T, not the callable type"
+        );
+        assert!(
+            field.type_annotation.as_deref() != Some("object"),
+            "should not degrade to 'object'"
+        );
+        assert!(
+            field.type_annotation.as_deref() != Some("Function"),
+            "should not degrade to 'Function'"
+        );
+    }
+
+    #[test]
+    fn prop_ts_as_new_ctor_return() {
+        // `Object as new () => typeof Card` should extract `typeof Card` (the return type)
+        let code = "defineProps({ comp: { type: Object as new () => typeof Card } })";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert_eq!(field.name, "comp");
+        assert_eq!(
+            field.type_annotation.as_deref(),
+            Some("typeof Card"),
+            "new () => T assertion should yield T"
+        );
+        assert!(
+            field.type_annotation.as_deref() != Some("object"),
+            "should not degrade to 'object'"
+        );
+    }
+
+    // =========================================================================
+    // Runtime prop optionality tests (Vue semantics: optional unless required:true)
+    // =========================================================================
+
+    #[test]
+    fn prop_shorthand_defaults_to_optional() {
+        // `bar: Number` — no required field → is_optional: true (Vue default)
+        let code = "defineProps({ bar: Number })";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert_eq!(field.name, "bar");
+        assert!(
+            field.is_optional,
+            "shorthand runtime prop without required:true should be optional"
+        );
+    }
+
+    #[test]
+    fn prop_required_true_is_not_optional() {
+        // `required: true` → is_optional: false
+        let code = "defineProps({ foo: { type: String, required: true } })";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert_eq!(field.name, "foo");
+        assert!(
+            !field.is_optional,
+            "runtime prop with required:true should not be optional"
+        );
+    }
+
+    #[test]
+    fn prop_required_false_is_optional() {
+        // `required: false` → is_optional: true
+        let code = "defineProps({ bar: { type: String, required: false } })";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert!(
+            field.is_optional,
+            "runtime prop with required:false should be optional"
+        );
+    }
+
+    #[test]
+    fn prop_with_default_is_optional() {
+        // Props with a default value are optional (no required:true)
+        let code = "defineProps({ count: { type: Number, default: 0 } })";
+        let macros = parse_macros(code);
+        let field = &macros[0].prop_fields[0];
+        assert!(
+            field.is_optional,
+            "runtime prop with default but no required:true should be optional"
+        );
+    }
+
+    #[test]
+    fn prop_array_form_is_optional() {
+        // Array form props have no type or required info → all optional
+        let code = "defineProps(['title', 'active'])";
+        let macros = parse_macros(code);
+        let fields = &macros[0].prop_fields;
+        assert_eq!(fields.len(), 2);
+        assert!(
+            fields[0].is_optional,
+            "array-form props should be optional by default"
+        );
+        assert!(
+            fields[1].is_optional,
+            "array-form props should be optional by default"
+        );
+    }
+
+    #[test]
+    fn prop_mixed_fixture() {
+        // Full regression fixture covering PropType<T>, () => T, required:true, and defaults
+        let code = r#"defineProps({
+  bar: Number,
+  foo: { type: String, required: true },
+  baz: { type: Object as () => typeof Card, default: () => { return Card } },
+  foz: { type: Object as PropType<typeof Card>, default: () => { return Card } }
+})"#;
+        let macros = parse_macros(code);
+        assert_eq!(macros.len(), 1);
+        let dp = &macros[0];
+        assert_eq!(dp.prop_fields.len(), 4);
+
+        let bar = dp.prop_fields.iter().find(|f| f.name == "bar").unwrap();
+        assert_eq!(bar.type_annotation.as_deref(), Some("number"));
+        assert!(
+            bar.is_optional,
+            "bar has no required:true, should be optional"
+        );
+
+        let foo = dp.prop_fields.iter().find(|f| f.name == "foo").unwrap();
+        assert_eq!(foo.type_annotation.as_deref(), Some("string"));
+        assert!(
+            !foo.is_optional,
+            "foo has required:true, should not be optional"
+        );
+
+        let baz = dp.prop_fields.iter().find(|f| f.name == "baz").unwrap();
+        assert_eq!(
+            baz.type_annotation.as_deref(),
+            Some("typeof Card"),
+            "baz: Object as () => typeof Card should extract 'typeof Card'"
+        );
+        assert!(
+            baz.is_optional,
+            "baz has default, no required:true — should be optional"
+        );
+        assert!(
+            baz.type_annotation.as_deref() != Some("object"),
+            "baz must not degrade to 'object'"
+        );
+        assert!(
+            baz.type_annotation.as_deref() != Some("Function"),
+            "baz must not degrade to 'Function'"
+        );
+        assert!(
+            baz.type_annotation.as_deref() != Some("unknown"),
+            "baz must not degrade to 'unknown'"
+        );
+
+        let foz = dp.prop_fields.iter().find(|f| f.name == "foz").unwrap();
+        assert_eq!(
+            foz.type_annotation.as_deref(),
+            Some("typeof Card"),
+            "foz: Object as PropType<typeof Card> should extract 'typeof Card'"
+        );
+        assert!(
+            foz.is_optional,
+            "foz has default, no required:true — should be optional"
+        );
+        assert!(
+            foz.type_annotation.as_deref() != Some("object"),
+            "foz must not degrade to 'object'"
+        );
+        assert!(
+            foz.type_annotation.as_deref() != Some("Function"),
+            "foz must not degrade to 'Function'"
+        );
+        assert!(
+            foz.type_annotation.as_deref() != Some("unknown"),
+            "foz must not degrade to 'unknown'"
+        );
+
+        // Default values should contain the arrow function source
+        let baz_default = dp.default_values.iter().find(|d| d.key == "baz").unwrap();
+        assert!(
+            baz_default.value.contains("=>"),
+            "baz default should preserve arrow function source"
+        );
+        let foz_default = dp.default_values.iter().find(|d| d.key == "foz").unwrap();
+        assert!(
+            foz_default.value.contains("=>"),
+            "foz default should preserve arrow function source"
+        );
     }
 }
