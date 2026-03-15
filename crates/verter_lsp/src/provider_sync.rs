@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(
             state.api_path.as_deref(),
             Some("/workspace/pkg-a/src/App.vue.ts"),
-            "Vue imports must keep resolving through .vue.ts"
+            "Vue public API output should still be tracked alongside the IDE artifact"
         );
     }
 

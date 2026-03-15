@@ -849,6 +849,12 @@ impl VerterLanguageServer {
                 None => return,
             };
             self.hydrate_vue_compile_blockers_for_canonical_id(&canonical_id);
+            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                if let Some(snapshot) = self.resolver_snapshot() {
+                    configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false)
+                        .await;
+                }
+            }
             let Some(transition) = self
                 .documents
                 .get_ide(uri)
@@ -941,6 +947,9 @@ impl VerterLanguageServer {
         };
 
         if let Some(sync) = &self.project_sync {
+            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                configure_provider_paths_for_source(sync, snapshot, canonical_id, false).await;
+            }
             if let Some(transition) = self.prepare_non_vue_provider_sync_transition(canonical_id) {
                 self.close_provider_paths(&transition.stale_paths).await;
                 if let Err(error) = sync
@@ -1056,6 +1065,13 @@ impl VerterLanguageServer {
                 continue;
             };
 
+            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                let snapshot = ResolverSnapshot {
+                    generation: 0,
+                    resolver: resolver.clone(),
+                };
+                configure_provider_paths_for_source(sync, &snapshot, &canonical_id, true).await;
+            }
             if let Some(transition) = self.prepare_non_vue_provider_sync_transition(&canonical_id) {
                 self.close_provider_paths(&transition.stale_paths).await;
                 if let Err(error) = sync
@@ -1122,10 +1138,11 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(&uri) else {
             return;
         };
-        if self.resolver_snapshot().is_none() {
+        let Some(snapshot) = self.resolver_snapshot() else {
             self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
-        }
+        };
+        let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
         let Some(transition) =
             self.prepare_vue_provider_sync_transition(&canonical_id, self.documents.is_jsx(&uri))
         else {
@@ -1139,6 +1156,9 @@ impl VerterLanguageServer {
         let host = self.documents.host_arc();
         let provider_sync_states = Arc::clone(&self.provider_sync_states);
         tokio::spawn(async move {
+            if is_tsgo {
+                configure_provider_paths_for_source(&sync, &snapshot, &canonical_id, true).await;
+            }
             for (kind, path) in &transition.stale_paths {
                 let result = match kind {
                     ProviderPathKind::Ide => sync.close_tsx(path).await,
@@ -1241,6 +1261,9 @@ impl VerterLanguageServer {
 
         // Determine IDE path — owner-aware or provisional
         let (ide_path, provisional) = if let Some(snapshot) = self.resolver_snapshot() {
+            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false).await;
+            }
             match provider_ide_path_for_source(&snapshot.resolver, &canonical_id, is_jsx) {
                 Some(path) => (path, false),
                 None => {
@@ -1373,10 +1396,11 @@ impl VerterLanguageServer {
     async fn ensure_provider_synced(&self, uri: &Uri) {
         self.ensure_current_file_synced(uri).await;
         self.ensure_imported_vue_apis_synced(uri).await;
+        self.ensure_barrel_imports_synced_for_tsgo(uri).await;
     }
 
     async fn ensure_imported_vue_apis_synced(&self, uri: &Uri) {
-        if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+        if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
             return;
         }
 
@@ -1410,6 +1434,142 @@ impl VerterLanguageServer {
 
         for import_id in import_ids {
             self.sync_imported_vue_api_lightweight(&import_id).await;
+        }
+    }
+
+    /// Sync barrel (non-Vue re-export) imports and their Vue dependencies to TSGO.
+    ///
+    /// When a Vue file imports components through a barrel (`import { Comp } from './components'`),
+    /// `ensure_imported_vue_apis_synced` misses both the barrel and its Vue re-export targets
+    /// because the barrel is a `.ts` file. This method discovers barrels from template component
+    /// usages, syncs their Vue dependencies first, then syncs the barrel itself.
+    async fn ensure_barrel_imports_synced_for_tsgo(&self, uri: &Uri) {
+        if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+            return;
+        }
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+        let Some(snapshot) = self.resolver_snapshot() else {
+            return;
+        };
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+        let Some(analysis) = self.documents.get_analysis(uri) else {
+            return;
+        };
+        let Some(template) = analysis.template.as_ref() else {
+            return;
+        };
+
+        let host = self.documents.host();
+        let mut barrel_ids: Vec<String> = Vec::new();
+        let mut barrel_vue_deps: Vec<String> = Vec::new();
+        let mut seen_barrels = HashSet::new();
+        let mut seen_barrel_vue = HashSet::new();
+
+        for component in &template.components {
+            let Some(import_source) = component.import_source.as_deref() else {
+                continue;
+            };
+            let Some(resolved) = self.resolve_import_specifier(&canonical_id, import_source) else {
+                continue;
+            };
+            if resolved.ends_with(".vue") {
+                continue; // already handled by Vue sync
+            }
+            if !seen_barrels.insert(resolved.clone()) {
+                continue;
+            }
+
+            // Load barrel into host and scan its module references for Vue specifiers
+            crate::compile_blockers::ensure_source_loaded_into_host(host, &resolved);
+
+            if let Some(barrel_analysis) = host.get_analysis(&resolved) {
+                for module_ref in barrel_analysis.module_references.iter() {
+                    if let Some(specifier) = &module_ref.literal_specifier {
+                        if specifier.ends_with(".vue") {
+                            if let Some(vue_id) =
+                                self.resolve_import_specifier(&resolved, specifier)
+                            {
+                                if vue_id.ends_with(".vue")
+                                    && seen_barrel_vue.insert(vue_id.clone())
+                                {
+                                    barrel_vue_deps.push(vue_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            barrel_ids.push(resolved);
+        }
+
+        // Phase 1: Sync Vue dependencies first (so TSGO has .vue.ts targets)
+        for vue_id in &barrel_vue_deps {
+            self.sync_imported_vue_api_lightweight(vue_id).await;
+        }
+
+        // Phase 2: Sync barrel files (TSGO's rewrite_vue_imports_for_tsgo handles .vue → .vue.ts)
+        for barrel_id in &barrel_ids {
+            // Skip if already synced
+            if let Some(state) = self.provider_sync_state_for_source(barrel_id) {
+                if state.shadow_background_loaded {
+                    continue;
+                }
+            }
+
+            let Some(source) = host.get_source(barrel_id) else {
+                continue;
+            };
+            let module_references = block_in_place_if_available(|| {
+                host.upsert(verter_host::UpsertRequest {
+                    canonical_id: Some(barrel_id.clone()),
+                    input_id: barrel_id.clone(),
+                    source: source.clone(),
+                    file_kind: verter_host::FileKind::NonSfc,
+                    aliases: Vec::new(),
+                })
+                .map(|result| result.module_references)
+                .unwrap_or_default()
+            });
+            let reader = LspProjectResolverReader::new(&self.documents);
+            let Some(prepared) = prepare_non_vue_provider_sync(
+                Some(&snapshot),
+                &reader,
+                barrel_id,
+                &source,
+                &module_references,
+            ) else {
+                continue;
+            };
+
+            configure_provider_paths_for_source(sync, &snapshot, barrel_id, false).await;
+
+            if let Some(transition) = self.prepare_non_vue_provider_sync_transition(barrel_id) {
+                self.close_provider_paths(&transition.stale_paths).await;
+                if let Err(error) = sync
+                    .sync_file(&prepared.provider_path, &prepared.rewritten)
+                    .await
+                {
+                    tracing::warn!(
+                        "barrel sync: failed to sync {}: {error}",
+                        prepared.provider_path
+                    );
+                } else {
+                    self.commit_provider_sync_state(barrel_id, transition.next);
+                }
+            } else if let Err(error) = sync
+                .sync_file(&prepared.provider_path, &prepared.rewritten)
+                .await
+            {
+                tracing::warn!(
+                    "barrel sync: failed to sync {}: {error}",
+                    prepared.provider_path
+                );
+            }
         }
     }
 
@@ -1528,6 +1688,53 @@ impl VerterLanguageServer {
         canonical_id
             .ends_with(".vue")
             .then(|| format!("{canonical_id}.ts"))
+    }
+
+    async fn sync_vue_ide_provisionally(
+        &self,
+        canonical_id: &str,
+        ide_code: &str,
+        is_jsx: bool,
+    ) -> bool {
+        let Some(sync) = &self.project_sync else {
+            return false;
+        };
+        let ext = if is_jsx { ".jsx" } else { ".tsx" };
+        let ide_path = format!("{canonical_id}{ext}");
+
+        let mut state = self
+            .provider_sync_state_for_source(canonical_id)
+            .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
+                owner_key: "__provisional__".to_string(),
+                ..Default::default()
+            });
+
+        if state.owner_key.is_empty() {
+            state.owner_key = "__provisional__".to_string();
+        }
+
+        let needs_open =
+            state.ide_path.as_deref() != Some(ide_path.as_str()) || !state.ide_background_loaded;
+        let result = if needs_open {
+            sync.open_tsx(&ide_path, ide_code).await
+        } else {
+            sync.sync_tsx(&ide_path, ide_code).await
+        };
+
+        match result {
+            Ok(()) => {
+                state.ide_path = Some(ide_path);
+                state.ide_background_loaded = true;
+                self.commit_provider_sync_state(canonical_id, state);
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                true
+            }
+            Err(error) => {
+                tracing::warn!("sync_vue_ide_provisionally: failed for {canonical_id}: {error}");
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                false
+            }
+        }
     }
 
     async fn sync_vue_api_provisionally(&self, canonical_id: &str, api_code: &str) -> bool {
@@ -3094,17 +3301,31 @@ impl VerterLanguageServer {
             .await;
     }
 
-    /// Re-read a non-open .vue file from disk, upsert, compile, and sync to TSGO.
-    /// Lightweight API sync for imported .vue files during `did_open`.
+    /// Re-read a non-open .vue file from disk, upsert, compile, and sync it to the provider.
+    /// Lightweight imported-Vue sync for `did_open`.
     ///
-    /// Tries to generate and sync the public API (.vue.ts) without disk I/O:
+    /// Tries to generate and sync the required Vue artifacts without disk I/O:
     /// if the host already has the file in memory, `get_public_api` avoids
     /// re-reading from disk. Falls back to `resync_background_vue_file` when
     /// the file hasn't been upserted yet.
     async fn sync_imported_vue_api_lightweight(&self, canonical_id: &str) {
-        // Fast path: host already has the file — generate API and sync DTS only.
+        let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+        let profile = self.documents.tsx_profile.read().clone();
+
+        // Fast path: host already has the file — sync directly from cached artifacts.
         if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+            let ide = if is_tsgo {
+                self.documents.host.get_ide(canonical_id, &profile)
+            } else {
+                None
+            };
+
             if self.resolver_snapshot().is_none() {
+                if let Some(ide) = ide.as_ref() {
+                    let _ = self
+                        .sync_vue_ide_provisionally(canonical_id, &ide.code, ide.is_jsx)
+                        .await;
+                }
                 let _ = self
                     .sync_vue_api_provisionally(canonical_id, &api.code)
                     .await;
@@ -3112,9 +3333,10 @@ impl VerterLanguageServer {
             }
 
             if let Some(sync) = &self.project_sync {
-                let Some(transition) =
-                    self.prepare_vue_provider_sync_transition(canonical_id, false)
-                else {
+                let Some(transition) = self.prepare_vue_provider_sync_transition(
+                    canonical_id,
+                    ide.as_ref().map(|output| output.is_jsx).unwrap_or(false),
+                ) else {
                     let _ = self
                         .sync_vue_api_provisionally(canonical_id, &api.code)
                         .await;
@@ -3122,6 +3344,27 @@ impl VerterLanguageServer {
                 };
                 self.close_provider_paths(&transition.stale_paths).await;
                 let mut committed_state = transition.next;
+                let mut synced_any = false;
+
+                if let Some(ide) = ide.as_ref() {
+                    if let Some(ide_path) = committed_state.ide_path.clone() {
+                        let result = if committed_state.ide_background_loaded {
+                            sync.sync_tsx(&ide_path, &ide.code).await
+                        } else {
+                            sync.open_tsx(&ide_path, &ide.code).await
+                        };
+                        if result.is_ok() {
+                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                            synced_any = true;
+                        } else if let Err(error) = result {
+                            tracing::warn!(
+                                "sync_imported_vue_api_lightweight: failed for {ide_path}: {error}"
+                            );
+                            self.queue_snapshot_provider_sync(canonical_id.to_string());
+                        }
+                    }
+                }
+
                 if let Some(dts_path) = committed_state.api_path.clone() {
                     let result = if committed_state.api_background_loaded {
                         sync.sync_dts(&dts_path, &api.code).await
@@ -3130,13 +3373,17 @@ impl VerterLanguageServer {
                     };
                     if result.is_ok() {
                         committed_state.set_background_loaded(ProviderPathKind::Api, true);
-                        self.commit_provider_sync_state(canonical_id, committed_state);
+                        synced_any = true;
                     } else if let Err(e) = result {
                         tracing::warn!(
                             "sync_imported_vue_api_lightweight: failed for {dts_path}: {e}"
                         );
                         self.queue_snapshot_provider_sync(canonical_id.to_string());
                     }
+                }
+
+                if synced_any {
+                    self.commit_provider_sync_state(canonical_id, committed_state);
                 }
             }
             return;
@@ -3166,6 +3413,13 @@ impl VerterLanguageServer {
             });
 
             if compiled {
+                if is_tsgo {
+                    if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
+                        let _ = self
+                            .sync_vue_ide_provisionally(canonical_id, &ide.code, ide.is_jsx)
+                            .await;
+                    }
+                }
                 if let Some(api) = self.documents.host.get_public_api(canonical_id) {
                     let _ = self
                         .sync_vue_api_provisionally(canonical_id, &api.code)
@@ -3223,14 +3477,16 @@ impl VerterLanguageServer {
         self.refresh_vue_dependency_tracking(canonical_id);
 
         // Sync to type provider
-        // For TSGO: only sync DTS (has default export for cross-file imports).
-        // IDE files (.vue.tsx) are only synced when the file is open in the editor.
-        // For tsserver: sync IDE files (TS plugin resolves .vue → .vue.tsx).
         if let Some(sync) = &self.project_sync {
             let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
             let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) else {
                 return;
             };
+            if is_tsgo {
+                if let Some(snapshot) = self.resolver_snapshot() {
+                    configure_provider_paths_for_source(sync, &snapshot, canonical_id, true).await;
+                }
+            }
             let Some(transition) =
                 self.prepare_vue_provider_sync_transition(canonical_id, ide.is_jsx)
             else {
@@ -3240,25 +3496,22 @@ impl VerterLanguageServer {
             self.close_provider_paths(&transition.stale_paths).await;
             let mut committed_state = transition.next;
 
-            if !is_tsgo {
-                // tsserver: sync IDE output
-                if let Some(tsx_path) = committed_state.ide_path.clone() {
-                    let is_bg = self
-                        .is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Ide);
-                    let result = if is_bg {
-                        sync.sync_tsx(&tsx_path, &ide.code).await
-                    } else {
-                        sync.open_tsx(&tsx_path, &ide.code).await
-                    };
-                    if result.is_ok() {
-                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                    } else if let Err(e) = result {
-                        tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
-                    }
+            if let Some(tsx_path) = committed_state.ide_path.clone() {
+                let is_bg =
+                    self.is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Ide);
+                let result = if is_bg {
+                    sync.sync_tsx(&tsx_path, &ide.code).await
+                } else {
+                    sync.open_tsx(&tsx_path, &ide.code).await
+                };
+                if result.is_ok() {
+                    committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                } else if let Err(e) = result {
+                    tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
                 }
             }
 
-            // Sync .vue.ts for cross-file component type resolution
+            // Sync .vue.ts as secondary provider support output.
             if let Some(api) = self.documents.host.get_public_api(canonical_id) {
                 let Some(dts_path) = committed_state.api_path.clone() else {
                     return;
@@ -3266,7 +3519,7 @@ impl VerterLanguageServer {
                 let is_bg =
                     self.is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Api);
                 let result = if is_tsgo {
-                    // TSGO: open/update DTS so it's in TSGO's virtual FS
+                    // TSGO: open/update DTS so it's in TSGO's virtual FS alongside the IDE file.
                     if is_bg {
                         sync.sync_dts(&dts_path, &api.code).await
                     } else {
@@ -5419,7 +5672,7 @@ async fn resync_aliased_imports_for_open_files(
     project_sync: Option<&ProjectSync>,
     resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
-    _is_tsgo: bool,
+    is_tsgo: bool,
 ) -> bool {
     let Some(sync) = project_sync else {
         return false;
@@ -5473,11 +5726,15 @@ async fn resync_aliased_imports_for_open_files(
         }
     }
 
-    // Lightweight sync: compile + sync DTS only for each imported .vue file
-    // that doesn't already have an API path loaded.
+    // Lightweight sync: compile and sync the provider artifacts needed by the backend.
     for import_id in &all_import_ids {
         if let Some(state) = provider_sync_states.get(import_id.as_str()) {
-            if state.api_background_loaded {
+            let already_loaded = if is_tsgo {
+                state.ide_background_loaded && state.api_background_loaded
+            } else {
+                state.api_background_loaded
+            };
+            if already_loaded {
                 continue;
             }
         }
@@ -5504,14 +5761,24 @@ async fn resync_aliased_imports_for_open_files(
             continue;
         }
 
+        if is_tsgo {
+            configure_provider_paths_for_source(sync, &snapshot, import_id, true).await;
+        }
+
+        let ide = if is_tsgo {
+            host.get_ide(import_id, &profile)
+        } else {
+            None
+        };
         let Some(api) = host.get_public_api(import_id) else {
             continue;
         };
 
-        // Build sync state and sync DTS
-        let Some(next_state) =
-            crate::provider_sync::vue_sync_state_for_source(&snapshot.resolver, import_id, false)
-        else {
+        let Some(next_state) = crate::provider_sync::vue_sync_state_for_source(
+            &snapshot.resolver,
+            import_id,
+            ide.as_ref().map(|output| output.is_jsx).unwrap_or(false),
+        ) else {
             continue;
         };
         let transition = crate::provider_sync::prepare_sync_transition(
@@ -5520,7 +5787,24 @@ async fn resync_aliased_imports_for_open_files(
             next_state,
         );
 
+        close_stale_provider_paths(sync, &transition.stale_paths, "aliased_resync").await;
         let mut committed_state = transition.next;
+        let mut synced_this_file = false;
+        if let Some(ide) = ide {
+            let Some(ide_path) = committed_state.ide_path.clone() else {
+                continue;
+            };
+            let result = if committed_state.ide_background_loaded {
+                sync.sync_tsx(&ide_path, &ide.code).await
+            } else {
+                sync.open_tsx(&ide_path, &ide.code).await
+            };
+            if result.is_ok() {
+                committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                synced_any = true;
+                synced_this_file = true;
+            }
+        }
         if let Some(dts_path) = committed_state.api_path.clone() {
             let result = if committed_state.api_background_loaded {
                 sync.sync_dts(&dts_path, &api.code).await
@@ -5529,17 +5813,230 @@ async fn resync_aliased_imports_for_open_files(
             };
             if result.is_ok() {
                 committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                synced_any = true;
+                synced_this_file = true;
+            }
+        }
+
+        if synced_this_file {
+            crate::provider_sync::commit_sync_transition(
+                provider_sync_states,
+                import_id,
+                committed_state,
+            );
+        }
+    }
+
+    // Pass 2 (TSGO only): Sync barrel imports discovered from template component usages.
+    // When a component is imported through a barrel (non-Vue re-export file), the Vue
+    // file collection above misses both the barrel and its Vue re-export targets.
+    // This pass follows the barrel → Vue re-export chain and syncs both.
+    if is_tsgo {
+        let mut barrel_ids: Vec<String> = Vec::new();
+        let mut barrel_vue_deps: Vec<String> = Vec::new();
+        let mut seen_barrels = HashSet::new();
+        let mut seen_barrel_vue = HashSet::new();
+
+        for uri_str in documents.open_uris() {
+            let Ok(uri) = uri_str.parse::<Uri>() else {
+                continue;
+            };
+            let Some(canonical_id) = documents.get_canonical_id(&uri) else {
+                continue;
+            };
+            if !canonical_id.ends_with(".vue") {
+                continue;
+            }
+            let Some(analysis) = host.get_analysis(&canonical_id) else {
+                continue;
+            };
+            let Some(template) = analysis.template.as_ref() else {
+                continue;
+            };
+
+            for component in &template.components {
+                let Some(import_source) = component.import_source.as_deref() else {
+                    continue;
+                };
+                let Some(resolved) = resolve_import_specifier_standalone(
+                    host,
+                    project_registry,
+                    &canonical_id,
+                    import_source,
+                ) else {
+                    continue;
+                };
+                if resolved.ends_with(".vue") {
+                    continue; // already handled by Vue sync pass
+                }
+                if !seen_barrels.insert(resolved.clone()) {
+                    continue;
+                }
+
+                // Load the barrel into the host and scan its module references
+                // for .vue import specifiers. This avoids the chicken-and-egg problem
+                // where get_export_span_follow_reexports needs Vue files already loaded.
+                crate::compile_blockers::ensure_source_loaded_into_host(host, &resolved);
+
+                if let Some(barrel_analysis) = host.get_analysis(&resolved) {
+                    for module_ref in barrel_analysis.module_references.iter() {
+                        if let Some(specifier) = &module_ref.literal_specifier {
+                            if specifier.ends_with(".vue") {
+                                if let Some(vue_id) = resolve_import_specifier_standalone(
+                                    host,
+                                    project_registry,
+                                    &resolved,
+                                    specifier,
+                                ) {
+                                    if vue_id.ends_with(".vue")
+                                        && seen_barrel_vue.insert(vue_id.clone())
+                                    {
+                                        barrel_vue_deps.push(vue_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                barrel_ids.push(resolved);
+            }
+        }
+
+        // Phase 1: Sync Vue dependencies first (so TSGO has .vue.ts targets before barrel)
+        for vue_id in &barrel_vue_deps {
+            // Skip if already synced in the main Vue pass
+            if let Some(state) = provider_sync_states.get(vue_id.as_str()) {
+                if state.ide_background_loaded && state.api_background_loaded {
+                    continue;
+                }
+            }
+
+            let loaded = crate::compile_blockers::ensure_source_loaded_into_host(host, vue_id);
+            if !loaded {
+                continue;
+            }
+            crate::compile_blockers::hydrate_cached(
+                &crate::compile_blockers::HydrationCache::default(),
+                host,
+                &snapshot.resolver,
+                &crate::compile_blockers::HostFsProjectResolverReader::new(host),
+                vue_id,
+                snapshot.generation,
+            );
+            let profile = documents.tsx_profile.read().clone();
+            if host.ensure_compiled(vue_id, &profile).is_err() {
+                continue;
+            }
+
+            configure_provider_paths_for_source(sync, &snapshot, vue_id, true).await;
+
+            let ide = host.get_ide(vue_id, &profile);
+            let Some(api) = host.get_public_api(vue_id) else {
+                continue;
+            };
+
+            let Some(next_state) = crate::provider_sync::vue_sync_state_for_source(
+                &snapshot.resolver,
+                vue_id,
+                ide.as_ref().map(|output| output.is_jsx).unwrap_or(false),
+            ) else {
+                continue;
+            };
+            let transition = crate::provider_sync::prepare_sync_transition(
+                provider_sync_states,
+                vue_id,
+                next_state,
+            );
+            close_stale_provider_paths(sync, &transition.stale_paths, "barrel_vue_dep").await;
+            let mut committed_state = transition.next;
+            let mut synced_this = false;
+
+            if let Some(ide) = ide {
+                if let Some(ide_path) = committed_state.ide_path.clone() {
+                    let result = if committed_state.ide_background_loaded {
+                        sync.sync_tsx(&ide_path, &ide.code).await
+                    } else {
+                        sync.open_tsx(&ide_path, &ide.code).await
+                    };
+                    if result.is_ok() {
+                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                        synced_any = true;
+                        synced_this = true;
+                    }
+                }
+            }
+            if let Some(dts_path) = committed_state.api_path.clone() {
+                let result = if committed_state.api_background_loaded {
+                    sync.sync_dts(&dts_path, &api.code).await
+                } else {
+                    sync.open_dts(&dts_path, &api.code).await
+                };
+                if result.is_ok() {
+                    committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                    synced_any = true;
+                    synced_this = true;
+                }
+            }
+            if synced_this {
                 crate::provider_sync::commit_sync_transition(
                     provider_sync_states,
-                    import_id,
+                    vue_id,
                     committed_state,
                 );
+            }
+        }
+
+        // Phase 2: Sync barrel files (their rewritten imports now point to .vue.ts)
+        for barrel_id in &barrel_ids {
+            if sync_pending_non_vue_provider_file(
+                sync,
+                documents,
+                &snapshot,
+                provider_sync_states,
+                barrel_id,
+                true,
+            )
+            .await
+            {
                 synced_any = true;
             }
         }
     }
 
     synced_any
+}
+
+fn owner_path_config_for_source(
+    snapshot: &ResolverSnapshot,
+    canonical_id: &str,
+) -> Option<(String, serde_json::Value)> {
+    let owner = snapshot.resolver.owner_for_file(canonical_id)?;
+    let tsconfig_path = owner.tsconfig_path.as_deref()?;
+    crate::config::TsConfigPathResolver::raw_paths_json(std::path::Path::new(tsconfig_path))
+}
+
+pub(crate) async fn configure_provider_paths_for_source(
+    sync: &ProjectSync,
+    snapshot: &ResolverSnapshot,
+    canonical_id: &str,
+    background: bool,
+) {
+    let Some((base_url, paths)) = owner_path_config_for_source(snapshot, canonical_id) else {
+        return;
+    };
+
+    let result = if background {
+        sync.configure_paths_background(&base_url, paths).await
+    } else {
+        sync.configure_paths(&base_url, paths).await
+    };
+
+    if let Err(error) = result {
+        tracing::warn!(
+            "failed to configure provider paths for {canonical_id} (baseUrl={base_url}): {error}"
+        );
+    }
 }
 
 async fn sync_pending_snapshot_provider_file(
@@ -5567,6 +6064,7 @@ async fn sync_pending_snapshot_provider_file(
             snapshot,
             provider_sync_states,
             canonical_id,
+            is_tsgo,
         )
         .await
     }
@@ -5602,6 +6100,9 @@ async fn sync_pending_vue_provider_file(
     else {
         return false;
     };
+    if is_tsgo {
+        configure_provider_paths_for_source(sync, snapshot, canonical_id, true).await;
+    }
 
     let transition = prepare_sync_transition(provider_sync_states, canonical_id, next_state);
     close_stale_provider_paths(sync, &transition.stale_paths, "pending_snapshot").await;
@@ -5641,29 +6142,33 @@ async fn sync_pending_vue_provider_file(
         }
     }
 
-    if !is_tsgo {
-        if let Some(ide) = ide {
-            let Some(ide_path) = committed_state.ide_path.clone() else {
-                return false;
-            };
-            let result = if is_open || committed_state.ide_background_loaded {
+    if let Some(ide) = ide {
+        let Some(ide_path) = committed_state.ide_path.clone() else {
+            return false;
+        };
+        let result = if is_tsgo {
+            if committed_state.ide_background_loaded {
                 sync.sync_tsx(&ide_path, &ide.code).await
             } else {
-                sync.load_tsx(&ide_path, &ide.code).await
-            };
+                sync.open_tsx(&ide_path, &ide.code).await
+            }
+        } else if is_open || committed_state.ide_background_loaded {
+            sync.sync_tsx(&ide_path, &ide.code).await
+        } else {
+            sync.load_tsx(&ide_path, &ide.code).await
+        };
 
-            match result {
-                Ok(()) => {
-                    if !is_open {
-                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                    }
-                    synced_any = true;
+        match result {
+            Ok(()) => {
+                if is_tsgo || !is_open {
+                    committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        "pending_snapshot: failed to sync provider IDE path {ide_path}: {error}"
-                    );
-                }
+                synced_any = true;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "pending_snapshot: failed to sync provider IDE path {ide_path}: {error}"
+                );
             }
         }
     }
@@ -5680,6 +6185,7 @@ async fn sync_pending_non_vue_provider_file(
     snapshot: &ResolverSnapshot,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
+    is_tsgo: bool,
 ) -> bool {
     let Some(source) = documents.host.get_source(canonical_id) else {
         return false;
@@ -5713,6 +6219,9 @@ async fn sync_pending_non_vue_provider_file(
         return false;
     };
 
+    if is_tsgo {
+        configure_provider_paths_for_source(sync, snapshot, canonical_id, true).await;
+    }
     let transition = prepare_sync_transition(provider_sync_states, canonical_id, next_state);
     close_stale_provider_paths(sync, &transition.stale_paths, "pending_snapshot").await;
 
@@ -6741,6 +7250,7 @@ impl LanguageServer for VerterLanguageServer {
                 let sync = sync.clone();
                 let resolver_snapshot = Arc::clone(&self.resolver_snapshot);
                 let provider_sync_states = Arc::clone(&self.provider_sync_states);
+                let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
                 tokio::spawn(async move {
                     for canonical_id in ts_js_resync_ids {
@@ -6749,6 +7259,7 @@ impl LanguageServer for VerterLanguageServer {
                             &host,
                             &sync,
                             &resolver_snapshot,
+                            is_tsgo,
                             &provider_sync_states,
                         )
                         .await;
@@ -9069,7 +9580,7 @@ mod tests {
     use std::sync::Arc;
 
     use futures_util::StreamExt;
-    use verter_host::{HostConfig, VerterHost};
+    use verter_host::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
     use crate::tsgo::mock::{MockCall, MockTypeProvider};
     use crate::tsgo::protocol::{
@@ -14162,6 +14673,64 @@ defineProps<{ msg: string }>()
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn sync_imported_vue_api_lightweight_opens_snapshot_ide_path_for_tsgo() {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::Tsgo,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                    type_provider_none_reason: None,
+                },
+            )
+        });
+
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let child_id = "/workspace/src/Child.vue";
+        let _child_uri = open_test_vue(
+            server,
+            child_id,
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+        );
+
+        server.sync_imported_vue_api_lightweight(child_id).await;
+
+        let state = server
+            .provider_sync_states
+            .get(child_id)
+            .map(|entry| entry.clone())
+            .expect("snapshot imported Vue sync should commit provider state");
+        let ide_path = state
+            .ide_path
+            .clone()
+            .expect("TSGO imported Vue sync should record the IDE path");
+        let calls = provider.file_sync_calls();
+
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path == &ide_path
+            )),
+            "snapshot imported Vue sync should open the provider-facing IDE path for TSGO, calls={calls:?}, ide_path={ide_path}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn ensure_current_file_synced_queues_provisional_ide_path_for_snapshot_reconciliation() {
         let provider = Arc::new(MockTypeProvider::new());
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -15317,6 +15886,88 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_pending_vue_provider_file_syncs_ide_artifact_for_tsgo() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+        std::fs::write(workspace.join("tsconfig.app.json"), "{}").expect("write tsconfig");
+
+        let workspace_id = std::fs::canonicalize(&workspace)
+            .expect("canonical workspace path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let app_id = format!("{workspace_id}/src/App.vue");
+        let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child msg="hi" /></template>"#
+                .to_string(),
+        });
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(format!("{workspace_id}/src/Child.vue")),
+            input_id: format!("{workspace_id}/src/Child.vue"),
+            source: Arc::<str>::from(
+                r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+            ),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        });
+
+        let snapshot = ResolverSnapshot {
+            generation: 1,
+            resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+                crate::project_resolver::IdeProjectConfig::new(
+                    workspace_id.clone(),
+                    workspace_id.clone(),
+                    Some(format!("{workspace_id}/tsconfig.app.json")),
+                ),
+            ]),
+        };
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let provider_sync_states = DashMap::new();
+
+        let synced = sync_pending_vue_provider_file(
+            &sync,
+            &documents,
+            &snapshot,
+            &provider_sync_states,
+            &app_id,
+            true,
+        )
+        .await;
+
+        assert!(synced, "pending Vue sync should succeed for TSGO");
+
+        let calls = provider.file_sync_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.ts")
+            )),
+            "TSGO pending sync should keep syncing the API artifact, calls={calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.tsx")
+            )),
+            "TSGO pending sync should also sync the IDE artifact, calls={calls:?}"
+        );
+    }
+
     // ── wants_code_action_kind tests ────────────────────────────────
 
     #[test]
@@ -15907,6 +16558,229 @@ import Child from '@/components/Child.vue'
         );
 
         // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_base);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resync_aliased_imports_syncs_vue_ide_artifact_for_tsgo() {
+        let temp_base = std::env::temp_dir().join("verter_test_resync_aliased_tsgo");
+        let _ = std::fs::remove_dir_all(&temp_base);
+        let workspace = temp_base.join("workspace");
+        std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
+
+        std::fs::write(
+            workspace.join("tsconfig.json"),
+            r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}"#,
+        )
+        .expect("write tsconfig");
+
+        std::fs::write(
+            workspace.join("src/components/Child.vue"),
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        )
+        .expect("write child");
+
+        let workspace_id_raw = std::fs::canonicalize(&workspace)
+            .expect("canonical workspace")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let workspace_id = workspace_id_raw
+            .strip_prefix("//?/")
+            .unwrap_or(&workspace_id_raw)
+            .to_string();
+        let app_id = format!("{workspace_id}/src/App.vue");
+
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri,
+            language_id: "vue".to_string(),
+            version: 1,
+            text: r#"<script setup lang="ts">
+import Child from '@/components/Child.vue'
+</script>
+<template><Child msg="hello" /></template>"#
+                .to_string(),
+        });
+
+        let project_registry = parking_lot::RwLock::new(None);
+        let vite_opts = crate::vite_config::ViteConfigOptions::default();
+        let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+        let build_result =
+            crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
+        let registry = build_result.registry;
+        let resolver = registry.to_native_project_resolver();
+        let resolver_snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
+            generation: 1,
+            resolver,
+        }));
+        *project_registry.write() = Some(registry);
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let provider_sync_states = DashMap::new();
+
+        resync_aliased_imports_for_open_files(
+            &documents,
+            &project_registry,
+            Some(&sync),
+            &resolver_snapshot,
+            &provider_sync_states,
+            true,
+        )
+        .await;
+
+        let calls = provider.file_sync_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path.ends_with("Child.vue.tsx")
+            )),
+            "TSGO alias resync should open the Vue IDE artifact, calls={calls:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_base);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resync_aliased_imports_syncs_barrel_and_vue_deps_for_tsgo() {
+        // Setup: App.vue imports `{ Overlay }` from a barrel (./components/index.ts)
+        // which re-exports `./Overlay.vue`. Both the barrel and its Vue dependency
+        // must be synced eagerly so TSGO resolves the component types.
+        let temp_base = std::env::temp_dir().join("verter_test_resync_barrel_tsgo");
+        let _ = std::fs::remove_dir_all(&temp_base);
+        let workspace = temp_base.join("workspace");
+        std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
+
+        std::fs::write(
+            workspace.join("tsconfig.json"),
+            r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}"#,
+        )
+        .expect("write tsconfig");
+
+        // Barrel file re-exports Overlay from its Vue component
+        std::fs::write(
+            workspace.join("src/components/index.ts"),
+            r#"export { default as Overlay } from './Overlay.vue'"#,
+        )
+        .expect("write barrel");
+
+        // Vue component behind the barrel
+        std::fs::write(
+            workspace.join("src/components/Overlay.vue"),
+            r#"<script setup lang="ts">
+defineProps<{ show: boolean }>()
+</script>
+<template><div v-if="show">overlay</div></template>"#,
+        )
+        .expect("write Overlay.vue");
+
+        let workspace_id_raw = std::fs::canonicalize(&workspace)
+            .expect("canonical workspace")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let workspace_id = workspace_id_raw
+            .strip_prefix("//?/")
+            .unwrap_or(&workspace_id_raw)
+            .to_string();
+        let app_id = format!("{workspace_id}/src/App.vue");
+
+        let host = Arc::new(VerterHost::new(HostConfig::default()));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri,
+            language_id: "vue".to_string(),
+            version: 1,
+            text: r#"<script setup lang="ts">
+import { Overlay } from './components'
+</script>
+<template><Overlay :show="true" /></template>"#
+                .to_string(),
+        });
+
+        let project_registry = parking_lot::RwLock::new(None);
+        let vite_opts = crate::vite_config::ViteConfigOptions::default();
+        let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+        let build_result =
+            crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
+        let registry = build_result.registry;
+        let resolver = registry.to_native_project_resolver();
+        let resolver_snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
+            generation: 1,
+            resolver,
+        }));
+        *project_registry.write() = Some(registry);
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let provider_sync_states = DashMap::new();
+
+        resync_aliased_imports_for_open_files(
+            &documents,
+            &project_registry,
+            Some(&sync),
+            &resolver_snapshot,
+            &provider_sync_states,
+            true,
+        )
+        .await;
+
+        let calls = provider.file_sync_calls();
+
+        // Positive: Vue dependency Overlay.vue should be synced (IDE + API artifacts)
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path.contains("Overlay.vue")
+            )),
+            "Vue dependency Overlay.vue should be synced, calls={calls:?}"
+        );
+
+        // Positive: Barrel file should be synced to provider (via sync_file → update_file)
+        // Note: rewrite_vue_imports_for_tsgo happens inside the real TSGO provider, not the mock.
+        // The mock records raw content; in production TSGO rewrites .vue → .vue.ts.
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. }
+                    | MockCall::LoadFile { path, .. }
+                    | MockCall::UpdateFile { path, .. }
+                    if path.contains("components/index")
+            )),
+            "Barrel file index.ts should be synced to provider, calls={calls:?}"
+        );
+
+        // Negative: non-barrel utility imports should NOT trigger barrel sync
+        assert!(
+            !calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. }
+                    | MockCall::LoadFile { path, .. }
+                    | MockCall::UpdateFile { path, .. }
+                    if path.contains("utils")
+            )),
+            "Utility files should not be synced through barrel path, calls={calls:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&temp_base);
     }
 }

@@ -100,8 +100,9 @@ impl TsConfigPathResolver {
             let base_url = compiler_options
                 .get("baseUrl")
                 .and_then(|v| v.as_str())
-                .map(|b| tsconfig_dir.join(b))
-                .unwrap_or_else(|| tsconfig_dir.to_path_buf());
+                .map(|b| normalize_path_buf(&tsconfig_dir.join(b)))
+                .unwrap_or_else(|| normalize_path_buf(tsconfig_dir));
+            let base_url = PathBuf::from(&base_url);
 
             if let Some(paths) = compiler_options.get("paths").and_then(|v| v.as_object()) {
                 resolver.aliases.clear();
@@ -307,8 +308,8 @@ impl TsConfigPathResolver {
                 let base_url = co
                     .get("baseUrl")
                     .and_then(|v| v.as_str())
-                    .map(|b| tsconfig_dir.join(b).to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_else(|| tsconfig_dir.to_string_lossy().replace('\\', "/"));
+                    .map(|b| normalize_path_buf(&tsconfig_dir.join(b)))
+                    .unwrap_or_else(|| normalize_path_buf(tsconfig_dir));
                 return Some((base_url, paths.clone()));
             }
         }

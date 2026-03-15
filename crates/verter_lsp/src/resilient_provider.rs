@@ -52,7 +52,7 @@ where
     client: Arc<OnceCell<Client>>,
     file_cache: Arc<RwLock<HashMap<String, CachedFile>>>,
     workspace_folders: Arc<RwLock<Vec<serde_json::Value>>>,
-    path_config: Arc<RwLock<Option<CachedPathConfig>>>,
+    path_configs: Arc<RwLock<Vec<CachedPathConfig>>>,
     restart_count: AtomicU32,
     restart_lock: Mutex<()>,
     backend: B,
@@ -84,7 +84,7 @@ where
             client,
             file_cache: Arc::new(RwLock::new(HashMap::new())),
             workspace_folders: Arc::new(RwLock::new(Vec::new())),
-            path_config: Arc::new(RwLock::new(None)),
+            path_configs: Arc::new(RwLock::new(Vec::new())),
             restart_count: AtomicU32::new(0),
             restart_lock: Mutex::new(()),
             backend,
@@ -156,7 +156,15 @@ where
     }
 
     async fn cache_path_config(&self, base_url: &str, paths: serde_json::Value) {
-        *self.state.path_config.write().await = Some(CachedPathConfig {
+        let mut configs = self.state.path_configs.write().await;
+        if let Some(existing) = configs
+            .iter_mut()
+            .find(|config| config.base_url == base_url)
+        {
+            existing.paths = paths;
+            return;
+        }
+        configs.push(CachedPathConfig {
             base_url: base_url.to_string(),
             paths,
         });
@@ -242,7 +250,8 @@ where
                     let _ = provider.update_workspace_folders(folders, vec![]).await;
                 }
 
-                if let Some(path_config) = state.path_config.read().await.clone() {
+                let path_configs = state.path_configs.read().await.clone();
+                for path_config in path_configs {
                     let _ = provider
                         .configure_paths(&path_config.base_url, path_config.paths)
                         .await;
@@ -836,6 +845,51 @@ mod tests {
                     if added.iter().any(|folder| folder.get("uri").and_then(|value| value.as_str()) == Some("file:///project"))
             )),
             "workspace folders should be replayed after restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_replays_all_cached_path_configs() {
+        let initial = MockTypeProvider::new();
+        let replacement = MockTypeProvider::new();
+        let replacement_clone = replacement.clone();
+        let (provider, crash_notify) = make_resilient(initial, replacement);
+
+        provider
+            .configure_paths("/project/pkg-a", serde_json::json!({ "@a/*": ["./src/*"] }))
+            .await
+            .unwrap();
+        provider
+            .configure_paths("/project/pkg-b", serde_json::json!({ "@b/*": ["./lib/*"] }))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        crash_notify.notify_waiters();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while replacement_clone.calls().len() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let calls = replacement_clone.calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::ConfigurePaths { base_url, paths }
+                    if base_url == "/project/pkg-a"
+                        && *paths == serde_json::json!({ "@a/*": ["./src/*"] })
+            )),
+            "restart should replay pkg-a path configuration, calls={calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::ConfigurePaths { base_url, paths }
+                    if base_url == "/project/pkg-b"
+                        && *paths == serde_json::json!({ "@b/*": ["./lib/*"] })
+            )),
+            "restart should replay pkg-b path configuration, calls={calls:?}"
         );
     }
 

@@ -1167,22 +1167,15 @@ impl TsgoTypeProvider {
     }
 }
 
-/// Rewrite `.vue` import specifiers to `.vue.tsx` (or `.vue.jsx` for JS SFCs)
-/// in content sent to TSGO, so that `import Foo from './Foo.vue'` resolves to
-/// the virtual `./Foo.vue.tsx` file in TSGO's virtual FS.
+/// Rewrite `.vue` import specifiers to `.vue.ts` for TSGO cross-file resolution.
 ///
-/// The replacement target depends on the file extension of `path`:
-/// - `.jsx` files → rewrite to `.vue.jsx` (JS SFC output)
-/// - everything else (`.tsx`) → rewrite to `.vue.tsx`
+/// TSGO resolves cross-file Vue imports through the public API output (`.vue.ts`),
+/// which has a proper `export default` for component types. The IDE output
+/// (`.vue.tsx`) is a full JSX file that can leak DOM/React types into importers.
 ///
-/// This is safe because `.vue'` and `.vue"` only appear as import specifier
-/// endings in generated TSX/JSX content.
+/// NOTE: We use `.vue.ts` (not `.d.vue.ts`) because TypeScript treats `.d.vue.ts`
+/// as a declaration file and forbids regular imports from it.
 pub(crate) fn rewrite_vue_imports_for_tsgo(content: &str, _path: &str) -> String {
-    // Rewrite .vue imports to .vue.ts so TSGO resolves them to the public API
-    // output rather than the IDE (.vue.tsx) output.
-    // The .vue.ts file has a proper `export default` for cross-file imports.
-    // NOTE: We use .vue.ts (not .d.vue.ts) because TypeScript treats .d.vue.ts
-    // as a declaration file and forbids regular imports from it.
     content
         .replace(".vue'", ".vue.ts'")
         .replace(".vue\"", ".vue.ts\"")
@@ -2526,7 +2519,7 @@ fn find_tsgo_binary_in(
         }
     }
 
-    npx_entries.sort_by(|a, b| entry_modified(b).cmp(&entry_modified(a)));
+    npx_entries.sort_by_key(|b| std::cmp::Reverse(entry_modified(b)));
 
     for entry in &npx_entries {
         for rel_path in tsgo_native_binary_rel_paths() {
@@ -2912,6 +2905,27 @@ import Bar from './Bar.vue'"#;
         assert_eq!(
             result, input,
             "non-import .vue occurrences should be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_build_paths_config_payload_includes_paths_only() {
+        let payload = build_paths_config_payload(serde_json::json!({
+            "@/*": ["src/*"],
+            "@pkg/*": ["packages/*"],
+        }));
+
+        // baseUrl must NOT be present — TSGO 7.0 rejects it with TS5102
+        assert!(
+            payload["settings"]["typescript"]["tsserver"]["compilerOptions"]["baseUrl"].is_null(),
+            "baseUrl must not be in the payload"
+        );
+        assert_eq!(
+            payload["settings"]["typescript"]["tsserver"]["compilerOptions"]["paths"],
+            serde_json::json!({
+                "@/*": ["src/*"],
+                "@pkg/*": ["packages/*"],
+            })
         );
     }
 

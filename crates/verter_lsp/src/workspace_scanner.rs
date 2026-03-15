@@ -9,8 +9,9 @@
 //! 4. Follows node_modules dependencies transitively via import resolution
 //! 5. Accepts priority signals from `did_open` to dynamically reorder the queue
 //!
-//! Vue files are processed first because they produce `.vue.ts` public API files
-//! that barrel re-exports depend on.
+//! Vue files are processed first because they produce the provider-side Vue
+//! artifacts (`.vue.tsx` for IDE analysis and `.vue.ts` for public API) that
+//! cross-file resolution depends on.
 //!
 //! This makes `initialized()` return in <1s instead of blocking for the full scan.
 
@@ -411,6 +412,7 @@ async fn scanner_loop(
                 &config.host,
                 sync,
                 &config.resolver_snapshot,
+                config.is_tsgo,
                 &config.provider_sync_states,
             )
             .await;
@@ -421,6 +423,7 @@ async fn scanner_loop(
                 &config.host,
                 sync,
                 &config.resolver_snapshot,
+                config.is_tsgo,
                 &config.provider_sync_states,
                 &mut node_modules_synced,
             )
@@ -475,6 +478,7 @@ pub(crate) async fn resync_non_vue_file(
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
     resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) {
     // Invalidate host cache so ensure_source_loaded_into_host re-reads from disk
@@ -486,8 +490,15 @@ pub(crate) async fn resync_non_vue_file(
     .await
     .ok();
 
-    let _ = sync_non_vue_file_to_provider(canonical_id, host, sync, resolver_snapshot, sync_states)
-        .await;
+    let _ = sync_non_vue_file_to_provider(
+        canonical_id,
+        host,
+        sync,
+        resolver_snapshot,
+        is_tsgo,
+        sync_states,
+    )
+    .await;
 }
 
 /// Sync a non-Vue source file to the type provider.
@@ -499,6 +510,7 @@ async fn sync_non_vue_file_to_provider(
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
     resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) -> Vec<crate::project_resolver::ResolveResult> {
     let snapshot = match resolver_snapshot.read().clone() {
@@ -557,6 +569,10 @@ async fn sync_non_vue_file_to_provider(
     let next_state =
         crate::provider_sync::non_vue_sync_state_for_source(&snapshot.resolver, canonical_id);
     if let Some(next) = next_state {
+        if is_tsgo {
+            crate::server::configure_provider_paths_for_source(sync, &snapshot, canonical_id, true)
+                .await;
+        }
         let transition = prepare_sync_transition(sync_states, canonical_id, next);
         close_stale_paths(sync, &transition.stale_paths).await;
         let mut committed = transition.next;
@@ -616,6 +632,7 @@ async fn follow_node_modules_deps(
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
     resolver_snapshot: &parking_lot::RwLock<Option<ResolverSnapshot>>,
+    is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
     node_modules_synced: &mut HashSet<String>,
 ) {
@@ -651,6 +668,7 @@ async fn follow_node_modules_deps(
             host,
             sync,
             resolver_snapshot,
+            is_tsgo,
             sync_states,
         )
         .await;
@@ -693,6 +711,10 @@ async fn sync_file_to_provider(
     else {
         return;
     };
+    if is_tsgo {
+        crate::server::configure_provider_paths_for_source(sync, &snapshot, canonical_id, true)
+            .await;
+    }
     let transition = prepare_sync_transition(sync_states, canonical_id, next_state);
     close_stale_paths(sync, &transition.stale_paths).await;
     let mut committed_state = transition.next;
@@ -712,15 +734,18 @@ async fn sync_file_to_provider(
         }
     }
 
-    // Sync IDE (tsserver only — TSGO resolves via DTS)
-    if !is_tsgo {
-        if let Some(ide) = ide {
-            let Some(tsx_path) = committed_state.ide_path.clone() else {
-                return;
-            };
-            if sync.load_tsx(&tsx_path, &ide.code).await.is_ok() {
-                committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-            }
+    // Sync IDE artifact (both TSGO and tsserver)
+    if let Some(ide) = ide {
+        let Some(tsx_path) = committed_state.ide_path.clone() else {
+            return;
+        };
+        let result = if is_tsgo {
+            sync.open_tsx(&tsx_path, &ide.code).await
+        } else {
+            sync.load_tsx(&tsx_path, &ide.code).await
+        };
+        if result.is_ok() {
+            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
         }
     }
 
@@ -745,7 +770,7 @@ async fn close_stale_paths(sync: &ProjectSync, stale_paths: &[(ProviderPathKind,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tsgo::mock::MockTypeProvider;
+    use crate::tsgo::mock::{MockCall, MockTypeProvider};
     use crate::ProjectSyncMode;
     use std::fs;
     use tempfile::TempDir;
@@ -1048,7 +1073,10 @@ mod tests {
             file_kind: FileKind::VueSfc,
             aliases: Vec::new(),
         });
-        let profile = CompileProfile::default();
+        let profile = CompileProfile {
+            target: verter_host::CompileTarget::BUNDLER | verter_host::CompileTarget::TSX,
+            ..CompileProfile::default()
+        };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
         let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
@@ -1104,7 +1132,10 @@ mod tests {
             file_kind: FileKind::VueSfc,
             aliases: Vec::new(),
         });
-        let profile = CompileProfile::default();
+        let profile = CompileProfile {
+            target: verter_host::CompileTarget::BUNDLER | verter_host::CompileTarget::TSX,
+            ..CompileProfile::default()
+        };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
         let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
@@ -1153,6 +1184,190 @@ mod tests {
     // ═══════════════════════════════════════════════════════════
     // collect_source_paths — non-Vue file collection
     // ═══════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn scanner_syncs_vue_ide_artifact_for_tsgo() {
+        let host = VerterHost::new(verter_host::HostConfig::default());
+        let canonical_id = "/workspace/src/App.vue";
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::<str>::from(
+                r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child msg="hi" /></template>"#,
+            ),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        });
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some("/workspace/src/Child.vue".to_string()),
+            input_id: "/workspace/src/Child.vue".to_string(),
+            source: Arc::<str>::from(
+                r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+            ),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        });
+        let profile = CompileProfile {
+            target: verter_host::CompileTarget::BUNDLER | verter_host::CompileTarget::TSX,
+            ..CompileProfile::default()
+        };
+        assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
+        assert!(host
+            .ensure_compiled("/workspace/src/Child.vue", &profile)
+            .is_ok());
+
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.json".to_string()),
+            ),
+        ]);
+        let snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
+            generation: 1,
+            resolver,
+        }));
+        let sync_states = DashMap::new();
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+        sync_file_to_provider(
+            canonical_id,
+            &host,
+            &profile,
+            &sync,
+            &snapshot,
+            true,
+            &sync_states,
+        )
+        .await;
+
+        let calls = provider.calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.tsx"
+            )),
+            "TSGO scanner sync should open the Vue IDE artifact, calls={calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.ts"
+            )),
+            "TSGO scanner sync should keep syncing the public API artifact too, calls={calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scanner_configures_tsgo_paths_before_opening_vue_artifacts() {
+        let tmp = TempDir::new().expect("temp project should exist");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src")).expect("src dir should exist");
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}"#,
+        )
+        .expect("tsconfig should be written");
+
+        let canonical_id = root.join("src").join("App.vue");
+        let canonical_id = canonical_id.to_string_lossy().replace('\\', "/");
+        let host = VerterHost::new(verter_host::HostConfig::default());
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.clone()),
+            input_id: canonical_id.clone(),
+            source: Arc::<str>::from(
+                r#"<script setup lang="ts">
+import Child from '@/Child.vue'
+</script>
+<template><div /></template>"#,
+            ),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        });
+        let profile = CompileProfile {
+            target: verter_host::CompileTarget::BUNDLER | verter_host::CompileTarget::TSX,
+            ..CompileProfile::default()
+        };
+        assert!(host.ensure_compiled(&canonical_id, &profile).is_ok());
+
+        let tsconfig_path = root
+            .join("tsconfig.json")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root_path = root.to_string_lossy().replace('\\', "/");
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                root_path.clone(),
+                root_path.clone(),
+                Some(tsconfig_path),
+            ),
+        ]);
+        let snapshot = parking_lot::RwLock::new(Some(ResolverSnapshot {
+            generation: 1,
+            resolver,
+        }));
+        let sync_states = DashMap::new();
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        assert!(
+            snapshot
+                .read()
+                .as_ref()
+                .and_then(|snapshot| snapshot.resolver.owner_for_file(&canonical_id))
+                .is_some(),
+            "resolver should match the Vue file to the temp tsconfig owner"
+        );
+        let (expected_base_url, expected_paths) =
+            crate::config::TsConfigPathResolver::raw_paths_json(&root.join("tsconfig.json"))
+                .expect("raw_paths_json should read the temp tsconfig");
+
+        sync_file_to_provider(
+            &canonical_id,
+            &host,
+            &profile,
+            &sync,
+            &snapshot,
+            true,
+            &sync_states,
+        )
+        .await;
+
+        let calls = provider.calls();
+        let configure_index = calls
+            .iter()
+            .position(|call| matches!(call, MockCall::ConfigurePaths { .. }))
+            .expect("TSGO scanner sync should configure owner paths from tsconfig");
+        assert!(
+            matches!(
+                &calls[configure_index],
+                MockCall::ConfigurePaths { base_url, paths }
+                    if base_url == &expected_base_url && paths == &expected_paths
+            ),
+            "unexpected configure_paths payload, calls={calls:?}"
+        );
+        let first_open_index = calls
+            .iter()
+            .position(|call| matches!(call, MockCall::OpenFile { .. }))
+            .expect("TSGO scanner sync should open provider files");
+        assert!(
+            configure_index < first_open_index,
+            "path config must be sent before any provider file opens, calls={calls:?}"
+        );
+    }
 
     fn create_mixed_test_dir() -> TempDir {
         let tmp = TempDir::new().unwrap();

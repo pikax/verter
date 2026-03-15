@@ -141,7 +141,9 @@ Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/trait
 - `tsserver/resilient.rs` — `ResilientTsserverProvider` (crash detection + auto-restart)
 - `workspace_scanner.rs` — Async background workspace scanner with priority-based file loading
 
-**Background file sync**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
+**Background file sync**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. For TSGO, both `.vue.tsx` (IDE artifact) and `.vue.ts` (public API) are synced; cross-file imports resolve through `.vue.ts` (via `rewrite_vue_imports_for_tsgo`). This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
+
+**Barrel-import eager sync** (TSGO): When a Vue file imports components through a barrel (non-Vue re-export file like `components/index.ts`), the LSP eagerly syncs the barrel and its Vue dependencies to TSGO during `did_open` and `resync_aliased_imports_for_open_files`. The process: (1) discover barrels from `TemplateComponentUsage.import_source` resolving to non-Vue files, (2) scan barrel's `module_references` for `.vue` specifiers, (3) sync Vue dependencies first, (4) sync barrel file. Without this, TSGO only receives barrels from the background scanner, which may not complete before hover/completion requests.
 
 **Freeze prevention** (fast typing): Three layers prevent tokio runtime starvation during rapid typing:
 1. **SyncCoordinator** (`sync_coordinator.rs`): Single long-lived task replaces spawn-per-keystroke debounce. Uses mpsc channel + 300ms deadline map to guarantee exactly one sync per file after typing stops. After syncing, computes and publishes merged (Verter lint + TS type) diagnostics via push. Holds shared `Arc<VerterHost>`, `ProjectSync`, `TypeProvider`, `cached_verter_diags`, and `PositionEncodingKind`.
@@ -475,4 +477,5 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | `/position-encoding` | Working with spans, positions, coordinate conversions, path normalization details |
 | `/build-and-profiling` | Debugging build order, rebuild sequences, profiling, MCP server setup |
 | `/testing` | Writing tests, test patterns, sourcemap testing, E2E workflow, server cleanup |
+| `/wsl-e2e-testing` | Running E2E tests in WSL to reproduce Linux/CI failures, fixture matrix, acceptance criteria |
 | `/rust-performance` | Optimizing Rust code, allocation patterns, batch operations, CodeTransform API |
