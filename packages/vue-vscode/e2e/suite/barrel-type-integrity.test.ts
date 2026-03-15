@@ -1,10 +1,8 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
-  waitForTypeProviderSync,
-  waitForFileReady,
-  openVueFile,
+  ensureTypeProviderSynced,
+  openReadyCached,
   measureHover,
   getCompletions,
   findPosition,
@@ -23,18 +21,14 @@ function completionLabels(list: vscode.CompletionList): string[] {
 }
 
 suite(`Barrel Type Integrity [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   const isBarrelFixture = FIXTURE_NAME === "barrel-exports";
 
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
     if (!isBarrelFixture) return;
-    await waitForExtensionReady();
-    await waitForTypeProviderSync();
-    doc = await openVueFile("src/App.vue");
-    await waitForFileReady(doc);
+    await ensureTypeProviderSynced();
+    doc = await openReadyCached("src/App.vue");
   });
 
   // ── Hover Type Integrity ──────────────────────────────────────

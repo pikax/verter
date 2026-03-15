@@ -2,13 +2,12 @@ import { expect } from "chai";
 import * as path from "path";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
-  waitForTypeProviderSync,
-  waitForFileReady,
+  openReadyCached,
   openVueFile,
   getAppVuePath,
   getCompVuePath,
   waitForDiagnostics,
+  waitForDiagnosticsSettled,
   findPosition,
   sleep,
   FIXTURE_NAME,
@@ -17,21 +16,16 @@ import {
 import { getTimer } from "../timer";
 
 suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    await waitForTypeProviderSync();
+    this.timeout(60_000);
     // Ensure component types are synced to the type provider before running
     // diagnostics tests. Without this, MyComp resolves as Partial<{}> and
     // component prop/emit types are missing.
     const compPath = getCompVuePath();
     if (compPath) {
-      const compDoc = await openVueFile(compPath);
-      await waitForFileReady(compDoc);
+      await openReadyCached(compPath);
       // Re-open App.vue so subsequent tests use it
-      const appDoc = await openVueFile(getAppVuePath());
-      await waitForFileReady(appDoc);
+      await openReadyCached(getAppVuePath());
     }
   });
 
@@ -41,18 +35,13 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
   });
 
   test("opening .vue file does not crash", async function () {
-    const doc = await openVueFile(getAppVuePath());
+    const doc = await openReadyCached(getAppVuePath());
     expect(doc).to.exist;
     expect(doc.languageId).to.equal("vue");
-    // Give it time to process without crashing
-    await waitForFileReady(doc);
   });
 
   test("diagnostics API returns for .vue file", async function () {
-    const doc = await openVueFile(getAppVuePath());
-
-    // Wait for file to be processed
-    await waitForFileReady(doc);
+    const doc = await openReadyCached(getAppVuePath());
 
     const diags = vscode.languages.getDiagnostics(doc.uri);
     // We don't assert on count — valid files may have zero diagnostics.
@@ -80,8 +69,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
   });
 
   test("diagnostics have valid ranges", async function () {
-    const doc = await openVueFile(getAppVuePath());
-    await waitForFileReady(doc);
+    const doc = await openReadyCached(getAppVuePath());
 
     const diags = vscode.languages.getDiagnostics(doc.uri);
     for (const d of diags) {
@@ -124,9 +112,9 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
       await vscode.window.showTextDocument(doc);
       expect(doc.languageId).to.equal("typescript");
 
-      const diags = await waitForDiagnostics(doc.uri, {
-        timeoutMs: 8_000,
-        predicate: () => false,
+      const diags = await waitForDiagnosticsSettled(doc.uri, {
+        timeoutMs: 5_000,
+        stableMs: 500,
       });
 
       const summary = diags.map((d) => ({
@@ -155,6 +143,7 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
   });
 
   test("undeclared variable in script setup gets TS2304", async function () {
+    this.timeout(60_000);
     const doc = await openVueFile(getAppVuePath());
 
     // Find the line with "const count = ref(0)" to insert the undeclared variable after
@@ -194,6 +183,7 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
   });
 
   test("$event on component emit has no implicit any (TS7006)", async function () {
+    this.timeout(60_000);
     if (!TYPE_PROVIDER) return this.skip();
     const doc = await openVueFile(getAppVuePath());
 
@@ -272,6 +262,7 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
   });
 
   test("TS errors persist after inserting newlines", async function () {
+    this.timeout(60_000);
     const doc = await openVueFile(getAppVuePath());
 
     // Insert undeclared variable to create a known TS error
@@ -323,8 +314,8 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
   });
 
   test('missing sass preprocessor shows an inline diagnostic on lang="sass" and clears after switching to scss', async function () {
-    const doc = await openVueFile(getAppVuePath());
-    await waitForFileReady(doc);
+    this.timeout(60_000);
+    const doc = await openReadyCached(getAppVuePath());
 
     const insertPos = doc.lineAt(doc.lineCount - 1).range.end;
     const edit = new vscode.WorkspaceEdit();

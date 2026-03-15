@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
+  ensureFixtureWarm,
   openAndReady,
   getDefinitions,
   getReferences,
@@ -12,13 +12,11 @@ import {
 } from "../helpers";
 
 suite(`Style Block [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
     if (FIXTURE_NAME !== "single-project") return;
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
     doc = await openAndReady("src/StyledComp.vue");
   });
 
@@ -198,7 +196,9 @@ suite(`Style Block [${FIXTURE_NAME}]`, function () {
     console.log(`    Definition on template class 'container': ${locations.length} location(s)`);
 
     if (locations.length === 0) {
-      console.log("    No definition results — template class go-to-definition may not be supported yet");
+      console.log(
+        "    No definition results — template class go-to-definition may not be supported yet",
+      );
       return;
     }
 
@@ -223,7 +223,9 @@ suite(`Style Block [${FIXTURE_NAME}]`, function () {
     console.log(`    Definition on template id 'main-title': ${locations.length} location(s)`);
 
     if (locations.length === 0) {
-      console.log("    No definition results — template id go-to-definition may not be supported yet");
+      console.log(
+        "    No definition results — template id go-to-definition may not be supported yet",
+      );
       return;
     }
 

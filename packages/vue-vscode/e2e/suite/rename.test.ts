@@ -1,9 +1,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
-  waitForFileReady,
-  openVueFile,
+  openReadyCached,
   getAppVuePath,
   getPrepareRename,
   getRenameEdits,
@@ -13,14 +11,10 @@ import {
 } from "../helpers";
 
 suite(`Rename [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    doc = await openVueFile(getAppVuePath());
-    await waitForFileReady(doc);
+    doc = await openReadyCached(getAppVuePath());
   });
 
   test("R1: prepare rename on script binding succeeds", async function () {
@@ -73,7 +67,10 @@ suite(`Rename [${FIXTURE_NAME}]`, function () {
         const [, textEdits] = currentFileEdits;
         console.log(`    Current file edits: ${textEdits.length}`);
         // Should have at least 2 edits (declaration + template usage)
-        expect(textEdits.length, "should have at least 2 edits (declaration + usage)").to.be.greaterThanOrEqual(2);
+        expect(
+          textEdits.length,
+          "should have at least 2 edits (declaration + usage)",
+        ).to.be.greaterThanOrEqual(2);
       }
     }
 
@@ -105,7 +102,9 @@ suite(`Rename [${FIXTURE_NAME}]`, function () {
         console.log(`    Current file edits: ${textEdits.length}`);
         // count appears in: declaration, {{ count }}, count.value * 2, :bar="count",
         // count.value++, formatCount(count.value), watch(count, ...)
-        expect(textEdits.length, "should have at least 5 edits for count").to.be.greaterThanOrEqual(5);
+        expect(textEdits.length, "should have at least 5 edits for count").to.be.greaterThanOrEqual(
+          5,
+        );
       }
     }
   });
@@ -134,7 +133,10 @@ suite(`Rename [${FIXTURE_NAME}]`, function () {
         const [, textEdits] = currentFileEdits;
         console.log(`    Current file edits: ${textEdits.length}`);
         // increment: declaration, @click="increment", @click.prevent="increment"
-        expect(textEdits.length, "should have at least 3 edits for increment").to.be.greaterThanOrEqual(3);
+        expect(
+          textEdits.length,
+          "should have at least 3 edits for increment",
+        ).to.be.greaterThanOrEqual(3);
       }
     }
   });
@@ -191,7 +193,9 @@ suite(`Rename [${FIXTURE_NAME}]`, function () {
     }
 
     const edits = await getRenameEdits(doc.uri, pos, "onCustomEvent");
-    console.log(`    Rename handleCustom → onCustomEvent: ${edits ? `${edits.size} file(s)` : "none"}`);
+    console.log(
+      `    Rename handleCustom → onCustomEvent: ${edits ? `${edits.size} file(s)` : "none"}`,
+    );
 
     if (edits) {
       const entries = edits.entries();
@@ -202,7 +206,10 @@ suite(`Rename [${FIXTURE_NAME}]`, function () {
         const [, textEdits] = currentFileEdits;
         console.log(`    Current file edits: ${textEdits.length}`);
         // handleCustom: declaration, @custom="handleCustom($event)", @alert="handleCustom"
-        expect(textEdits.length, "should have at least 2 edits for handleCustom").to.be.greaterThanOrEqual(2);
+        expect(
+          textEdits.length,
+          "should have at least 2 edits for handleCustom",
+        ).to.be.greaterThanOrEqual(2);
       }
     }
   });
@@ -225,18 +232,29 @@ suite(`Rename [${FIXTURE_NAME}]`, function () {
 
     if (edits) {
       const entries = edits.entries();
-      console.log(`    Files affected: ${entries.map(([uri]) => uri.fsPath.split(/[/\\]/).pop()).join(", ")}`);
+      console.log(
+        `    Files affected: ${entries.map(([uri]) => uri.fsPath.split(/[/\\]/).pop()).join(", ")}`,
+      );
 
       // Cross-file rename should affect at least 2 files: App.vue and MyComp.vue
       const appEdits = entries.find(([uri]) => uri.fsPath.includes("App.vue"));
       const myCompEdits = entries.find(([uri]) => uri.fsPath.includes("MyComp.vue"));
 
       if (appEdits && myCompEdits) {
-        console.log(`    App.vue: ${appEdits[1].length} edit(s), MyComp.vue: ${myCompEdits[1].length} edit(s)`);
-        expect(appEdits[1].length, "App.vue should have at least 1 edit").to.be.greaterThanOrEqual(1);
-        expect(myCompEdits[1].length, "MyComp.vue should have at least 1 edit").to.be.greaterThanOrEqual(1);
+        console.log(
+          `    App.vue: ${appEdits[1].length} edit(s), MyComp.vue: ${myCompEdits[1].length} edit(s)`,
+        );
+        expect(appEdits[1].length, "App.vue should have at least 1 edit").to.be.greaterThanOrEqual(
+          1,
+        );
+        expect(
+          myCompEdits[1].length,
+          "MyComp.vue should have at least 1 edit",
+        ).to.be.greaterThanOrEqual(1);
       } else {
-        console.log("    Cross-file rename did not produce edits in both files — may need type provider support");
+        console.log(
+          "    Cross-file rename did not produce edits in both files — may need type provider support",
+        );
       }
     }
   });

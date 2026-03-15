@@ -9,12 +9,10 @@ import {
   openVueFile,
   sleep,
   TYPE_PROVIDER,
-  waitForExtensionReady,
+  ensureFixtureWarm,
 } from "../helpers";
 
 suite(`Imported Props [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
@@ -23,7 +21,7 @@ suite(`Imported Props [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
     doc = await openVueFile("src/ImportedPropsComp.vue");
   });
 

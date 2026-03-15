@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
+  ensureFixtureWarm,
   openVueFile,
   getAppVuePath,
   getDecorationState,
@@ -14,12 +14,10 @@ import {
 } from "../helpers";
 
 suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let state: DecorationState | undefined;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     // Enable binding colors
@@ -40,8 +38,10 @@ suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
       state = await getDecorationState();
       if (state) {
         // Check if any category has ranges (analysis is complete)
-        const totalRanges = Object.values(state.bindingColors)
-          .reduce((sum, ranges) => sum + (ranges?.length ?? 0), 0);
+        const totalRanges = Object.values(state.bindingColors).reduce(
+          (sum, ranges) => sum + (ranges?.length ?? 0),
+          0,
+        );
         if (totalRanges > 0) break;
       }
     }
@@ -74,7 +74,10 @@ suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
     if (computedRanges.length === 0) {
       console.log('    Warning: no "computed" ranges — analysis may not classify reactivityKind');
     }
-    expect(computedRanges.length, 'Should have "computed" decorated ranges for doubled').to.be.at.least(0);
+    expect(
+      computedRanges.length,
+      'Should have "computed" decorated ranges for doubled',
+    ).to.be.at.least(0);
   });
 
   test('prop "title" gets "prop" category', function () {
@@ -94,7 +97,9 @@ suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
     if (fnRanges.length === 0) {
       console.log('    Warning: no "function" ranges — analysis may not classify functions');
     }
-    expect(fnRanges.length, 'Should have "function" decorated ranges for increment').to.be.at.least(0);
+    expect(fnRanges.length, 'Should have "function" decorated ranges for increment').to.be.at.least(
+      0,
+    );
   });
 
   test("no unexpected decoration categories", function () {
@@ -107,12 +112,10 @@ suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
 });
 
 suite(`Vue API Decorations [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let state: DecorationState | undefined;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     const config = vscode.workspace.getConfiguration("verter.decorations");
@@ -127,8 +130,10 @@ suite(`Vue API Decorations [${FIXTURE_NAME}]`, function () {
       await sleep(300);
       state = await getDecorationState();
       if (state) {
-        const totalRanges = Object.values(state.vueApiCalls)
-          .reduce((sum, ranges) => sum + (ranges?.length ?? 0), 0);
+        const totalRanges = Object.values(state.vueApiCalls).reduce(
+          (sum, ranges) => sum + (ranges?.length ?? 0),
+          0,
+        );
         if (totalRanges > 0) break;
       }
     }
@@ -145,7 +150,10 @@ suite(`Vue API Decorations [${FIXTURE_NAME}]`, function () {
     if (lifecycleRanges.length === 0) {
       console.log('    Warning: no "lifecycle" ranges — Vue API analysis may not be complete');
     }
-    expect(lifecycleRanges.length, "Should have lifecycle decorations for onMounted").to.be.at.least(0);
+    expect(
+      lifecycleRanges.length,
+      "Should have lifecycle decorations for onMounted",
+    ).to.be.at.least(0);
   });
 
   test('watch gets "watcher" category', function () {
@@ -160,14 +168,12 @@ suite(`Vue API Decorations [${FIXTURE_NAME}]`, function () {
 });
 
 suite(`Prop Constness Decorations [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let state: DecorationState | undefined;
 
   suiteSetup(async function () {
     // Prop constness requires cross-file analysis via the type provider
     if (!TYPE_PROVIDER) return this.skip();
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     const config = vscode.workspace.getConfiguration("verter.decorations");
@@ -182,8 +188,10 @@ suite(`Prop Constness Decorations [${FIXTURE_NAME}]`, function () {
       await sleep(300);
       state = await getDecorationState();
       if (state) {
-        const totalRanges = Object.values(state.propConstness)
-          .reduce((sum, ranges) => sum + (ranges?.length ?? 0), 0);
+        const totalRanges = Object.values(state.propConstness).reduce(
+          (sum, ranges) => sum + (ranges?.length ?? 0),
+          0,
+        );
         if (totalRanges > 0) break;
       }
     }

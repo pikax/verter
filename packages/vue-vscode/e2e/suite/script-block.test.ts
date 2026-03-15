@@ -1,9 +1,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
-  waitForFileReady,
-  openVueFile,
+  openReadyCached,
   getAppVuePath,
   measureHover,
   getCompletions,
@@ -24,14 +22,10 @@ function completionLabels(list: vscode.CompletionList): string[] {
 }
 
 suite(`Script Block [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    doc = await openVueFile(getAppVuePath());
-    await waitForFileReady(doc);
+    doc = await openReadyCached(getAppVuePath());
   });
 
   // ── Script Hover ──────────────────────────────────────────────

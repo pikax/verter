@@ -390,6 +390,61 @@ export async function waitForNoDiagnosticsMatching(
 }
 
 /**
+ * Wait until diagnostics are stable (no changes for stableMs).
+ * Returns whatever diagnostics exist at that point (may be empty).
+ * Use for "I want to see what diagnostics look like after processing"
+ * without requiring any specific predicate.
+ */
+export async function waitForDiagnosticsSettled(
+  uri: vscode.Uri,
+  options?: {
+    source?: string;
+    timeoutMs?: number;
+    stableMs?: number;
+  },
+): Promise<vscode.Diagnostic[]> {
+  const { source, timeoutMs = 5_000, stableMs = 500 } = options ?? {};
+
+  const getFiltered = () => {
+    let diags = vscode.languages.getDiagnostics(uri);
+    if (source) {
+      diags = diags.filter((d) => d.source === source);
+    }
+    return diags;
+  };
+
+  return new Promise<vscode.Diagnostic[]>((resolve) => {
+    let stableTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = () => {
+      if (stableTimer) clearTimeout(stableTimer);
+      clearTimeout(deadlineTimer);
+      sub.dispose();
+      resolve(getFiltered());
+    };
+
+    // Start the quiescence timer — if no events fire for stableMs, resolve
+    const resetStableTimer = () => {
+      if (stableTimer) clearTimeout(stableTimer);
+      stableTimer = setTimeout(finish, stableMs);
+    };
+
+    // Absolute deadline
+    const deadlineTimer = setTimeout(finish, timeoutMs);
+
+    const sub = vscode.languages.onDidChangeDiagnostics((e) => {
+      const matched = e.uris.some((u) => u.toString() === uri.toString());
+      if (!matched) return;
+      // Reset the quiescence timer on each relevant change
+      resetStableTimer();
+    });
+
+    // Start the initial quiescence timer
+    resetStableTimer();
+  });
+}
+
+/**
  * Execute the decoration state command (only available in E2E test mode).
  */
 export async function getDecorationState(): Promise<DecorationState | undefined> {
@@ -936,6 +991,53 @@ export function findNthPosition(
     if (idx === -1) return undefined;
   }
   return doc.positionAt(idx + charOffset);
+}
+
+// ── Warm Session API ───────────────────────────────────────────
+// Singleton state — one warm context per fixture@provider run.
+// The root `beforeAll` in suite/index.ts calls these once; individual
+// suites skip redundant polling by checking the cached flags.
+
+let _fixtureWarm = false;
+let _typeProviderSynced = false;
+const _fileReadyCache = new Map<string, boolean>();
+
+/** Run once per fixture@provider. Idempotent. */
+export async function ensureFixtureWarm(): Promise<void> {
+  if (_fixtureWarm) return;
+  await waitForExtensionReady();
+  _fixtureWarm = true;
+}
+
+/** Run once per fixture@provider after ensureFixtureWarm. Idempotent. */
+export async function ensureTypeProviderSynced(): Promise<void> {
+  if (_typeProviderSynced) return;
+  await ensureFixtureWarm();
+  await waitForTypeProviderSync();
+  _typeProviderSynced = true;
+}
+
+/** Opens file, waits for readiness, caches result. */
+export async function openReadyCached(
+  relativePath: string,
+  options?: Parameters<typeof waitForFileReady>[1],
+): Promise<vscode.TextDocument> {
+  const doc = await openVueFile(relativePath);
+  const cacheKey = `${relativePath}:${JSON.stringify(options ?? {})}`;
+  if (!_fileReadyCache.has(cacheKey)) {
+    await waitForFileReady(doc, options);
+    _fileReadyCache.set(cacheKey, true);
+  }
+  return doc;
+}
+
+/** Invalidate a cached file (after mutation tests). */
+export function invalidateFileCache(relativePath: string): void {
+  for (const key of _fileReadyCache.keys()) {
+    if (key.startsWith(relativePath + ":")) {
+      _fileReadyCache.delete(key);
+    }
+  }
 }
 
 // ── Utilities ──────────────────────────────────────────────────

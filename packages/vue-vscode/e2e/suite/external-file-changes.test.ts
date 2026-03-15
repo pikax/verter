@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import {
-  waitForExtensionReady,
+  ensureFixtureWarm,
   waitForFileReady,
   openVueFile,
   openAndReady,
@@ -51,13 +51,13 @@ async function waitForExternalChange(ms = 2000): Promise<void> {
 }
 
 suite(`External File Changes [${FIXTURE_NAME}]`, function () {
-  this.timeout(90_000);
+  this.timeout(60_000);
 
   const isSingleProject = FIXTURE_NAME === "single-project";
 
   suiteSetup(async function () {
     if (!isSingleProject) return;
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
   });
 
   // ── Create: new .ts file on disk ──────────────────────────────

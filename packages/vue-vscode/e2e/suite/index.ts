@@ -2,6 +2,13 @@ import * as path from "path";
 import Mocha from "mocha";
 import * as fs from "fs";
 import { getTimer } from "../timer";
+import {
+  ensureFixtureWarm,
+  ensureTypeProviderSynced,
+  openReadyCached,
+  getAppVuePath,
+  TYPE_PROVIDER,
+} from "../helpers";
 
 /** Recursively find all *.test.js files under a directory. */
 function findTestFiles(dir: string): string[] {
@@ -20,7 +27,7 @@ function findTestFiles(dir: string): string[] {
 export async function run(): Promise<void> {
   const mocha = new Mocha({
     ui: "tdd",
-    timeout: 120_000,
+    timeout: 15_000,
     color: true,
   });
 
@@ -33,6 +40,19 @@ export async function run(): Promise<void> {
   for (const f of files) {
     mocha.addFile(f);
   }
+
+  // Root hooks run once before/after all test suites.
+  // Warm the fixture so individual suites skip redundant polling.
+  mocha.rootHooks({
+    async beforeAll(this: Mocha.Context) {
+      this.timeout(60_000);
+      await ensureFixtureWarm();
+      if (TYPE_PROVIDER) {
+        await ensureTypeProviderSynced();
+      }
+      await openReadyCached(getAppVuePath());
+    },
+  });
 
   return new Promise((resolve, reject) => {
     mocha.run((failures: number) => {

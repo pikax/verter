@@ -12,7 +12,7 @@ import {
   measureTimeToCompletionsMatching,
   openVueFile,
   triggerDecorationRefresh,
-  waitForExtensionReady,
+  ensureFixtureWarm,
   waitForFileReady,
 } from "../helpers";
 
@@ -29,23 +29,17 @@ interface CompletionSummary {
   maxMs: number;
 }
 
-const benchmarkSuite =
-  process.env.VERTER_E2E_COMPLETION_BENCHMARK === "1" ? suite : suite.skip;
+const benchmarkSuite = process.env.VERTER_E2E_COMPLETION_BENCHMARK === "1" ? suite : suite.skip;
 const reportFile = process.env.VERTER_E2E_COMPLETION_FILE;
 const iterations = readIntEnv("VERTER_E2E_COMPLETION_BENCHMARK_ITERATIONS", 10);
-const relativePath =
-  process.env.VERTER_E2E_COMPLETION_BENCHMARK_FILE ?? "src/App.vue";
-const anchor =
-  process.env.VERTER_E2E_COMPLETION_BENCHMARK_ANCHOR ?? "count.value * 2";
+const relativePath = process.env.VERTER_E2E_COMPLETION_BENCHMARK_FILE ?? "src/App.vue";
+const anchor = process.env.VERTER_E2E_COMPLETION_BENCHMARK_ANCHOR ?? "count.value * 2";
 const anchorOffset = readIntEnv("VERTER_E2E_COMPLETION_BENCHMARK_OFFSET", 6);
-const expectedLabel =
-  process.env.VERTER_E2E_COMPLETION_BENCHMARK_LABEL ?? "value";
+const expectedLabel = process.env.VERTER_E2E_COMPLETION_BENCHMARK_LABEL ?? "value";
 const triggerCharacter = process.env.VERTER_E2E_COMPLETION_BENCHMARK_TRIGGER;
-const warmupAnchor =
-  process.env.VERTER_E2E_COMPLETION_BENCHMARK_WARMUP_ANCHOR ?? "props.title";
+const warmupAnchor = process.env.VERTER_E2E_COMPLETION_BENCHMARK_WARMUP_ANCHOR ?? "props.title";
 const warmupOffset = readIntEnv("VERTER_E2E_COMPLETION_BENCHMARK_WARMUP_OFFSET", 6);
-const warmupLabel =
-  process.env.VERTER_E2E_COMPLETION_BENCHMARK_WARMUP_LABEL ?? "title";
+const warmupLabel = process.env.VERTER_E2E_COMPLETION_BENCHMARK_WARMUP_LABEL ?? "title";
 
 benchmarkSuite(`Completion Benchmark [${FIXTURE_NAME}]`, function () {
   this.timeout(120_000);
@@ -56,13 +50,10 @@ benchmarkSuite(`Completion Benchmark [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
     const doc = await openVueFile(relativePath);
     const warmupPosition = findPosition(doc, warmupAnchor, warmupOffset);
-    expect(
-      warmupPosition,
-      `Expected warmup anchor "${warmupAnchor}"`,
-    ).to.exist;
+    expect(warmupPosition, `Expected warmup anchor "${warmupAnchor}"`).to.exist;
     await waitForFileReady(doc, {
       probePosition: warmupPosition!,
       expectedLabel: warmupLabel,
@@ -82,9 +73,7 @@ benchmarkSuite(`Completion Benchmark [${FIXTURE_NAME}]`, function () {
       triggerCharacter,
     );
     if (!hasTypedCompletion(initialCompletions, expectedLabel)) {
-      console.log(
-        `    Initial completions: ${completionPreview(initialCompletions)}`,
-      );
+      console.log(`    Initial completions: ${completionPreview(initialCompletions)}`);
     }
     expect(
       hasTypedCompletion(initialCompletions, expectedLabel),
@@ -165,16 +154,11 @@ benchmarkSuite(`Completion Benchmark [${FIXTURE_NAME}]`, function () {
   });
 });
 
-function hasTypedCompletion(
-  list: vscode.CompletionList | undefined,
-  label: string,
-): boolean {
-  const match = list?.items.find((item) =>
-    (typeof item.label === "string" ? item.label : item.label.label) === label,
+function hasTypedCompletion(list: vscode.CompletionList | undefined, label: string): boolean {
+  const match = list?.items.find(
+    (item) => (typeof item.label === "string" ? item.label : item.label.label) === label,
   );
-  return (
-    match?.kind !== undefined && match.kind !== vscode.CompletionItemKind.Text
-  );
+  return match?.kind !== undefined && match.kind !== vscode.CompletionItemKind.Text;
 }
 
 function completionPreview(list: vscode.CompletionList | undefined): string {
@@ -185,31 +169,23 @@ function completionPreview(list: vscode.CompletionList | undefined): string {
   return list.items
     .slice(0, 10)
     .map((item) => {
-      const label =
-        typeof item.label === "string" ? item.label : item.label.label;
+      const label = typeof item.label === "string" ? item.label : item.label.label;
       const kind =
         item.kind !== undefined
-          ? vscode.CompletionItemKind[item.kind] ?? String(item.kind)
+          ? (vscode.CompletionItemKind[item.kind] ?? String(item.kind))
           : "undefined";
       return `${label}:${kind}`;
     })
     .join(", ");
 }
 
-function summarizeCompletionSamples(
-  samples: readonly CompletionSample[],
-): CompletionSummary {
-  const latencies = samples
-    .map((sample) => sample.latencyMs)
-    .sort((left, right) => left - right);
+function summarizeCompletionSamples(samples: readonly CompletionSample[]): CompletionSummary {
+  const latencies = samples.map((sample) => sample.latencyMs).sort((left, right) => left - right);
 
   const avgMs = Math.round(
     latencies.reduce((total, latency) => total + latency, 0) / latencies.length,
   );
-  const p95Index = Math.min(
-    Math.ceil(latencies.length * 0.95) - 1,
-    latencies.length - 1,
-  );
+  const p95Index = Math.min(Math.ceil(latencies.length * 0.95) - 1, latencies.length - 1);
 
   return {
     avgMs,

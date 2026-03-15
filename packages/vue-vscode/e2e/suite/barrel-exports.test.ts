@@ -2,10 +2,9 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import * as path from "path";
 import {
-  waitForExtensionReady,
-  waitForTypeProviderSync,
+  ensureTypeProviderSynced,
+  openReadyCached,
   waitForFileReady,
-  openVueFile,
   measureHover,
   FIXTURE_NAME,
   TYPE_PROVIDER,
@@ -40,8 +39,6 @@ function findPosition(
 }
 
 suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   // Only run on the barrel-exports fixture
   const isBarrelFixture = FIXTURE_NAME === "barrel-exports";
 
@@ -49,10 +46,8 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
   suiteSetup(async function () {
     if (!isBarrelFixture) return;
-    await waitForExtensionReady();
-    await waitForTypeProviderSync();
-    doc = await openVueFile("src/App.vue");
-    await waitForFileReady(doc);
+    await ensureTypeProviderSynced();
+    doc = await openReadyCached("src/App.vue");
   });
 
   test("no 'Cannot find module' errors on barrel import", async function () {

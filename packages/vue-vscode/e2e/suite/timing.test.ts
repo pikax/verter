@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import {
-  waitForExtensionReady,
+  ensureFixtureWarm,
   readTestLog,
   parseStartupTiming,
   isLspReady,
@@ -10,10 +10,8 @@ import {
 import { getTimer } from "../timer";
 
 suite(`Startup Timing [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   suiteSetup(async function () {
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
   });
 
   test("measures activation to ready time", function () {

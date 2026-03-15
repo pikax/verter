@@ -1,23 +1,12 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
-import {
-  waitForExtensionReady,
-  waitForFileReady,
-  openVueFile,
-  getAppVuePath,
-  getDocumentSymbols,
-  FIXTURE_NAME,
-} from "../helpers";
+import { openReadyCached, getAppVuePath, getDocumentSymbols, FIXTURE_NAME } from "../helpers";
 
 suite(`Document Symbols [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    doc = await openVueFile(getAppVuePath());
-    await waitForFileReady(doc);
+    doc = await openReadyCached(getAppVuePath());
   });
 
   test("DS1: has document symbols", async function () {
@@ -43,7 +32,9 @@ suite(`Document Symbols [${FIXTURE_NAME}]`, function () {
       return result;
     }
     const names = collectNames(symbols);
-    console.log(`    Symbol names: ${names.slice(0, 10).join(", ")}${names.length > 10 ? "..." : ""}`);
+    console.log(
+      `    Symbol names: ${names.slice(0, 10).join(", ")}${names.length > 10 ? "..." : ""}`,
+    );
 
     // Script bindings should appear as document symbols
     expect(names, "should contain 'count'").to.include("count");

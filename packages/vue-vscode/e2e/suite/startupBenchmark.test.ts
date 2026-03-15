@@ -4,7 +4,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
+  ensureFixtureWarm,
   openVueFile,
   parseStartupTiming,
   FIXTURE_NAME,
@@ -12,15 +12,14 @@ import {
 } from "../helpers";
 import { getTimer } from "../timer";
 
-const startupSuite =
-  process.env.VERTER_E2E_STARTUP_BENCHMARK === "1" ? suite : suite.skip;
+const startupSuite = process.env.VERTER_E2E_STARTUP_BENCHMARK === "1" ? suite : suite.skip;
 
 startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
   this.timeout(90_000);
 
   suiteSetup(async function () {
     await openVueFile(getAppVuePath());
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
   });
 
   test("captures typed-completion startup markers and timing report fields", async function () {
@@ -35,10 +34,9 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
     };
 
     expect(timing.activationStartMs, "activation_start marker should be present").to.be.a("number");
-    expect(
-      timing.typeProviderStartedMs,
-      "type_provider_started marker should be present",
-    ).to.be.a("number");
+    expect(timing.typeProviderStartedMs, "type_provider_started marker should be present").to.be.a(
+      "number",
+    );
     expect(timing.lspReadyMs, "ready marker should be present").to.be.a("number");
     expect(
       timing.firstTypedCompletionMs,
@@ -86,13 +84,9 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
 
     const report = getTimer().getReport();
     expect(report.startup.activationStartMs).to.equal(timing.activationStartMs);
-    expect(report.startup.typeProviderStartedMs).to.equal(
-      timing.typeProviderStartedMs,
-    );
+    expect(report.startup.typeProviderStartedMs).to.equal(timing.typeProviderStartedMs);
     expect(report.startup.lspReadyMs).to.equal(timing.lspReadyMs);
-    expect(report.startup.firstTypedCompletionMs).to.equal(
-      timing.firstTypedCompletionMs,
-    );
+    expect(report.startup.firstTypedCompletionMs).to.equal(timing.firstTypedCompletionMs);
     expect(report.startup.activationToTypeProviderStartedMs).to.equal(
       timing.activationToTypeProviderStartedMs,
     );

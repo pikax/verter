@@ -1,8 +1,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
-  openAndReady,
+  openReadyCached,
   getAppVuePath,
   getInlayHints,
   FIXTURE_NAME,
@@ -10,13 +9,10 @@ import {
 } from "../helpers";
 
 suite(`Inlay Hints [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    doc = await openAndReady(getAppVuePath());
+    doc = await openReadyCached(getAppVuePath());
   });
 
   test("inlay hints present for ref declarations in script", async function () {

@@ -1,9 +1,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
-  waitForFileReady,
-  openVueFile,
+  openReadyCached,
   getAppVuePath,
   getReferences,
   findPosition,
@@ -11,14 +9,10 @@ import {
 } from "../helpers";
 
 suite(`References [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    doc = await openVueFile(getAppVuePath());
-    await waitForFileReady(doc);
+    doc = await openReadyCached(getAppVuePath());
   });
 
   test("Ref1: binding has multiple references", async function () {

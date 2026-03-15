@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
+  ensureFixtureWarm,
   openAndReady,
   getCodeActions,
   FIXTURE_NAME,
@@ -14,13 +14,11 @@ function isCodeAction(item: vscode.CodeAction | vscode.Command): item is vscode.
 }
 
 suite(`Code Actions [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
     if (FIXTURE_NAME !== "single-project") return;
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
     doc = await openAndReady("src/OrganizeImports.vue");
   });
 

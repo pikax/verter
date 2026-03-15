@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
+  ensureFixtureWarm,
   readTestLog,
   assertLogContains,
   assertLogNotContains,
@@ -10,10 +10,8 @@ import {
 } from "../helpers";
 
 suite(`Activation & LSP Health [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   suiteSetup(async function () {
-    await waitForExtensionReady();
+    await ensureFixtureWarm();
   });
 
   test("extension activates successfully", function () {
@@ -23,25 +21,16 @@ suite(`Activation & LSP Health [${FIXTURE_NAME}]`, function () {
   });
 
   test("Verter output channel was created", function () {
-    assertLogContains(
-      "Verter extension activating",
-      "Log should contain activation message",
-    );
+    assertLogContains("Verter extension activating", "Log should contain activation message");
   });
 
   test("LSP binary was found and started", function () {
-    assertLogContains(
-      "LSP binary:",
-      "Log should indicate which LSP binary was used",
-    );
+    assertLogContains("LSP binary:", "Log should indicate which LSP binary was used");
   });
 
   test("server sends $/verter/ready notification", function () {
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
-    assertLogContains(
-      "Verter ready",
-      "Extension should log the ready notification",
-    );
+    assertLogContains("Verter ready", "Extension should log the ready notification");
   });
 
   test("server sends heartbeat", async function () {
@@ -98,10 +87,7 @@ suite(`Activation & LSP Health [${FIXTURE_NAME}]`, function () {
 
   test("no panics or crashes in log", function () {
     assertLogNotContains("panicked at", "Should not have Rust panics");
-    assertLogNotContains(
-      "thread 'main' panicked",
-      "Should not have thread panics",
-    );
+    assertLogNotContains("thread 'main' panicked", "Should not have thread panics");
   });
 
   test("tsserver does not inherit debugger env vars", function () {

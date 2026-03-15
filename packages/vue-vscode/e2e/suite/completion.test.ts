@@ -2,10 +2,10 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   assertLogNotContains,
-  waitForExtensionReady,
-  waitForFileReady,
+  openReadyCached,
   openAndReady,
   openVueFile,
+  waitForFileReady,
   getAppVuePath,
   getCompletions,
   findPosition,
@@ -76,14 +76,10 @@ function expectNoInternalLeakage(list: vscode.CompletionList): void {
 }
 
 suite(`Completion [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    doc = await openVueFile(getAppVuePath());
-    await waitForFileReady(doc);
+    doc = await openReadyCached(getAppVuePath());
   });
 
   test("mustache expression shows typed local bindings without globals", async function () {

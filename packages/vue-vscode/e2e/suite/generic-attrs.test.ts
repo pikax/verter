@@ -1,9 +1,7 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
-  waitForFileReady,
-  openVueFile,
+  openReadyCached,
   measureHover,
   getCompletions,
   findPosition,
@@ -11,8 +9,6 @@ import {
 } from "../helpers";
 
 suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
@@ -20,9 +16,7 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
       this.skip();
       return;
     }
-    await waitForExtensionReady();
-    doc = await openVueFile("src/GenericAttrsComp.vue");
-    await waitForFileReady(doc);
+    doc = await openReadyCached("src/GenericAttrsComp.vue");
   });
 
   // ── Return Type Annotation ──────────────────────────────────────
@@ -34,13 +28,11 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
     const ts7010 = allDiags.filter(
       (d) =>
         (typeof d.code === "number" && d.code === 7010) ||
-        (typeof d.code === "object" &&
-          (d.code as { value: unknown }).value === 7010),
+        (typeof d.code === "object" && (d.code as { value: unknown }).value === 7010),
     );
-    expect(
-      ts7010,
-      "Should have no ts(7010) implicit-any-return-type diagnostic",
-    ).to.have.lengthOf(0);
+    expect(ts7010, "Should have no ts(7010) implicit-any-return-type diagnostic").to.have.lengthOf(
+      0,
+    );
   });
 
   // ── Generic Attribute Value ─────────────────────────────────────
@@ -54,9 +46,7 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
     }
 
     const { hovers, latencyMs } = await measureHover(doc.uri, pos);
-    console.log(
-      `    Hover inside generic value: ${latencyMs}ms, ${hovers.length} result(s)`,
-    );
+    console.log(`    Hover inside generic value: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     // Soft check: if type provider is available, hover should return something
     if (hovers.length > 0) {
@@ -81,9 +71,7 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
     }
 
     const { hovers, latencyMs } = await measureHover(doc.uri, pos);
-    console.log(
-      `    Hover on generic attr name: ${latencyMs}ms, ${hovers.length} result(s)`,
-    );
+    console.log(`    Hover on generic attr name: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     if (hovers.length > 0) {
       const content = hovers[0].contents
@@ -91,9 +79,7 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
         .join("\n");
       console.log(`    Hover content: ${content.slice(0, 200)}`);
       // Should show SFC attribute documentation
-      expect(content.toLowerCase(), "Should show docs for generic attribute").to.include(
-        "generic",
-      );
+      expect(content.toLowerCase(), "Should show docs for generic attribute").to.include("generic");
     }
   });
 
@@ -108,9 +94,7 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
     }
 
     const { hovers, latencyMs } = await measureHover(doc.uri, pos);
-    console.log(
-      `    Hover inside attrs value: ${latencyMs}ms, ${hovers.length} result(s)`,
-    );
+    console.log(`    Hover inside attrs value: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     if (hovers.length > 0) {
       const content = hovers[0].contents
@@ -133,9 +117,7 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
     }
 
     const { hovers, latencyMs } = await measureHover(doc.uri, pos);
-    console.log(
-      `    Hover on attrs attr name: ${latencyMs}ms, ${hovers.length} result(s)`,
-    );
+    console.log(`    Hover on attrs attr name: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     if (hovers.length > 0) {
       const content = hovers[0].contents
@@ -143,9 +125,7 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
         .join("\n");
       console.log(`    Hover content: ${content.slice(0, 200)}`);
       // Should show SFC attribute documentation
-      expect(content.toLowerCase(), "Should show docs for attrs attribute").to.include(
-        "attrs",
-      );
+      expect(content.toLowerCase(), "Should show docs for attrs attribute").to.include("attrs");
     }
   });
 
@@ -160,16 +140,17 @@ suite(`Generic & Attrs [${FIXTURE_NAME}]`, function () {
     }
 
     const { hovers, latencyMs } = await measureHover(doc.uri, pos);
-    console.log(
-      `    Hover on generic binding: ${latencyMs}ms, ${hovers.length} result(s)`,
-    );
+    console.log(`    Hover on generic binding: ${latencyMs}ms, ${hovers.length} result(s)`);
 
     if (hovers.length > 0) {
       const content = hovers[0].contents
         .map((c) => (typeof c === "string" ? c : c.value))
         .join("\n");
       console.log(`    Hover content: ${content.slice(0, 200)}`);
-      expect(hovers[0].contents.length, "Hover on generic binding should have content").to.be.greaterThan(0);
+      expect(
+        hovers[0].contents.length,
+        "Hover on generic binding should have content",
+      ).to.be.greaterThan(0);
     }
   });
 

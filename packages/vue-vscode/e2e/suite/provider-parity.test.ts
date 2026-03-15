@@ -1,10 +1,9 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
-  waitForTypeProviderSync,
-  waitForFileReady,
+  openReadyCached,
   openVueFile,
+  waitForFileReady,
   getAppVuePath,
   measureHover,
   getCompletions,
@@ -26,15 +25,10 @@ function completionLabels(list: vscode.CompletionList): string[] {
 }
 
 suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    await waitForTypeProviderSync();
-    doc = await openVueFile(getAppVuePath());
-    await waitForFileReady(doc);
+    doc = await openReadyCached(getAppVuePath());
   });
 
   // ── Core Parity Checks ────────────────────────────────────────

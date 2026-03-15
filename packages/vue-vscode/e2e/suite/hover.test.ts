@@ -2,11 +2,10 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   assertLogNotContains,
-  waitForExtensionReady,
-  waitForTypeProviderSync,
-  waitForFileReady,
+  openReadyCached,
   openAndReady,
   openVueFile,
+  waitForFileReady,
   getAppVuePath,
   measureHover,
   findPosition,
@@ -26,15 +25,10 @@ function expectNoHoverDegrade(content: string, messagePrefix: string): void {
 }
 
 suite(`Hover [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    await waitForTypeProviderSync();
-    doc = await openVueFile(getAppVuePath());
-    await waitForFileReady(doc);
+    doc = await openReadyCached(getAppVuePath());
   });
 
   test("hover on ref binding in template shows typed result", async function () {

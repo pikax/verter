@@ -1,10 +1,9 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
 import {
-  waitForExtensionReady,
-  waitForTypeProviderSync,
-  waitForFileReady,
+  ensureTypeProviderSynced,
   openVueFile,
+  waitForFileReady,
   getAppVuePath,
   FIXTURE_NAME,
   TYPE_PROVIDER,
@@ -12,8 +11,6 @@ import {
 } from "../helpers";
 
 suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
-  this.timeout(60_000);
-
   // Fixtures that exercise import resolution (path aliases or project references)
   const IMPORT_FIXTURES = [
     "composite-paths",
@@ -64,8 +61,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
   };
 
   suiteSetup(async function () {
-    await waitForExtensionReady();
-    await waitForTypeProviderSync();
+    await ensureTypeProviderSynced();
   });
 
   test("no 'Cannot find module' diagnostics on App.vue", async function () {
