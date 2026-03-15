@@ -107,6 +107,7 @@ declare module "@verter/types" {
   export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
+  export declare function eventCallbacks<TArgs extends Array<any>, R extends ($event: TArgs[0]) => any>(event: TArgs, cb: R): R;
   export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
 }
 `;
@@ -640,7 +641,10 @@ describe("generated TSX TypeScript semantics", () => {
     const normalized = code.replace(/\s+/g, "");
 
     expect(messages).toEqual([]);
-    expect(normalized).toContain("onClick={($event)=>{$event.preventDefault()}}");
+    expect(normalized).toContain(
+      "onClick={(...___VERTER___eventArgs)=>___VERTER___eventCallbacks(___VERTER___eventArgs,($event)=>{$event.preventDefault()})}",
+    );
+    expect(normalized).not.toContain("onClick={($event)=>{$event.preventDefault()}}");
   });
 
   it("generates $event handler for template-only SFC (no script block)", async () => {
@@ -651,7 +655,10 @@ describe("generated TSX TypeScript semantics", () => {
     const { code } = await generateRealTsxOutput(source);
     const normalized = code.replace(/\s+/g, "");
 
-    expect(normalized).toContain("onClick={($event)=>{$event.preventDefault()}}");
+    expect(normalized).toContain(
+      "onClick={(...___VERTER___eventArgs)=>___VERTER___eventCallbacks(___VERTER___eventArgs,($event)=>{$event.preventDefault()})}",
+    );
+    expect(normalized).not.toContain("onClick={($event)=>{$event.preventDefault()}}");
   });
 
   it("emits v-if condition and event handler expressions for guarded branches", async () => {

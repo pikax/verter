@@ -8634,13 +8634,20 @@ const a = {}
     let tsx = result.tsx.as_ref().expect("tsx block");
     let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        normalized.contains("onClick={($event)=>{$event}}"),
-        "Bare $event should be emitted in a typed callback scope, got:\n{}",
+        normalized.contains(
+            "onClick={(...___VERTER___eventArgs)=>___VERTER___eventCallbacks(___VERTER___eventArgs,($event)=>{$event})}"
+        ),
+        "Bare $event should be emitted via eventCallbacks with a typed callback scope, got:\n{}",
         tsx.code
     );
     assert!(
         !tsx.code.contains("_ctx.$event"),
         "$event must not be context-prefixed, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !normalized.contains("onClick={($event)=>{$event}}"),
+        "$event handlers should not regress to the bare callback form, got:\n{}",
         tsx.code
     );
 }
@@ -8659,13 +8666,20 @@ const a = {}
     let tsx = result.tsx.as_ref().expect("tsx block");
     let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        normalized.contains("onInput={($event)=>{$event.target}}"),
-        "$event member expressions must stay inside callback scope, got:\n{}",
+        normalized.contains(
+            "onInput={(...___VERTER___eventArgs)=>___VERTER___eventCallbacks(___VERTER___eventArgs,($event)=>{$event.target})}"
+        ),
+        "$event member expressions must stay inside the eventCallbacks callback scope, got:\n{}",
         tsx.code
     );
     assert!(
         !tsx.code.contains("_ctx.$event"),
         "$event must not be context-prefixed, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !normalized.contains("onInput={($event)=>{$event.target}}"),
+        "$event member handlers should not regress to the bare callback form, got:\n{}",
         tsx.code
     );
 }
