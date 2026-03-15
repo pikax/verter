@@ -3595,6 +3595,7 @@ const count = ref(0)
             type_enhancements: None,
             options_api: None,
             nested_macro_calls: Vec::new(),
+            is_typescript: false,
         };
 
         let quality = scoring::compute_quality_score(Some(&script), None, &[], None);
