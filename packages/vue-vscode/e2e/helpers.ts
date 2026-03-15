@@ -590,10 +590,10 @@ export async function waitForTypeProviderSync(timeoutMs = 30_000): Promise<void>
     await sleep(200);
   }
 
-  if (currentGen === undefined) {
-    console.log("    waitForTypeProviderSync: no ready notification found, skipping");
-    return;
-  }
+  assert.ok(
+    currentGen !== undefined,
+    `waitForTypeProviderSync: no "Verter ready" notification found in log within ${timeoutMs}ms`,
+  );
 
   // Poll for TypeProviderSyncComplete with gen >= currentGen
   while (Date.now() - start < timeoutMs) {
@@ -608,8 +608,8 @@ export async function waitForTypeProviderSync(timeoutMs = 30_000): Promise<void>
     await sleep(200);
   }
 
-  console.log(
-    `    waitForTypeProviderSync: timed out waiting for sync complete ` +
+  assert.fail(
+    `waitForTypeProviderSync: timed out waiting for TypeProviderSyncComplete ` +
       `(gen >= ${currentGen}, ${timeoutMs}ms)`,
   );
 }
