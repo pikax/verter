@@ -2,6 +2,7 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForTypeProviderSync,
   waitForFileReady,
   openVueFile,
   getAppVuePath,
@@ -59,6 +60,7 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
 
   suiteSetup(async function () {
     await waitForExtensionReady();
+    await waitForTypeProviderSync();
     doc = await openVueFile(getAppVuePath());
     await waitForFileReady(doc);
   });

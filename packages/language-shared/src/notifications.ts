@@ -43,6 +43,7 @@ export enum NotificationType {
   McpReady = "$/verter/mcpReady",
   ViteConfigTrustRequired = "$/verter/viteConfigTrustRequired",
   TypeProviderStatus = "$/verter/typeProviderStatus",
+  TypeProviderSyncComplete = "$/verter/typeProviderSyncComplete",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -92,5 +93,8 @@ export type NotificationParams = {
   [NotificationType.TypeProviderStatus]: {
     kind: "tsgo" | "tsserver" | "none";
     reason?: string;
+  };
+  [NotificationType.TypeProviderSyncComplete]: {
+    gen: number;
   };
 };

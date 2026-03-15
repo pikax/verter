@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import {
   waitForExtensionReady,
+  waitForTypeProviderSync,
   waitForFileReady,
   openVueFile,
   measureHover,
@@ -49,6 +50,7 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
     if (!isBarrelFixture) return;
     await waitForExtensionReady();
+    await waitForTypeProviderSync();
     doc = await openVueFile("src/App.vue");
     await waitForFileReady(doc);
   });

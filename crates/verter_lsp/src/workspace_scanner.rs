@@ -76,6 +76,10 @@ pub struct WorkspaceScannerConfig {
     pub tsx_profile: CompileProfile,
     /// Coverage patterns from `TsConfigDiscovery` (e.g., `"C:/project/src/**"`).
     pub tsconfig_patterns: Vec<String>,
+    /// Optional oneshot channel fired after the full scanner loop completes
+    /// (both Phase 1 `.vue` files and Phase 2 non-Vue source files).
+    /// Used by the server to send `$/verter/typeProviderSyncComplete`.
+    pub done_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// Priority tier for a discovered `.vue` file.
@@ -299,6 +303,9 @@ async fn scanner_loop(
 
     if vue_paths.is_empty() && source_paths.is_empty() {
         tracing::info!("workspace_scanner: no source files found");
+        if let Some(tx) = config.done_tx {
+            let _ = tx.send(());
+        }
         return;
     }
 
@@ -433,6 +440,11 @@ async fn scanner_loop(
         source_paths.len(),
         node_modules_synced.len(),
     );
+
+    // Signal that the full scanner loop (Phase 1 + Phase 2) is complete.
+    if let Some(tx) = config.done_tx {
+        let _ = tx.send(());
+    }
 }
 
 /// Drain priority signals from the channel and re-sort remaining unprocessed files.

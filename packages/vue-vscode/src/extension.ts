@@ -862,6 +862,9 @@ export async function activateVueLanguageServer(
       startupProbe?.markReady();
       options?.onReady?.();
     });
+    lc.onNotification(NotificationType.TypeProviderSyncComplete, (params: { gen: number }) => {
+      log.info(`TypeProviderSyncComplete (init generation ${params.gen})`);
+    });
   }
 
   function stopHeartbeatTimer() {

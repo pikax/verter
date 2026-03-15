@@ -2,6 +2,7 @@ import { expect } from "chai";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForTypeProviderSync,
   waitForFileReady,
   openVueFile,
   getAppVuePath,
@@ -64,6 +65,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
 
   suiteSetup(async function () {
     await waitForExtensionReady();
+    await waitForTypeProviderSync();
   });
 
   test("no 'Cannot find module' diagnostics on App.vue", async function () {

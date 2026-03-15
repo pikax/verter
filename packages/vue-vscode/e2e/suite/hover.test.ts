@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import {
   assertLogNotContains,
   waitForExtensionReady,
+  waitForTypeProviderSync,
   waitForFileReady,
   openAndReady,
   openVueFile,
@@ -31,6 +32,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
 
   suiteSetup(async function () {
     await waitForExtensionReady();
+    await waitForTypeProviderSync();
     doc = await openVueFile(getAppVuePath());
     await waitForFileReady(doc);
   });

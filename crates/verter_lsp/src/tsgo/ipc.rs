@@ -1187,6 +1187,24 @@ pub(crate) fn rewrite_vue_imports_for_tsgo(content: &str, _path: &str) -> String
         .replace(".vue\"", ".vue.ts\"")
 }
 
+/// Build the `workspace/didChangeConfiguration` payload for TSGO path aliases.
+///
+/// TSGO 7.0 rejects `baseUrl` (TS5102), so we only send `paths`. TSGO resolves
+/// `paths` relative to the tsconfig location, making `baseUrl` unnecessary.
+fn build_paths_config_payload(paths: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "settings": {
+            "typescript": {
+                "tsserver": {
+                    "compilerOptions": {
+                        "paths": paths,
+                    }
+                }
+            }
+        }
+    })
+}
+
 impl TypeProvider for TsgoTypeProvider {
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO open_file: {} ({} bytes)", path, content.len());
@@ -2004,27 +2022,13 @@ impl TypeProvider for TsgoTypeProvider {
         })
     }
 
-    fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
+    fn configure_paths(&self, _base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
         let transport = Arc::clone(&self.transport);
-        let base_url = base_url.to_string();
         Box::pin(async move {
-            // Try workspace/didChangeConfiguration — TSGO may honor compiler options
-            // sent this way even though it's not guaranteed by the LSP spec.
             transport
                 .notify(
                     "workspace/didChangeConfiguration",
-                    serde_json::json!({
-                        "settings": {
-                            "typescript": {
-                                "tsserver": {
-                                    "compilerOptions": {
-                                        "baseUrl": base_url,
-                                        "paths": paths,
-                                    }
-                                }
-                            }
-                        }
-                    }),
+                    build_paths_config_payload(paths),
                 )
                 .await
         })
@@ -2113,27 +2117,15 @@ impl TypeProvider for TsgoTypeProvider {
 
     fn configure_paths_background(
         &self,
-        base_url: &str,
+        _base_url: &str,
         paths: serde_json::Value,
     ) -> ProviderFuture<'_, ()> {
         let transport = Arc::clone(&self.transport);
-        let base_url = base_url.to_string();
         Box::pin(async move {
             transport
                 .notify_with_priority(
                     "workspace/didChangeConfiguration",
-                    serde_json::json!({
-                        "settings": {
-                            "typescript": {
-                                "tsserver": {
-                                    "compilerOptions": {
-                                        "baseUrl": base_url,
-                                        "paths": paths,
-                                    }
-                                }
-                            }
-                        }
-                    }),
+                    build_paths_config_payload(paths),
                     ProviderPriority::Background,
                 )
                 .await

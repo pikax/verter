@@ -149,6 +149,21 @@ pub struct VerterReadyParams {
     pub gen: u64,
 }
 
+/// Server → client notification: workspace scanner has finished syncing all files
+/// (Phase 1 `.vue` + Phase 2 non-Vue source) to the type provider.
+/// Cross-file type resolution (barrel re-exports, imported types) is now reliable.
+pub enum TypeProviderSyncComplete {}
+
+impl tower_lsp_server::ls_types::notification::Notification for TypeProviderSyncComplete {
+    type Params = TypeProviderSyncCompleteParams;
+    const METHOD: &'static str = "$/verter/typeProviderSyncComplete";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TypeProviderSyncCompleteParams {
+    pub gen: u64,
+}
+
 /// Server → client notification: MCP HTTP server is ready.
 /// Sent during `initialized()` with the actual bound port (may differ from requested
 /// when port 0 is used for OS-assigned dynamic ports).
@@ -5102,6 +5117,8 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         .map(|uri| std::path::PathBuf::from(crate::documents::uri_to_canonical_id_from_str(uri)))
         .collect();
 
+    let (scanner_done_tx, scanner_done_rx) = tokio::sync::oneshot::channel::<()>();
+
     let scanner = crate::workspace_scanner::spawn_workspace_scanner(
         crate::workspace_scanner::WorkspaceScannerConfig {
             root_paths,
@@ -5112,6 +5129,7 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             is_tsgo,
             tsx_profile: tsx_profile.read().clone(),
             tsconfig_patterns,
+            done_tx: Some(scanner_done_tx),
         },
     );
 
@@ -5121,6 +5139,114 @@ async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             old.stop();
         }
         *guard = Some(scanner);
+    }
+
+    // Spawn waiter task: after the scanner completes, publish fresh diagnostics
+    // for all open files and send $/verter/typeProviderSyncComplete.
+    {
+        let client = client.clone();
+        let documents = documents.clone();
+        let cached_verter_diags = Arc::clone(&cached_verter_diags);
+        let project_registry = Arc::clone(&project_registry);
+        let fallback_linter = Arc::clone(&fallback_linter);
+        let type_provider = type_provider.clone();
+        let tsx_profile = tsx_profile.clone();
+        let resolver_snapshot = Arc::clone(&resolver_snapshot);
+        let position_encoding = position_encoding.clone();
+        let init_generation = Arc::clone(&init_generation);
+        tokio::spawn(async move {
+            if scanner_done_rx.await.is_err() {
+                return; // Scanner was dropped/cancelled
+            }
+
+            // Check generation — bail if superseded
+            if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                tracing::info!(
+                    "init gen={my_gen} superseded before typeProviderSyncComplete, discarding"
+                );
+                return;
+            }
+
+            tracing::info!(
+                "workspace scanner complete (gen={my_gen}), publishing post-scan diagnostics"
+            );
+
+            // Publish fresh diagnostics for all open files
+            let open_uris = documents.open_uris();
+            for uri_str in &open_uris {
+                let uri: Uri = match uri_str.parse() {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+
+                let verter_diags = compute_verter_diagnostics_for(
+                    &documents,
+                    &uri,
+                    &cached_verter_diags,
+                    &project_registry,
+                    &fallback_linter,
+                );
+
+                let diagnostics = if let Some(tp) = &type_provider {
+                    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+                    let profile = tsx_profile.read().clone();
+                    let ide = documents.host.get_ide(&canonical_id, &profile);
+
+                    if let Some(ide) = ide {
+                        let snapshot = resolver_snapshot.read().clone();
+                        let Some(tsx_path) = snapshot.as_ref().and_then(|snapshot| {
+                            provider_ide_path_for_source(
+                                &snapshot.resolver,
+                                &canonical_id,
+                                ide.is_jsx,
+                            )
+                        }) else {
+                            continue;
+                        };
+                        let encoding = position_encoding.read().clone();
+                        let tsx_li = crate::documents::line_index::LineIndex::new(
+                            &ide.code,
+                            encoding.clone(),
+                        );
+                        let mapper = ide
+                            .source_map
+                            .as_ref()
+                            .and_then(|sm| PositionMapper::from_json(sm).ok());
+                        let vue_source = documents.host.get_source(&canonical_id);
+
+                        match (tp.get_diagnostics(&tsx_path).await, mapper, vue_source) {
+                            (Ok(type_diags), Some(mapper), Some(vue_src)) => {
+                                let vue_li = crate::documents::line_index::LineIndex::new(
+                                    &vue_src, encoding,
+                                );
+                                crate::tsgo::merge::merge_diagnostics(
+                                    verter_diags,
+                                    type_diags,
+                                    &tsx_li,
+                                    &mapper,
+                                    &vue_li,
+                                )
+                            }
+                            _ => verter_diags,
+                        }
+                    } else {
+                        verter_diags
+                    }
+                } else {
+                    verter_diags
+                };
+
+                client.publish_diagnostics(uri, diagnostics, None).await;
+            }
+
+            client
+                .send_notification::<TypeProviderSyncComplete>(TypeProviderSyncCompleteParams {
+                    gen: my_gen,
+                })
+                .await;
+
+            tracing::info!("typeProviderSyncComplete sent (gen={my_gen})");
+        });
     }
 
     // 7. Generation check → notify ready

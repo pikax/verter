@@ -565,6 +565,55 @@ export async function triggerDecorationRefresh(): Promise<void> {
   await vscode.commands.executeCommand("undo");
 }
 
+/**
+ * Wait for the workspace scanner to finish syncing all files to the type provider.
+ *
+ * Reads the last "Verter ready (init generation N)" from the log to get the
+ * current generation, then polls for "TypeProviderSyncComplete (init generation M)"
+ * where M >= N. This prevents stale scanner signals from satisfying the wait.
+ */
+export async function waitForTypeProviderSync(timeoutMs = 30_000): Promise<void> {
+  const start = Date.now();
+
+  // Find current init generation from the ready notification
+  let currentGen: number | undefined;
+  while (Date.now() - start < timeoutMs) {
+    const log = readTestLog();
+    const readyMatches = log.matchAll(/Verter ready \(init generation (\d+)\)/g);
+    for (const m of readyMatches) {
+      const gen = parseInt(m[1], 10);
+      if (currentGen === undefined || gen > currentGen) {
+        currentGen = gen;
+      }
+    }
+    if (currentGen !== undefined) break;
+    await sleep(200);
+  }
+
+  if (currentGen === undefined) {
+    console.log("    waitForTypeProviderSync: no ready notification found, skipping");
+    return;
+  }
+
+  // Poll for TypeProviderSyncComplete with gen >= currentGen
+  while (Date.now() - start < timeoutMs) {
+    const log = readTestLog();
+    const syncMatches = log.matchAll(/TypeProviderSyncComplete \(init generation (\d+)\)/g);
+    for (const m of syncMatches) {
+      const gen = parseInt(m[1], 10);
+      if (gen >= currentGen) {
+        return;
+      }
+    }
+    await sleep(200);
+  }
+
+  console.log(
+    `    waitForTypeProviderSync: timed out waiting for sync complete ` +
+      `(gen >= ${currentGen}, ${timeoutMs}ms)`,
+  );
+}
+
 // ── Log file helpers ───────────────────────────────────────────
 
 export function readTestLog(): string {

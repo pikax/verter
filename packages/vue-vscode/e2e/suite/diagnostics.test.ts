@@ -3,6 +3,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import {
   waitForExtensionReady,
+  waitForTypeProviderSync,
   waitForFileReady,
   openVueFile,
   getAppVuePath,
@@ -20,6 +21,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
 
   suiteSetup(async function () {
     await waitForExtensionReady();
+    await waitForTypeProviderSync();
     // Ensure component types are synced to the type provider before running
     // diagnostics tests. Without this, MyComp resolves as Partial<{}> and
     // component prop/emit types are missing.
