@@ -3,7 +3,7 @@
   "displayName": "Verter VSCode",
   "version": "0.0.1-beta.1",
   "description": "Verter VSCode Extension",
-  "icon": "logo.svg",
+  "icon": "logo.png",
   "categories": [
     "Programming Languages"
   ],
