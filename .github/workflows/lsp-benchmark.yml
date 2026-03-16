@@ -187,7 +187,7 @@ jobs:
           echo "Benchmark complete."
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: lsp-benchmark-results-${{ matrix.os-key }}
           path: ${{ steps.run-bench.outputs.result-file }}
@@ -227,7 +227,7 @@ jobs:
           ref: ${{ steps.checkout-ref.outputs.ref }}
 
       - name: Download benchmark artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           pattern: lsp-benchmark-results-*
           merge-multiple: true
@@ -246,7 +246,7 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Upload combined benchmark report
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: lsp-benchmark-results-all
           path: |
