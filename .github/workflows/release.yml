@@ -85,6 +85,8 @@ jobs:
   build-native:
     name: Build Native (${{ matrix.target }})
     needs: validate
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
@@ -199,6 +201,8 @@ jobs:
   build-lsp:
     name: Build LSP (${{ matrix.target }})
     needs: validate
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
