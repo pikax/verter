@@ -1,12 +1,9 @@
 name: Nightly
 
 on:
-  push:
-    branches: main
-    paths:
-      - "crates/**"
-      - "packages/wasm/**"
-      - "packages/playground/**"
+  schedule:
+    - cron: '0 6 * * *' # 6 AM UTC daily
+  workflow_dispatch:
 
 concurrency:
   group: nightly
@@ -77,7 +74,7 @@ jobs:
           gh release download nightly -p nightly-manifest.json -D /tmp 2>/dev/null || \
             echo '{"commits":[]}' > /tmp/nightly-manifest.json
 
-          COMMIT_MSG=$(git log -1 --pretty=%s | head -c 200)
+          export COMMIT_MSG=$(git log -1 --pretty=%s | head -c 200)
 
           # Prepend new commit, keep last 50
           node -e "
@@ -98,7 +95,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_SHA: ${{ github.sha }}
           SHA_SHORT: ${{ env.SHA_SHORT }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
 
       # --- Cleanup old assets ---
       - name: Cleanup old nightly assets
