@@ -1251,6 +1251,33 @@ impl NapiVerterHost {
         })?
     }
 
+    /// Resolve imported type definitions for a file's macro type dependencies.
+    ///
+    /// Returns a JSON array of `{ name, expanded }` entries for imported types
+    /// that could be resolved from dependency files cached in the host.
+    #[napi(js_name = "resolveImportedTypes")]
+    pub fn resolve_imported_types(&self, canonical_or_alias: String) -> Result<Option<String>> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.resolve_imported_types(&canonical_or_alias)
+        }))
+        .map(|types| {
+            if types.is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::to_string(&types)
+                        .map_err(|e| {
+                            Error::new(
+                                Status::GenericFailure,
+                                format!("type resolution serialization error: {e}"),
+                            )
+                        })
+                        .unwrap_or_default(),
+                )
+            }
+        })
+    }
+
     /// Returns all exports of a file, following re-export chains to their ultimate source.
     ///
     /// For barrel files like `export { default as Button } from './Button.vue'`, this

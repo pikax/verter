@@ -13,6 +13,7 @@ import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { resolve, dirname, basename, extname } from "node:path";
 import { createNapiAdapter } from "../host-adapter.js";
 import { extractComponentMeta, buildTypeRegistry } from "../extractor.js";
+import { parseType } from "../resolver.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 import type { PropertyMeta, VolarComponentMeta, MetaCheckerOptions } from "./types.js";
@@ -137,9 +138,28 @@ export class ComponentMetaChecker {
   getComponentMeta(filePath: string, _exportName?: string): VolarComponentMeta {
     const absPath = resolve(this.projectRoot, filePath);
     this.ensureFile(absPath);
-    // Build type registry from raw snapshot for ref resolution
     const rawSnapshot = this.adapter.getAnalysis(absPath);
+    // Ensure dependency .ts files are in the host for cross-file type resolution
+    this.ensureTypeDependencies(absPath, rawSnapshot);
+    // Build type registry and enrich with resolved imported types
     const typeRegistry = rawSnapshot ? buildTypeRegistry(rawSnapshot) : undefined;
+    if (typeRegistry) {
+      const importedJson = this.adapter.resolveImportedTypes?.(absPath);
+      if (importedJson) {
+        try {
+          for (const rlt of JSON.parse(importedJson) as Array<{
+            name: string;
+            expanded: string;
+          }>) {
+            if (!typeRegistry.has(rlt.name)) {
+              typeRegistry.set(rlt.name, rlt.expanded);
+            }
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      }
+    }
     const meta = extractComponentMeta(this.adapter, absPath, absPath);
     if (!meta) {
       return {
@@ -149,6 +169,37 @@ export class ComponentMetaChecker {
         slots: [],
         exposed: [],
       };
+    }
+    // Fill in props from resolved imported types when extraction couldn't resolve them
+    if (meta.props.length === 0 && typeRegistry && typeRegistry.size > 0) {
+      const snapshot = rawSnapshot as {
+        macros?: Array<{ typeReferences?: string[]; propFields?: unknown[] }>;
+      } | null;
+      const unresolvedRefs =
+        snapshot?.macros
+          ?.filter((m) => (!m.propFields || m.propFields.length === 0) && m.typeReferences?.length)
+          ?.flatMap((m) => m.typeReferences ?? []) ?? [];
+      for (const ref of unresolvedRefs) {
+        const expanded = typeRegistry.get(ref);
+        if (!expanded) continue;
+        // Parse "{ label: string; size?: number }" into props
+        const parsed = parseType(expanded);
+        if (parsed.kind === "object") {
+          for (const prop of parsed.properties) {
+            meta.props.push({
+              name: prop.name,
+              type: prop.type,
+              required: !prop.optional,
+              hasDefault: false,
+              rawType: expanded.includes(prop.name)
+                ? prop.type.kind === "unknown"
+                  ? prop.type.rawType
+                  : undefined
+                : undefined,
+            });
+          }
+        }
+      }
     }
     return mapComponentMeta(meta, this.options, typeRegistry);
   }
@@ -224,6 +275,42 @@ export class ComponentMetaChecker {
         // File doesn't exist — will return empty meta
       }
     }
+  }
+
+  /**
+   * Ensure dependency `.ts` files for cross-file type resolution are in the host.
+   */
+  private ensureTypeDependencies(absPath: string, rawSnapshot: unknown): void {
+    const snapshot = rawSnapshot as { macroTypeDeps?: Array<{ importSource: string }> } | null;
+    if (!snapshot?.macroTypeDeps) return;
+    for (const dep of snapshot.macroTypeDeps) {
+      if (!dep.importSource.startsWith(".")) continue;
+      const resolved = this.resolveDepPath(absPath, dep.importSource);
+      if (resolved && !this.trackedFiles.has(resolved)) {
+        try {
+          const content = readFileSync(resolved, "utf-8");
+          this.trackedFiles.set(resolved, content);
+          this.adapter.upsert({ inputId: resolved, source: content, fileKind: "non_sfc" });
+        } catch {
+          // Dep file not found — skip
+        }
+      }
+    }
+  }
+
+  /**
+   * Resolve a relative import specifier to an absolute file path,
+   * trying common TypeScript extensions.
+   */
+  private resolveDepPath(fromPath: string, specifier: string): string | null {
+    const base = resolve(dirname(fromPath), specifier);
+    for (const ext of [".ts", ".tsx", "/index.ts", ".d.ts"]) {
+      const candidate = base + ext;
+      if (existsSync(candidate)) return candidate;
+    }
+    // Try exact path (might already have extension)
+    if (existsSync(base)) return base;
+    return null;
   }
 }
 

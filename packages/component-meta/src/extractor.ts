@@ -210,6 +210,8 @@ interface RawOptionsProp {
   hasDefault: boolean;
   defaultValue?: string | null;
   typeAnnotation?: string | null;
+  description?: string | null;
+  tags?: RawJsdocTag[];
 }
 
 interface RawOptionsField {
@@ -708,6 +710,12 @@ function extractOptionsProps(optionsApi: RawOptionsApi | null | undefined): Prop
       type = unknown("unknown");
     }
 
+    const description = prop.description ?? undefined;
+    const tags = prop.tags?.map((t) => ({
+      name: t.name,
+      ...(t.text != null && { text: t.text }),
+    }));
+
     return {
       name: prop.name,
       type,
@@ -716,6 +724,8 @@ function extractOptionsProps(optionsApi: RawOptionsApi | null | undefined): Prop
       ...(runtimeTypes.length > 0 && { runtimeTypes }),
       ...(prop.typeAnnotation && { rawType: prop.typeAnnotation }),
       ...(prop.defaultValue != null && { default: prop.defaultValue }),
+      ...(description && { description }),
+      ...(tags && tags.length > 0 && { tags }),
     };
   });
 }

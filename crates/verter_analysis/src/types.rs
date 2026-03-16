@@ -991,6 +991,12 @@ pub struct AnalyzedOptionsProp {
     /// Type annotation from `PropType<T>` (e.g., `"HTMLCanvasElement"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
+    /// JSDoc description (e.g., `"The display label"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// JSDoc tags (e.g., `@default`, `@deprecated`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<JsdocTag>,
 }
 
 /// A named field from an Options API option (data, computed, methods, etc.).

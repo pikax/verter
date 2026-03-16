@@ -4,9 +4,11 @@
 //! `export default defineComponent({ ... })` for cross-component type resolution.
 
 use oxc_ast::ast::*;
+use oxc_ast::Comment;
 use oxc_span::GetSpan;
 use verter_span::Span;
 
+use crate::macros::extract_jsdoc_for;
 use crate::types::{
     AnalyzedEmitField, AnalyzedOptionsApi, AnalyzedOptionsComponent, AnalyzedOptionsField,
     AnalyzedOptionsProp,
@@ -29,11 +31,16 @@ pub(crate) fn try_extract_options_from_expression(
     expr: &Expression<'_>,
     source: &str,
     import_sources: &rustc_hash::FxHashMap<String, String>,
+    comments: &[Comment],
 ) -> Option<AnalyzedOptionsApi> {
     match expr {
-        Expression::ObjectExpression(obj) => {
-            Some(extract_options_api(obj, source, false, import_sources))
-        }
+        Expression::ObjectExpression(obj) => Some(extract_options_api(
+            obj,
+            source,
+            false,
+            import_sources,
+            comments,
+        )),
         Expression::CallExpression(call) => {
             let is_define_component = match &call.callee {
                 Expression::Identifier(id) => is_define_component_name(&id.name),
@@ -44,7 +51,13 @@ pub(crate) fn try_extract_options_from_expression(
             }
             let first_arg = call.arguments.first()?.as_expression()?;
             if let Expression::ObjectExpression(obj) = first_arg {
-                Some(extract_options_api(obj, source, true, import_sources))
+                Some(extract_options_api(
+                    obj,
+                    source,
+                    true,
+                    import_sources,
+                    comments,
+                ))
             } else {
                 None
             }
@@ -63,6 +76,7 @@ fn extract_options_api(
     _source: &str,
     is_define_component: bool,
     import_sources: &rustc_hash::FxHashMap<String, String>,
+    comments: &[Comment],
 ) -> AnalyzedOptionsApi {
     let mut result = AnalyzedOptionsApi {
         is_define_component,
@@ -82,7 +96,7 @@ fn extract_options_api(
         let Some(key) = key_name else { continue };
 
         match key {
-            "props" => result.props = extract_options_props(&p.value, _source),
+            "props" => result.props = extract_options_props(&p.value, _source, comments),
             "emits" => result.emits = extract_options_emits(&p.value, _source),
             "data" => result.data_fields = extract_data_fields(&p.value),
             "computed" => result.computed_fields = extract_object_keys(&p.value),
@@ -103,7 +117,11 @@ fn extract_options_api(
 
 // ── Props ──
 
-fn extract_options_props(value: &Expression<'_>, source: &str) -> Vec<AnalyzedOptionsProp> {
+fn extract_options_props(
+    value: &Expression<'_>,
+    source: &str,
+    comments: &[Comment],
+) -> Vec<AnalyzedOptionsProp> {
     match value {
         // props: ['foo', 'bar']
         Expression::ArrayExpression(arr) => arr
@@ -119,6 +137,8 @@ fn extract_options_props(value: &Expression<'_>, source: &str) -> Vec<AnalyzedOp
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
+                        description: None,
+                        tags: Vec::new(),
                     })
                 } else {
                     None
@@ -136,6 +156,7 @@ fn extract_options_props(value: &Expression<'_>, source: &str) -> Vec<AnalyzedOp
                 };
                 let name = static_key_name(&p.key)?;
                 let span = key_span(&p.key);
+                let (description, tags) = extract_jsdoc_for(comments, p.key.span().start, source);
 
                 match &p.value {
                     // Shorthand: `foo: String`
@@ -147,6 +168,8 @@ fn extract_options_props(value: &Expression<'_>, source: &str) -> Vec<AnalyzedOp
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
+                        description,
+                        tags,
                     }),
                     // Full object: `foo: { type: String, required: true, default: 'x' }`
                     Expression::ObjectExpression(sub_obj) => {
@@ -200,6 +223,8 @@ fn extract_options_props(value: &Expression<'_>, source: &str) -> Vec<AnalyzedOp
                             has_default,
                             default_value,
                             type_annotation,
+                            description,
+                            tags,
                         })
                     }
                     // Array form for multiple types: `foo: [String, Number]` — treat as no single constructor
@@ -211,6 +236,8 @@ fn extract_options_props(value: &Expression<'_>, source: &str) -> Vec<AnalyzedOp
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
+                        description,
+                        tags,
                     }),
                     _ => Some(AnalyzedOptionsProp {
                         name,
@@ -220,6 +247,8 @@ fn extract_options_props(value: &Expression<'_>, source: &str) -> Vec<AnalyzedOp
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
+                        description,
+                        tags,
                     }),
                 }
             })

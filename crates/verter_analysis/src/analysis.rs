@@ -440,6 +440,7 @@ pub fn build_script_analysis_with_scope(
                         expr,
                         content,
                         &source_map,
+                        &program.comments,
                     );
                 }
             }

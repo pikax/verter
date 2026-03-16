@@ -1921,7 +1921,7 @@ fn parse_jsdoc(raw: &str) -> (Option<String>, Vec<JsdocTag>) {
 }
 
 /// Extract JSDoc description and tags for a given AST node position.
-fn extract_jsdoc_for(
+pub(crate) fn extract_jsdoc_for(
     comments: &[Comment],
     target_start: u32,
     source: &str,

@@ -442,3 +442,53 @@ fn emits_object_multi_param_validator() {
         "multi-param validator should extract all params as tuple"
     );
 }
+
+// ── JSDoc extraction ──
+
+#[test]
+fn jsdoc_on_options_api_props() {
+    let snap = analyze(
+        r#"export default defineComponent({
+            props: {
+                /** The display label */
+                label: String,
+                /** Size variant
+                 * @default 'md'
+                 */
+                size: { type: String, default: 'md' },
+                noDoc: Number,
+            }
+        })"#,
+    );
+    let opts = snap.options_api.unwrap();
+    let props = &opts.props;
+    assert_eq!(props.len(), 3);
+
+    // Positive: label has description, no tags
+    assert_eq!(props[0].description.as_deref(), Some("The display label"));
+    assert!(props[0].tags.is_empty());
+
+    // Positive: size has description and @default tag
+    assert_eq!(props[1].description.as_deref(), Some("Size variant"));
+    assert_eq!(props[1].tags.len(), 1);
+    assert_eq!(props[1].tags[0].name, "default");
+    assert_eq!(props[1].tags[0].text.as_deref(), Some("'md'"));
+
+    // Negative: noDoc has no JSDoc
+    assert!(props[2].description.is_none());
+    assert!(props[2].tags.is_empty());
+}
+
+#[test]
+fn jsdoc_on_bare_export_default_props() {
+    let snap = analyze(
+        r#"export default {
+            props: {
+                /** Required label */
+                label: { type: String, required: true },
+            }
+        }"#,
+    );
+    let opts = snap.options_api.unwrap();
+    assert_eq!(opts.props[0].description.as_deref(), Some("Required label"));
+}

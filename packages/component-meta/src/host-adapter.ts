@@ -30,6 +30,8 @@ export interface VerterHostAdapter {
   upsert(request: HostUpsertRequest): unknown;
   /** Retrieve the analysis snapshot for a file, or `null` if not found. */
   getAnalysis(canonicalOrAlias: string): unknown | null;
+  /** Resolve imported types for a file's macro type dependencies. Returns JSON or null. */
+  resolveImportedTypes?(canonicalOrAlias: string): string | null;
   /** Configure project-scoped path alias resolution (optional). */
   configureProjects?(
     projects: {
@@ -51,6 +53,7 @@ export interface VerterHostAdapter {
 export function wrapNapiHost(host: {
   upsert(request: HostUpsertRequest): unknown;
   getAnalysis(canonicalOrAlias: string): string | null;
+  resolveImportedTypes?(canonicalOrAlias: string): string | null;
   configureProjects?(projects: unknown[]): void;
 }): VerterHostAdapter {
   return {
@@ -61,6 +64,9 @@ export function wrapNapiHost(host: {
       const result = host.getAnalysis(canonicalOrAlias);
       if (result === null || result === undefined) return null;
       return JSON.parse(result);
+    },
+    resolveImportedTypes(canonicalOrAlias) {
+      return host.resolveImportedTypes?.(canonicalOrAlias) ?? null;
     },
     configureProjects(projects) {
       host.configureProjects?.(projects);

@@ -22,6 +22,98 @@ impl VerterHost {
         files.get(&canonical).map(|entry| entry.source.clone())
     }
 
+    /// Resolve imported type definitions for a file's macro type dependencies.
+    ///
+    /// For each `MacroTypeDep` (e.g., `defineProps<ButtonProps>()` importing from `./types`),
+    /// resolves the type by reading the dependency source from the host cache and running
+    /// `resolve_external_type()`. Returns expanded type text suitable for the type registry.
+    pub fn resolve_imported_types(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Vec<verter_analysis::ResolvedLocalType> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let files = read_lock(&self.files);
+        let Some(entry) = files.get(&canonical) else {
+            return Vec::new();
+        };
+
+        let macro_type_deps = entry.script_analysis.macro_type_deps.clone();
+        if macro_type_deps.is_empty() {
+            return Vec::new();
+        }
+
+        let mut result = Vec::new();
+        let alloc = oxc_allocator::Allocator::new();
+
+        for dep in macro_type_deps.iter() {
+            // Resolve import source to canonical dep ID
+            let dep_canonical = if dep.import_source.starts_with('.') {
+                crate::id::resolve_external(&canonical, &dep.import_source)
+            } else {
+                // Non-relative imports need dependency_resolutions
+                if let Some(res) = entry.dependency_resolutions.get(&dep.import_source) {
+                    if let Some(ref id) = res.resolved_canonical_id {
+                        id.clone()
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            };
+
+            // Try to get the dependency source from the host cache
+            let Some(dep_entry) = files.get(&dep_canonical) else {
+                // Try with common extensions for relative imports
+                let mut found_source = None;
+                for ext in &[".ts", ".tsx", "/index.ts", ".d.ts"] {
+                    let with_ext = format!("{}{}", dep_canonical, ext);
+                    if let Some(e) = files.get(&with_ext) {
+                        found_source = Some(e.source.clone());
+                        break;
+                    }
+                }
+                let Some(source) = found_source else {
+                    continue;
+                };
+                // Resolve and add to result
+                if let Some(resolved) =
+                    verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
+                        &dep.type_name,
+                        &source,
+                        &alloc,
+                    )
+                {
+                    let expanded = resolved_elements_to_expanded_text(&resolved, &source);
+                    result.push(verter_analysis::ResolvedLocalType {
+                        name: dep.type_name.clone(),
+                        expanded,
+                        span: verter_span::Span::default(),
+                    });
+                }
+                continue;
+            };
+
+            let dep_source = dep_entry.source.clone();
+            if let Some(resolved) =
+                verter_core::utils::oxc::vue::resolve_type::resolve_external_type(
+                    &dep.type_name,
+                    &dep_source,
+                    &alloc,
+                )
+            {
+                let expanded = resolved_elements_to_expanded_text(&resolved, &dep_source);
+                result.push(verter_analysis::ResolvedLocalType {
+                    name: dep.type_name.clone(),
+                    expanded,
+                    span: verter_span::Span::default(),
+                });
+            }
+        }
+
+        result
+    }
+
     /// Returns a serializable snapshot of the file's static analysis data.
     /// Returns `None` if the file doesn't exist.
     /// When `eager_analysis` is false, computes analysis on demand from stored source.
@@ -991,6 +1083,43 @@ impl VerterHost {
             Some((canonical_id.to_string(), name.to_string()))
         }
     }
+}
+
+/// Convert `ResolvedElements` props to an expanded type text string.
+///
+/// Produces `"{ name: type; name2?: type2 }"` format matching `build_expanded_type_text`
+/// in `verter_analysis::macros`.
+fn resolved_elements_to_expanded_text(
+    resolved: &verter_core::utils::oxc::vue::resolve_type::ResolvedElements,
+    source: &str,
+) -> String {
+    let source_bytes = source.as_bytes();
+    let mut parts = Vec::new();
+    for prop in &resolved.props {
+        let name = prop.key_name.as_deref().unwrap_or_else(|| {
+            let start = prop.key.start as usize;
+            let end = prop.key.end as usize;
+            if end <= source_bytes.len() {
+                std::str::from_utf8(&source_bytes[start..end]).unwrap_or("unknown")
+            } else {
+                "unknown"
+            }
+        });
+        let opt = if prop.optional { "?" } else { "" };
+        let ty = if let Some(type_span) = prop.type_span {
+            let start = type_span.start as usize;
+            let end = type_span.end as usize;
+            if end <= source_bytes.len() {
+                std::str::from_utf8(&source_bytes[start..end]).unwrap_or("unknown")
+            } else {
+                "unknown"
+            }
+        } else {
+            "unknown"
+        };
+        parts.push(format!("{}{}: {}", name, opt, ty));
+    }
+    format!("{{ {} }}", parts.join("; "))
 }
 
 #[cfg(test)]
@@ -2208,5 +2337,61 @@ export { default as Button } from './Button.vue';
         upsert_vue(&host, "App.vue", "<template><div>b</div></template>");
         let h2 = host.get_semantic_hash("App.vue").unwrap();
         assert_ne!(h1, h2, "semantic hash should change when content changes");
+    }
+
+    #[test]
+    fn resolve_imported_type_from_ts_dep() {
+        let host = make_host();
+        // Upsert the .ts type file
+        upsert_ts(
+            &host,
+            "/types.ts",
+            "export interface ButtonProps { label: string; size?: number }",
+        );
+        // Upsert the .vue file that imports from ./types
+        upsert_vue(
+            &host,
+            "/Button.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+defineProps<ButtonProps>()
+</script><template><div /></template>"#,
+        );
+
+        let types = host.resolve_imported_types("/Button.vue");
+        assert_eq!(types.len(), 1, "should resolve one imported type");
+        assert_eq!(types[0].name, "ButtonProps");
+        assert!(
+            types[0].expanded.contains("label"),
+            "expanded should contain 'label', got: {}",
+            types[0].expanded
+        );
+        assert!(
+            types[0].expanded.contains("size"),
+            "expanded should contain 'size', got: {}",
+            types[0].expanded
+        );
+        // Negative: should not return empty or unresolved
+        assert!(
+            !types[0].expanded.is_empty(),
+            "expanded should not be empty"
+        );
+    }
+
+    #[test]
+    fn resolve_imported_types_returns_empty_for_no_deps() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/Simple.vue",
+            r#"<script setup lang="ts">
+defineProps<{ count: number }>()
+</script><template><div /></template>"#,
+        );
+        let types = host.resolve_imported_types("/Simple.vue");
+        assert!(
+            types.is_empty(),
+            "should return empty when no imported types"
+        );
     }
 }

@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   ComponentMetaChecker,
@@ -331,5 +332,84 @@ defineProps<{
       expect(schema.kind).toBe("enum");
       expect(Array.isArray(schema.schema)).toBe(true);
     }
+  });
+
+  it("resolves imported type interfaces from dependency .ts files", () => {
+    const adapter = createNapiAdapter();
+    // Use resolve() to get consistent absolute paths on all platforms
+    const projectRoot = resolve(process.env.TEMP ?? "/tmp", "verter-test-crossfile");
+    const checker = new ComponentMetaChecker(adapter, projectRoot, {});
+
+    // Upsert the .ts dependency as non-SFC using resolved path
+    const typesPath = resolve(projectRoot, "types.ts");
+    adapter.upsert({
+      inputId: typesPath,
+      source: "export interface ButtonProps { label: string; size?: number }",
+      fileKind: "non_sfc",
+    });
+
+    // Upsert the .vue file that imports from the dependency
+    checker.updateFile(
+      "Button.vue",
+      `<script setup lang="ts">
+import type { ButtonProps } from './types'
+defineProps<ButtonProps>()
+</script><template><div /></template>`,
+    );
+
+    const meta = checker.getComponentMeta("Button.vue");
+
+    // Positive: should resolve props from the imported interface
+    const labelProp = meta.props.find((p) => p.name === "label");
+    expect(labelProp).toBeDefined();
+    expect(labelProp!.type).toContain("string");
+
+    const sizeProp = meta.props.find((p) => p.name === "size");
+    expect(sizeProp).toBeDefined();
+
+    // Negative: should not have the interface name as a prop
+    expect(meta.props.some((p) => p.name === "ButtonProps")).toBe(false);
+  });
+
+  it("Options API props preserve JSDoc descriptions and tags", () => {
+    const adapter = createNapiAdapter();
+    const checker = new ComponentMetaChecker(adapter, "/tmp", {});
+
+    const source = `<script>
+import { defineComponent } from 'vue'
+export default defineComponent({
+  props: {
+    /** The display label */
+    label: String,
+    /** Size variant
+     * @default 'md'
+     */
+    size: { type: String, default: 'md' },
+    noDoc: Number,
+  }
+})
+</script>
+<template><div /></template>`;
+
+    checker.updateFile("Options.vue", source);
+    const meta = checker.getComponentMeta("Options.vue");
+
+    // Positive: label has JSDoc description
+    const labelProp = meta.props.find((p) => p.name === "label");
+    expect(labelProp).toBeDefined();
+    expect(labelProp!.description).toBe("The display label");
+    expect(labelProp!.tags).toEqual([]);
+
+    // Positive: size has JSDoc description and @default tag
+    const sizeProp = meta.props.find((p) => p.name === "size");
+    expect(sizeProp).toBeDefined();
+    expect(sizeProp!.description).toBe("Size variant");
+    expect(sizeProp!.tags.length).toBeGreaterThanOrEqual(1);
+    expect(sizeProp!.tags[0].name).toBe("default");
+
+    // Negative: noDoc has empty description (compat maps null → "")
+    const noDocProp = meta.props.find((p) => p.name === "noDoc");
+    expect(noDocProp).toBeDefined();
+    expect(noDocProp!.description).toBe("");
   });
 });
