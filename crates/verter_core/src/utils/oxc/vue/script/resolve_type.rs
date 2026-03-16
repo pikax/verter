@@ -1,8 +1,15 @@
-//! Type resolution for Vue macro type parameters.
+//! Cross-file type resolution for Vue compiler macros.
 //!
-//! This module resolves TypeScript type annotations from Vue macros like
-//! `defineProps<{ title: string; count: number }>()` into structured type
-//! information that can be used for code generation.
+//! Resolves TypeScript type annotations used as type parameters in Vue macros
+//! (`defineProps<T>()`, `defineEmits<T>()`, `defineSlots<T>()`) into structured
+//! [`ResolvedElements`] that drive runtime props/emits code generation.
+//!
+//! When `T` is defined inline (e.g. `defineProps<{ title: string }>()`), resolution
+//! stays local. When `T` extends or references types from other files, the host
+//! must pre-resolve those external types and pass them in via
+//! [`VerterCompileOptions::external_types`](crate::VerterCompileOptions). The
+//! resolved data is merged into [`TypeResolutionContext::companion_types`] so that
+//! lookups for imported type names can fall back to pre-resolved definitions.
 //!
 //! Based on Vue's `resolveType.ts` implementation.
 
@@ -10,6 +17,7 @@
 
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
+use rustc_hash::FxHashMap;
 
 use crate::common::Span;
 
@@ -164,15 +172,36 @@ pub struct ResolvedProp {
     pub span: Span,
     /// Span of the property key (name) in the source
     pub key: Span,
+    /// Pre-resolved key name (set for external/cross-file types where spans
+    /// reference a different source than the consuming SFC).
+    pub key_name: Option<String>,
     /// Whether the property is optional (has `?`)
     pub optional: bool,
     /// Inferred runtime types for this property
     pub types: Vec<RuntimeType>,
+    /// Span of the type annotation (excluding the `: ` prefix) in the source.
+    /// Set for property signatures with explicit type annotations; `None` for
+    /// method signatures and companion-script props.
+    pub type_span: Option<Span>,
+    /// Whether this span points into the current SFC source and can be used
+    /// directly for local source maps.
+    pub map_local: bool,
+    /// Whether spans on this prop are already SFC-absolute.
+    pub span_is_absolute: bool,
 }
 
 /// A resolved emit event from defineEmits type parameter.
 /// Supports both call signature style `{ (e: 'change', id: number): void }`
 /// and shorthand style `{ change: [id: number] }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedEmitSignature {
+    /// Call signature payload params after the event name parameter.
+    /// Empty string means the event carries no extra payload.
+    Call { params_text: String },
+    /// Shorthand tuple payload, including the surrounding `[...]`.
+    Tuple { tuple_text: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedEmit {
     /// Span of the entire emit signature
@@ -181,10 +210,18 @@ pub struct ResolvedEmit {
     pub name: String,
     /// Span of the event name in source (if available, for string literal params)
     pub name_span: Option<Span>,
+    /// The resolved payload signature, preserved as text so consumers can
+    /// inline exact handler / `$emit` types even for cross-file imports.
+    pub signature: ResolvedEmitSignature,
+    /// Whether this span points into the current SFC source and can be used
+    /// directly for local source maps.
+    pub map_local: bool,
+    /// Whether spans on this emit are already SFC-absolute.
+    pub span_is_absolute: bool,
 }
 
 /// Result of resolving type elements from a type annotation.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ResolvedElements {
     /// Resolved properties from the type
     pub props: Vec<ResolvedProp>,
@@ -192,6 +229,26 @@ pub struct ResolvedElements {
     pub emits: Vec<ResolvedEmit>,
     /// Whether this type has call signatures (is callable)
     pub has_call_signature: bool,
+    /// Runtime type inferred from the root type annotation being resolved.
+    /// Used to distinguish valid empty object-like macro types from invalid
+    /// primitives when cross-file resolution returns no concrete members.
+    pub root_runtime_types: Vec<RuntimeType>,
+}
+
+impl ResolvedElements {
+    /// Deduplicate props by key name (first occurrence wins).
+    /// Matches Vue's `mergeElements()` behavior for union/intersection types.
+    fn dedup_props(&mut self) {
+        let mut seen = rustc_hash::FxHashSet::default();
+        self.props.retain(|prop| {
+            if let Some(ref name) = prop.key_name {
+                seen.insert(name.clone())
+            } else {
+                // No key_name — always keep (shouldn't happen after resolution)
+                true
+            }
+        });
+    }
 }
 
 // =============================================================================
@@ -290,12 +347,22 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     pub source: &'ctx [u8],
     /// Local type alias declarations: (name_span, type_node)
     pub type_aliases: Vec<(Span, &'ctx TSType<'a>)>,
-    /// Local interface declarations: (name_span, interface_body_members)
-    pub interfaces: Vec<(Span, &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>)>,
+    /// Local interface declarations: (name_span, interface_body_members, extends_type_names)
+    /// The extends_type_names are extracted from heritage clauses as String names,
+    /// since we need to look them up recursively.
+    pub interfaces: Vec<(
+        Span,
+        &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>,
+        Vec<String>,
+    )>,
     /// Generic type parameters with constraints: (name_span, constraint_type)
     pub type_params: Vec<(Span, Option<&'ctx TSType<'a>>)>,
     /// Diagnostics collected during resolution
     pub diagnostics: Vec<ResolutionDiagnostic>,
+    /// Pre-resolved types from companion `<script>` block.
+    /// Keyed by type name string, value is the resolved elements.
+    /// Used when a type reference can't be found in the local context.
+    pub companion_types: rustc_hash::FxHashMap<String, ResolvedElements>,
 }
 
 impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
@@ -307,6 +374,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             interfaces: Vec::new(),
             type_params: Vec::new(),
             diagnostics: Vec::new(),
+            companion_types: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -318,15 +386,16 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             .map(|(_, ty)| *ty)
     }
 
-    /// Look up an interface by comparing spans against source bytes
+    /// Look up an interface by comparing spans against source bytes.
+    /// Returns (body_members, extends_type_names).
     pub fn find_interface(
         &self,
         name: &[u8],
-    ) -> Option<&'ctx oxc_allocator::Vec<'a, TSSignature<'a>>> {
+    ) -> Option<(&'ctx oxc_allocator::Vec<'a, TSSignature<'a>>, &[String])> {
         self.interfaces
             .iter()
-            .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
-            .map(|(_, members)| *members)
+            .find(|(span, _, _)| &self.source[span.start as usize..span.end as usize] == name)
+            .map(|(_, members, extends)| (*members, extends.as_slice()))
     }
 
     /// Look up a type parameter constraint by comparing spans against source bytes
@@ -360,7 +429,9 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
             Statement::TSInterfaceDeclaration(interface) => {
                 // interface.id.span is already adjusted by adjust_program_spans() to SFC coordinates.
                 let name_span = Span::from(interface.id.span);
-                ctx.interfaces.push((name_span, &interface.body.body));
+                let extends = extract_heritage_type_names(&interface.extends);
+                ctx.interfaces
+                    .push((name_span, &interface.body.body, extends));
             }
             // Collect exported type aliases and interfaces:
             // `export type Foo = { bar: string }` / `export interface Foo { bar: string }`
@@ -373,7 +444,9 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                         }
                         Declaration::TSInterfaceDeclaration(interface) => {
                             let name_span = Span::from(interface.id.span);
-                            ctx.interfaces.push((name_span, &interface.body.body));
+                            let extends = extract_heritage_type_names(&interface.extends);
+                            ctx.interfaces
+                                .push((name_span, &interface.body.body, extends));
                         }
                         _ => {}
                     }
@@ -386,6 +459,87 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
     ctx
 }
 
+/// Extract pre-resolved types from a companion `<script>` program.
+///
+/// Walks the program's statements and resolves any type aliases and interfaces,
+/// returning a map from type name → resolved elements. This allows the setup
+/// script's type resolver to look up types defined in the companion block.
+pub fn extract_companion_types(
+    program: &Program<'_>,
+    source: &[u8],
+    content_offset: u32,
+) -> rustc_hash::FxHashMap<String, ResolvedElements> {
+    // Build a full type context so we can resolve extends and cross-references
+    let ctx = build_type_context(program, source, content_offset);
+
+    let mut types = rustc_hash::FxHashMap::default();
+
+    for stmt in &program.body {
+        match stmt {
+            Statement::TSTypeAliasDeclaration(alias) => {
+                let name = alias.id.name.as_str().to_string();
+                let resolved = resolve_type_elements_with_ctx_ref(
+                    &alias.type_annotation,
+                    content_offset,
+                    &ctx,
+                );
+                types.insert(name, resolved);
+            }
+            Statement::TSInterfaceDeclaration(interface) => {
+                let name = interface.id.name.as_str().to_string();
+                let extends = extract_heritage_type_names(&interface.extends);
+                let mut resolved = ResolvedElements::default();
+                let mut guard = vec![name.clone()];
+                resolve_interface_with_extends_ctx_ref(
+                    &interface.body.body,
+                    &extends,
+                    content_offset,
+                    &mut resolved,
+                    &ctx,
+                    &mut guard,
+                );
+                resolved.root_runtime_types = vec![RuntimeType::Object];
+                types.insert(name, resolved);
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(decl) = &export.declaration {
+                    match decl {
+                        Declaration::TSTypeAliasDeclaration(alias) => {
+                            let name = alias.id.name.as_str().to_string();
+                            let resolved = resolve_type_elements_with_ctx_ref(
+                                &alias.type_annotation,
+                                content_offset,
+                                &ctx,
+                            );
+                            types.insert(name, resolved);
+                        }
+                        Declaration::TSInterfaceDeclaration(interface) => {
+                            let name = interface.id.name.as_str().to_string();
+                            let extends = extract_heritage_type_names(&interface.extends);
+                            let mut resolved = ResolvedElements::default();
+                            let mut guard = vec![name.clone()];
+                            resolve_interface_with_extends_ctx_ref(
+                                &interface.body.body,
+                                &extends,
+                                content_offset,
+                                &mut resolved,
+                                &ctx,
+                                &mut guard,
+                            );
+                            resolved.root_runtime_types = vec![RuntimeType::Object];
+                            types.insert(name, resolved);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    types
+}
+
 /// Resolve type elements from a TSType node.
 ///
 /// This extracts property information from type literals, interfaces,
@@ -396,7 +550,8 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
 /// * `base_offset` - The document offset to apply to all spans
 pub fn resolve_type_elements(node: &TSType, base_offset: u32) -> ResolvedElements {
     let mut result = ResolvedElements::default();
-    resolve_type_elements_inner(node, base_offset, &mut result);
+    resolve_type_elements_inner(node, base_offset, &mut result, b"");
+    result.root_runtime_types = infer_runtime_type(node);
     result
 }
 
@@ -414,6 +569,8 @@ pub fn resolve_type_elements_with_ctx<'ctx, 'a: 'ctx>(
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner_with_ctx(node, base_offset, &mut result, ctx);
+    result.root_runtime_types =
+        resolve_root_runtime_type_with_ctx(node, ctx).unwrap_or_else(|| infer_runtime_type(node));
     result
 }
 
@@ -432,33 +589,141 @@ pub fn resolve_type_elements_with_ctx_ref<'ctx, 'a: 'ctx>(
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner_with_ctx_ref(node, base_offset, &mut result, ctx);
+    result.root_runtime_types = resolve_root_runtime_type_with_ctx_ref(node, ctx)
+        .unwrap_or_else(|| infer_runtime_type(node));
     result
 }
 
-fn resolve_type_elements_inner(node: &TSType, base_offset: u32, result: &mut ResolvedElements) {
+fn inferred_root_runtime_type_for_companion(companion: &ResolvedElements) -> Vec<RuntimeType> {
+    if !companion.root_runtime_types.is_empty() {
+        return companion.root_runtime_types.clone();
+    }
+    if !companion.props.is_empty() || !companion.emits.is_empty() {
+        return vec![RuntimeType::Object];
+    }
+    if companion.has_call_signature {
+        return vec![RuntimeType::Function];
+    }
+    vec![RuntimeType::Unknown]
+}
+
+fn resolve_root_runtime_type_with_ctx<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<Vec<RuntimeType>> {
+    match node {
+        TSType::TSTypeReference(type_ref) => {
+            let type_name = get_type_reference_name(&type_ref.type_name);
+            let type_name_bytes = type_name.as_bytes();
+
+            if let Some(aliased_type) = ctx.find_type_alias(type_name_bytes) {
+                return Some(
+                    resolve_root_runtime_type_with_ctx(aliased_type, ctx)
+                        .unwrap_or_else(|| infer_runtime_type(aliased_type)),
+                );
+            }
+
+            if ctx.find_interface(type_name_bytes).is_some() {
+                return Some(vec![RuntimeType::Object]);
+            }
+
+            if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
+                return Some(
+                    resolve_root_runtime_type_with_ctx(constraint, ctx)
+                        .unwrap_or_else(|| infer_runtime_type(constraint)),
+                );
+            }
+
+            ctx.companion_types
+                .get(type_name.as_str())
+                .map(inferred_root_runtime_type_for_companion)
+        }
+        TSType::TSTypeQuery(query) => {
+            let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name else {
+                return None;
+            };
+            ctx.companion_types
+                .get(ident.name.as_str())
+                .map(inferred_root_runtime_type_for_companion)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_root_runtime_type_with_ctx_ref<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<Vec<RuntimeType>> {
+    match node {
+        TSType::TSTypeReference(type_ref) => {
+            let type_name = get_type_reference_name(&type_ref.type_name);
+            let type_name_bytes = type_name.as_bytes();
+
+            if let Some(aliased_type) = ctx.find_type_alias(type_name_bytes) {
+                return Some(
+                    resolve_root_runtime_type_with_ctx_ref(aliased_type, ctx)
+                        .unwrap_or_else(|| infer_runtime_type(aliased_type)),
+                );
+            }
+
+            if ctx.find_interface(type_name_bytes).is_some() {
+                return Some(vec![RuntimeType::Object]);
+            }
+
+            if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
+                return Some(
+                    resolve_root_runtime_type_with_ctx_ref(constraint, ctx)
+                        .unwrap_or_else(|| infer_runtime_type(constraint)),
+                );
+            }
+
+            ctx.companion_types
+                .get(type_name.as_str())
+                .map(inferred_root_runtime_type_for_companion)
+        }
+        TSType::TSTypeQuery(query) => {
+            let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name else {
+                return None;
+            };
+            ctx.companion_types
+                .get(ident.name.as_str())
+                .map(inferred_root_runtime_type_for_companion)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_type_elements_inner(
+    node: &TSType,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    source: &[u8],
+) {
     match node {
         // { prop: Type }
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(&lit.members, base_offset, result);
+            resolve_type_literal_members(&lit.members, base_offset, result, source);
         }
 
         // Parenthesized: (Type)
         TSType::TSParenthesizedType(paren) => {
-            resolve_type_elements_inner(&paren.type_annotation, base_offset, result);
+            resolve_type_elements_inner(&paren.type_annotation, base_offset, result, source);
         }
 
         // Union: Type1 | Type2
         TSType::TSUnionType(union) => {
             for ty in &union.types {
-                resolve_type_elements_inner(ty, base_offset, result);
+                resolve_type_elements_inner(ty, base_offset, result, source);
             }
+            result.dedup_props();
         }
 
         // Intersection: Type1 & Type2
         TSType::TSIntersectionType(intersection) => {
             for ty in &intersection.types {
-                resolve_type_elements_inner(ty, base_offset, result);
+                resolve_type_elements_inner(ty, base_offset, result, source);
             }
+            result.dedup_props();
         }
 
         // Type reference: SomeType or SomeType<T>
@@ -477,6 +742,102 @@ fn resolve_type_elements_inner(node: &TSType, base_offset: u32, result: &mut Res
     }
 }
 
+/// Resolve an interface including its extends clauses using mutable context.
+/// Recursion guard prevents infinite loops from circular extends.
+fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
+    members: &[TSSignature],
+    extends: &[String],
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &mut TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+) {
+    // Resolve own members
+    resolve_type_literal_members(members, base_offset, result, ctx.source);
+
+    // Resolve extends
+    for base_name in extends {
+        if recursion_guard.contains(base_name) {
+            continue; // Avoid infinite recursion
+        }
+        recursion_guard.push(base_name.clone());
+
+        let base_bytes = base_name.as_bytes();
+
+        // Check local type aliases
+        if let Some(aliased_type) = ctx.find_type_alias(base_bytes) {
+            resolve_type_elements_inner_with_ctx(aliased_type, base_offset, result, ctx);
+        }
+        // Check local interfaces (need to clone extends to avoid borrow conflict)
+        else if let Some((iface_members, iface_extends)) = ctx.find_interface(base_bytes) {
+            let iface_extends_owned: Vec<String> = iface_extends.to_vec();
+            resolve_interface_with_extends_ctx(
+                iface_members,
+                &iface_extends_owned,
+                base_offset,
+                result,
+                ctx,
+                recursion_guard,
+            );
+        }
+        // Check companion types
+        else if let Some(companion) = ctx.companion_types.get(base_name.as_str()) {
+            result.props.extend(companion.props.iter().cloned());
+            result.emits.extend(companion.emits.iter().cloned());
+            if companion.has_call_signature {
+                result.has_call_signature = true;
+            }
+        }
+
+        recursion_guard.pop();
+    }
+}
+
+/// Resolve an interface including its extends clauses using immutable context.
+fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
+    members: &[TSSignature],
+    extends: &[String],
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+) {
+    // Resolve own members
+    resolve_type_literal_members(members, base_offset, result, ctx.source);
+
+    // Resolve extends
+    for base_name in extends {
+        if recursion_guard.contains(base_name) {
+            continue;
+        }
+        recursion_guard.push(base_name.clone());
+
+        let base_bytes = base_name.as_bytes();
+
+        if let Some(aliased_type) = ctx.find_type_alias(base_bytes) {
+            resolve_type_elements_inner_with_ctx_ref(aliased_type, base_offset, result, ctx);
+        } else if let Some((iface_members, iface_extends)) = ctx.find_interface(base_bytes) {
+            let iface_extends_owned: Vec<String> = iface_extends.to_vec();
+            resolve_interface_with_extends_ctx_ref(
+                iface_members,
+                &iface_extends_owned,
+                base_offset,
+                result,
+                ctx,
+                recursion_guard,
+            );
+        } else if let Some(companion) = ctx.companion_types.get(base_name.as_str()) {
+            result.props.extend(companion.props.iter().cloned());
+            result.emits.extend(companion.emits.iter().cloned());
+            if companion.has_call_signature {
+                result.has_call_signature = true;
+            }
+        }
+
+        recursion_guard.pop();
+    }
+}
+
 /// Inner resolution function that uses the context for type reference lookup.
 fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
@@ -487,7 +848,7 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
     match node {
         // { prop: Type }
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(&lit.members, base_offset, result);
+            resolve_type_literal_members(&lit.members, base_offset, result, ctx.source);
         }
 
         // Parenthesized: (Type)
@@ -500,6 +861,7 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
             for ty in &union.types {
                 resolve_type_elements_inner_with_ctx(ty, base_offset, result, ctx);
             }
+            result.dedup_props();
         }
 
         // Intersection: Type1 & Type2
@@ -507,6 +869,7 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
             for ty in &intersection.types {
                 resolve_type_elements_inner_with_ctx(ty, base_offset, result, ctx);
             }
+            result.dedup_props();
         }
 
         // Type reference: SomeType or SomeType<T>
@@ -521,9 +884,18 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 2. Check local interfaces
-            if let Some(interface_members) = ctx.find_interface(type_name_bytes) {
-                resolve_type_literal_members(interface_members, base_offset, result);
+            // 2. Check local interfaces (with extends support)
+            if let Some((interface_members, iface_extends)) = ctx.find_interface(type_name_bytes) {
+                let extends_owned: Vec<String> = iface_extends.to_vec();
+                let mut guard = vec![type_name.clone()];
+                resolve_interface_with_extends_ctx(
+                    interface_members,
+                    &extends_owned,
+                    base_offset,
+                    result,
+                    ctx,
+                    &mut guard,
+                );
                 return;
             }
 
@@ -533,7 +905,76 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 4. Couldn't resolve - add diagnostic
+            // 4. Check companion <script> block's pre-resolved types
+            if let Some(companion) = ctx.companion_types.get(type_name.as_str()) {
+                result.props.extend(companion.props.iter().cloned());
+                result.emits.extend(companion.emits.iter().cloned());
+                if companion.has_call_signature {
+                    result.has_call_signature = true;
+                }
+                return;
+            }
+
+            // 5. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
+            if let Some(args) = &type_ref.type_arguments {
+                match type_name.as_str() {
+                    "Omit" if args.params.len() >= 2 => {
+                        // Omit<T, K>: resolve T, then remove keys in K
+                        let mut inner = ResolvedElements::default();
+                        resolve_type_elements_inner_with_ctx(
+                            &args.params[0],
+                            base_offset,
+                            &mut inner,
+                            ctx,
+                        );
+                        let keys = extract_string_literal_keys(&args.params[1]);
+                        inner
+                            .props
+                            .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
+                        inner.emits.retain(|e| !keys.contains(&e.name));
+                        result.props.extend(inner.props);
+                        result.emits.extend(inner.emits);
+                        if inner.has_call_signature {
+                            result.has_call_signature = true;
+                        }
+                        return;
+                    }
+                    "Pick" if args.params.len() >= 2 => {
+                        // Pick<T, K>: resolve T, then keep only keys in K
+                        let mut inner = ResolvedElements::default();
+                        resolve_type_elements_inner_with_ctx(
+                            &args.params[0],
+                            base_offset,
+                            &mut inner,
+                            ctx,
+                        );
+                        let keys = extract_string_literal_keys(&args.params[1]);
+                        inner
+                            .props
+                            .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
+                        inner.emits.retain(|e| keys.contains(&e.name));
+                        result.props.extend(inner.props);
+                        result.emits.extend(inner.emits);
+                        if inner.has_call_signature {
+                            result.has_call_signature = true;
+                        }
+                        return;
+                    }
+                    "Partial" | "Required" | "Readonly" if !args.params.is_empty() => {
+                        // These preserve structure, just change modifiers
+                        resolve_type_elements_inner_with_ctx(
+                            &args.params[0],
+                            base_offset,
+                            result,
+                            ctx,
+                        );
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            // 6. Couldn't resolve - add diagnostic
             // Note: We don't add to result.props here because we can't determine the structure
             ctx.diagnostics.push(ResolutionDiagnostic {
                 span: Span {
@@ -543,6 +984,20 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                 kind: ResolutionDiagnosticKind::UnresolvedTypeReference,
                 location: DiagnosticLocation::TypeResolution,
             });
+        }
+
+        // Type query: typeof X — look up in companion types
+        TSType::TSTypeQuery(query) => {
+            if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
+                let type_name = ident.name.as_str();
+                if let Some(companion) = ctx.companion_types.get(type_name) {
+                    result.props.extend(companion.props.iter().cloned());
+                    result.emits.extend(companion.emits.iter().cloned());
+                    if companion.has_call_signature {
+                        result.has_call_signature = true;
+                    }
+                }
+            }
         }
 
         // Function type: () => Type
@@ -564,7 +1019,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
     match node {
         // { prop: Type }
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(&lit.members, base_offset, result);
+            resolve_type_literal_members(&lit.members, base_offset, result, ctx.source);
         }
 
         // Parenthesized: (Type)
@@ -582,6 +1037,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
             for ty in &union.types {
                 resolve_type_elements_inner_with_ctx_ref(ty, base_offset, result, ctx);
             }
+            result.dedup_props();
         }
 
         // Intersection: Type1 & Type2
@@ -589,6 +1045,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
             for ty in &intersection.types {
                 resolve_type_elements_inner_with_ctx_ref(ty, base_offset, result, ctx);
             }
+            result.dedup_props();
         }
 
         // Type reference: SomeType or SomeType<T>
@@ -603,18 +1060,105 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 2. Check local interfaces
-            if let Some(interface_members) = ctx.find_interface(type_name_bytes) {
-                resolve_type_literal_members(interface_members, base_offset, result);
+            // 2. Check local interfaces (with extends support)
+            if let Some((interface_members, iface_extends)) = ctx.find_interface(type_name_bytes) {
+                let extends_owned: Vec<String> = iface_extends.to_vec();
+                let mut guard = vec![type_name.clone()];
+                resolve_interface_with_extends_ctx_ref(
+                    interface_members,
+                    &extends_owned,
+                    base_offset,
+                    result,
+                    ctx,
+                    &mut guard,
+                );
                 return;
             }
 
             // 3. Check generic type parameter constraints
             if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
                 resolve_type_elements_inner_with_ctx_ref(constraint, base_offset, result, ctx);
+                return;
             }
 
-            // 4. Couldn't resolve - skip silently (no diagnostics in immutable version)
+            // 4. Check companion <script> block's pre-resolved types
+            if let Some(companion) = ctx.companion_types.get(type_name.as_str()) {
+                result.props.extend(companion.props.iter().cloned());
+                result.emits.extend(companion.emits.iter().cloned());
+                if companion.has_call_signature {
+                    result.has_call_signature = true;
+                }
+                return;
+            }
+
+            // 5. Handle built-in TypeScript utility types (Omit, Pick, Partial, etc.)
+            if let Some(args) = &type_ref.type_arguments {
+                match type_name.as_str() {
+                    "Omit" if args.params.len() >= 2 => {
+                        let mut inner = ResolvedElements::default();
+                        resolve_type_elements_inner_with_ctx_ref(
+                            &args.params[0],
+                            base_offset,
+                            &mut inner,
+                            ctx,
+                        );
+                        let keys = extract_string_literal_keys(&args.params[1]);
+                        inner
+                            .props
+                            .retain(|p| p.key_name.as_ref().is_none_or(|n| !keys.contains(n)));
+                        inner.emits.retain(|e| !keys.contains(&e.name));
+                        result.props.extend(inner.props);
+                        result.emits.extend(inner.emits);
+                        if inner.has_call_signature {
+                            result.has_call_signature = true;
+                        }
+                    }
+                    "Pick" if args.params.len() >= 2 => {
+                        let mut inner = ResolvedElements::default();
+                        resolve_type_elements_inner_with_ctx_ref(
+                            &args.params[0],
+                            base_offset,
+                            &mut inner,
+                            ctx,
+                        );
+                        let keys = extract_string_literal_keys(&args.params[1]);
+                        inner
+                            .props
+                            .retain(|p| p.key_name.as_ref().is_some_and(|n| keys.contains(n)));
+                        inner.emits.retain(|e| keys.contains(&e.name));
+                        result.props.extend(inner.props);
+                        result.emits.extend(inner.emits);
+                        if inner.has_call_signature {
+                            result.has_call_signature = true;
+                        }
+                    }
+                    "Partial" | "Required" | "Readonly" if !args.params.is_empty() => {
+                        resolve_type_elements_inner_with_ctx_ref(
+                            &args.params[0],
+                            base_offset,
+                            result,
+                            ctx,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            // 6. Couldn't resolve - skip silently (no diagnostics in immutable version)
+        }
+
+        // Type query: typeof X — look up in companion types
+        TSType::TSTypeQuery(query) => {
+            if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
+                let type_name = ident.name.as_str();
+                if let Some(companion) = ctx.companion_types.get(type_name) {
+                    result.props.extend(companion.props.iter().cloned());
+                    result.emits.extend(companion.emits.iter().cloned());
+                    if companion.has_call_signature {
+                        result.has_call_signature = true;
+                    }
+                }
+            }
         }
 
         // Function type: () => Type
@@ -631,13 +1175,14 @@ fn resolve_type_literal_members(
     members: &[TSSignature],
     base_offset: u32,
     result: &mut ResolvedElements,
+    source: &[u8],
 ) {
     for member in members {
         match member {
             TSSignature::TSPropertySignature(prop) => {
                 // Check if this is a shorthand emit: { change: [id: number] }
                 // Properties with tuple/array type values are treated as emits
-                if let Some(emit) = resolve_property_as_emit(prop, base_offset) {
+                if let Some(emit) = resolve_property_as_emit(prop, base_offset, source) {
                     result.emits.push(emit);
                 } else if let Some(resolved) = resolve_property_signature(prop, base_offset) {
                     result.props.push(resolved);
@@ -651,7 +1196,7 @@ fn resolve_type_literal_members(
             TSSignature::TSCallSignatureDeclaration(call_sig) => {
                 result.has_call_signature = true;
                 // Extract emit from call signature: (e: 'change', id: number): void
-                if let Some(emit) = resolve_call_signature_as_emit(call_sig, base_offset) {
+                if let Some(emit) = resolve_call_signature_as_emit(call_sig, base_offset, source) {
                     result.emits.push(emit);
                 }
             }
@@ -662,7 +1207,11 @@ fn resolve_type_literal_members(
 
 /// Try to resolve a property signature as an emit (shorthand style).
 /// Shorthand style: `{ change: [id: number] }` or `{ update: [] }`
-fn resolve_property_as_emit(prop: &TSPropertySignature, base_offset: u32) -> Option<ResolvedEmit> {
+fn resolve_property_as_emit(
+    prop: &TSPropertySignature,
+    base_offset: u32,
+    source: &[u8],
+) -> Option<ResolvedEmit> {
     // Get the property key as the event name
     let name = get_property_key_name(&prop.key)?;
     let key_span = get_property_key_span(&prop.key, base_offset)?;
@@ -672,6 +1221,11 @@ fn resolve_property_as_emit(prop: &TSPropertySignature, base_offset: u32) -> Opt
     // TSArrayType (e.g., `string[]`) is a regular array prop type.
     if let Some(ann) = &prop.type_annotation {
         if let TSType::TSTupleType(_) = &ann.type_annotation {
+            let tuple_text = slice_source_span(
+                source,
+                ann.type_annotation.span().start,
+                ann.type_annotation.span().end,
+            )?;
             return Some(ResolvedEmit {
                 span: Span {
                     start: prop.span.start + base_offset,
@@ -679,6 +1233,9 @@ fn resolve_property_as_emit(prop: &TSPropertySignature, base_offset: u32) -> Opt
                 },
                 name,
                 name_span: Some(key_span),
+                signature: ResolvedEmitSignature::Tuple { tuple_text },
+                map_local: true,
+                span_is_absolute: base_offset != 0,
             });
         }
     }
@@ -692,6 +1249,7 @@ fn resolve_property_as_emit(prop: &TSPropertySignature, base_offset: u32) -> Opt
 fn resolve_call_signature_as_emit(
     call_sig: &TSCallSignatureDeclaration,
     base_offset: u32,
+    source: &[u8],
 ) -> Option<ResolvedEmit> {
     // Get the first parameter - should be like `e: 'eventName'`
     let first_param = call_sig.params.items.first()?;
@@ -702,6 +1260,23 @@ fn resolve_call_signature_as_emit(
     // Extract event name from string literal type
     if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
         if let TSLiteral::StringLiteral(s) = &lit.literal {
+            let mut params_text = String::new();
+            for param in call_sig.params.items.iter().skip(1) {
+                if !params_text.is_empty() {
+                    params_text.push_str(", ");
+                }
+                params_text.push_str(&slice_source_span(
+                    source,
+                    param.span().start,
+                    param.span().end,
+                )?);
+            }
+            if let Some(rest) = &call_sig.params.rest {
+                if !params_text.is_empty() {
+                    params_text.push_str(", ");
+                }
+                params_text.push_str(&slice_source_span(source, rest.span.start, rest.span.end)?);
+            }
             return Some(ResolvedEmit {
                 span: Span {
                     start: call_sig.span.start + base_offset,
@@ -712,6 +1287,9 @@ fn resolve_call_signature_as_emit(
                     start: s.span.start + base_offset,
                     end: s.span.end + base_offset,
                 }),
+                signature: ResolvedEmitSignature::Call { params_text },
+                map_local: true,
+                span_is_absolute: base_offset != 0,
             });
         }
     }
@@ -727,6 +1305,37 @@ fn get_property_key_name(key: &PropertyKey) -> Option<String> {
         PropertyKey::NumericLiteral(n) => n.raw.as_ref().map(|r| r.to_string()),
         _ => None,
     }
+}
+
+/// Extract string literal keys from a type argument (supports single literal and unions).
+/// Used for `Omit<T, 'a' | 'b'>` and `Pick<T, 'a' | 'b'>`.
+fn extract_string_literal_keys(ty: &TSType) -> Vec<String> {
+    match ty {
+        TSType::TSLiteralType(lit) => {
+            if let TSLiteral::StringLiteral(s) = &lit.literal {
+                vec![s.value.to_string()]
+            } else {
+                vec![]
+            }
+        }
+        TSType::TSUnionType(union) => union
+            .types
+            .iter()
+            .flat_map(|t| extract_string_literal_keys(t))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+fn slice_source_span(source: &[u8], start: u32, end: u32) -> Option<String> {
+    let start = start as usize;
+    let end = end as usize;
+    if end > source.len() || start > end {
+        return None;
+    }
+    std::str::from_utf8(&source[start..end])
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// Resolve a property signature to a ResolvedProp.
@@ -749,11 +1358,20 @@ fn resolve_property_signature(
         end: prop.span.end + base_offset,
     };
 
+    let type_span = prop.type_annotation.as_ref().map(|ann| Span {
+        start: ann.type_annotation.span().start + base_offset,
+        end: ann.type_annotation.span().end + base_offset,
+    });
+
     Some(ResolvedProp {
         span,
         key,
+        key_name: get_property_key_name(&prop.key),
         optional,
         types,
+        type_span,
+        map_local: true,
+        span_is_absolute: base_offset != 0,
     })
 }
 
@@ -771,8 +1389,12 @@ fn resolve_method_signature(method: &TSMethodSignature, base_offset: u32) -> Opt
     Some(ResolvedProp {
         span,
         key,
+        key_name: get_property_key_name(&method.key),
         optional,
         types: vec![RuntimeType::Function],
+        type_span: None,
+        map_local: true,
+        span_is_absolute: base_offset != 0,
     })
 }
 
@@ -865,8 +1487,20 @@ pub fn infer_runtime_type(node: &TSType) -> Vec<RuntimeType> {
         // Type reference: SomeType or SomeType<T>
         TSType::TSTypeReference(type_ref) => infer_type_reference(type_ref),
 
-        // Conditional type: T extends U ? X : Y
-        TSType::TSConditionalType(_) => vec![RuntimeType::Unknown],
+        // Conditional type: T extends U ? X : Y — union both branches
+        TSType::TSConditionalType(cond) => {
+            let mut types = infer_runtime_type(&cond.true_type);
+            for t in infer_runtime_type(&cond.false_type) {
+                if !types.contains(&t) {
+                    types.push(t);
+                }
+            }
+            if types.is_empty() {
+                vec![RuntimeType::Unknown]
+            } else {
+                types
+            }
+        }
 
         // Mapped type: { [K in keyof T]: T[K] }
         TSType::TSMappedType(_) => vec![RuntimeType::Object],
@@ -877,8 +1511,8 @@ pub fn infer_runtime_type(node: &TSType) -> Vec<RuntimeType> {
         // Template literal type: `${string}`
         TSType::TSTemplateLiteralType(_) => vec![RuntimeType::String],
 
-        // Type query: typeof x
-        TSType::TSTypeQuery(_) => vec![RuntimeType::Unknown],
+        // Type query: typeof x — in defineProps context, always refers to an object shape
+        TSType::TSTypeQuery(_) => vec![RuntimeType::Object],
 
         // Import type: import("...").Type
         TSType::TSImportType(_) => vec![RuntimeType::Unknown],
@@ -993,466 +1627,361 @@ fn infer_type_reference(type_ref: &TSTypeReference) -> Vec<RuntimeType> {
     }
 }
 
+/// Extract type names from interface heritage/extends clauses.
+fn extract_heritage_type_names(extends: &[TSInterfaceHeritage]) -> Vec<String> {
+    extends
+        .iter()
+        .filter_map(|heritage| match &heritage.expression {
+            Expression::Identifier(id) => Some(id.name.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Get the name from a type reference's type name.
+///
+/// For qualified names like `Namespace.Props`, returns the full path
+/// (`"Namespace.Props"`) by recursively walking the left side.
 fn get_type_reference_name(type_name: &TSTypeName) -> String {
     match type_name {
         TSTypeName::IdentifierReference(id) => id.name.to_string(),
         TSTypeName::QualifiedName(qualified) => {
-            // For qualified names like Foo.Bar, just use the last part for now
-            qualified.right.name.to_string()
+            let left = get_type_reference_name(&qualified.left);
+            format!("{}.{}", left, qualified.right.name)
         }
         TSTypeName::ThisExpression(_) => "this".to_string(),
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
-    use oxc_span::SourceType;
+/// Resolve a value declaration's type shape (for `typeof X` support).
+///
+/// Looks for variable declarations matching `type_name` in both exported and
+/// non-exported positions. If the variable has a type annotation, resolves that.
+/// Otherwise, if it has an object literal initializer, infers prop types from
+/// the property values.
+fn resolve_value_declaration_type<'a>(
+    type_name: &str,
+    program: &Program<'a>,
+    source_bytes: &[u8],
+    base_offset: u32,
+    ctx: &TypeResolutionContext<'_, 'a>,
+) -> Option<ResolvedElements> {
+    let name_bytes = type_name.as_bytes();
 
-    /// Result of parsing a type string, includes source for key extraction
-    struct ParsedType {
-        source: String,
-        resolved: ResolvedElements,
-    }
+    for stmt in &program.body {
+        // Check both `export const X` and plain `const X`
+        let var_decl = match stmt {
+            Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                Some(Declaration::VariableDeclaration(decl)) => Some(decl.as_ref()),
+                _ => None,
+            },
+            Statement::VariableDeclaration(decl) => Some(decl.as_ref()),
+            _ => None,
+        };
 
-    impl ParsedType {
-        /// Get the key name from a prop by extracting from source
-        fn key_name(&self, prop: &ResolvedProp) -> &str {
-            &self.source[prop.key.start as usize..prop.key.end as usize]
-        }
+        if let Some(decl) = var_decl {
+            for declarator in &decl.declarations {
+                let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                    continue;
+                };
+                if id.name.as_bytes() != name_bytes {
+                    continue;
+                }
 
-        /// Find a prop by key name
-        fn find_prop(&self, name: &str) -> Option<&ResolvedProp> {
-            self.resolved
-                .props
-                .iter()
-                .find(|p| self.key_name(p) == name)
-        }
-    }
+                // 1. Type annotation on the declarator: `const X: { foo: string } = ...`
+                if let Some(ref annotation) = declarator.type_annotation {
+                    return Some(resolve_type_elements_with_ctx_ref(
+                        &annotation.type_annotation,
+                        base_offset,
+                        ctx,
+                    ));
+                }
 
-    /// Helper to parse a type string and return the result with source
-    fn parse_type(type_str: &str) -> Option<ParsedType> {
-        let allocator = Allocator::default();
-        // Wrap in a type alias to parse
-        let source = format!("type T = {}", type_str);
-        let source_type = SourceType::ts();
-        let parser = Parser::new(&allocator, &source, source_type);
-        let result = parser.parse();
-
-        if !result.errors.is_empty() {
-            return None;
-        }
-
-        // Find the type alias declaration
-        for stmt in &result.program.body {
-            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
-                return Some(ParsedType {
-                    source: source.clone(),
-                    resolved: resolve_type_elements(&alias.type_annotation, 0),
-                });
-            }
-        }
-        None
-    }
-
-    /// Helper to infer runtime types from a type string
-    fn infer_type(type_str: &str) -> Vec<RuntimeType> {
-        let allocator = Allocator::default();
-        let source = format!("type T = {}", type_str);
-        let source_type = SourceType::ts();
-        let parser = Parser::new(&allocator, &source, source_type);
-        let result = parser.parse();
-
-        if !result.errors.is_empty() {
-            return vec![RuntimeType::Unknown];
-        }
-
-        for stmt in &result.program.body {
-            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
-                return infer_runtime_type(&alias.type_annotation);
-            }
-        }
-        vec![RuntimeType::Unknown]
-    }
-
-    #[test]
-    fn test_primitive_types() {
-        assert_eq!(infer_type("string"), vec![RuntimeType::String]);
-        assert_eq!(infer_type("number"), vec![RuntimeType::Number]);
-        assert_eq!(infer_type("boolean"), vec![RuntimeType::Boolean]);
-        assert_eq!(infer_type("symbol"), vec![RuntimeType::Symbol]);
-        assert_eq!(infer_type("null"), vec![RuntimeType::Null]);
-        assert_eq!(infer_type("bigint"), vec![RuntimeType::Number]);
-    }
-
-    #[test]
-    fn test_literal_types() {
-        assert_eq!(infer_type("'hello'"), vec![RuntimeType::String]);
-        assert_eq!(infer_type("42"), vec![RuntimeType::Number]);
-        assert_eq!(infer_type("true"), vec![RuntimeType::Boolean]);
-        assert_eq!(infer_type("false"), vec![RuntimeType::Boolean]);
-    }
-
-    #[test]
-    fn test_array_types() {
-        assert_eq!(infer_type("string[]"), vec![RuntimeType::Array]);
-        assert_eq!(infer_type("Array<number>"), vec![RuntimeType::Array]);
-        assert_eq!(infer_type("[string, number]"), vec![RuntimeType::Array]);
-    }
-
-    #[test]
-    fn test_function_types() {
-        assert_eq!(infer_type("() => void"), vec![RuntimeType::Function]);
-        assert_eq!(
-            infer_type("(x: number) => string"),
-            vec![RuntimeType::Function]
-        );
-        assert_eq!(infer_type("Function"), vec![RuntimeType::Function]);
-    }
-
-    #[test]
-    fn test_object_types() {
-        assert_eq!(infer_type("{ foo: string }"), vec![RuntimeType::Object]);
-        assert_eq!(infer_type("object"), vec![RuntimeType::Object]);
-        assert_eq!(infer_type("Object"), vec![RuntimeType::Object]);
-    }
-
-    #[test]
-    fn test_union_types() {
-        let types = infer_type("string | number");
-        assert!(types.contains(&RuntimeType::String));
-        assert!(types.contains(&RuntimeType::Number));
-        assert_eq!(types.len(), 2);
-    }
-
-    #[test]
-    fn test_builtin_types() {
-        assert_eq!(
-            infer_type("Date"),
-            vec![RuntimeType::BuiltIn("Date".to_string())]
-        );
-        assert_eq!(
-            infer_type("Map<string, number>"),
-            vec![RuntimeType::BuiltIn("Map".to_string())]
-        );
-        assert_eq!(
-            infer_type("Set<string>"),
-            vec![RuntimeType::BuiltIn("Set".to_string())]
-        );
-        assert_eq!(
-            infer_type("Promise<void>"),
-            vec![RuntimeType::BuiltIn("Promise".to_string())]
-        );
-    }
-
-    #[test]
-    fn test_utility_types() {
-        assert_eq!(
-            infer_type("Partial<{ foo: string }>"),
-            vec![RuntimeType::Object]
-        );
-        assert_eq!(
-            infer_type("Required<{ foo?: string }>"),
-            vec![RuntimeType::Object]
-        );
-        assert_eq!(
-            infer_type("Parameters<() => void>"),
-            vec![RuntimeType::Array]
-        );
-    }
-
-    #[test]
-    fn test_resolve_type_literal() {
-        let parsed = parse_type("{ title: string; count: number }").unwrap();
-        assert_eq!(parsed.resolved.props.len(), 2);
-
-        let title = parsed.find_prop("title").unwrap();
-        assert_eq!(title.types, vec![RuntimeType::String]);
-        assert!(!title.optional);
-
-        let count = parsed.find_prop("count").unwrap();
-        assert_eq!(count.types, vec![RuntimeType::Number]);
-        assert!(!count.optional);
-    }
-
-    #[test]
-    fn test_resolve_optional_props() {
-        let parsed = parse_type("{ required: string; optional?: number }").unwrap();
-        assert_eq!(parsed.resolved.props.len(), 2);
-
-        let required = parsed.find_prop("required").unwrap();
-        assert!(!required.optional);
-
-        let optional = parsed.find_prop("optional").unwrap();
-        assert!(optional.optional);
-    }
-
-    #[test]
-    fn test_resolve_method_signatures() {
-        let parsed = parse_type("{ onClick(): void; onChange(value: string): void }").unwrap();
-        assert_eq!(parsed.resolved.props.len(), 2);
-
-        for prop in &parsed.resolved.props {
-            assert_eq!(prop.types, vec![RuntimeType::Function]);
-        }
-    }
-
-    #[test]
-    fn test_resolve_union_prop_types() {
-        let parsed = parse_type("{ value: string | number }").unwrap();
-        assert_eq!(parsed.resolved.props.len(), 1);
-
-        let value = &parsed.resolved.props[0];
-        assert!(value.types.contains(&RuntimeType::String));
-        assert!(value.types.contains(&RuntimeType::Number));
-    }
-
-    #[test]
-    fn test_resolve_call_signature() {
-        let parsed = parse_type("{ (): void }").unwrap();
-        assert!(parsed.resolved.has_call_signature);
-    }
-
-    #[test]
-    fn test_complex_props_type() {
-        let parsed = parse_type(
-            r#"{
-            title: string;
-            count?: number;
-            items: string[];
-            metadata: { key: string };
-            onClick: () => void;
-            onUpdate(value: string): void;
-        }"#,
-        )
-        .unwrap();
-
-        assert_eq!(parsed.resolved.props.len(), 6);
-
-        let title = parsed.find_prop("title").unwrap();
-        assert_eq!(title.types, vec![RuntimeType::String]);
-        assert!(!title.optional);
-
-        let count = parsed.find_prop("count").unwrap();
-        assert_eq!(count.types, vec![RuntimeType::Number]);
-        assert!(count.optional);
-
-        let items = parsed.find_prop("items").unwrap();
-        assert_eq!(items.types, vec![RuntimeType::Array]);
-
-        let metadata = parsed.find_prop("metadata").unwrap();
-        assert_eq!(metadata.types, vec![RuntimeType::Object]);
-
-        let onclick = parsed.find_prop("onClick").unwrap();
-        assert_eq!(onclick.types, vec![RuntimeType::Function]);
-
-        let onupdate = parsed.find_prop("onUpdate").unwrap();
-        assert_eq!(onupdate.types, vec![RuntimeType::Function]);
-    }
-
-    #[test]
-    fn test_format_runtime_types_single() {
-        assert_eq!(format_runtime_types(&[RuntimeType::String]), "String");
-        assert_eq!(format_runtime_types(&[RuntimeType::Number]), "Number");
-        assert_eq!(format_runtime_types(&[RuntimeType::Boolean]), "Boolean");
-        assert_eq!(format_runtime_types(&[RuntimeType::Array]), "Array");
-        assert_eq!(format_runtime_types(&[RuntimeType::Function]), "Function");
-        assert_eq!(format_runtime_types(&[RuntimeType::Object]), "Object");
-    }
-
-    #[test]
-    fn test_format_runtime_types_multiple() {
-        assert_eq!(
-            format_runtime_types(&[RuntimeType::String, RuntimeType::Number]),
-            "[String, Number]"
-        );
-        assert_eq!(
-            format_runtime_types(&[
-                RuntimeType::String,
-                RuntimeType::Number,
-                RuntimeType::Boolean
-            ]),
-            "[String, Number, Boolean]"
-        );
-    }
-
-    #[test]
-    fn test_format_runtime_types_filters_unknown() {
-        // Unknown types should be filtered out
-        assert_eq!(
-            format_runtime_types(&[RuntimeType::String, RuntimeType::Unknown]),
-            "String"
-        );
-        assert_eq!(format_runtime_types(&[RuntimeType::Unknown]), "null");
-    }
-
-    #[test]
-    fn test_format_runtime_types_builtin() {
-        assert_eq!(
-            format_runtime_types(&[RuntimeType::BuiltIn("Date".to_string())]),
-            "Date"
-        );
-        assert_eq!(
-            format_runtime_types(&[RuntimeType::BuiltIn("Map".to_string()), RuntimeType::Null]),
-            "[Map, null]"
-        );
-    }
-
-    // =========================================================================
-    // Tests for TypeResolutionContext
-    // =========================================================================
-
-    #[test]
-    fn test_build_type_context_collects_type_aliases() {
-        let allocator = Allocator::default();
-        let source = r#"type Props = { foo: string };
-type Options = { bar: number };"#;
-        let source_type = SourceType::ts();
-        let parser = Parser::new(&allocator, source, source_type);
-        let result = parser.parse();
-
-        let ctx = build_type_context(&result.program, source.as_bytes(), 0);
-
-        assert_eq!(ctx.type_aliases.len(), 2);
-        // Check that we can find Props
-        assert!(ctx.find_type_alias(b"Props").is_some());
-        assert!(ctx.find_type_alias(b"Options").is_some());
-        assert!(ctx.find_type_alias(b"Unknown").is_none());
-    }
-
-    #[test]
-    fn test_build_type_context_collects_interfaces() {
-        let allocator = Allocator::default();
-        let source = r#"interface Props { foo: string }
-interface Options { bar: number }"#;
-        let source_type = SourceType::ts();
-        let parser = Parser::new(&allocator, source, source_type);
-        let result = parser.parse();
-
-        let ctx = build_type_context(&result.program, source.as_bytes(), 0);
-
-        assert_eq!(ctx.interfaces.len(), 2);
-        assert!(ctx.find_interface(b"Props").is_some());
-        assert!(ctx.find_interface(b"Options").is_some());
-        assert!(ctx.find_interface(b"Unknown").is_none());
-    }
-
-    #[test]
-    fn test_resolve_type_alias_with_context() {
-        let allocator = Allocator::default();
-        let source = r#"type Props = { foo: string; bar: number };
-type Test = Props;"#;
-        let source_type = SourceType::ts();
-        let parser = Parser::new(&allocator, source, source_type);
-        let result = parser.parse();
-
-        let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-
-        // Find the type alias for Test and resolve it
-        // First, manually get the Test type alias
-        for stmt in &result.program.body {
-            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
-                if alias.id.name.as_str() == "Test" {
-                    let resolved =
-                        resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
-                    // Test should resolve to Props which has 2 props
-                    assert_eq!(
-                        resolved.props.len(),
-                        2,
-                        "Should resolve Props type alias with 2 props"
-                    );
-                    assert!(ctx.diagnostics.is_empty(), "Should have no diagnostics");
+                // 2. Object literal initializer: `const X = { foo: 'str', bar: 42 }`
+                if let Some(Expression::ObjectExpression(obj)) = &declarator.init {
+                    return Some(infer_props_from_object_literal(obj, source_bytes));
                 }
             }
         }
     }
 
-    #[test]
-    fn test_resolve_interface_with_context() {
-        let allocator = Allocator::default();
-        let source = r#"interface Props { foo: string; bar: number }
-type Test = Props;"#;
-        let source_type = SourceType::ts();
-        let parser = Parser::new(&allocator, source, source_type);
-        let result = parser.parse();
-
-        let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-
-        // Find the type alias for Test and resolve it
-        for stmt in &result.program.body {
-            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
-                if alias.id.name.as_str() == "Test" {
-                    let resolved =
-                        resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
-                    // Test should resolve to Props interface which has 2 props
-                    assert_eq!(
-                        resolved.props.len(),
-                        2,
-                        "Should resolve Props interface with 2 props"
-                    );
-                    assert!(ctx.diagnostics.is_empty(), "Should have no diagnostics");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_unresolved_type_emits_diagnostic() {
-        let allocator = Allocator::default();
-        let source = r#"type Test = UnknownType;"#;
-        let source_type = SourceType::ts();
-        let parser = Parser::new(&allocator, source, source_type);
-        let result = parser.parse();
-
-        let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-
-        for stmt in &result.program.body {
-            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
-                let _resolved = resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
-                // Should have a diagnostic for unresolved type
-                assert_eq!(ctx.diagnostics.len(), 1, "Should have 1 diagnostic");
-                assert_eq!(
-                    ctx.diagnostics[0].kind,
-                    ResolutionDiagnosticKind::UnresolvedTypeReference
-                );
-                assert_eq!(
-                    ctx.diagnostics[0].location,
-                    DiagnosticLocation::TypeResolution,
-                    "Diagnostic should come from TypeResolution"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_resolve_intersection_with_context() {
-        let allocator = Allocator::default();
-        let source = r#"type A = { foo: string };
-type B = { bar: number };
-type Test = A & B;"#;
-        let source_type = SourceType::ts();
-        let parser = Parser::new(&allocator, source, source_type);
-        let result = parser.parse();
-
-        let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-
-        for stmt in &result.program.body {
-            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
-                if alias.id.name.as_str() == "Test" {
-                    let resolved =
-                        resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
-                    // Test should resolve to A & B which has 2 props total
-                    assert_eq!(
-                        resolved.props.len(),
-                        2,
-                        "Should resolve intersection with 2 props"
-                    );
-                    assert!(ctx.diagnostics.is_empty(), "Should have no diagnostics");
-                }
-            }
-        }
-    }
+    None
 }
+
+/// Infer prop types from an object literal's property values.
+fn infer_props_from_object_literal(
+    obj: &oxc_ast::ast::ObjectExpression<'_>,
+    _source_bytes: &[u8],
+) -> ResolvedElements {
+    let mut result = ResolvedElements {
+        root_runtime_types: vec![RuntimeType::Object],
+        ..ResolvedElements::default()
+    };
+
+    for prop in &obj.properties {
+        let ObjectPropertyKind::ObjectProperty(p) = prop else {
+            continue;
+        };
+        let key_span: oxc_span::Span = p.key.span();
+        let runtime_type = match &p.value {
+            Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
+                vec![RuntimeType::String]
+            }
+            Expression::NumericLiteral(_) => vec![RuntimeType::Number],
+            Expression::BooleanLiteral(_) => vec![RuntimeType::Boolean],
+            Expression::ArrayExpression(_) => vec![RuntimeType::Array],
+            Expression::ObjectExpression(_) => vec![RuntimeType::Object],
+            Expression::NullLiteral(_) => vec![RuntimeType::Null],
+            _ => vec![RuntimeType::Unknown],
+        };
+
+        result.props.push(ResolvedProp {
+            span: crate::common::Span::new(key_span.start, key_span.end),
+            key: crate::common::Span::new(key_span.start, key_span.end),
+            key_name: None,
+            types: runtime_type,
+            optional: false,
+            type_span: None,
+            map_local: true,
+            span_is_absolute: false,
+        });
+    }
+
+    result
+}
+
+/// Resolve an imported type by name from a dependency file's source.
+///
+/// Parses the dep file, builds a type resolution context, finds the named type
+/// (interface or type alias), and resolves it to structured property/emit information.
+///
+/// Returns `None` if the file can't be parsed or the named type isn't found.
+pub fn resolve_external_type(
+    type_name: &str,
+    dep_source: &str,
+    allocator: &oxc_allocator::Allocator,
+) -> Option<ResolvedElements> {
+    resolve_external_type_with_companion(type_name, dep_source, &FxHashMap::default(), allocator)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedTypeBinding {
+    pub local_name: String,
+    pub imported_name: String,
+    pub source: String,
+}
+
+/// Result of extracting type bindings from a dependency file.
+/// Includes both named bindings (from `import` and `export {} from`) and
+/// wildcard re-export sources (from `export * from`).
+#[derive(Debug, Clone, Default)]
+pub struct ExtractedTypeBindings {
+    pub bindings: Vec<ImportedTypeBinding>,
+    pub wildcard_reexport_sources: Vec<String>,
+}
+
+pub fn extract_imported_type_bindings(
+    dep_source: &str,
+    allocator: &oxc_allocator::Allocator,
+) -> ExtractedTypeBindings {
+    let source_type = oxc_span::SourceType::ts();
+    let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
+
+    if parsed.panicked {
+        return ExtractedTypeBindings::default();
+    }
+
+    let mut result = ExtractedTypeBindings::default();
+    for stmt in &parsed.program.body {
+        match stmt {
+            Statement::ImportDeclaration(import_decl) => {
+                let Some(specifiers) = &import_decl.specifiers else {
+                    continue;
+                };
+                for specifier in specifiers {
+                    let ImportDeclarationSpecifier::ImportSpecifier(import_spec) = specifier else {
+                        continue;
+                    };
+                    result.bindings.push(ImportedTypeBinding {
+                        local_name: import_spec.local.name.to_string(),
+                        imported_name: import_spec.imported.name().to_string(),
+                        source: import_decl.source.value.to_string(),
+                    });
+                }
+            }
+            Statement::ExportNamedDeclaration(export_decl) => {
+                // `export { X } from './Y'` — named re-export with source
+                let Some(source) = &export_decl.source else {
+                    continue;
+                };
+                for specifier in &export_decl.specifiers {
+                    let local_name = specifier.exported.name().to_string();
+                    let imported_name = specifier.local.name().to_string();
+                    result.bindings.push(ImportedTypeBinding {
+                        local_name,
+                        imported_name,
+                        source: source.value.to_string(),
+                    });
+                }
+            }
+            Statement::ExportAllDeclaration(export_all) => {
+                // `export * from './Drawer'` — wildcard re-export
+                result
+                    .wildcard_reexport_sources
+                    .push(export_all.source.value.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    result
+}
+
+pub fn resolve_external_type_with_companion(
+    type_name: &str,
+    dep_source: &str,
+    companion_types: &FxHashMap<String, ResolvedElements>,
+    allocator: &oxc_allocator::Allocator,
+) -> Option<ResolvedElements> {
+    let source_type = oxc_span::SourceType::ts();
+    let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
+
+    if parsed.panicked {
+        return None;
+    }
+
+    let source_bytes = dep_source.as_bytes();
+    let mut ctx = build_type_context(&parsed.program, source_bytes, 0);
+    for (name, resolved) in companion_types {
+        ctx.companion_types
+            .entry(name.clone())
+            .or_insert_with(|| resolved.clone());
+    }
+
+    let name_bytes = type_name.as_bytes();
+
+    let mut result = None;
+
+    // Try type alias first
+    if let Some(ts_type) = ctx.find_type_alias(name_bytes) {
+        result = Some(resolve_type_elements_with_ctx_ref(ts_type, 0, &ctx));
+    }
+
+    // Try interface (with extends support)
+    if result.is_none() {
+        if let Some((members, extends)) = ctx.find_interface(name_bytes) {
+            let mut r = ResolvedElements::default();
+            let extends_owned: Vec<String> = extends.to_vec();
+            let mut guard = vec![type_name.to_string()];
+            resolve_interface_with_extends_ctx_ref(
+                members,
+                &extends_owned,
+                0,
+                &mut r,
+                &ctx,
+                &mut guard,
+            );
+            r.root_runtime_types = vec![RuntimeType::Object];
+            result = Some(r);
+        }
+    }
+
+    // Try exported variable declarations: `export const X: { prop: Type } = ...`
+    // or non-exported `const X: { prop: Type } = ...` (for `typeof X`)
+    if result.is_none() {
+        result = resolve_value_declaration_type(type_name, &parsed.program, source_bytes, 0, &ctx);
+    }
+
+    // Try companion types directly — handles `export { X } from './y'` re-exports
+    // where X is not defined in this file but was resolved from the import source.
+    if result.is_none() {
+        if let Some(companion) = companion_types.get(type_name) {
+            result = Some(companion.clone());
+        }
+    }
+
+    // Populate key_name on all props since spans reference the external file,
+    // not the consuming SFC. Consumers use key_name when available.
+    result.map(|resolved| finalize_external_resolution(resolved, source_bytes))
+}
+
+fn finalize_external_resolution(
+    mut resolved: ResolvedElements,
+    source_bytes: &[u8],
+) -> ResolvedElements {
+    for prop in &mut resolved.props {
+        let start = prop.key.start as usize;
+        let end = prop.key.end as usize;
+        if prop.key_name.is_none() && start < end && end <= source_bytes.len() {
+            if let Ok(name) = std::str::from_utf8(&source_bytes[start..end]) {
+                prop.key_name = Some(name.to_string());
+            }
+        }
+        prop.map_local = false;
+        prop.span_is_absolute = false;
+    }
+    for emit in &mut resolved.emits {
+        emit.map_local = false;
+        emit.span_is_absolute = false;
+    }
+
+    resolved
+}
+
+/// Hash the resolved type shape for cache comparison (SHA-256, truncated to 16 bytes).
+///
+/// Produces a stable hash from prop names + runtime types + optional flags + emits.
+/// Two different source texts that resolve to the same prop shape produce the same hash.
+///
+/// # Arguments
+/// * `resolved` - The resolved type elements
+/// * `source` - Source bytes needed to extract prop key names from spans
+pub fn hash_resolved_type(resolved: &ResolvedElements, source: &[u8]) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+
+    // Hash props sorted by key name for stability
+    let mut props: Vec<_> = resolved
+        .props
+        .iter()
+        .map(|p| {
+            let key_name = &source[p.key.start as usize..p.key.end as usize];
+            let mut runtime_types: Vec<&str> = p.types.iter().map(|t| t.as_str()).collect();
+            runtime_types.sort();
+            (key_name, runtime_types, p.optional)
+        })
+        .collect();
+    props.sort_by_key(|(name, _, _)| *name);
+
+    hasher.update((props.len() as u32).to_le_bytes());
+    for (name, types, optional) in &props {
+        hasher.update((name.len() as u32).to_le_bytes());
+        hasher.update(name);
+        hasher.update((types.len() as u32).to_le_bytes());
+        for t in types {
+            hasher.update(t.as_bytes());
+        }
+        hasher.update([*optional as u8]);
+    }
+
+    // Hash emits sorted by name
+    let mut emits: Vec<&str> = resolved.emits.iter().map(|e| e.name.as_str()).collect();
+    emits.sort();
+
+    hasher.update((emits.len() as u32).to_le_bytes());
+    for name in &emits {
+        hasher.update(name.as_bytes());
+    }
+
+    hasher.update([resolved.has_call_signature as u8]);
+
+    let hash = hasher.finalize();
+    let mut result = [0u8; 16];
+    result.copy_from_slice(&hash[..16]);
+    result
+}
+
+#[cfg(test)]
+#[path = "resolve_type_tests.rs"]
+mod resolve_type_tests;

@@ -1,0 +1,1251 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="608" failures="0" errors="0" time="0">
+    <testsuite name="src/exports.spec.ts" timestamp="2026-03-13T15:16:58.218Z" hostname="Carloss-MacBook-Air.local" tests="1" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/exports.spec.ts" name="Package exports &gt; all types are properly exported" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/components/components.spec.ts" timestamp="2026-03-13T15:16:58.218Z" hostname="Carloss-MacBook-Air.local" tests="70" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; constructor returns instance type" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; function returning void -&gt; Comment" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; function returning array -&gt; Fragment" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; function returning other -&gt; HTMLElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; direct HTMLElement type preserved" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; works with defineComponent constructor" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; Vue built-ins (KeepAlive)" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; Vue built-ins (Transition)" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; Vue built-ins (TransitionGroup)" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; Vue built-ins (Teleport)" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; Vue built-ins (Suspense)" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; function component returning VNode -&gt; HTMLElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; function component returning VNode[] -&gt; Fragment" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; function component returning void -&gt; Comment" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; GetVueComponent &gt; non-component types yield never" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; DefineOptions &gt; signature and return type" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; DefineOptions &gt; preserves name type" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; DefineOptions &gt; preserves inheritAttrs type" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; DefineOptions &gt; preserves both name and inheritAttrs" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; DefineOptions &gt; allows empty object" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; DefineOptions &gt; from defineAsyncComponent" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; basic extraction &gt; extracts component from flat object" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; basic extraction &gt; extracts multiple components" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; basic extraction &gt; returns empty object when no components" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; basic extraction &gt; handles empty input object" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; deep extraction &gt; extracts components from nested objects with capitalized keys" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; deep extraction &gt; extracts from deeply nested capitalized structures" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; deep extraction &gt; removes empty nested objects even when capitalized" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; capitalization filter &gt; removes lowercase component keys" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; capitalization filter &gt; removes lowercase containers even when they hold components" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; filters non-components &gt; removes primitive values" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; filters non-components &gt; removes arrays" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; filters non-components &gt; removes regular functions (non-component)" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; real-world patterns &gt; extracts from module-like structure with capitalized keys" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; real-world patterns &gt; extracts from component library structure honoring capitalization" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; edge cases &gt; handles HTMLElement types with capitalized keys" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; edge cases &gt; handles functional components" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponents &gt; edge cases &gt; preserves component type exactly" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; instantiateComponent &gt; returns instance type for class-based component" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; instantiateComponent &gt; returns return type for functional component" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; instantiateComponent &gt; returns return type for functional component returning void (Comment)" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; instantiateComponent &gt; returns T for non-component types" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; instantiateComponent &gt; works with defineComponent result" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; basic enhancement &gt; enhances constructor instance with additional props" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; basic enhancement &gt; preserves original instance properties" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; basic enhancement &gt; adds new props to instance" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; instance extends props scenario &gt; returns instance when it already extends props" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; instance extends props scenario &gt; returns instance when props are subset of instance" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; non-constructor types &gt; merges additional props for non-constructor types" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; non-constructor types &gt; merges additional props with plain object type" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; non-constructor types &gt; merges additional props with function type (non-constructor)" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; Vue component scenarios &gt; enhances Vue component constructor with additional props" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; Vue component scenarios &gt; handles component with complex instance type" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; edge cases &gt; handles empty props" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; edge cases &gt; handles overlapping property types" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; enhanceElementWithProps &gt; edge cases &gt; handles never type" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from component constructor" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from component instance with $props" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from HTMLAudioElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from HTMLInputElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from HTMLVideoElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from HTMLButtonElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from HTMLFormElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from HTMLAnchorElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from HTMLImageElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from HTMLSelectElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts props from HTMLTextAreaElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; extracts HTMLAttributes for generic HTMLElement" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; recursively extracts from constructor to instance" time="0">
+        </testcase>
+        <testcase classname="src/components/components.spec.ts" name="components helpers &gt; ExtractComponentProps &gt; handles component with empty $props" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/helpers/helpers.spec.ts" timestamp="2026-03-13T15:16:58.221Z" hostname="Carloss-MacBook-Air.local" tests="36" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PatchHidden and ExtractHidden &gt; should patch and extract hidden properties correctly" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PatchHidden and ExtractHidden &gt; should be never when extracting from a type without the hidden property" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; FunctionToObject &amp; IntersectionFunctionToObject &gt; simple" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; FunctionToObject &amp; IntersectionFunctionToObject &gt; no args" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; FunctionToObject &amp; IntersectionFunctionToObject &gt; intersections" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; FunctionToObject &amp; IntersectionFunctionToObject &gt; union functions" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; FunctionToObject &amp; IntersectionFunctionToObject &gt; arg types \&quot;foo\&quot; | \&quot;bar\&quot;" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; makes undefined properties optional" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; keeps all properties required when none accept undefined" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; handles mix of required and optional properties" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; handles nullable properties (null | undefined)" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; handles empty object" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; handles object with only optional properties" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; generic tests &gt; preserves generics with required properties" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; generic tests &gt; preserves generics with optional properties" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; generic tests &gt; works with constrained generics" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; generic tests &gt; handles generic union types" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; PartialUndefined &gt; generic tests &gt; preserves complex generic structures" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; UnionToIntersection &gt; converts union to intersection" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; UnionToIntersection &gt; handles function unions" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; UnionToIntersection &gt; handles empty union (never)" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; UnionToIntersection &gt; generic tests &gt; preserves generics in union to intersection" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; UnionToIntersection &gt; generic tests &gt; works with constrained generic unions" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; removes properties with never type" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; keeps all properties when none are never" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; returns empty object when all properties are never" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; handles empty object" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; preserves optional properties that are not never" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; handles union types that include never" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; handles readonly properties" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; does not remove properties with undefined or null" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; handles nested objects (shallow - does not recurse)" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; handles function properties" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; handles array properties" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; handles symbol and number keys" time="0">
+        </testcase>
+        <testcase classname="src/helpers/helpers.spec.ts" name="Helpers &gt; OmitNever &gt; works with index signatures" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/emits/emits.spec.ts" timestamp="2026-03-13T15:16:58.223Z" hostname="Carloss-MacBook-Air.local" tests="31" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; direct function types &gt; simple event" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; direct function types &gt; no args event" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; direct function types &gt; multiple events with intersections" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; direct function types &gt; multiple events with unions" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; direct function types &gt; event names \&quot;foo\&quot; | \&quot;bar\&quot;" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; direct function types &gt; kebab-case event names produce both casings" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; direct function types &gt; camelCase event produces single key, no duplicate" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; direct function types &gt; multiple arguments" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; defineEmits &gt; object syntax" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; defineEmits &gt; array syntax" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; defineEmits &gt; typed &gt; function syntax" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; defineEmits &gt; typed &gt; object syntax" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; generic tests &gt; EmitsToProps preserves generic constraints" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; generic tests &gt; EmitsToProps with generic event types" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; generic tests &gt; EmitsToProps with union of generic events" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; generic tests &gt; EmitsToProps with complex generic types" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; generic tests &gt; EmitsToProps with generic intersection types" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; EmitsToProps &gt; empty" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; defineComponent with emits &gt; object syntax" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; defineComponent with emits &gt; array syntax" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; defineComponent with emits &gt; typed &gt; with setup" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; defineComponent with emits &gt; kebab-case event names produce both casings" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; defineComponent with emits &gt; camelCase event produces single key, no duplicate" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; defineComponent with emits &gt; multiple arguments" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; defineComponent with emits &gt; no args event" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; defineComponent with emits &gt; component with props and emits" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; generic tests &gt; ComponentEmitsToProps preserves generic event types" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; generic tests &gt; ComponentEmitsToProps with generic payload types" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; generic tests &gt; ComponentEmitsToProps with multiple generic types" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; generic tests &gt; ComponentEmitsToProps with constrained generics" time="0">
+        </testcase>
+        <testcase classname="src/emits/emits.spec.ts" name="\&quot;emits\&quot; helper &gt; ComponentEmitsToProps &gt; generic tests &gt; ComponentEmitsToProps with array generic types" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/instance/instance.spec.ts" timestamp="2026-03-13T15:16:58.224Z" hostname="Carloss-MacBook-Air.local" tests="75" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; ToInstanceProps &gt; extracts props with MakePublicProps when MakeDefaultsOptional is true" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; ToInstanceProps &gt; extracts props with MakeInternalProps when MakeDefaultsOptional is false" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; ToInstanceProps &gt; handles empty props object" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateTypedPublicInstanceFromNormalisedMacro &gt; creates public instance with correct types" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateTypedPublicInstanceFromNormalisedMacro &gt; exposes props directly on instance (not just $props)" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateTypedPublicInstanceFromNormalisedMacro &gt; exposes model values directly on instance" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateTypedPublicInstanceFromNormalisedMacro &gt; combines props and model values on instance" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateTypedInternalInstanceFromNormalisedMacro &gt; creates internal instance with correct structure" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; InternalInstanceFromMacro &gt; creates internal instance with enhanced props type" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; InternalInstanceFromMacro &gt; creates internal instance with enhanced emit type" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; InternalInstanceFromMacro &gt; creates internal instance with enhanced slots type" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; InternalInstanceFromMacro &gt; creates internal instance with model props and emits" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; InternalInstanceFromMacro &gt; has all standard ComponentInternalInstance properties" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; InternalInstanceFromMacro &gt; has ComponentInternalInstance structure" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; InternalInstanceFromMacro &gt; proxy property is typed as PublicInstance" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromNormalisedMacro &gt; creates public instance with props and models accessible directly" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromNormalisedMacro &gt; has all standard ComponentPublicInstance properties" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromNormalisedMacro &gt; has ComponentPublicInstance structure" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateExportedInstanceFromNormalisedMacro &gt; creates exported instance with MakeDefaultsOptional=true" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateExportedInstanceFromNormalisedMacro &gt; exposes props and model values on instance" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateExportedInstanceFromNormalisedMacro &gt; has all standard ComponentPublicInstance properties" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateExportedInstanceFromNormalisedMacro &gt; has ComponentPublicInstance structure" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; CreateExportedInstanceFromMacro &gt; works with MacroReturn structure for props only" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; Instance with expose macro &gt; public instance exposes methods from defineExpose" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; Instance with expose macro &gt; exported instance exposes methods from defineExpose" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; Instance with expose macro &gt; internal instance has exposed property with correct type" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; Instance with expose macro &gt; instance with both props, models and expose" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; Instance with expose macro &gt; CreateExportedInstanceFromMacro with expose" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; Instance with expose macro &gt; expose with generic types" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineProps only &gt; handles type-argument syntax: defineProps&lt;{ id: number }&gt;()" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineProps only &gt; handles object syntax: defineProps({ foo: String })" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineProps only &gt; handles array syntax: defineProps([&apos;foo&apos;, &apos;bar&apos;])" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineProps only &gt; handles all-optional props: defineProps&lt;{ message?: string }&gt;()" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineProps with withDefaults &gt; handles withDefaults making props optional" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineProps with withDefaults &gt; handles withDefaults internal instance (MakeDefaultsOptional=false)" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineEmits &gt; handles type-argument syntax with call signatures" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineEmits &gt; handles shorthand object syntax" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineModel &gt; handles basic modelValue" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineModel &gt; handles named model" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineModel &gt; handles multiple models" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineModel &gt; handles model with complex types" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineSlots &gt; handles typed slots" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineExpose &gt; handles exposed methods and properties" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; defineExpose &gt; exposed members replace props on instance root" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; combined macros - realistic component scenarios &gt; props + emits" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; combined macros - realistic component scenarios &gt; props + model" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; combined macros - realistic component scenarios &gt; props + withDefaults + emits + model" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; combined macros - realistic component scenarios &gt; all macros combined: props, emits, model, slots, expose" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; model-only macro does not leak internal props/defaults structure" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; empty macro return produces valid instance" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; handles Attrs type parameter" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; handles Element type parameter" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; type is not any or unknown" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; type is not never" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; preserves literal types in props" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; handles readonly props" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; handles union type models" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; edge cases and type safety &gt; handles default model" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; DEV mode parameter &gt; DEV=true includes $data" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; DEV mode parameter &gt; DEV=false has empty $data" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; compatibility with Vue&apos;s ComponentPublicInstance &gt; has all required ComponentPublicInstance methods" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; PublicInstanceFromMacro - realistic macro usage &gt; compatibility with Vue&apos;s ComponentPublicInstance &gt; instance is assignable to base ComponentPublicInstance" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; SFCPublicInstanceFromMacro &gt; creates instance for internal SFC template usage" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; SFCPublicInstanceFromMacro &gt; props with defaults are required internally" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; SFCPublicInstanceFromMacro &gt; attrs are NOT included in $props" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; SFCPublicInstanceFromMacro &gt; exposes model values on $props and instance" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; ExternalPublicInstanceFromMacro &gt; creates instance for external/consumer usage" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; ExternalPublicInstanceFromMacro &gt; props with defaults are optional for consumers" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; ExternalPublicInstanceFromMacro &gt; attrs are NOT included in $props" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; ExternalPublicInstanceFromMacro &gt; works with exposed methods from defineExpose" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; TestExternalPublicInstanceFromMacro &gt; includes attrs in $props for testing purposes" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; TestExternalPublicInstanceFromMacro &gt; has MakeDefaultsOptional=true like ExternalPublicInstanceFromMacro" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; TestExternalPublicInstanceFromMacro &gt; useful for testing attr merging behavior" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; comparison between SFC, External, and Test instance types &gt; all three types share common Vue instance properties" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.ts" name="instance helpers &gt; SFC Instance Type Variants &gt; comparison between SFC, External, and Test instance types &gt; differs in how they handle props with defaults" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/instance/instance.spec.tsx" timestamp="2026-03-13T15:16:58.227Z" hostname="Carloss-MacBook-Air.local" tests="3" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/instance/instance.spec.tsx" name="Instance Types &gt; PublicInstanceFromMacro &gt; basic" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.tsx" name="Instance Types &gt; PublicInstanceFromMacro &gt; generic" time="0">
+        </testcase>
+        <testcase classname="src/instance/instance.spec.tsx" name="Instance Types &gt; CreateExportedInstanceFromMacro &gt; generic" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/model/model.spec.ts" timestamp="2026-03-13T15:16:58.227Z" hostname="Carloss-MacBook-Air.local" tests="24" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; should convert ModelRef properties to props" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; should handle optional ModelRef properties" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; should handle complex types in ModelRef" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; should handle union types in ModelRef" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; should filter out non-ModelRef properties" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; should handle mixed ModelRef and non-ModelRef properties" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; should handle empty model" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; should use default name when ModelRef name parameter is not provided" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; should handle custom names with optional ModelRef" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should generate emit functions for ModelRef properties" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should handle optional ModelRef properties" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should handle complex types in ModelRef" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should handle union types in ModelRef" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should return a function for empty model" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should handle single ModelRef property" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should handle nullable ModelRef" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should properly type event names as template literals" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should respect custom name in ModelRef for emits" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should handle mix of custom and default names in emits" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should handle custom names with optional ModelRef in emits" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should handle custom names with complex types in emits" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToEmits &gt; should handle multiple properties with same custom name" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToProps and ModelToEmits integration &gt; should work together for a complete v-model setup" time="0">
+        </testcase>
+        <testcase classname="src/model/model.spec.ts" name="Model helpers &gt; ModelToProps &gt; ModelToProps and ModelToEmits integration &gt; should handle mixed optional and required models" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/loops/loops.spec.ts" timestamp="2026-03-13T15:16:58.228Z" hostname="Carloss-MacBook-Air.local" tests="16" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; array types &gt; extracts key as number and value as element type from arrays" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; array types &gt; extracts value type from number arrays" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; array types &gt; extracts complex object type from arrays" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; array types &gt; extracts union types from arrays" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; array types &gt; handles nested arrays" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; object/record types &gt; extracts literal keys and values from objects" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; object/record types &gt; extracts single property object" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; object/record types &gt; handles optional properties" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; object/record types &gt; handles complex nested object values" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; object/record types &gt; handles Record types with string keys" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; object/record types &gt; handles Record types with number keys" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; v-for use cases &gt; simulates v-for with array items - (item, index) in items" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; v-for use cases &gt; simulates v-for with object - (value, key) in object" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; v-for use cases &gt; handles nested v-for with children property" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; function type inference &gt; function signature extracts array elements correctly" time="0">
+        </testcase>
+        <testcase classname="src/loops/loops.spec.ts" name="loops helpers &gt; extractLoops &gt; function type inference &gt; function signature extracts object entries correctly" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/name/name.spec.ts" timestamp="2026-03-13T15:16:58.230Z" hostname="Carloss-MacBook-Air.local" tests="11" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; CanCapitalize: special chars map to &apos;x&apos;" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; CanCapitalize: letters capitalize correctly" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; PascalToKebab: base and simple pairs" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; CamelToKebab: typical camelCase" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; CamelToKebab: with acronym sequence" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; CamelToKebab: leading uppercase coerces first letter to lowercase" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; NormalisePascal: uppercase input normalised to hyphenated variants" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; NormalisePascal: lowercase input stays as-is" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; Hyphenate (vue/core): camelCase to kebab-case lowercase" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; Hyphenate: distributes over unions" time="0">
+        </testcase>
+        <testcase classname="src/name/name.spec.ts" name="name helpers &gt; Camelize (vue/core): kebab-case to camelCase" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/props/props.spec.ts" timestamp="2026-03-13T15:16:58.233Z" hostname="Carloss-MacBook-Air.local" tests="23" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/props/props.spec.ts" name="PropsWithDefaults &gt; should mark props with defaults" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="PropsWithDefaults &gt; should work with optional props" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakePublicProps &gt; should make props with defaults optional in public API" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakePublicProps &gt; should handle props without defaults marker" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakePublicProps &gt; should handle all props with defaults" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakePublicProps &gt; should preserve readonly modifier" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakePublicProps &gt; should handle mixed optional and required props" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakeBooleanOptional &gt; should make boolean props optional for DefineProps" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakeBooleanOptional &gt; should handle DefineProps with no boolean keys" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakeBooleanOptional &gt; should return unchanged type if not DefineProps" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakeBooleanOptional &gt; should handle single boolean key" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="ExtractBooleanKeys &gt; should extract boolean keys from DefineProps" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="ExtractBooleanKeys &gt; should return never if no boolean keys" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="ExtractBooleanKeys &gt; should return never if not DefineProps" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="ExtractBooleanKeys &gt; should handle single boolean key" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakeInternalProps &gt; should make props with defaults required internally" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakeInternalProps &gt; should handle props without defaults marker" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakeInternalProps &gt; should handle all props with defaults" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakeInternalProps &gt; should preserve readonly modifier" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="MakeInternalProps &gt; should make all default props required but possibly undefined" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="Integration tests &gt; should correctly transform props from public to internal API" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="Integration tests &gt; should handle complex prop scenarios" time="0">
+        </testcase>
+        <testcase classname="src/props/props.spec.ts" name="Integration tests &gt; should work with DefineProps and boolean keys" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/setup/setup.spec.ts" timestamp="2026-03-13T15:16:58.234Z" hostname="Carloss-MacBook-Air.local" tests="137" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ReturnMacros &gt; includes all valid macro names" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ReturnMacros &gt; rejects invalid macro names" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; NonReturnMacros &gt; includes all valid non-return macro names" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; RegularMacros &gt; excludes model from regular macros" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; RegularMacros &gt; rejects model as regular macro" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; RegularMacros &gt; rejects options as regular macro" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; RegularMacros &gt; rejects expose as regular macro" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturnType &gt; creates type-based macro return structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturnType &gt; preserves value and type generics" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturnType &gt; works with complex value types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturnType &gt; rejects wrong structure with object instead of type" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturnObject &gt; creates object-based macro return structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturnObject &gt; preserves value and object generics" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturnObject &gt; works with complex object types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturnObject &gt; rejects wrong structure with type instead of object" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturn &gt; accepts MacroReturnType structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturn &gt; accepts MacroReturnObject structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturn &gt; is a union of both return types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; MacroReturn &gt; rejects invalid structures" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacroReturn &gt; extracts the wrapped type from createMacroReturn" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacroReturn &gt; returns never for non-macro types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; extracts a specific macro when present" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; returns never for missing macro without fallback" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; returns fallback for missing macro with fallback" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; extracts model structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; extracts props macro without defaults field" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; returns empty object with defaults when props not present" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; extracts withDefaults into defaults field" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractEmits &gt; extracts emits macro" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractEmits &gt; returns default emit function when emits not present" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractEmits &gt; handles complex emit types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractSlots &gt; extracts slots macro" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractSlots &gt; returns empty object when slots not present" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractSlots &gt; handles multiple slot types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractOptions &gt; extracts options macro" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractOptions &gt; returns empty object when options not present" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; extracts model macro with nested keys" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; returns empty object when model not present" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; handles single model value" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; extracts options" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractExpose &gt; extracts expose macro" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractExpose &gt; returns empty object when expose not present" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractExpose &gt; handles complex exposed API" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; NormaliseMacroReturn &gt; normalizes macro return with all macros present" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; NormaliseMacroReturn &gt; provides defaults for missing macros" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; NormaliseMacroReturn &gt; normalizes empty macro return" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; NormaliseMacroReturn &gt; normalizes partial macro return" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; NormaliseMacroReturn &gt; preserves complex prop types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; NormaliseMacroReturn &gt; preserves multiple model keys" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; NormaliseMacroReturn &gt; handles non-macro type" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; creates empty macro return" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; creates macro return with props" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; creates macro return with emits" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; creates macro return with slots" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; creates macro return with options" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; creates macro return with expose" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; creates macro return with model object" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; creates macro return with multiple regular macros" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; creates macro return with all macros" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; preserves partial structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; allows nested model with multiple keys" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; preserves exact return type" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; handles mixed type and object returns" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; rejects non-regular macros at model level" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; handles empty model object" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; handles complex nested value types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; createMacroReturn &gt; handles function value types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; extracts specific macro from metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; returns never for missing macro without fallback" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; returns fallback type for missing macro" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; preserves macro structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; works with all macro types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; handles empty metadata object" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractMacro &gt; handles partial metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; extracts props from macro metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; returns empty object for missing props" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; works with complex prop types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; preserves MacroReturnType vs MacroReturnObject" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; works with empty metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; includes defaults property from withDefaults macro" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; defaults property is empty object when withDefaults missing" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; extracts defaults property with complex types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractProps &gt; works with MacroReturnObject in defaults" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; Extract withDefaults &gt; extracts withDefaults from macro metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; Extract withDefaults &gt; returns empty object fallback for missing withDefaults" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; Extract withDefaults &gt; works with MacroReturnType for defaults" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; Extract withDefaults &gt; works with MacroReturnObject for defaults" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; Extract withDefaults &gt; works together with props in createMacroReturn" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; Extract withDefaults &gt; ExtractProps includes withDefaults in defaults property" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; Extract withDefaults &gt; defaults property accessible from ExtractProps result" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; Extract withDefaults &gt; works with nested defaults structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; Extract withDefaults &gt; handles empty withDefaults gracefully" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractEmits &gt; extracts emits from macro metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractEmits &gt; returns function fallback for missing emits" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractEmits &gt; preserves emit function signature" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractEmits &gt; works with object-based emit specification" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractSlots &gt; extracts slots from macro metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractSlots &gt; returns empty object for missing slots" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractSlots &gt; preserves slot function signatures" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractSlots &gt; handles scoped slot types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractOptions &gt; extracts options from macro metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractOptions &gt; returns empty object for missing options" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractOptions &gt; preserves component options structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractOptions &gt; handles complex options with computed and methods" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; extracts model from macro metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; returns empty object for missing model" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; handles multiple model properties" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; preserves model value and type structure" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; handles empty model object" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractModel &gt; handles complex model value types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractExpose &gt; extracts expose from macro metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractExpose &gt; returns empty object for missing expose" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractExpose &gt; preserves exposed method signatures" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractExpose &gt; handles async methods in expose" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractExpose &gt; handles exposed properties and methods" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; integration tests for Extract* helpers &gt; extracts all macros from complete setup" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; integration tests for Extract* helpers &gt; extracts from partial macro metadata" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; integration tests for Extract* helpers &gt; works with createMacroReturn result" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; integration tests for Extract* helpers &gt; chaining ExtractMacroReturn and Extract*" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; integration tests for Extract* helpers &gt; handles complex real-world setup pattern" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; integration tests for Extract* helpers &gt; ensures type safety with never for missing required macros" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; ExtractProps with generic type parameter" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; ExtractEmits with generic event type" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; ExtractSlots with generic slot props" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; ExtractModel with generic model type" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; ExtractExpose with generic exposed API" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; ExtractOptions with generic computed types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; multiple generic parameters" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; generic with constraints" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; generic with union types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; generic with conditional types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; all macros with same generic type" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; nested generic types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; generic tests for Extract* helpers &gt; generic with mapped types" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractPropsFromMacro with optional props &gt; should extract required props" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractPropsFromMacro with optional props &gt; should extract optional props" time="0">
+        </testcase>
+        <testcase classname="src/setup/setup.spec.ts" name="Setup helpers &gt; ExtractPropsFromMacro with optional props &gt; should extract mixed required and optional props" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/render/render.spec.tsx" timestamp="2026-03-13T15:16:58.240Z" hostname="Carloss-MacBook-Air.local" tests="32" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; component resolution from map &gt; resolves component from components map" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; component resolution from map &gt; resolves different components correctly" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; component resolution from map &gt; resolved component can be used in JSX with correct props" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; component resolution from map &gt; resolved component rejects incorrect props" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; component resolution from map &gt; resolves component with slots" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; native element resolution &gt; resolves native div element" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; native element resolution &gt; resolves native span element" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; native element resolution &gt; resolves native input element" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; native element resolution &gt; resolves native button element" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; native element resolution &gt; resolves native form elements" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; native element resolution &gt; resolves native anchor element" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; native element resolution &gt; resolves native img element" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; native element resolution &gt; rejects invalid attributes for native elements" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; invalid component handling &gt; rejects non-existent component at call-site" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; invalid component handling &gt; rejects non-existent element at call-site" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; invalid component handling &gt; rejects generic string type" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; type inference &gt; infers component type from string literal" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; type inference &gt; works with union of component names" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; type inference &gt; works with union including native element" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; empty components map &gt; rejects component with empty map" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; real-world patterns &gt; dynamic component pattern" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; real-world patterns &gt; component with fallback to native element" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; real-world patterns &gt; tab/panel pattern" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; edge cases &gt; handles component with no props" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; edge cases &gt; handles component with optional props only" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; edge cases &gt; handles deeply nested components object" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; edge cases &gt; preserves component generic types" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; direct component reference (second overload) &gt; accepts direct component reference" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; direct component reference (second overload) &gt; works with component from defineComponent" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; direct component reference (second overload) &gt; works with functional component" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; direct component reference (second overload) &gt; direct reference can be used in JSX" time="0">
+        </testcase>
+        <testcase classname="src/render/render.spec.tsx" name="toComponentRender &gt; direct component reference (second overload) &gt; rejects non-component values" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/slots/slots-to-render.spec.tsx" timestamp="2026-03-13T15:16:58.241Z" hostname="Carloss-MacBook-Air.local" tests="49" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; string props &gt; accepts valid string prop" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; string props &gt; rejects missing required prop" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; string props &gt; rejects wrong type" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; number props &gt; accepts valid number prop" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; number props &gt; rejects wrong type" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; boolean props &gt; accepts valid boolean prop" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; boolean props &gt; rejects wrong type" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; object props &gt; accepts valid object prop" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; object props &gt; rejects incomplete object" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; object props &gt; rejects wrong object shape" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; array props &gt; accepts valid array prop" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; basic slot props &gt; array props &gt; rejects wrong array element type" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; optional and required props &gt; optional props &gt; accepts with only required props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; optional and required props &gt; optional props &gt; accepts with both required and optional props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; optional and required props &gt; optional props &gt; rejects missing required prop" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; optional and required props &gt; all optional props &gt; accepts empty props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; optional and required props &gt; all optional props &gt; accepts partial props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; optional and required props &gt; all required props &gt; requires all props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; optional and required props &gt; all required props &gt; rejects missing any prop" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; multiple slots &gt; each slot has correct props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; multiple slots &gt; rejects wrong props for each slot" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; multiple slots &gt; slots are independent" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; slots without props &gt; accepts no props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; complex prop types &gt; union types &gt; accepts any union member" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; complex prop types &gt; union types &gt; rejects non-union types" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; complex prop types &gt; literal types &gt; accepts valid literals" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; complex prop types &gt; literal types &gt; rejects invalid literals" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; complex prop types &gt; nested complex types &gt; accepts valid nested structure" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; complex prop types &gt; nested complex types &gt; rejects invalid nested structure" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; complex prop types &gt; function props &gt; accepts valid function props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; complex prop types &gt; function props &gt; rejects wrong function signature" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; complex prop types &gt; generic-like patterns &gt; accepts unknown type" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; optional slots &gt; required slot works normally" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; optional slots &gt; optional slots type reflects optionality" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; edge cases &gt; empty props object &gt; accepts empty object" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; edge cases &gt; void return type &gt; works with void return" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; edge cases &gt; never return type &gt; works with never return" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; edge cases &gt; tuple return type &gt; works with tuple return" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; edge cases &gt; slot with &apos;any&apos; props &gt; accepts any props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; edge cases &gt; slot with index signature &gt; accepts string indexed props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; edge cases &gt; slot with index signature &gt; rejects non-string values" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; real-world patterns &gt; data table slot &gt; renders data table slots correctly" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; real-world patterns &gt; modal slot &gt; renders modal slots correctly" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; real-world patterns &gt; form field slot &gt; renders form field slots correctly" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; real-world patterns &gt; tabs component slot &gt; renders tabs slots correctly" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; type assertions &gt; SlotsToRender produces correct component type" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; type assertions &gt; preserves optional props in $props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; type assertions &gt; handles slots without props correctly" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots-to-render.spec.tsx" name="SlotsToRender &gt; type assertions &gt; non-function slot produces fallback type" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/slots/slots.spec.ts" timestamp="2026-03-13T15:16:58.243Z" hostname="Carloss-MacBook-Air.local" tests="23" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; accepts array children for array-returning slot" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; requires single-element tuple for single-returning slot" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; requires non-empty array for notEmpty-returning slot" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; supports tuple-returning slot" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; support for string" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; support for string | TabItem" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; support for named slot returning literal" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; support for named slot returning literal union" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; support for named slot returning literal union array" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; support for named slot returning tuple of literal and component" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; support for named slot returning HTMLSpanElement" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot &gt; support for named slot returning HTMLSpanElement[]" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot with Verter codegen pattern &gt; accepts correct children via Comp function ReturnType pattern" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot with Verter codegen pattern &gt; works with HTML element slot types via Comp function pattern" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="StrictRenderSlot with Verter codegen pattern &gt; works with HTMLElementTagNameMap pattern (what Verter emits for HTML children)" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="extractArgumentsFromRenderSlot &gt; extracts props from slot with single prop" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="extractArgumentsFromRenderSlot &gt; extracts props from slot with multiple props" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="extractArgumentsFromRenderSlot &gt; handles slot without props (returns undefined)" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="extractArgumentsFromRenderSlot &gt; extracts complex nested props from slot" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="extractArgumentsFromRenderSlot &gt; works with component instance directly" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="extractArgumentsFromRenderSlot &gt; provides type safety for slot names" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="extractArgumentsFromRenderSlot &gt; with generic components &gt; extracts props from generic component slots" time="0">
+        </testcase>
+        <testcase classname="src/slots/slots.spec.ts" name="extractArgumentsFromRenderSlot &gt; with union type props &gt; extracts union type props correctly" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/tsx/tsx.spec.tsx" timestamp="2026-03-13T15:16:58.244Z" hostname="Carloss-MacBook-Air.local" tests="26" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot on HTML elements &gt; supports v-slot on div elements" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot on HTML elements &gt; supports v-slot on input elements" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot on HTML elements &gt; supports v-slot on select elements" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot on Vue components &gt; infers component instance type from v-slot function parameter" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot on Vue components &gt; generic v-slot usage &gt; string literal" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot on Vue components &gt; generic v-slot usage &gt; string" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot on Vue components &gt; generic v-slot usage &gt; object" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot on Vue components &gt; generic v-slot usage &gt; generic with constraint" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot on Vue components &gt; generic v-slot usage &gt;  with generic" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot advanced usage &gt; v-slot returning slots object &gt; allows returning slots object from v-slot callback" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot advanced usage &gt; v-slot returning slots object &gt; v-slot callback receives component instance with $slots" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot advanced usage &gt; v-slot returning slots object &gt; v-slot with multiple named slots" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot advanced usage &gt; v-slot returning slots object &gt; v-slot with optional slots" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot advanced usage &gt; v-slot with scoped slots &gt; properly types scoped slot parameters" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot advanced usage &gt; v-slot with scoped slots &gt; v-slot with complex slot parameter types" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot advanced usage &gt; v-slot type validation &gt; validates slot return types match expected slots" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; v-slot advanced usage &gt; v-slot type validation &gt; validates required vs optional slots" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; Vue lifecycle hooks (onVue:*) &gt; mounted receives instance properties" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; Vue lifecycle hooks (onVue:*) &gt; mounted with reactive data and method" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; Vue lifecycle hooks (onVue:*) &gt; unmounted receives cleanupId" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; Vue lifecycle hooks (onVue:*) &gt; updated receives current and old vnode proxies" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; Vue lifecycle hooks (onVue:*) &gt; before-mount receives isReady flag" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; Vue lifecycle hooks (onVue:*) &gt; before-unmount receives saveState method" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; Vue lifecycle hooks (onVue:*) &gt; before-update receives data ref" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; Vue lifecycle hooks (onVue:*) &gt; allows combining multiple hooks" time="0">
+        </testcase>
+        <testcase classname="src/tsx/tsx.spec.tsx" name="TSX type augmentations &gt; Vue lifecycle hooks (onVue:*) &gt; combines hooks with v-slot" time="0">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/vue/vue.macros.spec.ts" timestamp="2026-03-13T15:16:58.245Z" hostname="Carloss-MacBook-Air.local" tests="51" failures="0" errors="0" skipped="0" time="0">
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; array syntax overload &gt; allows passing Box result back into original macro" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; array syntax overload &gt; preserves array type in return" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; array syntax overload &gt; accepts generic string extends" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; object syntax overload &gt; preserves object prop options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; object syntax overload &gt; preserves complex prop options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; object syntax overload &gt; works with validator functions" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; type-only syntax overload (no argument) &gt; type equivalence with generic props" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; type-only syntax overload (no argument) &gt; handles optional properties" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; type-only syntax overload (no argument) &gt; handles complex nested types" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineProps_Box &gt; type-only syntax overload (no argument) &gt; handles union types" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; withDefaults_Box &gt; works with props from Box macro" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; withDefaults_Box &gt; returns tuple type" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; withDefaults_Box &gt; handles factory functions in defaults" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; withDefaults_Box &gt; preserves default value types" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineEmits_Box &gt; array syntax overload &gt; emits function equivalence" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineEmits_Box &gt; array syntax overload &gt; preserves array type" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineEmits_Box &gt; array syntax overload &gt; handles generic event names" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineEmits_Box &gt; object syntax overload &gt; object form equivalence" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineEmits_Box &gt; object syntax overload &gt; handles validator functions" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineEmits_Box &gt; object syntax overload &gt; preserves complex emit payloads" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineEmits_Box &gt; type-only syntax overload &gt; generic emit spec equivalence" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineEmits_Box &gt; type-only syntax overload &gt; handles empty event payloads" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineEmits_Box &gt; type-only syntax overload &gt; handles complex event payloads" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineOptions_Box &gt; preserves component options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineOptions_Box &gt; handles empty options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineOptions_Box &gt; rejects disallowed options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineOptions_Box &gt; accepts valid component options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineExpose_Box &gt; preserves exposed properties" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineExpose_Box &gt; handles empty expose" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineExpose_Box &gt; handles typed exposed interface" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineExpose_Box &gt; preserves method signatures" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineSlots_Box &gt; preserves slot definitions" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineSlots_Box &gt; handles empty slots" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineSlots_Box &gt; handles scoped slots with props" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineSlots_Box &gt; preserves complex slot prop types" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; required options overload &gt; with required constraint" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; required options overload &gt; with default value" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; required options overload &gt; with type prop option" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; optional options overload &gt; with empty options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; optional options overload &gt; with validator" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; optional options overload &gt; with get/set options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; named model with required options overload &gt; with name and required" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; named model with required options overload &gt; returns tuple type" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; named model with required options overload &gt; with complex options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; named model with optional options overload &gt; with name and empty options" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; named model with optional options overload &gt; with name and validator" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; named model with optional options overload &gt; handles union types" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; defineModel_Box &gt; named model with optional options overload &gt; preserves get/set with name" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; integration tests &gt; chaining Box macros together" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; integration tests &gt; all macros return correct types" time="0">
+        </testcase>
+        <testcase classname="src/vue/vue.macros.spec.ts" name="vue macros _Box usage &gt; integration tests &gt; complex component setup" time="0">
+        </testcase>
+    </testsuite>
+</testsuites>

@@ -517,13 +517,19 @@
           "include": "#tag-stuff"
         },
         {
+          "contentName": "source.css",
           "begin": "(>)",
           "beginCaptures": {
             "1": {
               "name": "punctuation.definition.tag.end.html"
             }
           },
-          "end": "(?=</style>)"
+          "end": "(?=</style>)",
+          "patterns": [
+            {
+              "include": "source.css"
+            }
+          ]
         }
       ]
     },
@@ -846,7 +852,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         }
       ]
     },
@@ -874,7 +880,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         },
         {
           "begin": "(>)",
@@ -911,7 +917,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         },
         {
           "contentName": "source.ts",
@@ -954,7 +960,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         },
         {
           "contentName": "source.coffee",
@@ -997,7 +1003,7 @@
       },
       "patterns": [
         {
-          "include": "#tag-stuff"
+          "include": "#script-tag-stuff"
         },
         {
           "contentName": "source.js",
@@ -1170,6 +1176,118 @@
         }
       ]
     },
+    "script-ts-generic-attr": {
+      "name": "meta.attribute.generic.vue",
+      "begin": "\\b(generic)\\s*(=)",
+      "beginCaptures": {
+        "1": {
+          "name": "entity.other.attribute-name.html"
+        },
+        "2": {
+          "name": "punctuation.separator.key-value.html"
+        }
+      },
+      "end": "(?<='|\")",
+      "patterns": [
+        {
+          "begin": "('|\")",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.html"
+            }
+          },
+          "end": "(\\1)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.end.html"
+            }
+          },
+          "contentName": "meta.type.parameters.vue",
+          "patterns": [
+            {
+              "include": "source.ts#comment"
+            },
+            {
+              "name": "storage.modifier.ts",
+              "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(extends)(?![_$[:alnum:]])(?:(?=\\.\\.\\.)|(?!\\.))"
+            },
+            {
+              "include": "source.ts#type"
+            },
+            {
+              "include": "source.ts#punctuation-comma"
+            },
+            {
+              "name": "keyword.operator.assignment.ts",
+              "match": "(=)(?!>)"
+            }
+          ]
+        }
+      ]
+    },
+    "script-ts-attrs-attr": {
+      "name": "meta.attribute.attrs.vue",
+      "begin": "\\b(attrs|attributes)\\s*(=)",
+      "beginCaptures": {
+        "1": {
+          "name": "entity.other.attribute-name.html"
+        },
+        "2": {
+          "name": "punctuation.separator.key-value.html"
+        }
+      },
+      "end": "(?<='|\")",
+      "patterns": [
+        {
+          "begin": "('|\")",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.html"
+            }
+          },
+          "end": "(\\1)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.end.html"
+            }
+          },
+          "contentName": "meta.type.annotation.vue",
+          "patterns": [
+            {
+              "include": "source.ts#comment"
+            },
+            {
+              "include": "source.ts#type"
+            }
+          ]
+        }
+      ]
+    },
+    "script-tag-stuff": {
+      "patterns": [
+        {
+          "include": "#script-ts-generic-attr"
+        },
+        {
+          "include": "#script-ts-attrs-attr"
+        },
+        {
+          "include": "#vue-directives"
+        },
+        {
+          "include": "#tag-id-attribute"
+        },
+        {
+          "include": "#tag-generic-attribute"
+        },
+        {
+          "include": "#string-double-quoted"
+        },
+        {
+          "include": "#string-single-quoted"
+        }
+      ]
+    },
     "vue-directives": {
       "name": "meta.directive.vue",
       "begin": "(?:\\b(v-)|(:|@|#))([a-zA-Z0-9\\-_]+)(?:\\:([a-zA-Z\\-_]+))?(?:\\.([a-zA-Z\\-_]+))*\\s*(=)",
@@ -1211,7 +1329,7 @@
           },
           "patterns": [
             {
-              "include": "source.js#expression"
+              "include": "#ts-expression-safe"
             }
           ]
         },
@@ -1231,7 +1349,7 @@
           },
           "patterns": [
             {
-              "include": "source.js#expression"
+              "include": "#ts-expression-safe"
             }
           ]
         },
@@ -1251,9 +1369,35 @@
           },
           "patterns": [
             {
-              "include": "source.js#expression"
+              "include": "#ts-expression-safe"
             }
           ]
+        }
+      ]
+    },
+    "ts-expression-safe": {
+      "patterns": [
+        {
+          "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(as)\\s+(const)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.as.ts"
+            },
+            "2": {
+              "name": "storage.modifier.ts"
+            }
+          }
+        },
+        {
+          "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(as|satisfies)(?=\\s)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.as.ts"
+            }
+          }
+        },
+        {
+          "include": "source.ts#expression"
         }
       ]
     },
@@ -1275,7 +1419,7 @@
           },
           "patterns": [
             {
-              "include": "source.js#expression"
+              "include": "#ts-expression-safe"
             }
           ]
         }

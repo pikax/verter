@@ -1,0 +1,25 @@
+{
+  "name": "@verter/tsc-linux-x64-gnu",
+  "version": "0.0.1-beta.1",
+  "description": "verter-tsc binary for Linux x64 (glibc)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "files": [
+    "verter-tsc"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

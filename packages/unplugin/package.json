@@ -1,64 +1,102 @@
 {
   "name": "@verter/unplugin",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Universal Vue SFC compiler plugin for all bundlers (Vite, Rollup, webpack, esbuild, etc.)",
+  "keywords": [
+    "vue",
+    "compiler",
+    "unplugin",
+    "vite",
+    "webpack",
+    "rollup"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
+  "author": "pikax",
+  "homepage": "https://verterjs.dev/",
+  "engines": {
+    "node": ">=18"
+  },
   "files": [
     "dist"
   ],
-  "main": "dist/index.js",
+  "main": "dist/index.cjs",
   "module": "dist/index.mjs",
-  "types": "dist/index.d.ts",
+  "types": "dist/index.d.mts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": {
+        "import": "./dist/index.d.mts",
+        "require": "./dist/index.d.cts"
+      },
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "require": "./dist/index.cjs"
     },
     "./vite": {
-      "types": "./dist/vite.d.ts",
+      "types": {
+        "import": "./dist/vite.d.mts",
+        "require": "./dist/vite.d.cts"
+      },
       "import": "./dist/vite.mjs",
-      "require": "./dist/vite.js"
+      "require": "./dist/vite.cjs"
     },
     "./rollup": {
-      "types": "./dist/rollup.d.ts",
+      "types": {
+        "import": "./dist/rollup.d.mts",
+        "require": "./dist/rollup.d.cts"
+      },
       "import": "./dist/rollup.mjs",
-      "require": "./dist/rollup.js"
+      "require": "./dist/rollup.cjs"
     },
     "./webpack": {
-      "types": "./dist/webpack.d.ts",
+      "types": {
+        "import": "./dist/webpack.d.mts",
+        "require": "./dist/webpack.d.cts"
+      },
       "import": "./dist/webpack.mjs",
-      "require": "./dist/webpack.js"
+      "require": "./dist/webpack.cjs"
     },
     "./esbuild": {
-      "types": "./dist/esbuild.d.ts",
+      "types": {
+        "import": "./dist/esbuild.d.mts",
+        "require": "./dist/esbuild.d.cts"
+      },
       "import": "./dist/esbuild.mjs",
-      "require": "./dist/esbuild.js"
+      "require": "./dist/esbuild.cjs"
     },
     "./rspack": {
-      "types": "./dist/rspack.d.ts",
+      "types": {
+        "import": "./dist/rspack.d.mts",
+        "require": "./dist/rspack.d.cts"
+      },
       "import": "./dist/rspack.mjs",
-      "require": "./dist/rspack.js"
+      "require": "./dist/rspack.cjs"
     },
     "./rolldown": {
-      "types": "./dist/rolldown.d.ts",
+      "types": {
+        "import": "./dist/rolldown.d.mts",
+        "require": "./dist/rolldown.d.cts"
+      },
       "import": "./dist/rolldown.mjs",
-      "require": "./dist/rolldown.js"
+      "require": "./dist/rolldown.cjs"
     },
     "./farm": {
-      "types": "./dist/farm.d.ts",
+      "types": {
+        "import": "./dist/farm.d.mts",
+        "require": "./dist/farm.d.cts"
+      },
       "import": "./dist/farm.mjs",
-      "require": "./dist/farm.js"
+      "require": "./dist/farm.cjs"
     }
   },
   "scripts": {
     "build": "tsdown src/index.ts src/vite.ts src/rollup.ts src/webpack.ts src/esbuild.ts src/rspack.ts src/rolldown.ts src/farm.ts --format cjs,esm --dts --unbundle",
     "dev": "tsdown src/index.ts src/vite.ts src/rollup.ts src/webpack.ts src/esbuild.ts src/rspack.ts src/rolldown.ts src/farm.ts --format cjs,esm --dts --unbundle --watch",
-    "test": "vitest run",
+    "test": "vitest run && node e2e/scripts/exit-regression.mjs",
+    "test:exit-regression": "node e2e/scripts/exit-regression.mjs",
     "e2e": "tsx e2e/scripts/run.ts",
     "e2e:vite": "tsx e2e/scripts/run.ts --bundler vite",
     "e2e:webpack": "tsx e2e/scripts/run.ts --bundler webpack",
@@ -70,46 +108,73 @@
   },
   "dependencies": {
     "@verter/native": "workspace:*",
-    "unplugin": "^2.3.2"
+    "unplugin": "^2.3.0 || ^3.0.0"
   },
   "devDependencies": {
-    "@farmfe/cli": "^1.0.0",
-    "@farmfe/core": "^1.0.0",
-    "@playwright/test": "^1.52.0",
-    "@rollup/plugin-commonjs": "^29.0.0",
+    "@farmfe/cli": "^1.0.5",
+    "@farmfe/core": "^1.7.11",
+    "@playwright/test": "^1.58.2",
+    "@rollup/plugin-commonjs": "^29.0.2",
     "@rollup/plugin-node-resolve": "^16.0.3",
-    "@rollup/plugin-replace": "^6.0.0",
-    "@rspack/cli": "^1.3.12",
-    "@rspack/core": "^1.3.12",
-    "css-loader": "^7.1.2",
+    "@rollup/plugin-replace": "^6.0.3",
+    "@rspack/cli": "^1.7.8",
+    "@rspack/core": "^1.7.8",
+    "@tailwindcss/vite": "4.2.1",
+    "css-loader": "^7.1.4",
     "esbuild": "^0.27.3",
-    "esbuild-loader": "^4.3.0",
-    "execa": "^9.6.0",
-    "html-webpack-plugin": "^5.6.3",
-    "less": "^4.3.0",
-    "less-loader": "^12.3.0",
-    "rolldown": "^1.0.0-beta.8",
-    "rollup": "^4.57.1",
+    "esbuild-loader": "^4.4.2",
+    "execa": "^9.6.1",
+    "html-webpack-plugin": "^5.6.6",
+    "less": "^4.6.2",
+    "less-loader": "^12.3.1",
+    "rolldown": "1.0.0-rc.8",
+    "rollup": "^4.59.0",
     "rollup-plugin-postcss": "^4.0.2",
-    "sass": "^1.89.0",
-    "sass-loader": "^16.0.5",
+    "sass": "^1.98.0",
+    "sass-embedded": "1.98.0",
+    "sass-loader": "^16.0.7",
     "sirv-cli": "^3.0.1",
     "style-loader": "^4.0.0",
-    "tsdown": "^0.12.4",
-    "tsx": "^4.19.4",
+    "tailwindcss": "4.2.1",
+    "tsdown": "^0.21.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vite": "^7.3.1",
-    "vitest": "^4.0.18",
+    "vite": "^8.0.0",
+    "vitest": "^4.1.0",
     "vue": "3.6.0-beta.6",
-    "webpack": "^5.99.9",
+    "webpack": "^5.105.4",
     "webpack-cli": "^6.0.1",
-    "webpack-dev-server": "^5.2.2"
+    "webpack-dev-server": "^5.2.3"
   },
   "peerDependencies": {
-    "vite": "^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0"
+    "@farmfe/core": "^1.0.0",
+    "@rspack/core": "^1.0.0",
+    "esbuild": ">=0.18.0",
+    "rolldown": ">=1.0.0-rc.0",
+    "rollup": "^4.0.0",
+    "vite": "^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0",
+    "webpack": "^5.0.0"
   },
   "peerDependenciesMeta": {
     "vite": {
+      "optional": true
+    },
+    "rollup": {
+      "optional": true
+    },
+    "esbuild": {
+      "optional": true
+    },
+    "@farmfe/core": {
+      "optional": true
+    },
+    "webpack": {
+      "optional": true
+    },
+    "@rspack/core": {
+      "optional": true
+    },
+    "rolldown": {
       "optional": true
     }
   }

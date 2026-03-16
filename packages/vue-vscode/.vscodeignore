@@ -1,0 +1,28 @@
+# Source files (bundled by esbuild)
+src/**
+**/*.ts
+**/*.map
+tsconfig.json
+tsconfig.tsbuildinfo
+esbuild.mjs
+package.mjs
+
+# Old tsc output in dist/ (keep only esbuild bundle)
+dist/**
+!dist/extension.js
+
+# Tests
+**/*.spec.*
+**/*.test.*
+e2e/**
+out-test/**
+.vscode-test.mjs
+tsconfig.test.json
+
+# Config files
+.gitignore
+.eslintrc*
+prettier*
+
+# VSIX artifacts
+*.vsix

@@ -36,7 +36,10 @@ pub struct MacroObjectArg<'a> {
     pub properties: Vec<MacroProperty<'a>>,
 }
 
-/// A property in a macro object argument
+/// A property in a macro object argument.
+///
+/// For `defineProps` object syntax, the AST-extracted fields provide all type
+/// information needed for codegen — no string parsing of prop values is needed.
 #[derive(Debug)]
 pub struct MacroProperty<'a> {
     /// The property name
@@ -45,6 +48,25 @@ pub struct MacroProperty<'a> {
     pub name_span: Span,
     /// Span of the value (Some for { foo: String }, None for shorthand)
     pub value_span: Option<Span>,
+    /// Whether this property uses method shorthand (e.g., `foo() { ... }`)
+    pub is_method: bool,
+    /// Whether the prop has `required: true` in object form.
+    /// Extracted from the OXC AST (not string parsing).
+    pub required: bool,
+    /// Whether the prop has a `default:` key in object form.
+    /// Extracted from the OXC AST (not string parsing).
+    pub has_default: bool,
+    /// Runtime constructor types extracted from the AST.
+    /// - `title: String` → `[RuntimeType::String]`
+    /// - `value: [String, Number]` → `[RuntimeType::String, RuntimeType::Number]`
+    /// - `{ type: Number }` → `[RuntimeType::Number]`
+    /// - `{ type: [String, Number] }` → `[RuntimeType::String, RuntimeType::Number]`
+    pub runtime_types: Vec<RuntimeType>,
+    /// Span of the TypeScript type annotation from `as PropType<T>`, if present.
+    /// Points to `T` inside `PropType<T>`.
+    /// - `Array as PropType<string[]>` → span of `string[]`
+    /// - `{ type: Object as PropType<{name: string}> }` → span of `{name: string}`
+    pub prop_type_annotation: Option<Span>,
 }
 
 /// Array argument info: defineEmits(['change', 'update'])
@@ -106,6 +128,7 @@ pub enum ScriptMacro<'a> {
     DefineExpose {
         span: Span,
         declarator: Option<MacroDeclarator<'a>>,
+        type_params: Option<MacroTypeParams>,
         object_arg: Option<MacroObjectArg<'a>>,
     },
 
@@ -114,6 +137,8 @@ pub enum ScriptMacro<'a> {
         span: Span,
         declarator: Option<MacroDeclarator<'a>>,
         object_arg: Option<MacroObjectArg<'a>>,
+        /// Whether `inheritAttrs: false` is present in the options object.
+        has_inherit_attrs_false: bool,
     },
 
     /// defineModel<T>(name?, options?)
@@ -142,8 +167,12 @@ pub enum ScriptMacro<'a> {
         define_props_span: Option<Span>,
         /// Type parameters from the inner defineProps
         define_props_type_params: Option<MacroTypeParams>,
-        /// The defaults object
+        /// The defaults object (only populated when the second arg is an object literal)
         defaults: Option<MacroObjectArg<'a>>,
+        /// Raw span of the second argument expression (any expression type:
+        /// object literal, variable reference, function call, etc.)
+        /// Used for `_mergeDefaults` wrapping when the type can't be resolved.
+        defaults_arg_span: Option<Span>,
     },
 }
 

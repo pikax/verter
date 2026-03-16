@@ -15,9 +15,7 @@ use rustc_hash::FxHashSet;
 
 use super::span::{adjust_diagnostics_spans, adjust_expression_spans};
 use crate::common::Span;
-use crate::utils::oxc::bindings::{
-    collect_expression_reference_spans, collect_ts_type_reference_spans_from_expression,
-};
+use crate::utils::oxc::bindings::collect_expression_reference_spans;
 
 /// Result of parsing a v-for expression.
 #[derive(Debug)]
@@ -228,11 +226,12 @@ fn extract_vfor_bindings_internal(
         }
     }
 
-    // Extract reference spans from the right side (the iterable)
+    // Extract reference spans from the right side (the iterable).
+    // Note: we only collect runtime references, NOT TypeScript type references.
+    // TS type assertions (e.g. `as Foo`) are preserved in SSR output (stripped later
+    // by the bundler), so type identifiers must not be added to the reference set.
     if let Some(right) = &result.right {
         collect_expression_reference_spans(right, &ignored, &mut references_set);
-        // Also extract TypeScript type references from type assertions
-        collect_ts_type_reference_spans_from_expression(right, &mut references_set);
     }
 
     let mut references: Vec<Span> = references_set.into_iter().collect();

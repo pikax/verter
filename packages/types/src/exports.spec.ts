@@ -26,7 +26,12 @@ import type { ModelToEmits, ModelToProps, ModelToModelInfo } from "./index";
 import type { GetVueComponent, DefineOptions } from "./index";
 
 // Slots
-import type { strictRenderSlot, extractArgumentsFromRenderSlot, SlotsToRender } from "./index";
+import type {
+  strictRenderSlot,
+  extractArgumentsFromRenderSlot,
+  SlotsToRender,
+  checkRequiredSlots,
+} from "./index";
 
 // Props
 import type {

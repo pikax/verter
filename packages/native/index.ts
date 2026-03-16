@@ -1,338 +1,4 @@
-export type InputBuffer = string | Uint8Array;
-
-/**
- * Severity level for a compilation diagnostic
- */
-export type DiagnosticSeverity = "error" | "warning" | "info";
-
-/**
- * A structured diagnostic message from the compiler
- */
-export interface Diagnostic {
-  /**
-   * Severity level
-   */
-  severity: DiagnosticSeverity;
-  /**
-   * Vue-compatible error code (e.g., "XMissingEndTag", "XInvalidEndTag")
-   */
-  code: string;
-  /**
-   * Human-readable error message
-   */
-  message: string;
-  /**
-   * Optional source span start (byte offset into original input)
-   */
-  span_start?: number;
-  /**
-   * Optional source span end (byte offset into original input)
-   */
-  span_end?: number;
-}
-
-/**
- * Options for compiling Vue SFC to JavaScript
- */
-export interface CodegenOptions {
-  /**
-   * The filename for source map generation
-   */
-  filename?: string;
-  /**
-   * Production mode - affects component ID generation and optimizations
-   */
-  is_production?: boolean;
-  /**
-   * Custom component ID (overrides auto-generation from filename)
-   */
-  component_id?: string;
-  /**
-   * Skip source map generation for faster compilation
-   */
-  skip_source_map?: boolean;
-  /**
-   * Custom interpolation delimiters [open, close]. Default: ["{{", "}}"]
-   */
-  delimiters?: [string, string];
-  /**
-   * Tag name prefixes treated as custom elements (skip component resolution).
-   * E.g. ["ion-", "my-"] matches <ion-button>, <my-card>
-   */
-  custom_elements?: string[];
-  /**
-   * Whether to preserve HTML comments in output. Default: !isProduction
-   */
-  comments?: boolean;
-  /**
-   * Runtime module name to import helpers from. Default: "vue"
-   */
-  runtime_module_name?: string;
-  /**
-   * Hoist static VNodes/props to constants. Default: true
-   */
-  hoist_static?: boolean;
-  /**
-   * Whitespace handling: "condense" or "preserve". Default: "condense"
-   */
-  whitespace?: "condense" | "preserve";
-  /**
-   * Cache event handler expressions. Default: false
-   */
-  cache_handlers?: boolean;
-  /**
-   * Inline render function in setup(). Default: isProduction
-   */
-  inline?: boolean;
-  /**
-   * Indicates SFC uses :slotted() in styles. Default: true
-   */
-  slotted?: boolean;
-}
-
-/**
- * A compiled CSS style block from an SFC `<style>` tag
- */
-export interface JsCompiledStyleBlock {
-  /**
-   * Compiled CSS code (scoped selectors, v-bind replacements, module hashing applied)
-   */
-  code: string;
-  /**
-   * Whether this style block is scoped
-   */
-  scoped: boolean;
-  /**
-   * Style language (css, scss, less, stylus)
-   */
-  lang?: string;
-  /**
-   * Whether this is a CSS module block
-   */
-  is_module: boolean;
-  /**
-   * CSS module class mappings (each entry is [original, hashed])
-   */
-  module_classes: [string, string][];
-  /**
-   * CSS processing diagnostics
-   */
-  errors: Diagnostic[];
-}
-
-/**
- * Result of compiling a Vue SFC
- */
-export interface CodegenResult {
-  /**
-   * The transformed code
-   */
-  code: string;
-  /**
-   * The source map as JSON string
-   */
-  source_map: string;
-  /**
-   * The transformed code with inline source map appended
-   */
-  code_with_source_map: string;
-  /**
-   * Compiled CSS blocks from `<style>` tags
-   */
-  styles: JsCompiledStyleBlock[];
-  /**
-   * Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if no scoped styles.
-   */
-  scope_id: string;
-  /**
-   * Compilation diagnostics (errors, warnings, info)
-   */
-  errors: Diagnostic[];
-  /**
-   * Time taken for the Rust pipeline in milliseconds
-   */
-  duration_ms: number;
-}
-
-/**
- * Options for compiling Vue SFC for Vite plugin usage
- */
-export interface ViteCodegenOptions {
-  /**
-   * The filename for source map generation
-   */
-  filename?: string;
-  /**
-   * SSR mode
-   */
-  ssr?: boolean;
-  /**
-   * Production mode
-   */
-  is_production?: boolean;
-  /**
-   * Custom component ID
-   */
-  component_id?: string;
-  /**
-   * Whether to generate source maps
-   */
-  sourcemap?: boolean;
-}
-
-/**
- * An import statement in a block's output (with UTF-16 offsets for JS)
- */
-export interface JsBlockImport {
-  /**
-   * Import source (e.g., "vue")
-   */
-  source: string;
-  /**
-   * Specifier strings (e.g., ["openBlock as _openBlock", ...])
-   */
-  specifiers: string[];
-  /**
-   * UTF-16 code unit offset of import start in block's code
-   */
-  start_utf16: number;
-  /**
-   * UTF-16 code unit offset of import end in block's code
-   */
-  end_utf16: number;
-}
-
-/**
- * Output block with code, source map, and import metadata (UTF-16 offsets for JS)
- */
-export interface JsBlockOutput {
-  /**
-   * Generated code for this block
-   */
-  code: string;
-  /**
-   * Source map as JSON string
-   */
-  source_map?: string;
-  /**
-   * Import statements with UTF-16 offsets
-   */
-  imports: JsBlockImport[];
-  /**
-   * UTF-16 code unit offset where non-import code begins
-   */
-  body_start_utf16: number;
-}
-
-/**
- * Style block in a Vue SFC
- */
-export interface JsStyleBlock {
-  /**
-   * Processed CSS content
-   */
-  code: string;
-  /**
-   * Source map for CSS transformations
-   */
-  source_map?: string;
-  /**
-   * Is scoped style
-   */
-  scoped: boolean;
-  /**
-   * Is CSS module
-   */
-  is_module: boolean;
-  /**
-   * Language (css, scss, less)
-   */
-  lang?: string;
-  /**
-   * Module name (e.g., "$style")
-   */
-  module_name?: string;
-  /**
-   * CSS module class mappings (original -> hashed)
-   */
-  module_classes: string[][];
-}
-
-/**
- * Result of compiling a Vue SFC for Vite
- */
-export interface ViteCodegenResult {
-  /**
-   * Script block (component definition)
-   */
-  script?: JsBlockOutput;
-  /**
-   * Template block (render function)
-   */
-  template?: JsBlockOutput;
-  /**
-   * Style blocks
-   */
-  styles: JsStyleBlock[];
-  /**
-   * Whether the SFC has a default export (script setup or script with export default)
-   */
-  has_default_export: boolean;
-  /**
-   * Whether the output contains a standalone `function render()` that must be
-   * attached to the component via `_sfc_main.render = render`.
-   */
-  has_render: boolean;
-  /**
-   * Build time in milliseconds
-   */
-  duration_ms: number;
-}
-
-/**
- * Compile a Vue SFC to JavaScript.
- *
- * @param input - The Vue SFC source code (string or Buffer)
- * @param options - Optional compilation options
- * @returns The compiled result with code, source map, and code with inline source map
- */
-export declare function compile(input: InputBuffer, options?: CodegenOptions): CodegenResult;
-
-/**
- * Compile a Vue SFC to JavaScript (synchronous).
- *
- * @param input - The Vue SFC source code (string or Buffer)
- * @param options - Optional compilation options
- * @returns The compiled result with code, source map, and code with inline source map
- */
-export declare function compileSync(input: InputBuffer, options?: CodegenOptions): CodegenResult;
-
-/**
- * Compile a Vue SFC for Vite plugin usage.
- *
- * Returns split blocks (script, template, styles) for virtual module serving.
- * Each block has its own code, source map, and import metadata with UTF-16 offsets.
- *
- * @param input - The Vue SFC source code (string or Buffer)
- * @param options - Optional compilation options
- * @returns Compiled result with split blocks for virtual modules
- */
-export declare function compileForVite(
-  input: InputBuffer,
-  options?: ViteCodegenOptions,
-): ViteCodegenResult;
-
-/**
- * Compile a Vue SFC for Vite plugin usage (synchronous).
- *
- * @param input - The Vue SFC source code (string or Buffer)
- * @param options - Optional compilation options
- * @returns Compiled result with split blocks for virtual modules
- */
-export declare function compileForViteSync(
-  input: InputBuffer,
-  options?: ViteCodegenOptions,
-): ViteCodegenResult;
+/// <reference types="node" />
 
 // =============================================================================
 // Standalone CSS Style Processing (for preprocessed CSS from Vite plugin)
@@ -345,7 +11,7 @@ export interface ProcessStyleOptions {
   /**
    * Scope ID string (e.g., "a4f2eed6")
    */
-  scope_id: string;
+  scopeId: string;
   /**
    * Whether this style block is scoped
    */
@@ -353,11 +19,11 @@ export interface ProcessStyleOptions {
   /**
    * Whether this is a CSS module block
    */
-  is_module?: boolean;
+  isModule?: boolean;
   /**
    * Custom module name (None = "$style")
    */
-  module_name?: string;
+  moduleName?: string;
   /**
    * Source filename for source map generation
    */
@@ -379,7 +45,7 @@ export interface ProcessStyleVBind {
   /**
    * The generated CSS variable name (e.g., "--a4f2eed6-color")
    */
-  var_name: string;
+  varName: string;
 }
 
 /**
@@ -393,58 +59,228 @@ export interface ProcessStyleResult {
   /**
    * Source map as JSON string (if sourcemap was requested)
    */
-  source_map?: string;
+  sourceMap?: string;
   /**
-   * CSS module class mappings (original -> hashed)
+   * CSS module class mappings (each entry is [original, hashed])
    */
-  module_classes: string[][];
+  moduleClasses: [string, string][];
+  /**
+   * Resolved CSS module name (e.g., "$style" or a custom name)
+   */
+  moduleName?: string;
   /**
    * v-bind() expressions found and replaced
    */
-  v_bind_vars: ProcessStyleVBind[];
+  vBindVars: ProcessStyleVBind[];
 }
 
 /**
  * Process a CSS style block: apply scoping, CSS modules, and v-bind replacement.
  *
  * Called by the Vite plugin after preprocessing SCSS/Less/Stylus to valid CSS.
- * For plain CSS blocks, the Rust compiler handles this inline during compileForVite().
+ * For plain CSS blocks, the Rust compiler handles this inline during compilation.
  *
- * @param css - Valid CSS string (already preprocessed if originally SCSS/Less/etc.)
+ * @param css - Valid CSS as a string or Buffer (UTF-8 bytes).
  * @param options - Processing options (scope ID, scoped, modules, etc.)
  * @returns Processed CSS with scoping/modules applied, plus v-bind metadata
  */
 export declare function processStyle(
-  css: string,
+  css: string | Buffer,
   options: ProcessStyleOptions,
 ): ProcessStyleResult;
 
 // =============================================================================
-// Standalone TypeScript Stripping
+// Batch Compilation (Rayon parallel)
 // =============================================================================
 
-/**
- * Result of stripping TypeScript syntax
- */
-export interface StripTypesResult {
-  /**
-   * The JavaScript output with TypeScript syntax removed
-   */
+export interface BatchFile {
+  filename: string;
+  source: string;
+}
+
+export interface BatchOptions {
+  /** Number of Rayon threads (0 or undefined = all logical CPUs) */
+  threads?: number;
+}
+
+export interface BatchResult {
+  filename: string;
+  /** Combined script + template code */
   code: string;
-  /**
-   * Any parse errors encountered
-   */
-  errors: string[];
+  /** First error message if compilation failed */
+  error?: string;
+  durationMs: number;
 }
 
 /**
- * Strip TypeScript syntax from a standalone .ts/.tsx file.
+ * Compile a batch of Vue SFC files in parallel using Rayon.
  *
- * Removes type annotations, interfaces, type aliases, and converts enums to JavaScript.
+ * Each file is compiled independently with its own allocator — no shared
+ * mutable state. No caching, no analysis — compile-only for maximum throughput.
  *
- * @param source - The TypeScript source code (string or Buffer)
- * @returns The stripped JavaScript code and any parse errors
+ * Equivalent to Vize's `compileSfcBatch` for fair benchmark comparison.
  */
-export declare function stripTypes(source: InputBuffer): StripTypesResult;
+export declare function compileBatch(files: BatchFile[], options?: BatchOptions): BatchResult[];
+
+// =============================================================================
+// VerterHost (in-memory virtual file host)
+//
+// Shared types re-exported from host-types.ts. Native-specific overrides
+// (Buffer support) for HostUpsertRequest are defined below.
+// HostStyleOverrideEntry and HostStyleOverrideRequest are kept for
+// compatibility with @verter/wasm and host-types re-exports.
+// =============================================================================
+
+export type {
+  HostConfig,
+  HostCompileProfile,
+  HostIdeResponse,
+  HostVirtualNodeKind,
+  HostSliceChanges,
+  HostDiagnostic,
+  HostDiagnosticsSnapshot,
+  HostExternalSourceRequest,
+  HostScriptImportInfo,
+  HostModuleReference,
+  HostPreprocessorRequest,
+  HostBlockOverrideEntry,
+  HostBlockOverrideRequest,
+  HostExportSignature,
+  HostResolvedExport,
+  HostUpdateResult,
+  HostResolvedId,
+  HostVirtualMeta,
+  HostVirtualFileResponse,
+  HostVirtualQuery,
+  HostRemoveResult,
+  HostTextEdit,
+  HostCodeAction,
+  HostLintRuleMetadata,
+  HostLintDiagnostic,
+  HostDocumentSymbol,
+  HostElementMatch,
+  HostSelectorMatchResult,
+  HostDependencyResolution,
+} from "./host-types";
+
+import type { HostCompileProfile } from "./host-types";
+
+// ---------------------------------------------------------------------------
+// Native-specific overrides: accept Buffer in addition to string
+// ---------------------------------------------------------------------------
+
+export interface HostUpsertRequest {
+  canonicalId?: string;
+  inputId: string;
+  /** SFC source code. Accepts a string or a Buffer (UTF-8 bytes from `fs.readFileSync(path)`). */
+  source: string | Buffer;
+  fileKind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
+  aliases?: string[];
+}
+
+export interface HostStyleOverrideEntry {
+  index: number;
+  /** Preprocessed CSS. Accepts a string or a Buffer (UTF-8 bytes). */
+  code: string | Buffer;
+  sourceMap?: string;
+}
+
+export interface HostStyleOverrideRequest {
+  canonicalId: string;
+  compileProfile?: HostCompileProfile;
+  overrides: HostStyleOverrideEntry[];
+}
+
+export interface NativeBlockOverrideEntry {
+  /** Block type: "template", "script", "style", or "custom". */
+  blockType: "template" | "script" | "style" | "custom";
+  /** Block index (0 for template/script, 0..N for styles/custom blocks). */
+  index: number;
+  /** Preprocessed code. Accepts a string or a Buffer (UTF-8 bytes). */
+  code: string | Buffer;
+  /** Source map from the preprocessor, if available. */
+  sourceMap?: string;
+}
+
+export interface NativeBlockOverrideRequest {
+  canonicalId: string;
+  compileProfile?: HostCompileProfile;
+  overrides: NativeBlockOverrideEntry[];
+}
+
+export type HostPublicApiMode = "public" | "testing";
+
+export declare class VerterHost {
+  constructor(config?: import("./host-types").HostConfig);
+  resolve(rawId: string): import("./host-types").HostResolvedId | null;
+  upsert(request: HostUpsertRequest): import("./host-types").HostUpdateResult;
+  applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
+  getPublicApi(
+    canonicalId: string,
+    mode?: HostPublicApiMode,
+  ): { code: string; sourceMap?: string } | null;
+  getIde(
+    canonicalId: string,
+    profile?: import("./host-types").HostCompileProfile,
+  ): import("./host-types").HostIdeResponse | null;
+  getVirtualFile(
+    query: import("./host-types").HostVirtualQuery,
+  ): import("./host-types").HostVirtualFileResponse | null;
+  listVirtualFiles(canonicalId: string): import("./host-types").HostVirtualNodeKind[];
+  remove(canonicalOrAlias: string): import("./host-types").HostRemoveResult | null;
+  /**
+   * Returns the analysis snapshot for a file as a JSON string, or null if the file
+   * doesn't exist. When `analysisLevel` is not "full", computes analysis on demand.
+   */
+  getAnalysis(canonicalOrAlias: string): string | null;
+  /**
+   * Returns all exports of a file, following re-export chains to their ultimate source.
+   * For barrel files, resolves through chains to return the ultimate source file and name.
+   */
+  resolveExports(canonicalOrAlias: string): import("./host-types").HostResolvedExport[];
+  /**
+   * Sets the resolved import dependencies for a file, enabling Tier 2/3
+   * smart invalidation (cross-file change tracking).
+   */
+  setImportDependencies(
+    canonicalOrAlias: string,
+    resolutions: import("./host-types").HostDependencyResolution[],
+  ): void;
+  collectResolvableModuleReferenceSpecifiers(
+    moduleReferences: import("./host-types").HostModuleReference[],
+  ): string[];
+  resolveKnownModuleReferenceDependencies(
+    ownerCanonicalId: string,
+    moduleReferences: import("./host-types").HostModuleReference[],
+    knownIds: string[],
+    extensions?: string[],
+  ): string[];
+  /**
+   * Runs lint rules against a file's analysis data and returns diagnostics.
+   * @param config - Optional JSON string with lint config. Pass undefined for defaults.
+   */
+  lint(canonicalOrAlias: string, config?: string): import("./host-types").HostLintDiagnostic[];
+  /**
+   * Returns code actions (quick fixes) available at a given UTF-16 offset.
+   */
+  getCodeActions(canonicalOrAlias: string, offset: number): import("./host-types").HostCodeAction[];
+  /**
+   * Returns metadata for all registered lint rules.
+   */
+  getLintRuleMetadata(): import("./host-types").HostLintRuleMetadata[];
+  /**
+   * Returns document symbols for a file (outline / Ctrl+Shift+O).
+   */
+  getDocumentSymbols(canonicalOrAlias: string): import("./host-types").HostDocumentSymbol[];
+  /**
+   * Matches CSS selectors against template elements, returning a match matrix.
+   */
+  matchCssSelectors(canonicalOrAlias: string): import("./host-types").HostSelectorMatchResult[];
+  /**
+   * Release all cached data (files, aliases, dependency graph).
+   * Call before dropping the host to prevent process exit hangs.
+   */
+  close(): void;
+}
 
 export {};

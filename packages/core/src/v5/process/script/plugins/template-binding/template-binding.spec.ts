@@ -107,6 +107,26 @@ describe("process script plugin template-binding", () => {
     `);
   });
 
+  it("Options API (non-setup) uses InstanceType", () => {
+    const { result } = parse(
+      `import { defineComponent } from 'vue'; export default defineComponent({ data() { return { count: 0 } } })`,
+      "defineComponent",
+      "ts",
+    );
+    expect(result).toContain("InstanceType<typeof ___VERTER___default_Component>");
+    expect(result).not.toContain("{return {}}");
+  });
+
+  it("Options API JS uses InstanceType", () => {
+    const { result } = parse(
+      `import { defineComponent } from 'vue'; export default defineComponent({ data() { return { count: 0 } } })`,
+      "defineComponent",
+      "js",
+    );
+    expect(result).toContain("InstanceType<typeof ___VERTER___default_Component>");
+    expect(result).not.toContain("{return {}}");
+  });
+
   it("Component", () => {
     const { result } = parse(
       `import Comp from './Comp.vue'; let a = 0`,

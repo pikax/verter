@@ -36,6 +36,14 @@ export function createNotificationHelper<T extends GenericNotificationHelper>(
 export enum NotificationType {
   OnDidChangeTsOrJsFile = "$/onDidChangeTsOrJsFile",
   OnFileChanged = "$/onFileChanged",
+  TsgoStarted = "$/verter/tsgoStarted",
+  TypeProviderStarted = "$/verter/typeProviderStarted",
+  Heartbeat = "$/verter/heartbeat",
+  Ready = "$/verter/ready",
+  McpReady = "$/verter/mcpReady",
+  ViteConfigTrustRequired = "$/verter/viteConfigTrustRequired",
+  TypeProviderStatus = "$/verter/typeProviderStatus",
+  TypeProviderSyncComplete = "$/verter/typeProviderSyncComplete",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -60,5 +68,33 @@ export type NotificationParams = {
   [NotificationType.OnFileChanged]: {
     uri: string;
     type: FileNotificationChange;
+  };
+  [NotificationType.TsgoStarted]: {
+    pid: number;
+  };
+  [NotificationType.TypeProviderStarted]: {
+    pid: number;
+    kind: "tsgo" | "tsserver";
+  };
+  [NotificationType.Heartbeat]: {
+    timestamp: number;
+  };
+  [NotificationType.Ready]: {
+    gen: number;
+  };
+  [NotificationType.McpReady]: {
+    port: number;
+  };
+  [NotificationType.ViteConfigTrustRequired]: {
+    configPath: string;
+    workspaceRoot: string;
+    reason: string;
+  };
+  [NotificationType.TypeProviderStatus]: {
+    kind: "tsgo" | "tsserver" | "none";
+    reason?: string;
+  };
+  [NotificationType.TypeProviderSyncComplete]: {
+    gen: number;
   };
 };

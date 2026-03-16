@@ -1,8 +1,9 @@
 {
   "name": "@verter/typescript-plugin",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Vue TypeScript Plugin powered by Verter",
-  "keywords": [],
+  "keywords": ["vue", "typescript", "plugin", "language-service"],
+  "homepage": "https://verterjs.dev/",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -10,18 +11,30 @@
   },
   "author": "Carlos Rodrigues <pikax>",
   "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist"
+  ],
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -b",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run"
   },
   "dependencies": {
-    "@verter/core": "workspace:^",
-    "vue": "^3.5.27"
+    "@verter/native": "workspace:^"
   },
   "devDependencies": {
-    "@types/node": "^25.2.1",
+    "@types/node": "^25.4.0",
     "typescript": "^5.9.3",
-    "vite": "^7.3.1"
+    "vitest": "^4.1.0"
   }
 }

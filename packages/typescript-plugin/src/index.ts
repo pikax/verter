@@ -1,84 +1,70 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
 import path from "node:path";
 import fs from "node:fs";
-import { isRelativeVue, isVue } from "./helpers/utils";
-import { parseFile } from "./helpers/getDtsSnapshot";
+import {
+  getVueVirtualFileInfo,
+  isRelativeVue,
+  isRelativeVueTs,
+  isVue,
+  normalizePath,
+  resolveVuePublicApiMode,
+  stripVueVirtualSuffix,
+  toVueVirtualFileName,
+} from "./helpers/utils";
+import { parseFile, FALLBACK_STUB, remapVirtualSpan } from "./helpers/getDtsSnapshot";
+import type { MacroTypeDependencyAccess } from "./helpers/macroTypeHydration";
+import {
+  getAliasedNavigationResult,
+  getAliasedQuickInfo,
+  getModuleSpecifierNavigationResult,
+  retargetAliasedDefinitionInfos,
+} from "./helpers/barrelNavigation";
+import { isTestFileWithContext } from "./helpers/testFileDetection";
+import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
+
+function normalizeSourcePath(fileName: string): string {
+  return stripVueVirtualSuffix(fileName);
+}
 
 const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   const create = (info: tsModule.server.PluginCreateInfo) => {
-    const languageServiceHost = {} as Partial<tsModule.LanguageServiceHost>;
-    const languageServiceHostProxy = new Proxy(info.languageServiceHost, {
-      get(target, key: keyof tsModule.LanguageServiceHost) {
-        // if (key in target || key in languageServiceHost) {
-        //   logger.info("[VERTER] Proxying: " + key);
-        // }
-        return languageServiceHost[key] ? languageServiceHost[key] : target[key];
-      },
-    });
-
     const logger = info.project.projectService.logger;
     const directory = info.project.getCurrentDirectory();
-    const compilerOptions = info.project.getCompilerOptions();
+    const exposeBindingsTesting = info.config?.exposeBindingsTesting === true;
 
-    // TypeScript plugins have a `cwd` of `/`, which causes issues with import resolution.
+    try {
+      const native: typeof import("@verter/native") = require("@verter/native");
+      const testHost = new native.VerterHost();
+      logger.info("[Verter] NAPI binary loaded successfully (VerterHost created)");
+      void testHost;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.info(`[Verter] NAPI binary load FAILED: ${msg}`);
+      logger.info("[Verter] .vue files will use fallback types (DefineComponent<{}, {}>)");
+    }
+
     process.chdir(directory);
 
-    const languageService = ts.createLanguageService(languageServiceHostProxy);
-
-    // TypeScript 5.x
-    if (info.languageServiceHost.resolveModuleNameLiterals) {
-      const _resolveModuleNameLiterals = info.languageServiceHost.resolveModuleNameLiterals.bind(
-        info.languageServiceHost,
-      );
-
-      languageServiceHost.resolveModuleNameLiterals = (moduleNames, containingFile, ...rest) => {
-        const resolvedModules = _resolveModuleNameLiterals(moduleNames, containingFile, ...rest);
-
-        const moduleResolver = createModuleResolver(containingFile);
-
-        return moduleNames.map(({ text: moduleName }, index) => {
-          try {
-            const resolvedModule = moduleResolver(moduleName, () => resolvedModules[index] as any);
-            if (resolvedModule) return { resolvedModule };
-          } catch (e) {
-            // @ts-expect-error
-            logger.msg(e.toString(), "Err");
-            return resolvedModules[index];
-          }
-          return resolvedModules[index];
-        });
-      };
+    const verterTypesVirtualPath = normalizePath(
+      path.join(directory, "node_modules", "@verter", "types", "index.d.ts"),
+    );
+    const verterTypesInstalled = fs.existsSync(
+      path.join(directory, "node_modules", "@verter", "types", "index.d.ts"),
+    );
+    if (!verterTypesInstalled) {
+      logger.info("[Verter] @verter/types not installed, will serve virtual stub");
     }
-    // TypeScript 4.x
-    else if (info.languageServiceHost.resolveModuleNames) {
-      const _resolveModuleNames = info.languageServiceHost.resolveModuleNames.bind(
-        info.languageServiceHost,
+
+    const _fileExists = info.serverHost.fileExists.bind(info.serverHost);
+    const _readFile = info.serverHost.readFile.bind(info.serverHost);
+
+    const resolvePublicApiMode = (containingFile: string) =>
+      resolveVuePublicApiMode(exposeBindingsTesting, containingFile, (sourceFileName) =>
+        isTestFileWithContext(normalizeSourcePath(sourceFileName), {
+          fileExists: _fileExists,
+          readFile: _readFile,
+        }),
       );
-
-      languageServiceHost.resolveModuleNames = (moduleNames, containingFile, ...rest) => {
-        const resolvedModules = _resolveModuleNames(moduleNames, containingFile, ...rest);
-
-        const moduleResolver = createModuleResolver(containingFile);
-
-        return moduleNames.map((moduleName, index) => {
-          try {
-            const resolvedModule = moduleResolver(moduleName, () =>
-              // @ts-expect-error
-              languageServiceHost.getResolvedModuleWithFailedLookupLocationsFromCache?.(
-                moduleName,
-                containingFile,
-              ),
-            );
-            if (resolvedModule) return resolvedModule;
-          } catch (e) {
-            // @ts-expect-error
-            logger.msg(e.toString(), "Err");
-            return resolvedModules[index];
-          }
-          return resolvedModules[index];
-        });
-      };
-    }
 
     const createModuleResolver =
       (containingFile: string) =>
@@ -90,111 +76,584 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             })
           | undefined,
       ): tsModule.ResolvedModuleFull | undefined => {
-        if (isRelativeVue(moduleName)) {
-          logger.info(
-            "[Verter] createModuleResolver relative vue - " +
-              moduleName +
-              " -- " +
-              path.resolve(path.dirname(containingFile), moduleName),
-          );
+        const publicApiMode = resolvePublicApiMode(containingFile);
+
+        if (moduleName === "@verter/types" && !verterTypesInstalled) {
           return {
-            extension: ts.Extension.Tsx,
-            isExternalLibraryImport: false,
-            resolvedFileName: path.resolve(path.dirname(containingFile), moduleName),
+            extension: ts.Extension.Dts,
+            isExternalLibraryImport: true,
+            resolvedFileName: verterTypesVirtualPath,
           };
         }
+
+        if (isRelativeVueTs(moduleName)) {
+          const resolved = path.resolve(path.dirname(containingFile), moduleName);
+          logger.info(
+            "[Verter] createModuleResolver relative vue.ts - " + moduleName + " -- " + resolved,
+          );
+          return {
+            extension: ts.Extension.Ts,
+            isExternalLibraryImport: false,
+            resolvedFileName: resolved,
+          };
+        }
+
+        if (isRelativeVue(moduleName)) {
+          const resolved = path.resolve(path.dirname(containingFile), moduleName);
+          logger.info(
+            "[Verter] createModuleResolver relative vue - " + moduleName + " -- " + resolved,
+          );
+          return {
+            extension: ts.Extension.Ts,
+            isExternalLibraryImport: false,
+            resolvedFileName: toVueVirtualFileName(resolved, publicApiMode),
+          };
+        }
+
         if (!isVue(moduleName)) {
           return;
         }
 
         const resolvedModule = resolveModule();
-
         logger.info(
           "[Verter] createModuleResolver vue - " + resolvedModule + " -- " + resolvedModule,
         );
-        if (!resolvedModule) return;
+        if (!resolvedModule) {
+          return;
+        }
 
         const baseUrl = info.project.getCompilerOptions().baseUrl;
-        const match = "/index.ts";
-
         const failedLocations = resolvedModule.failedLookupLocations;
-        // Filter to only one extension type, and remove that extension. This leaves us with the actual file name.
-        // Example: "usr/person/project/src/dir/File.module.css/index.d.ts" > "usr/person/project/src/dir/File.module.css"
-        const normalizedLocations = failedLocations.reduce<string[]>((locations, location) => {
-          if ((baseUrl ? location.includes(baseUrl) : true) && location.endsWith(match)) {
-            return [...locations, location.replace(match, "")];
-          }
-          return locations;
-        }, []);
-
-        // // Find the imported CSS module, if it exists.
-        // const vueModulePath = normalizedLocations.find((location) =>
-        //   fs.existsSync(location)
-        // );
-
-        // logger.info(
-        //   "[Verter] createModuleResolver vue - " +
-        //     resolvedModule +
-        //     " -ModulePath-  " +
-        //     vueModulePath
-        // );
-        // if (vueModulePath) {
-        //   logger.info("wwww -- Vue 3 Plugin found path" + vueModulePath);
-        //   return {
-        //     extension: ts.Extension.Tsx,
-        //     isExternalLibraryImport: false,
-        //     resolvedFileName: path.resolve(vueModulePath),
-        //   };
-        // }
-
-        // logger.info("--- Vue 3 Plugin NOT found path" + vueModulePath);
-
         const vueModulePath = failedLocations.find(
-          (x) => (baseUrl ? x.includes(baseUrl) : true) && x.endsWith(match) && fs.existsSync(x),
+          (candidate) =>
+            (baseUrl ? candidate.includes(baseUrl) : true) &&
+            candidate.endsWith("/index.ts") &&
+            fs.existsSync(candidate),
         );
 
-        if (!vueModulePath) return;
+        if (!vueModulePath) {
+          return;
+        }
+
+        const resolvedVueModulePath = normalizePath(path.resolve(vueModulePath));
         return {
           extension: ts.Extension.Dts,
           isExternalLibraryImport: false,
-          resolvedFileName: path.resolve(vueModulePath),
+          resolvedFileName: isVue(resolvedVueModulePath)
+            ? toVueVirtualFileName(resolvedVueModulePath, publicApiMode)
+            : resolvedVueModulePath,
         };
       };
 
-    // patching
-    const _readFile = info.serverHost.readFile.bind(info.serverHost);
+    if (info.languageServiceHost.resolveModuleNameLiterals) {
+      const _resolveModuleNameLiterals = info.languageServiceHost.resolveModuleNameLiterals.bind(
+        info.languageServiceHost,
+      );
+
+      info.languageServiceHost.resolveModuleNameLiterals = (
+        moduleNames,
+        containingFile,
+        ...rest
+      ) => {
+        const resolvedModules = _resolveModuleNameLiterals(moduleNames, containingFile, ...rest);
+        const moduleResolver = createModuleResolver(containingFile);
+
+        return moduleNames.map(({ text: moduleName }, index) => {
+          try {
+            const resolvedModule = moduleResolver(moduleName, () => resolvedModules[index] as any);
+            if (resolvedModule) {
+              return { resolvedModule };
+            }
+          } catch (e) {
+            logger.info(`[Verter] module resolution override failed: ${String(e)}`);
+            return resolvedModules[index];
+          }
+          return resolvedModules[index];
+        });
+      };
+    }
+
+    const _getCompilationSettings = info.languageServiceHost.getCompilationSettings.bind(
+      info.languageServiceHost,
+    );
+    info.languageServiceHost.getCompilationSettings = () => {
+      const settings = _getCompilationSettings();
+      return { ...settings, jsx: ts.JsxEmit.Preserve };
+    };
+
+    const macroTypeAccess: MacroTypeDependencyAccess = {
+      resolveModule(containingFile, specifier) {
+        const resolved = ts.resolveModuleName(
+          specifier,
+          normalizeSourcePath(containingFile),
+          info.project.getCompilerOptions(),
+          {
+            fileExists: _fileExists,
+            readFile: _readFile,
+            directoryExists: info.serverHost.directoryExists?.bind(info.serverHost),
+            getCurrentDirectory: () => directory,
+            getDirectories: info.serverHost.getDirectories?.bind(info.serverHost),
+            realpath: info.serverHost.realpath?.bind(info.serverHost),
+            useCaseSensitiveFileNames: () => info.serverHost.useCaseSensitiveFileNames,
+          },
+        );
+        return resolved.resolvedModule
+          ? normalizeSourcePath(resolved.resolvedModule.resolvedFileName)
+          : undefined;
+      },
+      readSource(fileName) {
+        const normalized = normalizeSourcePath(fileName);
+        const snapshot =
+          info.languageServiceHost.getScriptSnapshot?.(normalized) ??
+          (normalized !== fileName
+            ? info.languageServiceHost.getScriptSnapshot?.(fileName)
+            : undefined);
+        if (snapshot) {
+          return snapshot.getText(0, snapshot.getLength());
+        }
+        return _readFile(normalized) ?? (normalized !== fileName ? _readFile(fileName) : undefined);
+      },
+    };
+
     info.serverHost.readFile = (fileName: string) => {
+      if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
+        return VERTER_TYPES_STUB;
+      }
+
+      const virtualInfo = getVueVirtualFileInfo(fileName);
+      if (virtualInfo) {
+        const file = _readFile(virtualInfo.sourceFileName);
+        if (file) {
+          return parseFile(
+            virtualInfo.sourceFileName,
+            file,
+            logger,
+            macroTypeAccess,
+            virtualInfo.mode,
+          );
+        }
+        return FALLBACK_STUB;
+      }
+
       const file = _readFile(fileName);
       if (isVue(fileName) && file) {
-        logger.info("[Verter] readFile - " + fileName + " -- " + file!.length);
-        return parseFile(fileName, file, logger);
+        logger.info("[Verter] readFile - " + fileName + " -- " + file.length);
+        return parseFile(fileName, file, logger, macroTypeAccess);
       }
       return file;
     };
 
-    // languageServiceHost.getScriptSnapshot = (fileName: string) => {
-    //   if (isVue(fileName) && fs.existsSync(fileName)) {
-    //     logger.info("[Verter] getScriptSnapshot vue - " + fileName);
-    //     // return getDtsSnapshot(
-    //     //   ts,
-    //     //   fileName,
-    //     //   logger
-    //     //   // compilerOptions,
-    //     //   // directory
-    //     // );
-    //     return info.languageServiceHost.getScriptSnapshot(fileName);
-    //   }
-    //   return info.languageServiceHost.getScriptSnapshot(fileName);
-    // };
+    info.serverHost.fileExists = (fileName: string) => {
+      if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
+        return true;
+      }
 
-    // /patching
+      const virtualInfo = getVueVirtualFileInfo(fileName);
+      if (virtualInfo) {
+        return _fileExists(virtualInfo.sourceFileName);
+      }
+
+      return _fileExists(fileName);
+    };
+
+    const languageService = info.languageService;
+
+    function fixVuePath(fileName: string): string {
+      return stripVueVirtualSuffix(fileName);
+    }
+
+    function cleanupVueVirtualImportPath(text: string): string {
+      return text.replace(/\.vue\.__verter_test\.ts/g, ".vue").replace(/\.vue\.(d\.)?ts/g, ".vue");
+    }
+
+    function remapDefinitionLike<
+      T extends {
+        fileName: string;
+        textSpan: tsModule.TextSpan;
+        contextSpan?: tsModule.TextSpan;
+        originalTextSpan?: tsModule.TextSpan;
+      },
+    >(definition: T): T {
+      if (definition.fileName.endsWith(".vue")) {
+        return definition;
+      }
+
+      const remapped = remapVirtualSpan(definition.fileName, definition.textSpan, (target) =>
+        _readFile(target),
+      );
+
+      if (!remapped) {
+        definition.fileName = fixVuePath(definition.fileName);
+        return definition;
+      }
+
+      definition.fileName = remapped.fileName;
+      definition.textSpan = remapped.textSpan;
+      if (definition.contextSpan) {
+        definition.contextSpan = remapped.textSpan;
+      }
+      if (definition.originalTextSpan) {
+        definition.originalTextSpan = remapped.textSpan;
+      }
+      return definition;
+    }
+
+    function getProgramSourceContext(fileName: string): {
+      checker: tsModule.TypeChecker;
+      sourceFile: tsModule.SourceFile;
+    } | null {
+      const program = languageService.getProgram?.();
+      if (!program) {
+        return null;
+      }
+
+      const sourceFile = program.getSourceFile(fileName);
+      if (!sourceFile) {
+        return null;
+      }
+
+      return {
+        checker: program.getTypeChecker(),
+        sourceFile,
+      };
+    }
+
+    function getIdentifierTextAtPosition(
+      sourceFile: tsModule.SourceFile,
+      position: number,
+    ): string | undefined {
+      const runtimeTs = ts as typeof tsModule & {
+        getTouchingPropertyName?: (
+          sourceFile: tsModule.SourceFile,
+          position: number,
+        ) => tsModule.Node | undefined;
+        getTokenAtPosition?: (
+          sourceFile: tsModule.SourceFile,
+          position: number,
+        ) => tsModule.Node | undefined;
+      };
+
+      const token =
+        runtimeTs.getTouchingPropertyName?.(sourceFile, position) ??
+        runtimeTs.getTokenAtPosition?.(sourceFile, position);
+      if (!token) {
+        return undefined;
+      }
+
+      const text = token.getText(sourceFile);
+      return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) ? text : undefined;
+    }
+
+    function resolveModuleFileName(containingFile: string, moduleName: string): string | undefined {
+      const publicApiMode = resolvePublicApiMode(containingFile);
+
+      if (moduleName === "@verter/types" && !verterTypesInstalled) {
+        return verterTypesVirtualPath;
+      }
+
+      if (isRelativeVueTs(moduleName)) {
+        return path.resolve(path.dirname(containingFile), moduleName);
+      }
+
+      if (isRelativeVue(moduleName)) {
+        const resolved = path.resolve(path.dirname(containingFile), moduleName);
+        return toVueVirtualFileName(resolved, publicApiMode);
+      }
+
+      const result = ts.resolveModuleName(
+        moduleName,
+        normalizeSourcePath(containingFile),
+        info.project.getCompilerOptions(),
+        {
+          fileExists: _fileExists,
+          readFile: _readFile,
+          directoryExists: info.serverHost.directoryExists?.bind(info.serverHost),
+          getCurrentDirectory: () => directory,
+          getDirectories: info.serverHost.getDirectories?.bind(info.serverHost),
+          realpath: info.serverHost.realpath?.bind(info.serverHost),
+          useCaseSensitiveFileNames: () => info.serverHost.useCaseSensitiveFileNames,
+        },
+      );
+
+      return result.resolvedModule?.resolvedFileName;
+    }
+
+    function retargetAliasedDefinitions(
+      definitions: readonly tsModule.DefinitionInfo[] | undefined,
+      preferredName?: string,
+    ): tsModule.DefinitionInfo[] | undefined {
+      if (!definitions?.length) {
+        return undefined;
+      }
+
+      const program = languageService.getProgram?.();
+      if (!program) {
+        return [...definitions];
+      }
+
+      return (
+        retargetAliasedDefinitionInfos(
+          ts,
+          program.getTypeChecker(),
+          (candidateFileName) => program.getSourceFile(candidateFileName),
+          definitions,
+          preferredName,
+        ) ?? [...definitions]
+      );
+    }
+
+    function getPreferredRetargetName(
+      fileName: string,
+      position: number,
+      context?: { sourceFile: tsModule.SourceFile } | null,
+    ): string | undefined {
+      const sourceFile = context?.sourceFile ?? getProgramSourceContext(fileName)?.sourceFile;
+      return sourceFile ? getIdentifierTextAtPosition(sourceFile, position) : undefined;
+    }
+
+    const _getDefinitionAndBoundSpan =
+      languageService.getDefinitionAndBoundSpan.bind(languageService);
+    languageService.getDefinitionAndBoundSpan = (fileName, position) => {
+      const context = getProgramSourceContext(fileName);
+      if (context) {
+        const aliased = getAliasedNavigationResult(
+          ts,
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (aliased?.definitions.length) {
+          for (const def of aliased.definitions) {
+            remapDefinitionLike(def);
+          }
+          return {
+            textSpan: aliased.textSpan,
+            definitions: aliased.definitions,
+          };
+        }
+
+        const moduleNavigation = getModuleSpecifierNavigationResult(
+          ts,
+          context.sourceFile,
+          position,
+          (moduleName) => resolveModuleFileName(fileName, moduleName),
+        );
+        if (moduleNavigation?.definitions.length) {
+          for (const def of moduleNavigation.definitions) {
+            remapDefinitionLike(def);
+          }
+          return {
+            textSpan: moduleNavigation.textSpan,
+            definitions: moduleNavigation.definitions,
+          };
+        }
+      }
+
+      const result = _getDefinitionAndBoundSpan(fileName, position);
+      if (result?.definitions) {
+        const preferredName = getPreferredRetargetName(fileName, position, context);
+        const definitions = retargetAliasedDefinitions(result.definitions, preferredName) ?? [
+          ...result.definitions,
+        ];
+        for (const def of definitions) {
+          remapDefinitionLike(def);
+        }
+        result.definitions = definitions;
+      }
+      return result;
+    };
+
+    const _getDefinitionAtPosition = languageService.getDefinitionAtPosition.bind(languageService);
+    languageService.getDefinitionAtPosition = (fileName, position) => {
+      const context = getProgramSourceContext(fileName);
+      if (context) {
+        const aliased = getAliasedNavigationResult(
+          ts,
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (aliased?.definitions.length) {
+          for (const def of aliased.definitions) {
+            remapDefinitionLike(def);
+          }
+          return aliased.definitions;
+        }
+
+        const moduleNavigation = getModuleSpecifierNavigationResult(
+          ts,
+          context.sourceFile,
+          position,
+          (moduleName) => resolveModuleFileName(fileName, moduleName),
+        );
+        if (moduleNavigation?.definitions.length) {
+          for (const def of moduleNavigation.definitions) {
+            remapDefinitionLike(def);
+          }
+          return moduleNavigation.definitions;
+        }
+      }
+
+      const result = _getDefinitionAtPosition(fileName, position);
+      if (result) {
+        const preferredName = getPreferredRetargetName(fileName, position, context);
+        const definitions = retargetAliasedDefinitions(result, preferredName) ?? [...result];
+        for (const def of definitions) {
+          remapDefinitionLike(def);
+        }
+        return definitions;
+      }
+      return result;
+    };
+
+    const _getTypeDefinitionAtPosition =
+      languageService.getTypeDefinitionAtPosition.bind(languageService);
+    languageService.getTypeDefinitionAtPosition = (fileName, position) => {
+      const context = getProgramSourceContext(fileName);
+      if (context) {
+        const aliased = getAliasedNavigationResult(
+          ts,
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (aliased?.definitions.length) {
+          for (const def of aliased.definitions) {
+            remapDefinitionLike(def);
+          }
+          return aliased.definitions;
+        }
+      }
+
+      const result = _getTypeDefinitionAtPosition(fileName, position);
+      if (result) {
+        const preferredName = getPreferredRetargetName(fileName, position, context);
+        const definitions = retargetAliasedDefinitions(result, preferredName) ?? [...result];
+        for (const def of definitions) {
+          remapDefinitionLike(def);
+        }
+        return definitions;
+      }
+      return result;
+    };
+
+    const _getQuickInfoAtPosition = languageService.getQuickInfoAtPosition.bind(languageService);
+    languageService.getQuickInfoAtPosition = (fileName, position) => {
+      const originalQuickInfo = _getQuickInfoAtPosition(fileName, position);
+      const context = getProgramSourceContext(fileName);
+      if (context) {
+        const quickInfo = getAliasedQuickInfo(
+          ts,
+          { getQuickInfoAtPosition: _getQuickInfoAtPosition },
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (quickInfo) {
+          return quickInfo;
+        }
+      }
+
+      const originalDefinitions = _getDefinitionAtPosition(fileName, position);
+      const preferredName = getPreferredRetargetName(fileName, position, context);
+      const retargeted = retargetAliasedDefinitions(originalDefinitions, preferredName);
+      if (originalDefinitions?.length && retargeted?.length) {
+        const original = originalDefinitions[0];
+        const target = retargeted[0];
+        if (
+          target.fileName !== original.fileName ||
+          target.textSpan.start !== original.textSpan.start ||
+          target.textSpan.length !== original.textSpan.length
+        ) {
+          const targetQuickInfo = _getQuickInfoAtPosition(target.fileName, target.textSpan.start);
+          if (targetQuickInfo) {
+            return {
+              ...targetQuickInfo,
+              textSpan: originalQuickInfo?.textSpan ?? targetQuickInfo.textSpan,
+            };
+          }
+        }
+      }
+
+      return originalQuickInfo;
+    };
+
+    const _getCompletionEntryDetails =
+      languageService.getCompletionEntryDetails.bind(languageService);
+    languageService.getCompletionEntryDetails = (
+      fileName,
+      position,
+      entryName,
+      formatOptions,
+      source,
+      preferences,
+      data,
+    ) => {
+      const result = _getCompletionEntryDetails(
+        fileName,
+        position,
+        entryName,
+        formatOptions,
+        source,
+        preferences,
+        data,
+      );
+      if (result?.codeActions) {
+        for (const action of result.codeActions) {
+          action.description = cleanupVueVirtualImportPath(action.description);
+          for (const change of action.changes) {
+            for (const edit of change.textChanges) {
+              edit.newText = cleanupVueVirtualImportPath(edit.newText);
+            }
+          }
+        }
+      }
+      if (result?.sourceDisplay) {
+        result.sourceDisplay = result.sourceDisplay.map((part) => ({
+          ...part,
+          text: cleanupVueVirtualImportPath(part.text),
+        }));
+      }
+      return result;
+    };
+
+    const _getCompletionsAtPosition =
+      languageService.getCompletionsAtPosition.bind(languageService);
+    languageService.getCompletionsAtPosition = (
+      fileName,
+      position,
+      options,
+      formattingSettings,
+    ) => {
+      const result = _getCompletionsAtPosition(fileName, position, options, formattingSettings);
+      if (result?.entries) {
+        for (const entry of result.entries) {
+          if (entry.sourceDisplay) {
+            entry.sourceDisplay = entry.sourceDisplay.map((part) => ({
+              ...part,
+              text: cleanupVueVirtualImportPath(part.text),
+            }));
+          }
+          if (entry.source) {
+            entry.source = fixVuePath(entry.source);
+          }
+        }
+      }
+      return result;
+    };
+
     return languageService;
   };
 
   const getExternalFiles = (project: tsModule.server.ConfiguredProject) => {
     const files = project.getFileNames(true, true).filter(isVue);
-    project.projectService.logger.info("[Verter] Got files\n" + files.join("\n"));
-    return files;
+    project.projectService.logger.info(
+      `[Verter] getExternalFiles: ${files.length} .vue file(s) -> ${files.length} .vue.ts virtual file(s)`,
+    );
+    if (files.length > 0) {
+      project.projectService.logger.info("[Verter] Got files\n" + files.join("\n"));
+    }
+    return files.map((fileName) => fileName + ".ts");
   };
 
   return {

@@ -155,7 +155,7 @@ fn bench_expression_extraction(c: &mut Criterion) {
                     if let Ok(ast) = result {
                         let ctx = BindingContext::new(0);
                         let extraction =
-                            extract_bindings_from_expression(black_box(&ast), expr, &ctx);
+                            extract_bindings_from_expression(black_box(&ast), expr, ctx);
                         black_box(extraction);
                     }
                 });
@@ -175,7 +175,7 @@ fn bench_expression_extraction(c: &mut Criterion) {
                 let result = parser.parse_expression();
                 if let Ok(ast) = result {
                     let ctx = BindingContext::new(0);
-                    let extraction = extract_bindings_from_expression(black_box(&ast), expr, &ctx);
+                    let extraction = extract_bindings_from_expression(black_box(&ast), expr, ctx);
                     black_box(extraction);
                 }
             });
@@ -194,7 +194,7 @@ fn bench_expression_extraction(c: &mut Criterion) {
                 let result = parser.parse_expression();
                 if let Ok(ast) = result {
                     let ctx = BindingContext::new(0);
-                    let extraction = extract_bindings_from_expression(black_box(&ast), expr, &ctx);
+                    let extraction = extract_bindings_from_expression(black_box(&ast), expr, ctx);
                     black_box(extraction);
                 }
             });
@@ -213,7 +213,7 @@ fn bench_expression_extraction(c: &mut Criterion) {
                 let result = parser.parse_expression();
                 if let Ok(ast) = result {
                     let ctx = BindingContext::new(0);
-                    let extraction = extract_bindings_from_expression(black_box(&ast), expr, &ctx);
+                    let extraction = extract_bindings_from_expression(black_box(&ast), expr, ctx);
                     black_box(extraction);
                 }
             });
@@ -232,7 +232,7 @@ fn bench_expression_extraction(c: &mut Criterion) {
                 let result = parser.parse_expression();
                 if let Ok(ast) = result {
                     let ctx = BindingContext::new(0);
-                    let extraction = extract_bindings_from_expression(black_box(&ast), expr, &ctx);
+                    let extraction = extract_bindings_from_expression(black_box(&ast), expr, ctx);
                     black_box(extraction);
                 }
             });
@@ -255,7 +255,7 @@ fn bench_expression_extraction(c: &mut Criterion) {
                     if let Ok(ast) = result {
                         let ctx = BindingContext::new(0);
                         let extraction =
-                            extract_bindings_from_expression(black_box(&ast), expr, &ctx);
+                            extract_bindings_from_expression(black_box(&ast), expr, ctx);
                         black_box(extraction);
                     }
                 });
@@ -280,7 +280,7 @@ fn bench_expression_extraction(c: &mut Criterion) {
                     if let Ok(ast) = result {
                         let ctx = BindingContext::new(0);
                         let extraction =
-                            extract_bindings_from_expression(black_box(&ast), expr, &ctx);
+                            extract_bindings_from_expression(black_box(&ast), expr, ctx);
                         black_box(extraction);
                     }
                 });
@@ -406,7 +406,7 @@ fn bench_with_context(c: &mut Criterion) {
                         let ctx =
                             BindingContext::with_ignored(0, ignored.iter().map(|s| s.as_str()));
                         let extraction =
-                            extract_bindings_from_expression(black_box(&ast), expr, &ctx);
+                            extract_bindings_from_expression(black_box(&ast), expr, ctx);
                         black_box(extraction);
                     }
                 });
@@ -444,7 +444,7 @@ fn bench_parsing_overhead(c: &mut Criterion) {
 
         b.iter(|| {
             let ctx = BindingContext::new(0);
-            let extraction = extract_bindings_from_expression(black_box(&ast), &expr, &ctx);
+            let extraction = extract_bindings_from_expression(black_box(&ast), &expr, ctx);
             black_box(extraction);
         });
     });
@@ -458,7 +458,7 @@ fn bench_parsing_overhead(c: &mut Criterion) {
             let result = parser.parse_expression();
             if let Ok(ast) = result {
                 let ctx = BindingContext::new(0);
-                let extraction = extract_bindings_from_expression(black_box(&ast), &expr, &ctx);
+                let extraction = extract_bindings_from_expression(black_box(&ast), &expr, ctx);
                 black_box(extraction);
             }
         });
@@ -484,7 +484,7 @@ fn bench_keyword_detection(c: &mut Criterion) {
         b.iter(|| {
             let ctx = BindingContext::new(0);
             let extraction =
-                extract_bindings_from_expression(black_box(&ast), expr_with_keywords, &ctx);
+                extract_bindings_from_expression(black_box(&ast), expr_with_keywords, ctx);
             black_box(extraction);
         });
     });
@@ -502,7 +502,7 @@ fn bench_keyword_detection(c: &mut Criterion) {
         b.iter(|| {
             let ctx = BindingContext::new(0);
             let extraction =
-                extract_bindings_from_expression(black_box(&ast), &expr_no_keywords, &ctx);
+                extract_bindings_from_expression(black_box(&ast), &expr_no_keywords, ctx);
             black_box(extraction);
         });
     });

@@ -8,6 +8,7 @@
     "declarationMap": false,
     "noEmit": true,
     "skipLibCheck": true,
+    "ignoreDeprecations": "6.0",
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "preserve",

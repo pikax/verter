@@ -1,0 +1,17 @@
+[package]
+name = "verter_ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "FFI types for Verter — shared serializable structs for NAPI/WASM boundaries"
+publish = false
+
+[dependencies]
+verter_host = { path = "../verter_host", version = "0.0.1-beta.1" }
+verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
+verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
+verter_span = { path = "../verter_span" }
+serde = { workspace = true }

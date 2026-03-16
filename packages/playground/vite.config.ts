@@ -32,10 +32,16 @@ export default defineConfig({
       "Cross-Origin-Embedder-Policy": "require-corp",
     },
   },
+  preview: {
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+  },
   build: {
     target: "esnext",
-    minify: false,
-    rollupOptions: {
+    minify: true,
+    rolldownOptions: {
       output: {
         format: "es",
         // entryFileNames: "[name].js",
@@ -50,9 +56,9 @@ export default defineConfig({
         //   }
         // },
 
-        manualChunks: {
-          monaco: ["monaco-editor-core"],
-          shiki: ["shiki", "@shikijs/monaco"],
+        manualChunks: (id) => {
+          if (id.includes("monaco-editor-core")) return "monaco";
+          if (id.includes("shiki") || id.includes("@shikijs/monaco")) return "shiki";
         },
       },
     },

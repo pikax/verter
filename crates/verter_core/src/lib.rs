@@ -1,15 +1,89 @@
+//! # verter_core — Vue SFC compiler
+//!
+//! Core Rust crate for the Verter Vue compiler. Handles the full compilation
+//! pipeline from Vue Single File Components (SFCs) to compiled output:
+//!
+//! ```text
+//! Vue SFC source
+//!     ↓ tokenizer   — byte-level SFC tokenization
+//!     ↓ parser      — builds arena-based template AST + extracts script/style blocks
+//!     ↓ script      — macro processing, binding extraction, component wrapper
+//!     ↓ template    — render function codegen (VDOM or Vapor backends)
+//!     ↓ style/css   — scoped CSS, CSS Modules, v-bind() replacement
+//!     ↓ compile     — orchestrates the above, applies CodeTransform, emits output
+//! ```
+//!
+//! ## Crate boundaries
+//!
+//! - **Rust** (this crate): tokenization → parsing → AST → template/script/style codegen
+//! - **TypeScript** (`@verter/core`): SFC-to-TSX transformation for IDE type checking
+//! - **NAPI** (`verter_napi`): bridges this crate to Node.js for build-time use (unplugin)
+//! - **WASM** (`verter_wasm`): bridges this crate to the browser for the playground
+//!
+//! ## Visibility
+//!
+//! Modules used only by `verter_bench` (`ast`, `code_transform`, `script`,
+//! `style`, `template`) are feature-gated behind the `bench` feature.
+//! They are `pub(crate)` by default and become `pub` when
+//! `features = ["bench"]` is enabled.
+
+// Shared infrastructure
+#[cfg(feature = "bench")]
+pub mod code_transform;
+#[cfg(not(feature = "bench"))]
+pub(crate) mod code_transform;
+
 pub mod common;
+pub mod css;
 pub mod cursor;
+pub mod strip_types;
 pub mod tokenizer;
-
-pub mod syntax;
-
-pub mod builder;
-pub mod runner;
 pub mod utils;
 
-pub mod code_transform;
-pub mod css;
+// Diagnostic infrastructure
+pub mod diagnostics;
 
-pub mod analysis;
-pub mod strip_types;
+// Core compilation modules
+#[cfg(feature = "bench")]
+pub mod ast;
+#[cfg(not(feature = "bench"))]
+pub(crate) mod ast;
+
+pub mod compile;
+pub mod parser;
+
+#[cfg(feature = "bench")]
+pub mod script;
+#[cfg(not(feature = "bench"))]
+pub(crate) mod script;
+
+#[cfg(feature = "bench")]
+pub mod style;
+#[cfg(not(feature = "bench"))]
+pub(crate) mod style;
+
+#[cfg(feature = "bench")]
+pub mod template;
+#[cfg(not(feature = "bench"))]
+pub(crate) mod template;
+
+// IDE code generation (TSX for TS projects, JSX+JSDoc for JS projects)
+pub(crate) mod ide;
+
+// TSC code generation (vue-tsc replacement)
+pub mod tsc;
+
+// Re-export the @verter/types declarations for the LSP and verter-tsc
+pub use ide::script::VERTER_TYPES_AMBIENT_MODULE;
+pub use ide::script::VERTER_TYPES_STANDALONE_DTS;
+
+pub mod types;
+
+#[cfg(test)]
+mod compile_ported_tests;
+#[cfg(test)]
+mod sourcemap_e2e_tests;
+#[cfg(test)]
+pub(crate) mod test_helpers;
+#[cfg(test)]
+mod v5_process_ported_tests;

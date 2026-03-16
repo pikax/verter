@@ -1,0 +1,266 @@
+name: Component Meta Benchmark
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or commit to benchmark'
+        required: false
+        default: 'main'
+
+  # PR comment trigger: /meta-benchmark
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  # Check if workflow should run (for PR comments)
+  check-trigger:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/meta-benchmark')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+      pr-number: ${{ steps.get-pr.outputs.pr-number }}
+      pr-sha: ${{ steps.get-pr.outputs.pr-sha }}
+      pr-ref: ${{ steps.get-pr.outputs.pr-ref }}
+    steps:
+      - name: Check comment author
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment;
+            const commentBody = comment.body.trim();
+
+            if (!commentBody.startsWith('/meta-benchmark')) {
+              core.setOutput('should-run', 'false');
+              return;
+            }
+
+            const { data: collaborator } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: comment.user.login
+            });
+
+            const hasPermission = ['admin', 'write'].includes(collaborator.permission);
+            core.setOutput('should-run', hasPermission ? 'true' : 'false');
+
+            if (!hasPermission) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `@${comment.user.login} Sorry, you don't have permission to trigger benchmarks.`
+              });
+            } else {
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment.id,
+                content: 'rocket'
+              });
+            }
+
+      - name: Get PR details
+        if: steps.check.outputs.should-run == 'true'
+        id: get-pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('pr-number', context.issue.number);
+            core.setOutput('pr-sha', pr.head.sha);
+            core.setOutput('pr-ref', pr.head.ref);
+
+  # Run benchmarks
+  benchmark:
+    needs: check-trigger
+    if: |
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: write
+    outputs:
+      result-json: ${{ steps.run-bench.outputs.result-json }}
+    steps:
+      - name: Determine checkout ref
+        id: checkout-ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "ref=refs/pull/${{ needs.check-trigger.outputs.pr-number }}/head" >> $GITHUB_OUTPUT
+          else
+            echo "ref=main" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.checkout-ref.outputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: napi-release
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build native package
+        run: pnpm --filter @verter/native build
+
+      - name: Build component-meta
+        run: pnpm --filter @verter/component-meta build
+
+      - name: Run meta benchmark
+        id: run-bench
+        run: |
+          echo "Running component meta benchmark..."
+          pnpm --silent --filter @verter/benchmark bench:meta:json > meta-benchmark-output.json
+
+          RESULT_JSON=$(cat meta-benchmark-output.json)
+          echo "$RESULT_JSON" > meta-benchmark-results.json
+
+          echo "result-json<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESULT_JSON" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "Benchmark complete"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-benchmark-results
+          path: meta-benchmark-results.json
+          retention-days: 30
+
+  # Post results to PR
+  report:
+    needs: [check-trigger, benchmark]
+    if: |
+      always() &&
+      needs.benchmark.result != 'cancelled' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      checks: write
+    steps:
+      - name: Generate PR comment
+        id: generate-comment
+        uses: actions/github-script@v7
+        env:
+          RESULT_JSON: ${{ needs.benchmark.outputs.result-json }}
+        with:
+          script: |
+            const resultJson = JSON.parse(process.env.RESULT_JSON);
+            const { summary, stress, init } = resultJson;
+
+            const fmtMs = (ms) => ms < 1 ? `${(ms * 1000).toFixed(0)}us` : `${ms.toFixed(2)}ms`;
+            const fmtS = (ms) => `${(ms / 1000).toFixed(2)}s`;
+
+            let c = `## Component Meta Benchmark Results\n\n`;
+            c += `**Correctness:** ${summary.allCorrect ? '✅ All fixtures match' : '⚠️ Mismatches detected'}\n`;
+            c += `**Avg speedup:** **${summary.avgSpeedup.toFixed(1)}x**\n\n`;
+
+            // Per-file table
+            c += `### Per-file (tinybench, 20 warmup + 100 iterations)\n\n`;
+            c += `| Fixture | Verter | Volar | Speedup | Correct |\n`;
+            c += `|---------|--------|-------|---------|--------|\n`;
+
+            for (const f of resultJson.fixtures) {
+              const icon = f.correct ? '✅' : '⚠️';
+              c += `| ${f.fixture} | ${fmtMs(f.verterMs)} | ${fmtMs(f.volarMs)} | **${f.speedup.toFixed(1)}x** | ${icon} |\n`;
+            }
+
+            // Stress tests
+            c += `\n### Stress Tests\n\n`;
+            c += `| Test | Files | Verter | Volar | Speedup |\n`;
+            c += `|------|-------|--------|-------|--------|\n`;
+            c += `| In-memory | ${stress.inMemory.files.toLocaleString()} | ${fmtS(stress.inMemory.verterMs)} (${stress.inMemory.verterFps.toLocaleString()} files/s) | ${fmtS(stress.inMemory.volarMs)} (${stress.inMemory.volarFps.toLocaleString()} files/s) | **${stress.inMemory.speedup.toFixed(1)}x** |\n`;
+            c += `| Disk-based | ${stress.disk.files.toLocaleString()} | ${fmtS(stress.disk.verterMs)} (${stress.disk.verterFps.toLocaleString()} files/s) | ${fmtS(stress.disk.volarMs)} (${stress.disk.volarFps.toLocaleString()} files/s) | **${stress.disk.speedup.toFixed(1)}x** |\n`;
+
+            // Init times
+            c += `\n<details>\n<summary>Init times</summary>\n\n`;
+            c += `- Verter: ${fmtMs(init.verterMs)}\n`;
+            c += `- Volar: ${fmtMs(init.volarMs)}\n`;
+            c += `\n</details>\n`;
+
+            core.setOutput('comment', c);
+
+      - name: Post PR comment
+        if: github.event_name == 'issue_comment' && needs.check-trigger.outputs.pr-number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `${{ steps.generate-comment.outputs.comment }}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ needs.check-trigger.outputs.pr-number }},
+              body: comment
+            });
+
+      - name: Create check run
+        if: github.event_name == 'issue_comment' && needs.check-trigger.outputs.pr-sha
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const resultJson = ${{ needs.benchmark.outputs.result-json }};
+            const { summary } = resultJson;
+            const conclusion = summary.allCorrect ? 'success' : 'neutral';
+            const title = `${summary.allCorrect ? '✅' : '⚠️'} ${summary.avgSpeedup.toFixed(1)}x avg speedup, ${summary.allCorrect ? 'all correct' : 'mismatches detected'}`;
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Component Meta Benchmark',
+              head_sha: '${{ needs.check-trigger.outputs.pr-sha }}',
+              status: 'completed',
+              conclusion: conclusion,
+              output: {
+                title: title,
+                summary: `${{ steps.generate-comment.outputs.comment }}`
+              }
+            });
+
+      - name: Summary
+        run: |
+          echo "${{ steps.generate-comment.outputs.comment }}" >> $GITHUB_STEP_SUMMARY

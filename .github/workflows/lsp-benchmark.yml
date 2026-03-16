@@ -1,0 +1,317 @@
+name: LSP Benchmark
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or commit to benchmark'
+        required: false
+        default: 'main'
+      save-results:
+        description: 'Commit results to benchmark-results branch for tracking'
+        required: false
+        default: false
+        type: boolean
+
+  # PR comment trigger: /lsp-benchmark
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  # Check if workflow should run (for PR comments)
+  check-trigger:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/lsp-benchmark')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+      pr-number: ${{ steps.get-pr.outputs.pr-number }}
+      pr-sha: ${{ steps.get-pr.outputs.pr-sha }}
+      pr-ref: ${{ steps.get-pr.outputs.pr-ref }}
+    steps:
+      - name: Check comment author
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment;
+            const commentBody = comment.body.trim();
+
+            // Check if comment is exactly "/lsp-benchmark" or starts with "/lsp-benchmark "
+            if (!commentBody.startsWith('/lsp-benchmark')) {
+              console.log('Comment does not start with /lsp-benchmark');
+              core.setOutput('should-run', 'false');
+              return;
+            }
+
+            // Check if commenter has write access
+            const { data: collaborator } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: comment.user.login
+            });
+
+            const hasPermission = ['admin', 'write'].includes(collaborator.permission);
+            core.setOutput('should-run', hasPermission ? 'true' : 'false');
+
+            if (!hasPermission) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `@${comment.user.login} Sorry, you don't have permission to trigger LSP benchmarks. Only collaborators with write access can use this command.`
+              });
+            } else {
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment.id,
+                content: 'rocket'
+              });
+            }
+
+      - name: Get PR details
+        if: steps.check.outputs.should-run == 'true'
+        id: get-pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            core.setOutput('pr-number', context.issue.number);
+            core.setOutput('pr-sha', pr.head.sha);
+            core.setOutput('pr-ref', pr.head.ref);
+
+  # Run LSP benchmarks
+  lsp-benchmark:
+    needs: check-trigger
+    if: |
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os-key: linux
+            os-label: Linux
+          - runner: macos-13
+            os-key: macos
+            os-label: macOS
+          - runner: windows-latest
+            os-key: windows
+            os-label: Windows
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Determine checkout ref
+        id: checkout-ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "ref=refs/pull/${{ needs.check-trigger.outputs.pr-number }}/head" >> $GITHUB_OUTPUT
+          else
+            echo "ref=main" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.checkout-ref.outputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lsp-release-${{ matrix.os-key }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build LSP binary (release)
+        run: cargo build --release -p verter_lsp
+
+      - name: Clone PrimeVue
+        run: git clone --depth 1 https://github.com/primefaces/primevue.git test-project
+
+      - name: Run LSP benchmark
+        id: run-bench
+        run: |
+          RESULT_FILE="lsp-benchmark-results-${{ matrix.os-key }}.json"
+
+          pnpm --silent --filter @verter/benchmark bench:lsp:json \
+            --workspace=test-project/packages/primevue \
+            --file=src/datatable/DataTable.vue \
+            --hover-line=19 \
+            --hover-char=20 > "$RESULT_FILE"
+
+          echo "result-file=$RESULT_FILE" >> $GITHUB_OUTPUT
+
+          echo "Benchmark complete."
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-benchmark-results-${{ matrix.os-key }}
+          path: ${{ steps.run-bench.outputs.result-file }}
+          retention-days: 30
+
+  # Post results to PR
+  report:
+    needs: [check-trigger, lsp-benchmark]
+    if: |
+      always() &&
+      needs.lsp-benchmark.result != 'cancelled' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Determine checkout ref
+        id: checkout-ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "ref=refs/pull/${{ needs.check-trigger.outputs.pr-number }}/head" >> $GITHUB_OUTPUT
+          else
+            echo "ref=main" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.checkout-ref.outputs.ref }}
+
+      - name: Download benchmark artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lsp-benchmark-results-*
+          merge-multiple: true
+          path: lsp-benchmark-artifacts
+
+      - name: Generate report
+        id: generate-report
+        run: |
+          node scripts/lsp-benchmark-report.mjs \
+            --input-dir=lsp-benchmark-artifacts \
+            --markdown-out=lsp-benchmark-comment.md \
+            --json-out=lsp-benchmark-results.json
+
+          echo "comment<<EOF" >> "$GITHUB_OUTPUT"
+          cat lsp-benchmark-comment.md >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Upload combined benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-benchmark-results-all
+          path: |
+            lsp-benchmark-results.json
+            lsp-benchmark-comment.md
+            lsp-benchmark-artifacts/
+          retention-days: 30
+
+      - name: Save results to branch
+        if: github.event_name == 'workflow_dispatch' && inputs.save-results == true
+        run: |
+          REF="${{ steps.checkout-ref.outputs.ref }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -f lsp-benchmark-results.json
+          if git log -1 --pretty=%s | grep -q "^ci: lsp benchmark results$"; then
+            git commit --amend --no-edit -- lsp-benchmark-results.json
+            git push --force-with-lease origin "$REF"
+          else
+            git commit -m "ci: lsp benchmark results" -- lsp-benchmark-results.json
+            git push origin "$REF"
+          fi
+
+      - name: Post PR comment
+        if: github.event_name == 'issue_comment' && needs.check-trigger.outputs.pr-number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `${{ steps.generate-report.outputs.comment }}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ needs.check-trigger.outputs.pr-number }},
+              body: comment
+            });
+
+      - name: Create check run
+        if: github.event_name == 'issue_comment' && needs.check-trigger.outputs.pr-sha
+        uses: actions/github-script@v7
+        env:
+          COMMENT_BODY: ${{ steps.generate-report.outputs.comment }}
+          JOB_RESULT: ${{ needs.lsp-benchmark.result }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const resultJson = JSON.parse(fs.readFileSync('lsp-benchmark-results.json', 'utf8'));
+            const osSummary = resultJson.runs.map(run => `${run.osLabel} (${run.platform}/${run.arch})`).join(', ');
+            const conclusion = process.env.JOB_RESULT === 'success' ? 'success' : 'neutral';
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'LSP Benchmark Results',
+              head_sha: '${{ needs.check-trigger.outputs.pr-sha }}',
+              status: 'completed',
+              conclusion,
+              output: {
+                title: `Benchmarked on ${osSummary}`,
+                summary: process.env.COMMENT_BODY
+              }
+            });
+
+      - name: Summary
+        run: |
+          cat lsp-benchmark-comment.md >> "$GITHUB_STEP_SUMMARY"

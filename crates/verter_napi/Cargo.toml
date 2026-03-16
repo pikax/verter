@@ -3,15 +3,31 @@ name = "verter_napi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Native Node.js bindings for Verter Vue compiler (NAPI-RS)"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+host_metrics = ["verter_host/host_metrics"]
 
 [dependencies]
-verter_core = { path = "../verter_core", version = "0.0.1-alpha.3" }
-oxc_allocator = "0.112.0"
+verter_core = { path = "../verter_core", version = "0.0.1-beta.1" }
+verter_host = { path = "../verter_host", version = "0.0.1-beta.1" }
+verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
+verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
+verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
+verter_analysis = { path = "../verter_analysis", version = "0.0.1-beta.1" }
+verter_span = { path = "../verter_span" }
 napi = { version = "2", default-features = false, features = ["napi8", "serde-json"] }
 napi-derive = "2"
+serde_json = { workspace = true }
+rayon = "1.8"
+oxc_allocator = { workspace = true }
 
 [build-dependencies]
 napi-build = "2"

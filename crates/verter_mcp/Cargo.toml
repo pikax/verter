@@ -1,0 +1,42 @@
+[package]
+name = "verter_mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "MCP server for Verter — Model Context Protocol server for AI-assisted Vue development"
+publish = false
+
+[lib]
+name = "verter_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "verter-mcp"
+path = "src/main.rs"
+
+[dependencies]
+verter_host = { path = "../verter_host" }
+verter_analysis = { path = "../verter_analysis" }
+verter_diagnostics = { path = "../verter_diagnostics" }
+verter_actions = { path = "../verter_actions" }
+rmcp = { version = "1", features = [
+    "server",
+    "macros",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+tokio = { version = "1", features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = "1"
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = "0.8"
+
+[dev-dependencies]
+verter_span = { path = "../verter_span" }

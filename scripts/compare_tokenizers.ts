@@ -597,7 +597,11 @@ function compareEvents(vue: TokenEvent[], slim: TokenEvent[]): string[] {
 }
 
 // Main
-const folders = ["D:\\dev\\accioresearch\\WLS\\avava\\src"];
+const folders = process.argv.slice(2);
+if (folders.length === 0) {
+  console.error("Usage: npx tsx scripts/compare_tokenizers.ts <folder1> [folder2] ...");
+  process.exit(1);
+}
 
 let totalDiffs = 0;
 let filesWithDiffs = 0;

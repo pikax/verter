@@ -15,12 +15,13 @@ use super::macros::{
     MacroTypeParams, ScriptMacro, VueMacroKind,
 };
 use super::resolve_type::{
-    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, TypeResolutionContext,
+    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, RuntimeType,
+    TypeResolutionContext,
 };
 use super::shared::ScriptParseContext;
 use super::types::{
-    DeclarationKind, ScriptAsync, ScriptBinding, ScriptDeclaration, ScriptError, ScriptErrorKind,
-    ScriptItem, ScriptTypeDeclaration, TypeDeclarationKind,
+    AsyncKind, DeclarationKind, ScriptAsync, ScriptBinding, ScriptDeclaration, ScriptError,
+    ScriptErrorKind, ScriptItem, ScriptTypeDeclaration, TypeDeclarationKind,
 };
 use super::usage::{
     detect_vue_api_call, CallSiteContext, EmitCallUsage, EmitEventName, InjectUsage, LifecycleHook,
@@ -208,6 +209,8 @@ pub fn process_setup_statement<'a>(
                 setup_ctx.is_async = true;
                 items.push(ScriptItem::Async(ScriptAsync {
                     span: Span::from(for_of.span),
+                    arg_span: None,
+                    kind: AsyncKind::ForAwaitOf,
                 }));
             }
             setup_ctx.enter_block();
@@ -391,6 +394,8 @@ fn process_variable_declaration<'a>(
             setup_ctx.is_async = true;
             items.push(ScriptItem::Async(ScriptAsync {
                 span: Span::from(var_decl.span),
+                arg_span: None,
+                kind: AsyncKind::AwaitUsing,
             }));
             DeclarationKind::Const
         }
@@ -499,6 +504,8 @@ fn check_expression_for_async<'a>(
             setup_ctx.is_async = true;
             items.push(ScriptItem::Async(ScriptAsync {
                 span: Span::from(await_expr.span),
+                arg_span: Some(Span::from(await_expr.argument.span())),
+                kind: AsyncKind::AwaitExpression,
             }));
             // Also check the argument
             check_expression_for_async(&await_expr.argument, setup_ctx, items);
@@ -594,6 +601,22 @@ fn check_expression_for_async<'a>(
                 check_expression_for_async(arg, setup_ctx, items);
             }
         }
+        // TS expression wrappers: recurse into the inner expression
+        Expression::TSNonNullExpression(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
+        Expression::TSAsExpression(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
+        Expression::TSSatisfiesExpression(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
+        Expression::TSTypeAssertion(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
+        Expression::TSInstantiationExpression(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
         // Don't recurse into function expressions - they have their own async context
         Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {}
         _ => {}
@@ -661,15 +684,18 @@ pub fn parse_macro_call<'a>(
             Some(ScriptMacro::DefineExpose {
                 span,
                 declarator,
+                type_params,
                 object_arg,
             })
         }
         VueMacroKind::DefineOptions => {
             let object_arg = extract_object_arg_from_call(call, 0, ctx);
+            let has_inherit_attrs_false = detect_inherit_attrs_false(call);
             Some(ScriptMacro::DefineOptions {
                 span,
                 declarator,
                 object_arg,
+                has_inherit_attrs_false,
             })
         }
         VueMacroKind::DefineModel => {
@@ -730,12 +756,20 @@ pub fn parse_macro_call<'a>(
             // Second arg is defaults object
             let defaults = extract_object_arg_from_call(call, 1, ctx);
 
+            // Capture the raw span of the second argument (any expression type)
+            let defaults_arg_span = call
+                .arguments
+                .get(1)
+                .and_then(|arg| arg.as_expression())
+                .map(|expr| Span::from(expr.span()));
+
             Some(ScriptMacro::WithDefaults {
                 span,
                 declarator,
                 define_props_span,
                 define_props_type_params,
                 defaults,
+                defaults_arg_span,
             })
         }
     }
@@ -781,7 +815,15 @@ fn extract_type_params<'a>(
         .params
         .first()
         .is_some_and(|ts_type| matches!(ts_type, TSType::TSTypeReference(_)));
-    let unresolved_type_ref = is_type_reference && resolved.props.is_empty();
+    let has_resolved_root_runtime = resolved
+        .root_runtime_types
+        .iter()
+        .any(|ty| !matches!(ty, RuntimeType::Unknown));
+    let unresolved_type_ref = is_type_reference
+        && resolved.props.is_empty()
+        && resolved.emits.is_empty()
+        && !resolved.has_call_signature
+        && !has_resolved_root_runtime;
 
     // Infer runtime types from the root type (for simple types like `string`, `number`)
     let runtime_types = tp
@@ -811,6 +853,31 @@ fn extract_arg_spans<'a>(
 }
 
 /// Extract an object argument from a call at a specific index
+/// Check if a `defineOptions()` call has `inheritAttrs: false` in its first object argument.
+fn detect_inherit_attrs_false(call: &CallExpression<'_>) -> bool {
+    let Some(first_arg) = call.arguments.first() else {
+        return false;
+    };
+    let Some(Expression::ObjectExpression(obj)) = first_arg.as_expression() else {
+        return false;
+    };
+    for prop in &obj.properties {
+        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+            let is_inherit_attrs = match &p.key {
+                PropertyKey::StaticIdentifier(id) => id.name == "inheritAttrs",
+                PropertyKey::StringLiteral(lit) => lit.value == "inheritAttrs",
+                _ => false,
+            };
+            if is_inherit_attrs {
+                if let Expression::BooleanLiteral(b) = &p.value {
+                    return !b.value; // inheritAttrs: false → true
+                }
+            }
+        }
+    }
+    false
+}
+
 fn extract_object_arg_from_call<'a>(
     call: &CallExpression<'a>,
     index: usize,
@@ -840,7 +907,119 @@ fn extract_array_arg_from_call(
     })
 }
 
-/// Extract object argument details
+/// Map a JS constructor identifier name to a `RuntimeType`.
+fn constructor_ident_to_runtime_type(name: &str) -> Option<RuntimeType> {
+    match name {
+        "String" => Some(RuntimeType::String),
+        "Number" => Some(RuntimeType::Number),
+        "Boolean" => Some(RuntimeType::Boolean),
+        "Object" => Some(RuntimeType::Object),
+        "Array" => Some(RuntimeType::Array),
+        "Function" => Some(RuntimeType::Function),
+        "Symbol" => Some(RuntimeType::Symbol),
+        _ => None,
+    }
+}
+
+/// Extract runtime types from an AST expression.
+///
+/// Handles:
+/// - `String` → `[RuntimeType::String]`
+/// - `[String, Number]` → `[RuntimeType::String, RuntimeType::Number]`
+/// - `Number as PropType<number[]>` → `[RuntimeType::Number]` (uses the constructor before `as`)
+fn extract_runtime_types_from_expr(expr: &Expression<'_>) -> Vec<RuntimeType> {
+    match expr {
+        Expression::Identifier(id) => {
+            if let Some(rt) = constructor_ident_to_runtime_type(id.name.as_str()) {
+                vec![rt]
+            } else {
+                vec![]
+            }
+        }
+        Expression::ArrayExpression(arr) => {
+            let mut types = Vec::new();
+            for elem in &arr.elements {
+                if let Some(Expression::Identifier(id)) = elem.as_expression() {
+                    if let Some(rt) = constructor_ident_to_runtime_type(id.name.as_str()) {
+                        types.push(rt);
+                    }
+                }
+            }
+            types
+        }
+        Expression::TSAsExpression(ts_as) => extract_runtime_types_from_expr(&ts_as.expression),
+        _ => vec![],
+    }
+}
+
+/// Extract the `PropType<T>` type annotation span from a `TSAsExpression`.
+///
+/// For `X as PropType<T>`, returns the span of `T`.
+fn extract_prop_type_annotation(expr: &Expression<'_>) -> Option<Span> {
+    let Expression::TSAsExpression(ts_as) = expr else {
+        return None;
+    };
+    let TSType::TSTypeReference(type_ref) = &ts_as.type_annotation else {
+        return None;
+    };
+    let TSTypeName::IdentifierReference(id) = &type_ref.type_name else {
+        return None;
+    };
+    if id.name.as_str() != "PropType" {
+        return None;
+    }
+    let Some(type_args) = &type_ref.type_arguments else {
+        return None;
+    };
+    type_args
+        .params
+        .first()
+        .map(|p: &TSType<'_>| Span::from(p.span()))
+}
+
+/// Extract prop metadata from an object-form prop value:
+/// `{ type: X, required: true, default: ... }`.
+///
+/// Returns `(required, has_default, runtime_types, prop_type_annotation)`.
+fn extract_prop_object_metadata(
+    obj: &ObjectExpression<'_>,
+) -> (bool, bool, Vec<RuntimeType>, Option<Span>) {
+    let mut required = false;
+    let mut has_default = false;
+    let mut runtime_types = Vec::new();
+    let mut prop_type_annotation = None;
+
+    for prop in &obj.properties {
+        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+            let key_name = match &p.key {
+                PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+                _ => None,
+            };
+            match key_name {
+                Some("type") => {
+                    runtime_types = extract_runtime_types_from_expr(&p.value);
+                    prop_type_annotation = extract_prop_type_annotation(&p.value);
+                }
+                Some("required") => {
+                    if let Expression::BooleanLiteral(b) = &p.value {
+                        required = b.value;
+                    }
+                }
+                Some("default") => {
+                    has_default = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (required, has_default, runtime_types, prop_type_annotation)
+}
+
+/// Extract object argument details.
+///
+/// For each property, extracts AST-level metadata: runtime types, required flag,
+/// default flag, and PropType<T> annotation span.
 fn extract_object_arg<'a>(
     obj: &ObjectExpression<'a>,
     ctx: &ScriptParseContext<'a>,
@@ -855,10 +1034,34 @@ fn extract_object_arg<'a>(
                 } else {
                     Some(Span::from(p.value.span()))
                 };
+
+                let (required, has_default, runtime_types, prop_type_annotation) = if p.shorthand {
+                    (false, false, vec![], None)
+                } else {
+                    match &p.value {
+                        Expression::Identifier(_) | Expression::ArrayExpression(_) => {
+                            let types = extract_runtime_types_from_expr(&p.value);
+                            (false, false, types, None)
+                        }
+                        Expression::TSAsExpression(_) => {
+                            let types = extract_runtime_types_from_expr(&p.value);
+                            let annotation = extract_prop_type_annotation(&p.value);
+                            (false, false, types, annotation)
+                        }
+                        Expression::ObjectExpression(obj) => extract_prop_object_metadata(obj),
+                        _ => (false, false, vec![], None),
+                    }
+                };
+
                 properties.push(MacroProperty {
                     name,
                     name_span,
                     value_span,
+                    is_method: p.method,
+                    required,
+                    has_default,
+                    runtime_types,
+                    prop_type_annotation,
                 });
             }
         }
@@ -1275,11 +1478,25 @@ fn collect_template_util_usage<'a>(
         None
     };
 
+    // Extract type parameter span for useAttrs<T>()
+    // Type annotation spans are NOT adjusted by adjust_program_spans, so we add content_offset
+    let type_arg_span = if kind == VueApiKind::UseAttrs {
+        call.type_arguments.as_ref().and_then(|tp| {
+            tp.params.first().map(|param: &oxc_ast::ast::TSType<'_>| {
+                let s = param.span();
+                Span::new(ctx.content_offset + s.start, ctx.content_offset + s.end)
+            })
+        })
+    } else {
+        None
+    };
+
     usage_ctx.record_template_util(TemplateUtilUsage {
         span,
         kind,
         binding_span,
         ref_name_span,
+        type_arg_span,
     });
 }
 

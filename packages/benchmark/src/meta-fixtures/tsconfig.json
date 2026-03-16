@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "jsx": "preserve",
+    "skipLibCheck": true,
+    "lib": ["ESNext", "DOM"],
+    "typeRoots": ["../../node_modules/@types"],
+    "paths": {
+      "vue": ["../../node_modules/vue"]
+    }
+  },
+  "include": ["*.vue"],
+  "vueCompilerOptions": {
+    "target": 3.5
+  }
+}

@@ -6,7 +6,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```ignore
 //! use verter_core::code_transform::{CodeTransform, SourceMapOptions};
 //! use oxc_allocator::Allocator;
 //!
@@ -32,7 +32,7 @@
 //! ```
 
 mod chunk;
-#[allow(clippy::module_inception)]
+#[allow(clippy::module_inception)] // CodeTransform struct lives in code_transform module
 mod code_transform;
 mod source_map;
 

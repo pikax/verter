@@ -1,0 +1,151 @@
+# Settings Reference
+
+::: warning Pre-Release
+Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
+:::
+
+All VS Code extension settings for Verter, configurable via `settings.json` or the Settings UI.
+
+## General
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `verter.enable` | `boolean` | `true` | Enable or disable the Verter extension entirely |
+| `verter.lspBinaryPath` | `string` | `""` | Absolute path to the `verter-lsp` binary. Leave empty to auto-detect (bundled binary or `PATH`). |
+
+## Statistics
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `verter.statistics.enabled` | `boolean` | `false` | Collect processing statistics (diagnostics, file reads) |
+| `verter.statistics.persistToFile` | `boolean` | `false` | Persist statistics to disk for cumulative analysis |
+| `verter.statistics.filePath` | `string` | `""` | Absolute path for persisted statistics. Defaults to `<workspace>/.verter/statistics.json` when persistence is enabled. |
+| `verter.statistics.maxSessionEntries` | `number` | `500` | Maximum number of in-memory statistics events to retain per session |
+| `verter.statistics.maxPersistedEntries` | `number` | `2000` | Maximum number of events persisted to disk |
+
+## Analysis
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `verter.analysis.enabled` | `boolean` | `false` | Enable the Verter Analysis sidebar (virtual files, component tree, analysis, source map sync) |
+
+## Decorations
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `verter.decorations.vueApiCalls` | `boolean` | `true` | Show inline annotations for Vue API calls (lifecycle hooks, watchers, reactivity, provide/inject) |
+| `verter.decorations.bindingColors` | `boolean` | `true` | Show faint color decorations on bindings based on their reactivity type (ref, computed, reactive, prop, etc.) |
+| `verter.decorations.bindingColorsScope` | `"template"` \| `"all"` | `"template"` | Where to apply binding color decorations. `"template"` colors bindings only in `<template>` (where they are consumed far from declarations). `"all"` colors bindings in both `<template>` and `<script>`. |
+| `verter.decorations.bindingColorsStyle` | `"background"` \| `"underline"` | `"background"` | Visual style for binding color decorations. `"background"` applies a faint background tint behind binding text. `"underline"` applies a subtle colored dotted underline beneath binding text. |
+| `verter.decorations.propConstness` | `boolean` | `false` | Show faint background decorations on component props based on their constness (const = optimizable, dynamic = needs tracking). |
+
+### Binding Color Categories
+
+Binding colors are determined by the reactivity type of each binding:
+
+| Category | Description | Default Color (Dark) |
+|----------|-------------|---------------------|
+| `verter.binding.ref` | `ref()` bindings (needs `.value`) | Blue `#4285f4` |
+| `verter.binding.computed` | `computed()` bindings | Purple `#a142f4` |
+| `verter.binding.reactive` | `reactive()` bindings | Teal `#00bcd4` |
+| `verter.binding.prop` | `defineProps` bindings | Orange `#ff9800` |
+| `verter.binding.composable` | Composable return values (MaybeRef) | Pink `#e91e63` |
+| `verter.binding.mutable` | Mutable (`let`) bindings | Amber `#ffc107` |
+| `verter.binding.function` | Function bindings | Green `#4caf50` |
+
+When `verter.decorations.propConstness` is enabled, these additional colors apply:
+
+| Category | Description | Default Color (Dark) |
+|----------|-------------|---------------------|
+| `verter.propConstness.const` | Props with constant values (optimizable) | Green |
+| `verter.propConstness.dynamic` | Props with dynamic values (needs tracking) | Orange |
+
+These colors are theme-aware and have separate defaults for dark, light, high contrast, and high contrast light themes. You can override them in your `workbench.colorCustomizations` settings:
+
+```json
+{
+  "workbench.colorCustomizations": {
+    "verter.binding.ref": "#5599ff20",
+    "verter.binding.computed": "#bb66ff20"
+  }
+}
+```
+
+## MCP Server
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `verter.mcp.enabled` | `boolean` | `true` | Start an HTTP MCP endpoint alongside the LSP, providing Vue analysis tools to AI agents |
+| `verter.mcp.port` | `number` | `6772` | Port for the MCP HTTP endpoint. Set to `0` for auto-assign. |
+| `verter.mcp.lintPreset` | `"essential"` \| `"recommended"` \| `"all"` \| `"performance"` \| `"a11y"` \| `"strict"` | `"recommended"` | Lint preset for the MCP server's diagnostic tools |
+| `verter.mcp.claudeCodeNotification` | `boolean` | `true` | Show a notification when Claude Code is detected with MCP setup instructions |
+
+See [MCP Server](/editor/mcp-server) for details on setup and available tools.
+
+## Type Provider
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `verter.typeProvider` | `"auto"` \| `"tsgo"` \| `"tsserver"` \| `"off"` | `"auto"` | TypeScript type provider for Vue files. Changing this setting restarts the server. |
+| `verter.typescript.tsdk` | `string` | `""` | Path to TypeScript SDK directory (e.g., `node_modules/typescript/lib`). Leave empty to auto-detect. |
+
+**Provider modes:**
+
+| Mode | Behavior |
+|------|----------|
+| `auto` | Detects workspace TS version — if TS 5.x/6.x installed, uses tsserver and recommends TSGO; otherwise tries TSGO |
+| `tsgo` | Uses TSGO only (faster, native Go binary) |
+| `tsserver` | Uses workspace TypeScript version (tsserver) |
+| `off` | Disables TypeScript type checking (verter-only mode) |
+
+::: warning TSGO Limitation
+TSGO has a known limitation: **re-exported `.vue` components** (e.g., barrel files like `export { default as MyComp } from './MyComp.vue'`) may lose their typing when imported in another SFC. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found. If you experience missing types with TSGO, switch to `tsserver`.
+:::
+
+## Server
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `verter.trace.server` | `"off"` \| `"messages"` \| `"verbose"` | `"off"` | Traces the communication between VS Code and the Verter language server. Useful for debugging LSP issues. |
+| `verter.server.logLevel` | `"error"` \| `"warn"` \| `"info"` \| `"debug"` \| `"trace"` | `"info"` | Log level for the Verter language server process. Changing this setting restarts the server. |
+
+## Emmet Configuration
+
+The extension automatically configures Emmet to include Vue in its language list:
+
+```json
+{
+  "emmet.includeLanguages": {
+    "vue": "html"
+  }
+}
+```
+
+This enables Emmet abbreviation expansion inside Vue `<template>` blocks.
+
+## Example Configuration
+
+A recommended configuration for development:
+
+```json
+{
+  "verter.enable": true,
+  "verter.decorations.vueApiCalls": true,
+  "verter.decorations.bindingColors": true,
+  "verter.decorations.bindingColorsScope": "template",
+  "verter.decorations.bindingColorsStyle": "background",
+  "verter.server.logLevel": "info"
+}
+```
+
+For debugging or extension development:
+
+```json
+{
+  "verter.enable": true,
+  "verter.analysis.enabled": true,
+  "verter.statistics.enabled": true,
+  "verter.trace.server": "verbose",
+  "verter.server.logLevel": "debug"
+}
+```

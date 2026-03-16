@@ -2,9 +2,9 @@
 <html>
   <head>
     <style>
-      html.dark {
-        color-scheme: dark;
-      }
+      /* Dark mode only affects scrollbars and system UI, not user content.
+         Applied per-element to avoid changing default text/background colors
+         which would break components that don't set explicit colors. */
       body {
         font-family:
           -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell,
@@ -71,18 +71,12 @@
         });
 
         window.addEventListener("message", async (ev) => {
-          const { action, scripts, css, darkMode } = ev.data;
+          const { action, scripts, css } = ev.data;
 
           if (action === "eval") {
             try {
               window.__modules__ = {};
               window.__css__ = [];
-
-              if (darkMode) {
-                document.documentElement.classList.add("dark");
-              } else {
-                document.documentElement.classList.remove("dark");
-              }
 
               // Remove old styles
               document.querySelectorAll("style[data-v]").forEach((el) => el.remove());
@@ -95,7 +89,14 @@
                 document.head.appendChild(style);
               }
 
-              // Clear app
+              // Unmount the previous Vue app to clean up internal state,
+              // then clear the DOM. Without unmount(), Vue's internal component
+              // tree stays alive and interferes when re-mounting (e.g., causes
+              // nextSibling errors when switching from single-root to multi-root).
+              if (window.__currentApp__) {
+                window.__currentApp__.unmount();
+                window.__currentApp__ = null;
+              }
               const app = document.getElementById("app");
               if (app) app.innerHTML = "";
 

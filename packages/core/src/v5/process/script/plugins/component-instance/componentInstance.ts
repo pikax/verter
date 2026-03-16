@@ -9,12 +9,6 @@ export const ComponentInstancePlugin = definePlugin({
   enforce: "post",
 
   pre(s, ctx) {
-    // const prefix = ctx.prefix("");
-    // const bundler = BundlerHelper.withPrefix(prefix);
-    // const imports = [...bundler.imports];
-    // const str = generateImport(imports);
-    // s.prepend(`${str}\n`);
-
     if (ctx.isSetup) {
       ctx.items.push(
         createHelperImport(
@@ -26,6 +20,10 @@ export const ComponentInstancePlugin = definePlugin({
           ],
           ctx.prefix,
         ),
+      );
+    } else {
+      ctx.items.push(
+        createHelperImport(["OmitConstructorSignature", "Prettify"], ctx.prefix),
       );
     }
   },
@@ -109,7 +107,24 @@ export const ComponentInstancePlugin = definePlugin({
 
       s.append(declaration.filter(Boolean).join("\n"));
     } else {
-      console.warn("Setup is not supported yet for ComponentInstancePlugin");
+      const defaultOptionsName = ctx.prefix("default_Component");
+      const instanceName = ctx.prefix("Instance");
+      const componentName = ctx.prefix("Component");
+      const OmitConstructorSignature = ctx.prefix(
+        "OmitConstructorSignature" as AvailableExports,
+      );
+      const Prettify = ctx.prefix("Prettify" as AvailableExports);
+      const exportStr = ctx.isSingleFile ? "" : "export";
+
+      const publicConstructor = `new(props?: ${instanceName}['$props']): ${Prettify}<${instanceName}>`;
+
+      const declaration = [
+        `${exportStr} type ${instanceName} = InstanceType<typeof ${defaultOptionsName}>;`,
+        `${exportStr} declare const ${componentName}: ${OmitConstructorSignature}<typeof ${defaultOptionsName}> & {${publicConstructor}};`,
+        ctx.isSingleFile ? `export default ${componentName};` : "",
+      ];
+
+      s.append(declaration.filter(Boolean).join("\n"));
     }
   },
 });

@@ -37,31 +37,40 @@ function tryLoad(file) {
   }
 }
 
+function tryLoadAny(files) {
+  for (const file of files) {
+    tryLoad(file);
+    if (nativeBinding) {
+      return;
+    }
+  }
+}
+
 switch (platform) {
   case "win32":
     switch (arch) {
       case "x64":
-        tryLoad("verter-native.win32-x64-msvc.node");
+        tryLoadAny(["verter-native.win32-x64-msvc.node", "verter.win32-x64-msvc.node"]);
         break;
       case "ia32":
-        tryLoad("verter-native.win32-ia32-msvc.node");
+        tryLoadAny(["verter-native.win32-ia32-msvc.node", "verter.win32-ia32-msvc.node"]);
         break;
       case "arm64":
-        tryLoad("verter-native.win32-arm64-msvc.node");
+        tryLoadAny(["verter-native.win32-arm64-msvc.node", "verter.win32-arm64-msvc.node"]);
         break;
       default:
         throw new Error(`Unsupported architecture on Windows: ${arch}`);
     }
     break;
   case "darwin":
-    tryLoad("verter-native.darwin-universal.node");
+    tryLoadAny(["verter-native.darwin-universal.node", "verter.darwin-universal.node"]);
     if (!nativeBinding) {
       switch (arch) {
         case "x64":
-          tryLoad("verter-native.darwin-x64.node");
+          tryLoadAny(["verter-native.darwin-x64.node", "verter.darwin-x64.node"]);
           break;
         case "arm64":
-          tryLoad("verter-native.darwin-arm64.node");
+          tryLoadAny(["verter-native.darwin-arm64.node", "verter.darwin-arm64.node"]);
           break;
         default:
           throw new Error(`Unsupported architecture on macOS: ${arch}`);
@@ -72,16 +81,16 @@ switch (platform) {
     switch (arch) {
       case "x64":
         if (isMusl()) {
-          tryLoad("verter-native.linux-x64-musl.node");
+          tryLoadAny(["verter-native.linux-x64-musl.node", "verter.linux-x64-musl.node"]);
         } else {
-          tryLoad("verter-native.linux-x64-gnu.node");
+          tryLoadAny(["verter-native.linux-x64-gnu.node", "verter.linux-x64-gnu.node"]);
         }
         break;
       case "arm64":
         if (isMusl()) {
-          tryLoad("verter-native.linux-arm64-musl.node");
+          tryLoadAny(["verter-native.linux-arm64-musl.node", "verter.linux-arm64-musl.node"]);
         } else {
-          tryLoad("verter-native.linux-arm64-gnu.node");
+          tryLoadAny(["verter-native.linux-arm64-gnu.node", "verter.linux-arm64-gnu.node"]);
         }
         break;
       default:
@@ -99,9 +108,45 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`);
 }
 
-const { compile, compileForVite, processStyle, stripTypes } = nativeBinding;
+// ---------------------------------------------------------------------------
+// JS-side string → Buffer coercion
+//
+// The native binding always receives bytes (Buffer). The JS wrapper accepts
+// both string and Buffer for convenience — strings are converted to UTF-8
+// Buffers before crossing the FFI boundary.
+// ---------------------------------------------------------------------------
 
-module.exports.compile = compile;
-module.exports.compileForVite = compileForVite;
+function toBuffer(v) {
+  return typeof v === "string" ? Buffer.from(v) : v;
+}
+
+const { processStyle: _processStyle, compileBatch, VerterHost } = nativeBinding;
+
+function processStyle(css, options) {
+  return _processStyle(toBuffer(css), options);
+}
+
+const _upsert = VerterHost.prototype.upsert;
+VerterHost.prototype.upsert = function (request) {
+  if (typeof request.source === "string") {
+    request = { ...request, source: Buffer.from(request.source) };
+  }
+  return _upsert.call(this, request);
+};
+
+const _applyBlockOverrides = VerterHost.prototype.applyBlockOverrides;
+VerterHost.prototype.applyBlockOverrides = function (request) {
+  if (request.overrides && request.overrides.some((o) => typeof o.code === "string")) {
+    request = {
+      ...request,
+      overrides: request.overrides.map((o) =>
+        typeof o.code === "string" ? { ...o, code: Buffer.from(o.code) } : o,
+      ),
+    };
+  }
+  return _applyBlockOverrides.call(this, request);
+};
+
 module.exports.processStyle = processStyle;
-module.exports.stripTypes = stripTypes;
+module.exports.compileBatch = compileBatch;
+module.exports.VerterHost = VerterHost;

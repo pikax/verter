@@ -1,19 +1,41 @@
-#![allow(dead_code)]
-
-/// Represents a piece of the output string
+/// Represents a piece of the output string.
+///
+/// Each variant models a distinct operation, eliminating impossible states
+/// (e.g. `was_moved: true` with no original span) that the previous
+/// `Edited { Option<u32>, Option<u32>, bool }` design allowed.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Chunk<'a> {
     /// Original content from source (byte range)
     Original { start: u32, end: u32 },
-    /// Inserted or overwritten content (allocated in bump allocator)
-    Edited {
-        /// Original span this replaces (for source maps)
-        original_start: Option<u32>,
-        original_end: Option<u32>,
-        /// The new content (allocated in the bump allocator)
+    /// Pure insertion — not from original source, no source map mapping
+    Inserted { content: &'a str },
+    /// Replaced content — maps to the original span for source maps
+    Overwritten {
+        start: u32,
+        end: u32,
         content: &'a str,
-        /// Whether this chunk has already been moved (to prevent double-moving)
-        was_moved: bool,
+    },
+    /// Content moved from its original position — maps back to source
+    /// line-by-line for accurate source maps
+    #[allow(dead_code)] // Used by move_slice() which is test/API only for now
+    Moved {
+        start: u32,
+        end: u32,
+        content: &'a str,
+    },
+    /// Inserted content mapped to a specific source position.
+    /// Unlike `Inserted` (unmapped), this emits a source map token at `source_start`.
+    /// Used for generated code that corresponds to a known source location
+    /// (e.g., resolved v-if expression relocated to ternary prefix).
+    ///
+    /// `content_offset` shifts the source map token within the content. Characters
+    /// before `content_offset` are unmapped; the token is placed at `content_offset`,
+    /// mapping to `source_start`. This accounts for binding prefixes like `__props.`
+    /// or `_ctx.` that precede the original identifier in the resolved expression.
+    InsertedMapped {
+        content: &'a str,
+        source_start: u32,
+        content_offset: u32,
     },
 }
 
@@ -25,85 +47,46 @@ impl<'a> Chunk<'a> {
 
     /// Create an inserted chunk (not from original source)
     pub fn inserted(content: &'a str) -> Self {
-        Self::Edited {
-            original_start: None,
-            original_end: None,
-            content,
-            was_moved: false,
-        }
+        Self::Inserted { content }
     }
 
     /// Create an overwritten chunk (replaces original content)
     pub fn overwritten(start: u32, end: u32, content: &'a str) -> Self {
-        Self::Edited {
-            original_start: Some(start),
-            original_end: Some(end),
+        Self::Overwritten {
+            start,
+            end,
             content,
-            was_moved: false,
         }
     }
 
     /// Create a moved chunk (content moved from original position, maps back to source)
-    pub fn moved(original_start: u32, original_end: u32, content: &'a str) -> Self {
-        Self::Edited {
-            original_start: Some(original_start),
-            original_end: Some(original_end),
+    #[allow(dead_code)]
+    pub fn moved(start: u32, end: u32, content: &'a str) -> Self {
+        Self::Moved {
+            start,
+            end,
             content,
-            was_moved: true, // Mark as moved to prevent double-moving
         }
     }
 
-    /// Check if this chunk is empty
-    pub fn is_empty(&self, _source: &str) -> bool {
-        match self {
-            Self::Original { start, end } => start >= end,
-            Self::Edited { content, .. } => content.is_empty(),
-        }
-    }
-
-    /// Get the output length of this chunk
-    pub fn output_len(&self, _source: &str) -> usize {
-        match self {
-            Self::Original { start, end } => (*end - *start) as usize,
-            Self::Edited { content, .. } => content.len(),
-        }
-    }
-
-    /// Get the original span (for source maps)
-    pub fn original_span(&self) -> Option<(u32, u32)> {
-        match self {
-            Self::Original { start, end } => Some((*start, *end)),
-            Self::Edited {
-                original_start: Some(start),
-                original_end: Some(end),
-                ..
-            } => Some((*start, *end)),
-            _ => None,
-        }
-    }
-
-    /// Check if this chunk was already moved
-    pub fn was_moved(&self) -> bool {
-        match self {
-            Self::Original { .. } => false,
-            Self::Edited { was_moved, .. } => *was_moved,
+    /// Create an inserted chunk mapped to a source position, with a content offset.
+    /// Characters before `content_offset` are unmapped; the source map token is
+    /// placed at `content_offset`, pointing to `source_start`.
+    pub fn inserted_mapped_with_offset(
+        content: &'a str,
+        source_start: u32,
+        content_offset: u32,
+    ) -> Self {
+        Self::InsertedMapped {
+            content,
+            source_start,
+            content_offset,
         }
     }
 
     /// Check if this chunk represents original content
+    #[allow(dead_code)]
     pub fn is_original(&self) -> bool {
         matches!(self, Self::Original { .. })
-    }
-
-    /// Write this chunk to a string buffer
-    pub fn write_to(&self, source: &str, buffer: &mut String) {
-        match self {
-            Self::Original { start, end } => {
-                buffer.push_str(&source[*start as usize..*end as usize]);
-            }
-            Self::Edited { content, .. } => {
-                buffer.push_str(content);
-            }
-        }
     }
 }

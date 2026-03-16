@@ -2,30 +2,30 @@
 
 A Vue compiler, Language Server Protocol (LSP) implementation, and build tool — built as a hybrid Rust + TypeScript monorepo.
 
-> [!WARNING]
-> **This project is experimental and under active development.** APIs, architecture, and package boundaries may change without notice. Use at your own risk and please report any issues you find.
+> [!NOTE]
+> **Verter is in alpha** (`v0.0.1-alpha.3`). It is actively used in development and tested against real-world Vue projects (Element Plus, Naive UI, PrimeVue, Vuetify, and more). The core APIs are stabilizing but may still change between releases. Bug reports and feedback are very welcome — please [open an issue](https://github.com/pikax/verter/issues) if you run into anything.
 
 > [!IMPORTANT]
 > The generated TSX is syntactically valid TypeScript/TSX used for **type analysis only** — it's not meant to be executed or compiled as actual JSX/TSX code.
 
 ## Project Vision
 
-Verter started as a Vue LSP and SFC-to-TSX transformation tool for VS Code, aiming to provide better TypeScript support than [Volar](https://github.com/vuejs/language-tools). The project is now evolving into a **full Vue compiler**:
-
-- **Today**: TypeScript handles SFC-to-TSX transformation (for IDE type analysis), while Rust handles template compilation to optimized render functions (for runtime).
-- **Future**: The Rust compiler (`verter_core`) will progressively take over responsibilities currently handled by the TypeScript packages, becoming the single compilation engine for both IDE analysis and runtime output.
+Verter is a **full Vue compiler and toolchain** built in Rust: it compiles templates to optimized render functions for production, generates typed TSX for IDE analysis, runs ~169 lint rules without ESLint, and powers a Language Server with type-provider integration (TSGO/tsserver). A bundler plugin, MCP server for AI agents, and component metadata extraction round out the toolchain.
 
 ## Features
 
 - **Full TypeScript Support**: Converts `.vue` files to typed TSX representations, enabling complete TypeScript type inference
 - **Vue 3 Support**: Optimized for Vue 3 with Composition API and Script Setup
-- **Options API Support**: While Script Setup receives more attention, Options API is fully supported
+- **Options API Support**: While Script Setup receives more attention, Options API is supported
 - **Strict Type Safety**: Built with a "strict first" approach to type safety
 - **JSX/TSX Interoperability**: SFCs can be seamlessly used in JSX/TSX projects
 - **Generic Component Handling**: Full support for generic Vue components with proper constructor typing
 - **Automatic Event Handler Type Inference**: Infers parameter types for functions used as template event handlers
 - **Fully Typed Vue Directives**: Complete type safety for directives with strict modifier, argument, and value validation
 - **Rust-Powered Template Compilation**: High-performance template-to-render-function compilation via native bindings or WASM
+- **Built-in Linting**: ~169 lint rules across 11 categories (Vue, a11y, CSS, performance, security, and more) — runs natively in Rust, no ESLint needed
+- **MCP Server**: Built-in Model Context Protocol server with 36+ Vue analysis tools for AI agents
+- **TypeScript Type Provider**: Delegates type checking to TSGO (fast Go binary) or tsserver (workspace TS version)
 
 ### Generic Components
 
@@ -113,24 +113,47 @@ These benchmarks run in CI on every PR (triggered via `/benchmark` comment) and 
 
 ## Why Verter?
 
-Since the Vetur days, Vue has struggled with type safety and tooling quality. Vue 3 and Volar brought significant improvements, but challenges remain. Verter aims to provide the **best possible TypeScript experience for Vue** by converting SFCs into typed TSX representations that TypeScript's language service can analyze directly.
+Verter is a ground-up reimagining of Vue tooling — a single Rust-powered toolchain that replaces several separate tools:
+
+- **Compiler**: Template compilation to optimized VDOM/Vapor render functions (~9x faster than `@vue/compiler-sfc`)
+- **Language Server**: Full LSP with hover, completions, diagnostics, go-to-definition, rename, and more — with type checking delegated to TSGO or tsserver
+- **Linter**: ~169 built-in lint rules across 11 categories (Vue, a11y, CSS, performance, security) — no ESLint or extra plugins needed
+- **Bundler Plugin**: Universal plugin for Vite, Webpack, Rollup, esbuild, Rspack, Rolldown, and Farm
+- **MCP Server**: 36+ analysis tools for AI agents via Model Context Protocol
+- **Component Metadata**: Prop/event/slot extraction with adapters for Storybook, Histoire, Zod, and JSON Schema
 
 ### Verter vs Volar
 
-| Aspect   | Verter                             | Volar                    |
-| -------- | ---------------------------------- | ------------------------ |
-| Maturity | Experimental / Alpha               | Production-ready         |
-| Approach | SFC → Typed TSX representation     | Virtual file mapping     |
-| Compiler | Rust (template) + TypeScript (SFC) | TypeScript only          |
-| Focus    | Best TypeScript integration        | Feature-rich IDE support |
-| Use case | When you need strict type safety   | General Vue development  |
+| Aspect | Verter | Volar |
+| --- | --- | --- |
+| Maturity | Alpha (tested against 15+ real-world projects) | Production-ready |
+| Language | Rust compiler + TypeScript IDE glue | TypeScript only |
+| IDE approach | SFC → valid typed TSX for direct TS analysis | Virtual file mapping |
+| Template compilation | Built-in (VDOM + Vapor output) | Delegates to `@vue/compiler-sfc` |
+| Linting | ~169 built-in rules (no ESLint needed) | Relies on eslint-plugin-vue |
+| Type provider | TSGO (fast) or tsserver (compatible) | TypeScript language service |
+| AI integration | Built-in MCP server | — |
 
 > [!NOTE]
-> If you haven't encountered specific issues with Volar, there's no reason to switch. Verter is for developers who need enhanced TypeScript support and are comfortable with experimental software.
+> If you haven't encountered specific issues with Volar, there's no reason to switch. Verter is for developers who want a faster, more integrated Vue toolchain and are comfortable with alpha software.
+
+### Type Provider
+
+The LSP delegates TypeScript type checking to an external process. Two backends are supported:
+
+| Backend | Protocol | Use Case |
+|---------|----------|----------|
+| **TSGO** (Go binary) | LSP over stdio | Fast, native TS checking (preview) |
+| **tsserver** (Node.js) | Newline-delimited JSON | Workspace TS version, plugin support |
+
+Set `verter.typeProvider` in VS Code settings to `auto` (default), `tsgo`, `tsserver`, or `off`.
+
+> [!WARNING]
+> **TSGO limitation**: Re-exported `.vue` components (e.g., barrel files like `export { default as MyComp } from './MyComp.vue'`) may lose their typing when imported in another SFC. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found. If you experience missing types with TSGO, switch to `tsserver`.
 
 ## Architecture
 
-Verter is a hybrid Rust + TypeScript monorepo. The Rust crates handle template compilation (exposed via NAPI-RS native bindings and wasm-bindgen WASM), while TypeScript packages handle SFC-to-TSX transformation, the LSP, and IDE integration.
+Verter is a hybrid Rust + TypeScript monorepo. The core compiler, LSP server, linter, MCP server, and static analysis are all Rust. TypeScript packages handle IDE integration (VS Code extension, TS plugin) and bundler plugin orchestration.
 
 ### System Overview
 
@@ -138,83 +161,88 @@ Verter is a hybrid Rust + TypeScript monorepo. The Rust crates handle template c
 graph TB
     subgraph "IDE Layer"
         VSCode["verter-vscode<br/>(VS Code Extension)"]
-    end
-
-    subgraph "Language Services"
-        LSP["@verter/language-server<br/>(LSP Server)"]
         TSPlugin["@verter/typescript-plugin<br/>(TS Plugin)"]
-        Shared["@verter/language-shared<br/>(Protocol Types)"]
     end
 
-    subgraph "Transformation"
-        Core["@verter/core<br/>(SFC → TSX)"]
-        Types["@verter/types<br/>(Type Utilities)"]
+    subgraph "Rust Core"
+        LSP["verter_lsp<br/>(LSP Server)"]
+        MCP["verter_mcp<br/>(MCP Server)"]
+        Host["verter_host<br/>(File Host + Caching)"]
+        Compiler["verter_core<br/>(Template Compiler)"]
+        Analysis["verter_analysis<br/>(Static Analysis)"]
+        Diagnostics["verter_diagnostics<br/>(~169 Lint Rules)"]
+        Actions["verter_actions<br/>(Quick Fixes)"]
     end
 
-    subgraph "Rust Compiler"
-        Native["@verter/native<br/>(NAPI-RS Bindings)"]
-        WASM["@verter/wasm<br/>(WASM Bindings)"]
-        RustCore["verter_core<br/>(Rust Template Compiler)"]
+    subgraph "Bindings"
+        Native["@verter/native<br/>(NAPI-RS)"]
+        WASM["@verter/wasm<br/>(wasm-bindgen)"]
     end
 
-    subgraph "Build Tools"
-        Unplugin["@verter/unplugin<br/>(Universal Bundler Plugin)"]
-    end
-
-    subgraph "Web"
-        Playground["@verter/playground<br/>(Online Playground)"]
+    subgraph "Consumers"
+        Unplugin["@verter/unplugin<br/>(7 Bundlers)"]
+        ComponentMeta["@verter/component-meta<br/>(Metadata Extraction)"]
+        Playground["@verter/playground<br/>(Online)"]
     end
 
     VSCode --> LSP
     VSCode --> TSPlugin
-    LSP --> Core
-    LSP --> Native
-    LSP --> Shared
-    TSPlugin --> Core
-    Core --> Types
-    Native --> RustCore
-    WASM --> RustCore
+    LSP --> Host
+    MCP --> Host
+    Host --> Compiler
+    Host --> Analysis
+    LSP --> Diagnostics
+    LSP --> Actions
+    MCP --> Diagnostics
+    Native --> Host
+    WASM --> Compiler
     Unplugin --> Native
+    ComponentMeta --> Native
+    ComponentMeta -.-> WASM
     Playground --> WASM
 ```
 
-### Dual Compilation Pipeline
+### Compilation Pipeline
 
 ```mermaid
 flowchart LR
-    SFC[".vue file"] --> TSCore["@verter/core<br/>(TypeScript)"]
-    SFC --> RustCompiler["verter_core<br/>(Rust)"]
-    TSCore --> TSX["Typed TSX<br/>(for IDE analysis)"]
-    RustCompiler --> Render["Render Functions<br/>(for runtime)"]
-    TSX --> LSP["Language Server<br/>+ IDE Features"]
-    Render --> Vite["Vite Build<br/>+ Production"]
+    SFC[".vue file"] --> Compiler["verter_core<br/>(Rust)"]
+    Compiler --> IDE["Typed TSX<br/>(IDE analysis)"]
+    Compiler --> Runtime["Render Functions<br/>(VDOM / Vapor)"]
+    IDE --> LSP["verter_lsp<br/>+ Type Provider"]
+    Runtime --> Bundler["Bundler Plugin<br/>+ Production"]
 ```
 
 ### Repository Structure
 
 ```
 verter/
-├── crates/                        # Rust crates
-│   ├── verter_core/               # Core template compiler (pure Rust)
+├── crates/                        # Rust crates (core of the project)
+│   ├── verter_core/               # Template compiler: parser, VDOM/Vapor codegen, IDE TSX codegen
+│   ├── verter_analysis/           # Static analysis: imports, exports, bindings, type resolution
+│   ├── verter_host/               # In-memory file host: caching, dependency tracking
+│   ├── verter_diagnostics/        # Diagnostic engine: ~169 lint rules, visitor, DiagnosticSet
+│   ├── verter_actions/            # Code actions: quick fixes, refactoring
+│   ├── verter_lsp/                # LSP server binary (stdio)
+│   ├── verter_mcp/                # MCP server binary (stdio + HTTP)
+│   ├── verter_ffi/                # FFI types: shared serializable structs for NAPI/WASM
+│   ├── verter_span/               # Typed span types (Span, RelativeSpan, GeneratedSpan)
 │   ├── verter_bench/              # Benchmarks and comparison examples
 │   ├── verter_napi/               # Native Node.js bindings (NAPI-RS)
 │   └── verter_wasm/               # WASM bindings (wasm-bindgen)
 ├── packages/                      # TypeScript packages
-│   ├── core/                      # @verter/core — SFC → TSX transformation
-│   ├── types/                     # @verter/types — TypeScript utility types
-│   ├── native/                    # @verter/native — Native binding loader
+│   ├── unplugin/                  # @verter/unplugin — Universal bundler plugin (7 bundlers)
+│   ├── native/                    # @verter/native — NAPI binding loader + platform packages
 │   ├── wasm/                      # @verter/wasm — WASM binding wrapper
-│   ├── unplugin/                  # @verter/unplugin — Universal bundler plugin
-│   ├── language-server/           # @verter/language-server — LSP server
-│   ├── language-shared/           # @verter/language-shared — Shared protocol types
-│   ├── typescript-plugin/         # @verter/typescript-plugin — TS plugin
-│   ├── oxc-bindings/              # @verter/oxc-bindings — OXC parser helper
-│   ├── playground/                # @verter/playground — Online playground
 │   ├── vue-vscode/                # verter-vscode — VS Code extension
+│   ├── typescript-plugin/         # @verter/typescript-plugin — TS language service plugin
+│   ├── language-shared/           # @verter/language-shared — Shared LSP protocol types
+│   ├── component-meta/            # @verter/component-meta — Metadata extraction + Type IR
+│   ├── playground/                # @verter/playground — Online playground (Netlify)
+│   ├── core/                      # @verter/core — Legacy SFC→TSX transformer (internal)
+│   ├── types/                     # @verter/types — Type utilities (internal)
 │   └── example/                   # Example project
-├── docs/                          # Additional documentation
-│   ├── architecture.md            # Architecture deep-dive
-│   └── rust-setup.md              # Rust development guide
+├── docs/                          # Documentation (VitePress site)
 └── scripts/                       # Build and utility scripts
 ```
 
@@ -222,20 +250,29 @@ verter/
 
 ```
 verter-vscode (VS Code extension)
-├── @verter/language-server (LSP server)
-│   ├── @verter/core (SFC → TSX transformation)
-│   │   └── @verter/types (type utilities)
-│   ├── @verter/native (Rust template compiler, NAPI-RS)
-│   └── @verter/language-shared (client/server protocol)
-├── @verter/typescript-plugin (IDE .vue import resolution)
-│   └── @verter/core
-└── @verter/oxc-bindings (OXC parser binary helper)
+├── verter_lsp (Rust LSP binary, stdio)
+│   ├── verter_host (file host + compilation)
+│   ├── verter_diagnostics (lint rules + DiagnosticSet)
+│   ├── verter_actions (quick fixes + refactoring)
+│   └── TypeProvider (optional: TSGO or tsserver)
+├── @verter/language-shared (custom protocol types)
+└── @verter/typescript-plugin (.vue import resolution, NAPI-backed)
+
+verter_mcp (MCP server binary, stdio + HTTP)
+├── verter_host (file host + compilation)
+├── verter_analysis (static analysis snapshots)
+├── verter_diagnostics (lint rules + DiagnosticSet)
+└── verter_actions (quick fixes + refactoring)
 
 @verter/unplugin (universal bundler plugin)
-└── @verter/native
+└── @verter/native (NAPI-RS bindings)
+
+@verter/component-meta (metadata extraction)
+├── @verter/native (NAPI host, Node.js)
+└── @verter/wasm (WASM host, browser, optional)
 
 @verter/playground (Netlify-hosted)
-└── @verter/wasm (Rust template compiler, wasm-bindgen)
+└── @verter/wasm (wasm-bindgen)
 ```
 
 ## Installation
@@ -263,7 +300,7 @@ corepack prepare pnpm@latest --activate
 git clone https://github.com/pikax/verter.git
 cd verter
 pnpm install
-pnpm build    # Builds: native bindings → WASM bindings → TypeScript packages
+pnpm build    # Builds: native bindings → LSP binary → WASM bindings → TypeScript packages
 
 # 5. (Optional) Package VS Code extension
 pnpm package
@@ -282,18 +319,20 @@ pnpm package
 ### Commands
 
 ```bash
-# Build everything (sequential: native → wasm → TypeScript)
+# Build everything (sequential: native → lsp → wasm → TypeScript)
 pnpm build
 
 # Build individual layers
 pnpm run build:native         # Rust → .node bindings
+pnpm run build:lsp            # Rust → LSP binary (debug)
+pnpm run build:lsp:release    # Rust → LSP binary (release, optimized)
 pnpm run build:wasm           # Rust → .wasm bindings
 pnpm run build:ts             # TypeScript packages
 
 # Watch mode for extension development
 pnpm watch
 
-# Watch language-server + vscode extension
+# Build LSP binary, then watch language-shared + vscode extension + typescript-plugin
 pnpm dev-extension
 
 # Clean build artifacts
@@ -345,6 +384,25 @@ pnpm --filter @verter/benchmark bench:json
 
 Benchmarks are also triggered in CI via `/benchmark` PR comment.
 
+### Profiling (hotpath + MCP)
+
+Use hotpath profiling on real Vue projects (or fixture fallback) via `profile_ast`:
+
+```bash
+# Timing profile
+pnpm run profile:hotpath
+
+# Timing + allocation profile
+pnpm run profile:hotpath:alloc
+
+# MCP server for agents (serves http://localhost:6771/mcp)
+pnpm run profile:hotpath:mcp
+```
+
+For MCP-capable agents, use [mcp/hotpath.mcp.json](./mcp/hotpath.mcp.json) as the server config.
+If your agent expects a custom config path, point it at that file.
+For client-specific setup examples, see [mcp/README.md](./mcp/README.md).
+
 ### Integration Tests
 
 Tests Verter against real-world Vue projects (Vuetify, PrimeVue, etc.) to ensure compilation correctness:
@@ -361,35 +419,52 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 
 ### Project Guides
 
-- **[Architecture Overview](./docs/architecture.md)** — Deep dive into Verter's design
-- **[Rust Setup Guide](./docs/rust-setup.md)** — Rust development environment
-- **[Contributing Guide](./CONTRIBUTING.md)** — How to contribute
-- **[CI/CD Documentation](./.claude/ci-cd.md)** — Workflows and release process
+- **[Documentation](https://verterjs.dev)** — Full documentation site
+- **[Architecture Overview](https://verterjs.dev/guide/architecture)** — Deep dive into Verter's design
+- **[Rust Setup Guide](https://verterjs.dev/contributing/rust-setup)** — Rust development environment
+- **[Contributing Guide](https://verterjs.dev/contributing/)** — How to contribute
+- **[CI/CD Documentation](https://verterjs.dev/contributing/ci-cd)** — Workflows and release process
 
 ### TypeScript Packages
 
-| Package                     | README                                           | Description                       |
-| --------------------------- | ------------------------------------------------ | --------------------------------- |
-| `@verter/core`              | [README](./packages/core/README.md)              | SFC → TSX transformation engine   |
-| `@verter/types`             | [README](./packages/types/readme.md)             | TypeScript utility types          |
-| `@verter/native`            | [README](./packages/native/README.md)            | Native Node.js bindings (NAPI-RS) |
-| `@verter/wasm`              | [README](./packages/wasm/README.md)              | WASM bindings for browser         |
-| `@verter/unplugin`          | [README](./packages/unplugin/README.md)          | Universal bundler plugin          |
-| `@verter/language-server`   | [README](./packages/language-server/readme.md)   | LSP server                        |
-| `@verter/language-shared`   | [README](./packages/language-shared/readme.md)   | Shared protocol types             |
-| `@verter/typescript-plugin` | [README](./packages/typescript-plugin/readme.md) | TypeScript plugin                 |
-| `@verter/oxc-bindings`      | [README](./packages/oxc-bindings/readme.md)      | OXC parser helper                 |
-| `verter-vscode`             | [README](./packages/vue-vscode/readme.md)        | VS Code extension                 |
-| `@verter/playground`        | [README](./packages/playground/README.md)        | Online playground                 |
+| Package                     | README                                           | Description                                |
+| --------------------------- | ------------------------------------------------ | ------------------------------------------ |
+| `verter-vscode`             | [README](./packages/vue-vscode/readme.md)        | VS Code extension                          |
+| `@verter/unplugin`          | [README](./packages/unplugin/README.md)          | Universal bundler plugin (7 bundlers)      |
+| `@verter/native`            | [README](./packages/native/README.md)            | NAPI-RS binding loader + platform packages |
+| `@verter/wasm`              | [README](./packages/wasm/README.md)              | WASM bindings for browser                  |
+| `@verter/typescript-plugin` | [README](./packages/typescript-plugin/readme.md) | TypeScript language service plugin         |
+| `@verter/language-shared`   | [README](./packages/language-shared/readme.md)   | Shared LSP protocol types                  |
+| `@verter/component-meta`    | [README](./packages/component-meta/README.md)    | Component metadata + Type IR + adapters    |
+| `@verter/playground`        | [README](./packages/playground/README.md)        | Online playground                          |
+
+<details>
+<summary>Internal packages (not intended for direct use)</summary>
+
+| Package              | Description                                              |
+| -------------------- | -------------------------------------------------------- |
+| `@verter/core`       | Legacy SFC→TSX transformer (predates Rust IDE codegen)   |
+| `@verter/types`      | TypeScript utility types used by the compilation pipeline |
+| `@verter/oxc-bindings` | OXC parser binary download helper                      |
+
+</details>
 
 ### Rust Crates
 
-| Crate          | README                                    | Description                        |
-| -------------- | ----------------------------------------- | ---------------------------------- |
-| `verter_core`  | [README](./crates/verter_core/README.md)  | Core template compiler             |
-| `verter_bench` | [README](./crates/verter_bench/Cargo.toml)| Benchmarks and comparison examples |
-| `verter_napi`  | [README](./crates/verter_napi/README.md)  | NAPI-RS Node.js bindings           |
-| `verter_wasm`  | [README](./crates/verter_wasm/README.md)  | WASM bindings                      |
+| Crate                | Description                                      |
+| -------------------- | ------------------------------------------------ |
+| `verter_core`        | Core template compiler                           |
+| `verter_analysis`    | Static analysis: imports, exports, bindings       |
+| `verter_host`        | In-memory file host: caching, dependency tracking |
+| `verter_diagnostics` | Diagnostic engine: ~169 lint rules                |
+| `verter_actions`     | Code actions: quick fixes, refactoring            |
+| `verter_lsp`         | Rust LSP server binary (stdio)                   |
+| `verter_mcp`         | MCP server binary (stdio + HTTP)                 |
+| `verter_ffi`         | FFI types for NAPI/WASM boundaries               |
+| `verter_span`        | Typed span types (Span, RelativeSpan, etc.)      |
+| `verter_bench`       | Benchmarks and comparison examples               |
+| `verter_napi`        | NAPI-RS Node.js bindings                         |
+| `verter_wasm`        | WASM bindings (wasm-bindgen)                     |
 
 ## Credits
 

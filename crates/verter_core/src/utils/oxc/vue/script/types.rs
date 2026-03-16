@@ -7,7 +7,7 @@
 #![allow(unused_imports)]
 
 use crate::common::Span;
-use crate::syntax::binding_types::BindingType;
+use crate::template::code_gen::binding::BindingType;
 
 /// The parsing mode for a script block
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +31,9 @@ pub struct ScriptParseResult<'a> {
     /// Each entry is a (span, type) pair where the span references the identifier
     /// in the parsed script content (offset by `base_offset`).
     pub bindings: Vec<(Span, BindingType)>,
+    /// Source literal spans (including quotes) of dynamic `import('./Foo.vue')` calls
+    /// whose specifier ends in `.vue`. Used by IDE codegen for `.vue` → `.vue.ts` rewriting.
+    pub vue_dynamic_import_spans: Vec<Span>,
 }
 
 /// A parsed script item
@@ -53,6 +56,17 @@ pub enum ScriptItem<'a> {
     Async(ScriptAsync),
 }
 
+/// Kind of import specifier (for proper import statement reconstruction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportSpecifierKind {
+    /// Named import: `import { Foo } from '...'`
+    Named,
+    /// Default import: `import Foo from '...'`
+    Default,
+    /// Namespace import: `import * as Foo from '...'`
+    Namespace,
+}
+
 /// A binding extracted from import specifiers or declarations
 #[derive(Debug, Clone)]
 pub struct ScriptBinding<'a> {
@@ -62,6 +76,8 @@ pub struct ScriptBinding<'a> {
     pub span: Span,
     /// Whether this is a per-specifier type import (`import { type Foo }`)
     pub is_type_only: bool,
+    /// Import specifier kind (only relevant for import bindings)
+    pub import_kind: Option<ImportSpecifierKind>,
 }
 
 /// Import declaration item
@@ -142,6 +158,8 @@ pub struct ScriptExport<'a> {
     pub bindings: Vec<ScriptBinding<'a>>,
     /// Source module (for re-exports like `export * from 'foo'`)
     pub source: Option<&'a str>,
+    /// Span of the source string literal (including quotes), for re-exports
+    pub source_span: Option<Span>,
     /// Whether this is a type-only export
     pub is_type_only: bool,
 }
@@ -200,11 +218,28 @@ impl<'a> ScriptDefaultExport<'a> {
     }
 }
 
-/// Async marker
+/// Async marker — tracks top-level `await` expressions in `<script setup>`.
 #[derive(Debug)]
 pub struct ScriptAsync {
-    /// Span of the await expression or async function
+    /// Span of the full await expression (including `await` keyword).
     pub span: Span,
+    /// Span of the argument expression (after `await`).
+    /// `None` for `for await...of` and `await using` where the
+    /// transformation is different from simple `await expr`.
+    pub arg_span: Option<Span>,
+    /// Kind of async construct.
+    pub kind: AsyncKind,
+}
+
+/// Kind of async construct in `<script setup>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncKind {
+    /// `await expr`
+    AwaitExpression,
+    /// `for await (... of expr) { ... }`
+    ForAwaitOf,
+    /// `await using x = expr`
+    AwaitUsing,
 }
 
 /// Script parsing error

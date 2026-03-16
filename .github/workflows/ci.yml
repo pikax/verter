@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  checks: write
 
 jobs:
   detect-changes:
@@ -19,6 +20,9 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       js: ${{ steps.filter.outputs.js }}
       wasm: ${{ steps.filter.outputs.wasm }}
+      playground: ${{ steps.filter.outputs.playground }}
+      vscode: ${{ steps.filter.outputs.vscode }}
+      native: ${{ steps.filter.outputs.native }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -31,20 +35,70 @@ jobs:
               - 'Cargo.lock'
               - '.cargo/**'
               - 'rust-toolchain.toml'
+              - 'scripts/v5-process/**'
               - '.github/workflows/ci.yml'
             js:
               - 'packages/**'
+              - '!packages/core/**'
               - '!packages/playground/**'
               - 'package.json'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'tsconfig*.json'
+              - 'scripts/v5-process/**'
               - '.github/workflows/ci.yml'
             wasm:
               - 'crates/verter_core/**'
+              - 'crates/verter_analysis/**'
+              - 'crates/verter_host/**'
+              - 'crates/verter_ffi/**'
               - 'crates/verter_wasm/**'
+              - 'crates/verter_diagnostics/**'
+              - 'crates/verter_actions/**'
+              - 'crates/verter_span/**'
               - 'packages/wasm/**'
               - '.cargo/**'
+              - '.github/workflows/ci.yml'
+            playground:
+              - 'crates/verter_core/**'
+              - 'crates/verter_analysis/**'
+              - 'crates/verter_host/**'
+              - 'crates/verter_ffi/**'
+              - 'crates/verter_diagnostics/**'
+              - 'crates/verter_actions/**'
+              - 'crates/verter_span/**'
+              - 'crates/verter_wasm/**'
+              - 'crates/verter_lsp/**'
+              - 'packages/wasm/**'
+              - 'packages/playground/**'
+              - '.github/workflows/ci.yml'
+            vscode:
+              - 'crates/verter_core/**'
+              - 'crates/verter_analysis/**'
+              - 'crates/verter_host/**'
+              - 'crates/verter_ffi/**'
+              - 'crates/verter_diagnostics/**'
+              - 'crates/verter_actions/**'
+              - 'crates/verter_lsp/**'
+              - 'crates/verter_span/**'
+              - 'packages/vue-vscode/**'
+              - 'packages/language-shared/**'
+              - 'packages/typescript-plugin/**'
+              - '.github/workflows/ci.yml'
+            native:
+              - 'crates/verter_napi/**'
+              - 'crates/verter_core/**'
+              - 'crates/verter_analysis/**'
+              - 'crates/verter_host/**'
+              - 'crates/verter_ffi/**'
+              - 'crates/verter_diagnostics/**'
+              - 'crates/verter_actions/**'
+              - 'crates/verter_span/**'
+              - 'packages/native/**'
+              - 'packages/unplugin/**'
+              - 'packages/typescript-plugin/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
 
   rust-fmt:
@@ -97,7 +151,63 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-      - run: cargo test --workspace --verbose
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Validate v5/process parity manifest
+        run: node scripts/v5-process/validate_manifest.mjs
+      - name: Prewarm tsgo cache
+        run: npx -y @typescript/native-preview@latest --version
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Rust tests (strict tsgo)
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: cargo nextest run --workspace --profile ci
+      - name: Test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Rust Test Results
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
+          fail-on-error: false
+
+  rust-coverage:
+    name: Rust Coverage
+    needs: [detect-changes, rust-test]
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cov-
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Prewarm tsgo cache
+        run: npx -y @typescript/native-preview@latest --version
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: lcov.info
 
   js-build-test:
     name: JS Build & Test
@@ -112,10 +222,55 @@ jobs:
           node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Validate v5/process parity manifest
+        run: node scripts/v5-process/validate_manifest.mjs
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Run tests
-        run: pnpm test
+        run: |
+          pnpm --filter @verter/types exec vitest --run --reporter=default --reporter=junit --outputFile=../../test-results/vitest-junit.xml
+      - name: Test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: JS Test Results
+          path: test-results/vitest-junit.xml
+          reporter: java-junit
+          fail-on-error: false
+      - name: Verify package tarballs
+        run: node scripts/verify-packages.mjs
+
+  playground-test:
+    name: Playground Unit Tests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.playground == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build WASM
+        run: pnpm run build:wasm
+      - name: Playground tests
+        run: pnpm --filter @verter/playground test
 
   wasm-build:
     name: WASM Build
@@ -148,3 +303,144 @@ jobs:
         run: pnpm run build:wasm
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
+      - name: Build TS packages
+        run: pnpm run build:ts
+      - name: Test @verter/wasm
+        run: pnpm --filter @verter/wasm test
+
+  # TODO: Re-enable once E2E flakiness is resolved — tests pass locally but
+  # fail intermittently in CI due to timing/race conditions in the VS Code test host.
+  # build-vscode-e2e:
+  #   name: Build VS Code E2E
+  #   needs: detect-changes
+  #   if: needs.detect-changes.outputs.vscode == 'true'
+  build-vscode-e2e:
+    name: Build VS Code E2E (DISABLED — flaky)
+    needs: detect-changes
+    if: false # Disabled: E2E tests are too flaky in CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare VS Code E2E artifacts
+        run: pnpm --filter verter-vscode prepare:e2e
+      - name: Upload LSP binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-binary-debug
+          path: target/debug/verter-lsp
+          retention-days: 1
+      - name: Upload built extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-e2e-build
+          path: |
+            packages/language-shared/dist/
+            packages/vue-vscode/dist/
+            packages/vue-vscode/out-test/
+          retention-days: 1
+
+  vscode-e2e:
+    name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
+    needs: [detect-changes, build-vscode-e2e]
+    if: false # Disabled: E2E tests are too flaky in CI
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture:
+          - single-project
+          - barrel-exports
+          - path-aliases
+          - monorepo
+          - tsconfig-extends
+          - tsconfig-references
+          - composite-paths
+          - no-config
+          - single-file
+        type_provider:
+          - tsserver
+          - tsgo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download LSP binary
+        uses: actions/download-artifact@v4
+        with:
+          name: lsp-binary-debug
+          path: target/debug
+      - name: Make LSP binary executable
+        run: chmod +x target/debug/verter-lsp
+      - name: Prewarm tsgo cache
+        run: npx -y @typescript/native-preview@latest --version
+      - name: Download built extension
+        uses: actions/download-artifact@v4
+        with:
+          name: vscode-e2e-build
+          path: packages
+      - name: Run E2E tests (${{ matrix.fixture }} / ${{ matrix.type_provider }})
+        run: xvfb-run -a pnpm --filter verter-vscode test:e2e:run
+        env:
+          E2E_FIXTURE: ${{ matrix.fixture }}
+          E2E_TYPE_PROVIDER: ${{ matrix.type_provider }}
+      - name: Upload timing report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-timing-${{ matrix.fixture }}-${{ matrix.type_provider }}
+          path: /tmp/verter-e2e-timing-*.json
+          if-no-files-found: ignore
+
+  native-test:
+    name: Native Package Tests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.native == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build native binary
+        run: pnpm run build:native
+      - name: Build TS packages
+        run: pnpm run build:ts
+      - name: Test @verter/native
+        run: pnpm --filter @verter/native test
+      - name: Test @verter/typescript-plugin
+        run: pnpm --filter @verter/typescript-plugin test
+      - name: Test @verter/unplugin
+        run: pnpm --filter @verter/unplugin test

@@ -1,30 +1,45 @@
 {
   "name": "@verter/native",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Native Node.js bindings for Verter Vue compiler",
+  "keywords": ["vue", "compiler", "native", "napi", "bindings"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
   },
+  "author": "pikax",
+  "homepage": "https://verterjs.dev/",
   "files": [
     "index.js",
+    "host-types.ts",
     "dist"
   ],
   "main": "index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./index.js"
+    },
+    "./host-types": {
+      "types": "./host-types.ts"
+    }
+  },
   "scripts": {
+    "clean:dist": "node ./scripts/clean-dist.mjs",
     "build:types": "pnpm exec tsc --declaration --emitDeclarationOnly --outDir dist index.ts",
-    "build": "napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
-    "build:debug": "napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
-    "prepublishOnly": "napi prepublish -t npm",
+    "build": "pnpm run clean:dist && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
+    "build:debug": "pnpm run clean:dist && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
+    "prepublishOnly": "pnpm run build && napi prepublish -t npm",
     "artifacts": "napi artifacts",
     "test": "vitest run"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5.1",
-    "typescript": "^5.7.3",
-    "vitest": "^4.0.18"
+    "@types/node": "^25.4.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
   },
   "optionalDependencies": {
     "@verter/native-darwin-arm64": "workspace:*",

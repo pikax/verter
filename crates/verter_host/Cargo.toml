@@ -1,0 +1,42 @@
+[package]
+name = "verter_host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "In-memory file host for Verter — caching, dependency tracking, multi-file compilation"
+publish = false
+
+[features]
+default = []
+host_metrics = []
+
+[dependencies]
+verter_core = { path = "../verter_core" }
+verter_analysis = { path = "../verter_analysis" }
+verter_span = { path = "../verter_span" }
+oxc_allocator = { workspace = true }
+oxc_span = { workspace = true }
+rustc-hash = { workspace = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sourcemap = "9"
+thiserror = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+parking_lot = "0.12"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
+[dev-dependencies]
+smallvec = "1.13"
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "host_bench"
+harness = false
+

@@ -1,6 +1,5 @@
 # Rust
 /target/
-Cargo.lock
 **/*.rs.bk
 
 # Node
@@ -26,7 +25,14 @@ nul
 
 .vscode/
 
+# Claude Code internal files
+.claude/plans/
+.claude/prompts/
+.claude/memory/
 .claude/settings.local.json
+.claude/*.md
+.claude/feedback/
+.claude/worktrees/
 
 # Benchmark results (generated artifacts)
 packages/bench/results/
@@ -34,3 +40,26 @@ packages/benchmark/benchmark-results/
 
 # Integration test cloned repos
 .integration-tests/
+
+# Playwright transient artifacts
+packages/playground/test-results/
+
+# Comparison script output
+scripts/compare-tsx-output/
+
+# VitePress
+docs/.vitepress/dist
+docs/.vitepress/cache
+
+# VS Code extension build artifacts
+packages/vue-vscode/bin/
+packages/vue-vscode/out-test/
+packages/vue-vscode/.vscode-test/
+.vscode-test/
+*.vsix
+
+# Scratch files
+cargo_errors.txt
+cargo_test_errors.txt
+benchmark-results.json
+*.bak

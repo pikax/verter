@@ -267,8 +267,8 @@ fn test_source_map_options() {
         .with_file("output.js")
         .include_content(true);
 
-    assert_eq!(options.source, Some("input.js".to_string()));
-    assert_eq!(options.file, Some("output.js".to_string()));
+    assert_eq!(options.source, Some("input.js"));
+    assert_eq!(options.file, Some("output.js"));
     assert!(options.include_content);
 }
 
@@ -851,4 +851,622 @@ fn test_move_slice_overwritten_chunk_then_prepend_left() {
 
     // PREFIX: should appear AFTER the moved content
     assert_eq!(ct.build_string(), "MOVEDPREFIX:START__END");
+}
+
+// ============================================================================
+// TDD Safety-Net Tests: Insert Position Semantics
+// Pin exact behavior before refactoring find_insert_position_for_*
+// ============================================================================
+
+#[test]
+fn test_prepend_left_split_original_chunk() {
+    // prepend_left at a position inside an Original chunk forces a split
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    // Position 3 is inside the single Original chunk [0,6)
+    ct.prepend_left(3, "X");
+    assert_eq!(ct.build_string(), "ABCXDEF");
+    // Should have split into [0,3), Inserted("X"), [3,6)
+    assert_eq!(ct.chunk_count(), 3);
+}
+
+#[test]
+fn test_append_left_split_original_chunk() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.append_left(3, "X");
+    assert_eq!(ct.build_string(), "ABCXDEF");
+    assert_eq!(ct.chunk_count(), 3);
+}
+
+#[test]
+fn test_prepend_right_after_edited_chunk() {
+    // prepend_right when target position corresponds to an Edited chunk
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.overwrite(2, 4, "XX"); // Replace "CD" with "XX"
+    ct.prepend_right(4, "Y"); // Insert after position 4 (after "E")
+                              // Position 4 maps to "E" in original, prepend_right inserts after it
+    assert_eq!(ct.build_string(), "ABXXEFY");
+}
+
+#[test]
+fn test_append_right_skips_pure_insertions() {
+    // append_right at end of source appends in order
+    let allocator = Allocator::default();
+    let len = "ABCDEF".len() as u32;
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.append_right(len, "1"); // First insert after end
+    ct.append_right(len, "2"); // Second insert after end — goes after "1"
+    assert_eq!(ct.build_string(), "ABCDEF12");
+}
+
+#[test]
+fn test_insert_at_end_of_source() {
+    let allocator = Allocator::default();
+    let source = "ABCDEF";
+    let len = source.len() as u32;
+    let mut ct = CodeTransform::new(source, &allocator);
+    ct.prepend_left(len, "X");
+    ct.append_left(len, "Y");
+    assert_eq!(ct.build_string(), "ABCDEFXY");
+}
+
+#[test]
+fn test_insert_interleaved_prepend_append() {
+    // Alternating prepend_left and append_left at the same position
+    // This pins the actual interleaving behavior
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.append_left(3, "a1"); // append at pos 3
+    ct.prepend_left(3, "p1"); // prepend at pos 3
+    ct.append_left(3, "a2"); // append at pos 3
+    ct.prepend_left(3, "p2"); // prepend at pos 3
+    let result = ct.build_string();
+    // Pin the actual output — append stacks FIFO, prepend stacks LIFO
+    assert_eq!(&result[..3], "ABC"); // Original before position 3
+    assert!(result.ends_with("DEF")); // Original after position 3
+                                      // a1 before a2 (FIFO append)
+    let a1_pos = result.find("a1").unwrap();
+    let a2_pos = result.find("a2").unwrap();
+    assert!(a1_pos < a2_pos, "a1 before a2 (FIFO append)");
+    // Pin the exact result for regression detection
+    assert_eq!(result, "ABCa1p1a2p2DEF");
+}
+
+#[test]
+fn test_prepend_left_at_overwrite_boundary() {
+    // Insert at the start boundary of an overwritten range
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.overwrite(2, 4, "XX");
+    ct.prepend_left(2, "Y");
+    assert_eq!(ct.build_string(), "ABYXXEF");
+}
+
+#[test]
+fn test_append_left_at_overwrite_boundary() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.overwrite(2, 4, "XX");
+    ct.append_left(2, "Y");
+    assert_eq!(ct.build_string(), "ABYXXEF");
+}
+
+// ============================================================================
+// TDD Safety-Net Tests: Move Operation Semantics
+// Pin exact behavior before refactoring move_slice/move_wrapped
+// ============================================================================
+
+#[test]
+fn test_move_wrapped_picks_up_pure_insertion_chunks() {
+    // Insertions within moved range should travel with the move
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEFGH", &allocator);
+    ct.append_left(4, "X"); // Insert "X" between D and E
+    assert_eq!(ct.build_string(), "ABCDXEFGH");
+    // Move range [2,6) which includes C, D, inserted X, E, F
+    ct.move_wrapped(2, 6, 0, "[", "]");
+    let result = ct.build_string();
+    assert!(result.contains("X"), "Insertion should travel with move");
+    assert!(result.starts_with("["));
+}
+
+#[test]
+fn test_move_slice_is_equivalent_to_move_wrapped_empty() {
+    // move_slice(s,e,t) should produce identical output to move_wrapped(s,e,t,"","")
+    let allocator1 = Allocator::default();
+    let allocator2 = Allocator::default();
+    let source = "ABCDEFGHIJKLMNOP";
+
+    let mut ct1 = CodeTransform::new(source, &allocator1);
+    ct1.move_slice(4, 10, 0);
+
+    let mut ct2 = CodeTransform::new(source, &allocator2);
+    ct2.move_wrapped(4, 10, 0, "", "");
+
+    assert_eq!(ct1.build_string(), ct2.build_string());
+}
+
+#[test]
+fn test_move_slice_is_equivalent_to_move_wrapped_empty_with_prior_edits() {
+    // Same equivalence test but with prior overwrites
+    let allocator1 = Allocator::default();
+    let allocator2 = Allocator::default();
+    let source = "ABCDEFGHIJKLMNOP";
+
+    let mut ct1 = CodeTransform::new(source, &allocator1);
+    ct1.overwrite(5, 8, "XXX");
+    ct1.move_slice(4, 10, 0);
+
+    let mut ct2 = CodeTransform::new(source, &allocator2);
+    ct2.overwrite(5, 8, "XXX");
+    ct2.move_wrapped(4, 10, 0, "", "");
+
+    assert_eq!(ct1.build_string(), ct2.build_string());
+}
+
+#[test]
+fn test_move_then_overwrite_at_boundary() {
+    // Overwrite at the exact start boundary of a moved range
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEFGHIJ", &allocator);
+    ct.move_wrapped(4, 7, 0, "(", ")"); // Move "EFG" to start
+    assert_eq!(ct.build_string(), "(EFG)ABCDHIJ");
+    // Overwrite spanning from D into the (now-empty) moved region
+    ct.overwrite(3, 5, "XX");
+    // Moved chunks are skipped by overwrite, so this replaces D and the gap
+    assert_eq!(ct.build_string(), "(EFG)ABCXXHIJ");
+}
+
+#[test]
+fn test_move_large_range() {
+    // Move 80% of the source to verify correctness at scale
+    let allocator = Allocator::default();
+    let source = "A".repeat(100);
+    let mut ct = CodeTransform::new(&source, &allocator);
+    ct.move_wrapped(10, 90, 0, "[", "]");
+    let result = ct.build_string();
+    // Should have: "[" + 80 A's + "]" + 10 A's (start) + 10 A's (end)
+    assert_eq!(result.len(), 102); // 100 original + "[" + "]"
+    assert!(result.starts_with("[AAAA"));
+    assert!(result.ends_with("AAAA"));
+}
+
+#[test]
+fn test_move_wrapped_multiple_adjacent_moves() {
+    // Multiple adjacent moves shouldn't interfere
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("AABBCCDDEE", &allocator);
+    ct.move_wrapped(0, 2, 10, "(a:", ")"); // Move "AA" to end
+    ct.move_wrapped(4, 6, 10, "(c:", ")"); // Move "CC" to end
+    let result = ct.build_string();
+    assert!(result.contains("(a:AA)"), "First move should be present");
+    assert!(result.contains("(c:CC)"), "Second move should be present");
+    assert!(result.contains("BB"), "Unmoved content preserved");
+    assert!(result.contains("DD"), "Unmoved content preserved");
+    assert!(result.contains("EE"), "Unmoved content preserved");
+}
+
+// ============================================================================
+// TDD Safety-Net Tests: Source Map Semantics
+// Pin exact behavior before refactoring source map generation
+// ============================================================================
+
+#[test]
+fn test_source_map_overwrite_identical_content_is_not_move() {
+    // Overwriting with identical content should use overwrite mapping,
+    // not move mapping. This tests the fragile string comparison in source_map.rs
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("Hello World", &allocator);
+    ct.overwrite(6, 11, "World"); // Same content as original!
+    let options = SourceMapOptions::new()
+        .with_source("test.js")
+        .include_content(true);
+    let map = ct.generate_map(options);
+    let sources: Vec<_> = map.get_sources().collect();
+    assert_eq!(sources.len(), 1);
+    // Map should be valid regardless of the mapping style
+    let json = ct.generate_map_json(SourceMapOptions::new().with_source("test.js"));
+    assert!(json.contains("\"mappings\""));
+}
+
+#[test]
+fn test_source_map_moved_chunk_produces_valid_map() {
+    // Moved multiline content should produce a valid source map
+    let allocator = Allocator::default();
+    let source = "line1\nline2\nline3\nline4";
+    let mut ct = CodeTransform::new(source, &allocator);
+    ct.move_wrapped(6, 17, 0, "/*start*/", "/*end*/"); // Move "line2\nline3"
+    let options = SourceMapOptions::new()
+        .with_source("test.js")
+        .include_content(true);
+    let map = ct.generate_map(options);
+    let sources: Vec<_> = map.get_sources().collect();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(map.get_source_content(0).unwrap().as_ref(), source);
+}
+
+#[test]
+fn test_source_map_pure_insertion_produces_valid_map() {
+    // Inserted content has no source mapping
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("AB", &allocator);
+    ct.prepend_left(1, "INSERTED");
+    let options = SourceMapOptions::new()
+        .with_source("test.js")
+        .include_content(true);
+    let map = ct.generate_map(options);
+    let sources: Vec<_> = map.get_sources().collect();
+    assert_eq!(sources.len(), 1);
+}
+
+#[test]
+fn test_source_map_complex_scenario() {
+    // Realistic scenario: overwrites + moves + insertions
+    let allocator = Allocator::default();
+    let source = "const x = defineProps<{a: string}>();\nconst y = 1;";
+    let mut ct = CodeTransform::new(source, &allocator);
+    ct.move_wrapped(22, 33, 0, "props:", ",\n");
+    ct.overwrite(10, 22, "_props");
+    ct.remove(33, 36);
+    ct.prepend("// generated\n");
+
+    let options = SourceMapOptions::new()
+        .with_source("test.vue")
+        .with_file("test.tsx")
+        .include_content(true);
+    let map = ct.generate_map(options);
+    let sources: Vec<_> = map.get_sources().collect();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].as_ref(), "test.vue");
+    assert_eq!(map.get_source_content(0).unwrap().as_ref(), source);
+}
+
+// ============================================================================
+// TDD Safety-Net Tests: Batch Operation Semantics
+// Pin exact behavior before refactoring
+// ============================================================================
+
+#[test]
+fn test_batch_overwrite_adjacent_ranges() {
+    // Batch overwrites where one ends exactly where another begins
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEFGHIJ", &allocator);
+    ct.batch_overwrite(&[(2, 5, "XX"), (5, 8, "YY")]);
+    assert_eq!(ct.build_string(), "ABXXYYIJ");
+}
+
+#[test]
+fn test_batch_prepend_left_multiple_at_same_position() {
+    // Multiple batch items targeting the same position
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.batch_prepend_left_static(&[(3, "X"), (3, "Y")]);
+    assert_eq!(ct.build_string(), "ABCXYDEF");
+}
+
+#[test]
+fn test_batch_overwrite_empty_content_removal() {
+    // Batch overwrite with empty content acts as removal
+    // batch_overwrite skips emitting empty-content chunks for efficiency,
+    // which means the original content in those ranges is removed
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEFGHIJ", &allocator);
+    ct.batch_overwrite(&[(2, 5, ""), (7, 9, "")]);
+    // Removes "CDE" (2-5) and "HI" (7-9)
+    assert_eq!(ct.build_string(), "ABFGJ");
+}
+
+#[test]
+fn test_batch_overwrite_single_item() {
+    // Batch with single item should behave like regular overwrite
+    let allocator1 = Allocator::default();
+    let allocator2 = Allocator::default();
+    let source = "ABCDEFGHIJ";
+
+    let mut ct1 = CodeTransform::new(source, &allocator1);
+    ct1.overwrite(3, 7, "XX");
+
+    let mut ct2 = CodeTransform::new(source, &allocator2);
+    ct2.batch_overwrite(&[(3, 7, "XX")]);
+
+    assert_eq!(ct1.build_string(), ct2.build_string());
+}
+
+#[test]
+fn test_batch_prepend_left_at_chunk_boundaries() {
+    // Batch prepend at position 0 and at source end
+    let allocator = Allocator::default();
+    let source = "ABCDEF";
+    let len = source.len() as u32;
+    let mut ct = CodeTransform::new(source, &allocator);
+    ct.batch_prepend_left_static(&[(0, "START"), (len, "END")]);
+    assert_eq!(ct.build_string(), "STARTABCDEFEND");
+}
+
+#[test]
+fn test_batch_overwrite_preserves_unaffected_chunks() {
+    // Batch overwrite with gaps should preserve content between overwrites
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("0123456789", &allocator);
+    ct.batch_overwrite(&[(1, 3, "A"), (5, 7, "B"), (8, 9, "C")]);
+    assert_eq!(ct.build_string(), "0A34B7C9");
+}
+
+// ============================================================================
+// Size-of assertions — document and verify enum layout
+// ============================================================================
+
+#[test]
+fn test_chunk_size() {
+    use super::chunk::Chunk;
+    // 4 explicit variants — largest (Overwritten/Moved) is u32 + u32 + &str = 24 bytes + tag = 32
+    assert_eq!(
+        std::mem::size_of::<Chunk>(),
+        32,
+        "Chunk enum size changed unexpectedly — update this test if intentional"
+    );
+}
+
+// ============================================================================
+// Output delta tracking — verifies build_string capacity is accurate
+// ============================================================================
+
+#[test]
+fn test_output_delta_overwrite() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("Hello World", &allocator);
+    // "World" (5 bytes) → "Rust" (4 bytes) = delta -1
+    ct.overwrite(6, 11, "Rust");
+    assert_eq!(ct.output_delta(), -1);
+    let s = ct.build_string();
+    assert_eq!(s, "Hello Rust");
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize
+    );
+}
+
+#[test]
+fn test_output_delta_insertions() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("AB", &allocator);
+    ct.prepend_left(1, "x"); // +1
+    ct.append_left(1, "y"); // +1
+    ct.prepend_right(1, "z"); // +1
+    ct.append_right(1, "w"); // +1
+    assert_eq!(ct.output_delta(), 4);
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize
+    );
+}
+
+#[test]
+fn test_output_delta_remove() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.remove(2, 4); // remove "CD" = delta -2
+    assert_eq!(ct.output_delta(), -2);
+    let s = ct.build_string();
+    assert_eq!(s, "ABEF");
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize
+    );
+}
+
+#[test]
+fn test_output_delta_move_wrapped() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.move_wrapped(2, 4, 0, "{", "}"); // prefix + suffix = +2
+    assert_eq!(ct.output_delta(), 2);
+    let s = ct.build_string();
+    assert_eq!(s, "{CD}ABEF");
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize
+    );
+}
+
+#[test]
+fn test_output_delta_batch_overwrite() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEFGHIJ", &allocator);
+    ct.batch_overwrite(&[(1, 3, "xx"), (5, 7, "yyy")]); // +0 and +1 = +1
+    assert_eq!(ct.output_delta(), 1);
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize
+    );
+}
+
+#[test]
+fn test_output_delta_batch_prepend_left_static() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("ABCDEF", &allocator);
+    ct.batch_prepend_left_static(&[(1, "_ctx."), (3, "_ctx.")]); // 5+5 = +10
+    assert_eq!(ct.output_delta(), 10);
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize
+    );
+}
+
+#[test]
+fn test_output_delta_complex_scenario() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("0123456789ABCDEF", &allocator);
+    ct.overwrite(2, 4, "XX"); // 0 delta (2 → 2)
+    ct.prepend_left(6, "INS"); // +3
+    ct.remove(8, 10); // -2
+    ct.move_wrapped(12, 14, 0, "<", ">"); // +2
+    assert_eq!(ct.output_delta(), 3);
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize
+    );
+}
+
+// ========================================================================
+// Review findings: nested overwrite no-op delta + batch after prior overwrite
+// ========================================================================
+
+/// @ai-generated — Verify output_delta remains accurate after the nested-overwrite
+/// no-op path (strict subset of an existing Overwritten chunk is skipped).
+/// This exercises the delta reversal at code_transform.rs lines 481-488.
+#[test]
+fn test_output_delta_after_nested_overwrite_noop() {
+    let allocator = Allocator::default();
+    // Source: "defineProps<{x: number}>()"
+    let source = "defineProps<{x: number}>()";
+    let mut ct = CodeTransform::new(source, &allocator);
+
+    // First overwrite: replace "defineProps<{x: number}>" (0..24) with "__props"
+    ct.overwrite(0, 24, "__props");
+    assert_eq!(ct.build_string(), "__props()");
+
+    // Second overwrite: try to remove the generic "<{x: number}>" (11..24)
+    // This is a strict subset of the already-overwritten range — should be a no-op
+    ct.overwrite(11, 24, "");
+    assert_eq!(ct.build_string(), "__props()");
+
+    // Verify output_delta is accurate (capacity prediction matches actual length)
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must remain accurate after nested no-op"
+    );
+}
+
+/// @ai-generated — Verify output_delta after nested no-op with non-empty replacement.
+#[test]
+fn test_output_delta_after_nested_overwrite_noop_with_content() {
+    let allocator = Allocator::default();
+    let source = "ABCDEFGHIJ";
+    let mut ct = CodeTransform::new(source, &allocator);
+
+    // Overwrite [2,8) with "XY"
+    ct.overwrite(2, 8, "XY");
+    assert_eq!(ct.build_string(), "ABXYIJ");
+
+    // Try to overwrite [4,6) (strict subset) with "ZZ" — should be no-op
+    ct.overwrite(4, 6, "ZZ");
+    assert_eq!(ct.build_string(), "ABXYIJ");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must remain accurate after nested no-op with content"
+    );
+}
+
+/// @ai-generated — batch_overwrite after a prior overwrite: the Overwritten chunk
+/// should pass through unchanged, and batch items targeting Original ranges
+/// around it should work correctly.
+#[test]
+fn test_batch_overwrite_after_prior_overwrite() {
+    let allocator = Allocator::default();
+    // Source: "AABBCCDDEE"
+    //          0123456789(10)
+    let source = "AABBCCDDEE";
+    let mut ct = CodeTransform::new(source, &allocator);
+
+    // Prior overwrite: replace "CC" (4..6) with "XX"
+    ct.overwrite(4, 6, "XX");
+    assert_eq!(ct.build_string(), "AABBXXDDEE");
+
+    // Batch overwrite: replace "BB" (2..4) and "DD" (6..8) — ranges around the prior overwrite
+    ct.batch_overwrite(&[(2, 4, "YY"), (6, 8, "ZZ")]);
+    assert_eq!(ct.build_string(), "AAYYXXZZEE");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must be accurate after batch_overwrite with prior overwrite"
+    );
+}
+
+/// @ai-generated — batch_overwrite preserves existing Overwritten chunk
+/// when batch items are on non-overlapping Original ranges.
+#[test]
+fn test_batch_overwrite_preserves_prior_overwrite_content() {
+    let allocator = Allocator::default();
+    let source = "abcdefghij";
+    let mut ct = CodeTransform::new(source, &allocator);
+
+    // Overwrite [3,6) with "XYZ"
+    ct.overwrite(3, 6, "XYZ");
+    assert_eq!(ct.build_string(), "abcXYZghij");
+
+    // Batch: overwrite [0,2) and [8,10)
+    ct.batch_overwrite(&[(0, 2, "11"), (8, 10, "22")]);
+    assert_eq!(ct.build_string(), "11cXYZgh22");
+}
+
+/// @ai-generated — batch_overwrite with a fully contained range: the inner
+/// overwrite is a no-op because its source region is already replaced by the
+/// outer overwrite. This reproduces the overlap from resolve_whitespace
+/// emitting a deletion for whitespace that the parent's tag extension already covers.
+#[test]
+fn test_batch_overwrite_contained_range_is_noop() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("0123456789", &allocator);
+    // Outer: replaces [0,5) with "VNODE", inner: deletes [3,5) — fully contained
+    ct.batch_overwrite(&[(0, 5, "VNODE"), (3, 5, "")]);
+    assert_eq!(ct.build_string(), "VNODE56789");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must be accurate with contained overlap"
+    );
+}
+
+/// @ai-generated — batch_overwrite with duplicate ranges at the same position:
+/// second overwrite is a no-op because the region was already replaced.
+/// This reproduces the gap-filling + whitespace-removal duplicate.
+#[test]
+fn test_batch_overwrite_duplicate_range() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("0123456789", &allocator);
+    // Both delete [3,6) — second is redundant
+    ct.batch_overwrite(&[(3, 6, ""), (3, 6, "")]);
+    assert_eq!(ct.build_string(), "0126789");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must be accurate with duplicate ranges"
+    );
+}
+
+/// @ai-generated — batch_overwrite with trailing contained range: the close
+/// tag extension covers trailing whitespace. Inner deletion of the trailing
+/// whitespace is a no-op.
+#[test]
+fn test_batch_overwrite_trailing_contained() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("0123456789", &allocator);
+    // First: delete trailing whitespace [7,8), then outer replaces [7,10) with ")"
+    ct.batch_overwrite(&[(7, 8, ""), (7, 10, ")")]);
+    assert_eq!(ct.build_string(), "0123456)");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must be accurate with trailing contained overlap"
+    );
 }

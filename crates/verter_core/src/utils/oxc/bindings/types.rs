@@ -2,12 +2,43 @@
 //!
 //! This module contains all the types used by the binding extraction system.
 
-use crate::common::Span;
+use crate::common::RelativeSpan;
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use std::collections::HashSet;
 
-use super::keywords::is_keyword;
+use super::keywords::{is_global, is_keyword};
+
+// ======================== Dynamism ========================
+
+/// Three-state dynamism classification for template expressions.
+///
+/// Tells codegen whether a script-binding lookup is needed to determine
+/// if an expression is truly static or dynamic:
+///
+/// - [`Static`](Dynamism::Static) — no identifiers at all → skip lookup.
+/// - [`MaybeDynamic`](Dynamism::MaybeDynamic) — has script-level identifiers →
+///   codegen checks if they are `const` (static) or `ref`/`reactive` (dynamic).
+/// - [`Dynamic`](Dynamism::Dynamic) — has injected locals (v-for/v-slot) →
+///   definitely per-iteration, skip lookup.
+///
+/// Computed incrementally during binding extraction — no separate iteration needed.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum Dynamism {
+    /// No identifier references — pure literals/operators. Definitely constant.
+    /// Codegen can skip script binding lookup.
+    Static,
+
+    /// Has script-level identifier references that could be `const` (static)
+    /// or `ref`/`reactive`/`computed` (dynamic). Codegen must resolve via
+    /// script binding analysis.
+    MaybeDynamic,
+
+    /// Has at least one injected local (v-for/v-slot variable). Definitely
+    /// per-iteration/per-slot — the value changes at runtime. Codegen can
+    /// skip script binding lookup.
+    Dynamic,
+}
 
 /// Type alias for parameter byte slices - most functions have ≤8 params
 pub type ParamBytes<'a> = SmallVec<[&'a str; 8]>;
@@ -17,8 +48,9 @@ pub type ParamBytes<'a> = SmallVec<[&'a str; 8]>;
 pub struct Binding<'a> {
     /// The name of the identifier
     pub name: &'a str,
-    /// The span of the identifier in the source
-    pub span: Span,
+    /// The span of the identifier relative to the parsed expression start.
+    /// OXC produces expression-relative offsets; this preserves that semantic.
+    pub span: RelativeSpan,
     /// The absolute position (span.start + base_offset)
     pub pos: u32,
     /// Whether this binding should be ignored (is a keyword, parameter, or local variable)
@@ -32,10 +64,10 @@ pub struct Binding<'a> {
 /// Represents a function found in an expression (byte-optimized version).
 #[derive(Debug, Clone)]
 pub struct FunctionBinding {
-    /// The span of the function
-    pub span: Span,
-    /// The span of the function body
-    pub body_span: Span,
+    /// The span of the function relative to the parsed expression start.
+    pub span: RelativeSpan,
+    /// The span of the function body relative to the parsed expression start.
+    pub body_span: RelativeSpan,
     /// The absolute position (span.start + base_offset)
     pub pos: u32,
     /// The absolute position of the body
@@ -45,8 +77,8 @@ pub struct FunctionBinding {
 /// Represents a literal found in an expression (byte-optimized version).
 #[derive(Debug, Clone)]
 pub struct LiteralBinding<'a> {
-    /// The span of the literal
-    pub span: Span,
+    /// The span of the literal relative to the parsed expression start.
+    pub span: RelativeSpan,
     /// The absolute position (span.start + base_offset)
     pub pos: u32,
     /// The string representation of the literal value
@@ -54,7 +86,7 @@ pub struct LiteralBinding<'a> {
 }
 
 /// The result of extracting bindings from an expression (byte-optimized version).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct BindingExtractionResult<'a> {
     /// All identifier bindings found
     pub bindings: Vec<Binding<'a>>,
@@ -64,6 +96,21 @@ pub struct BindingExtractionResult<'a> {
     pub literals: Vec<LiteralBinding<'a>>,
     /// Whether the expression had parse errors
     pub has_errors: bool,
+    /// Three-state dynamism classification, computed incrementally during extraction.
+    /// No separate iteration over bindings needed.
+    pub dynamism: Dynamism,
+}
+
+impl Default for BindingExtractionResult<'_> {
+    fn default() -> Self {
+        Self {
+            bindings: Vec::new(),
+            functions: Vec::new(),
+            literals: Vec::new(),
+            has_errors: false,
+            dynamism: Dynamism::Static,
+        }
+    }
 }
 
 impl<'a> BindingExtractionResult<'a> {
@@ -96,6 +143,14 @@ impl<'a> BindingExtractionResult<'a> {
         self.literals.extend(other.literals.iter().cloned());
         if other.has_errors {
             self.has_errors = true;
+        }
+        // Dynamic trumps MaybeDynamic trumps Static
+        if self.dynamism != Dynamism::Dynamic {
+            match other.dynamism {
+                Dynamism::Dynamic => self.dynamism = Dynamism::Dynamic,
+                Dynamism::MaybeDynamic => self.dynamism = Dynamism::MaybeDynamic,
+                Dynamism::Static => {}
+            }
         }
     }
 }
@@ -132,10 +187,26 @@ impl<'a> BindingContext<'a> {
         }
     }
 
-    /// Check if an identifier should be ignored
+    /// Check if an identifier should be ignored.
+    ///
+    /// `$event` is a Vue template built-in: the codegen wraps inline event
+    /// handlers in `$event => (...)`, so `$event` inside the expression is
+    /// the arrow parameter and must NOT be prefixed with `_ctx.`.
     #[inline]
     pub fn should_ignore(&self, name: &str) -> bool {
-        is_keyword(name.as_bytes()) || self.ignored_identifiers.contains(name)
+        let bytes = name.as_bytes();
+        is_keyword(bytes)
+            || is_global(bytes)
+            || name == "$event"
+            || self.ignored_identifiers.contains(name)
+            // In IDE mode, partial completions inside v-for / v-slot scopes arrive as
+            // unfinished identifiers (`it`, `slotI`, etc.). Treat prefixes of ignored
+            // locals as ignored too so the template codegen keeps them bare and the
+            // type provider can offer scoped completions instead of instance members.
+            || self
+                .ignored_identifiers
+                .iter()
+                .any(|ignored| ignored.starts_with(name))
     }
 
     /// Add an identifier to the ignore list
@@ -192,6 +263,32 @@ mod tests {
     }
 
     #[test]
+    fn test_binding_context_globals() {
+        let ctx = BindingContext::new(0);
+        assert!(ctx.should_ignore("String"));
+        assert!(ctx.should_ignore("Array"));
+        assert!(ctx.should_ignore("Object"));
+        assert!(ctx.should_ignore("Math"));
+        assert!(ctx.should_ignore("Number"));
+        assert!(ctx.should_ignore("Boolean"));
+        assert!(ctx.should_ignore("Date"));
+        assert!(ctx.should_ignore("JSON"));
+        assert!(ctx.should_ignore("Map"));
+        assert!(ctx.should_ignore("Set"));
+        assert!(ctx.should_ignore("console"));
+        assert!(ctx.should_ignore("Infinity"));
+        assert!(ctx.should_ignore("parseInt"));
+        assert!(ctx.should_ignore("parseFloat"));
+        assert!(ctx.should_ignore("Promise"));
+        assert!(ctx.should_ignore("RegExp"));
+        assert!(ctx.should_ignore("Error"));
+        assert!(ctx.should_ignore("Symbol"));
+        assert!(ctx.should_ignore("globalThis"));
+        assert!(ctx.should_ignore("require"));
+        assert!(!ctx.should_ignore("myVar"));
+    }
+
+    #[test]
     fn test_binding_context_add_ignored() {
         let mut ctx = BindingContext::new(0);
         assert!(!ctx.should_ignore("foo"));
@@ -215,28 +312,28 @@ mod tests {
         let mut result = BindingExtractionResult::default();
         result.bindings.push(Binding {
             name: "foo",
-            span: Span::new(0, 3),
+            span: RelativeSpan::new(0, 3),
             pos: 0,
             ignore: false,
             is_shorthand: false,
         });
         result.bindings.push(Binding {
             name: "bar",
-            span: Span::new(6, 9),
+            span: RelativeSpan::new(6, 9),
             pos: 6,
             ignore: false,
             is_shorthand: false,
         });
         result.bindings.push(Binding {
             name: "foo",
-            span: Span::new(12, 15),
+            span: RelativeSpan::new(12, 15),
             pos: 12,
             ignore: false,
             is_shorthand: false,
         }); // duplicate
         result.bindings.push(Binding {
             name: "ignored",
-            span: Span::new(18, 25),
+            span: RelativeSpan::new(18, 25),
             pos: 18,
             ignore: true,
             is_shorthand: false,

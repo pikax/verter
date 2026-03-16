@@ -25,22 +25,22 @@
 //! let parser = Parser::new(&allocator, "foo + bar", SourceType::tsx());
 //! let expr = parser.parse_expression().unwrap();
 //! let ctx = BindingContext::new(0);
-//! let result = extract_bindings_from_expression(&expr, "foo + bar", &ctx);
+//! let result = extract_bindings_from_expression(&expr, "foo + bar", ctx);
 //!
 //! assert_eq!(result.non_ignored_binding_names(), vec!["foo", "bar"]);
 //! ```
 
 mod expression;
 mod helpers;
-mod keywords;
+pub(crate) mod keywords;
 mod slot;
 mod types;
 mod vfor;
 
 // Re-export main types
 pub use types::{
-    Binding, BindingContext, BindingExtractionResult, FunctionBinding, LiteralBinding, ParamBytes,
-    ParameterBindingsResult,
+    Binding, BindingContext, BindingExtractionResult, Dynamism, FunctionBinding, LiteralBinding,
+    ParamBytes, ParameterBindingsResult,
 };
 
 // Re-export main functions
@@ -48,16 +48,16 @@ pub use expression::{extract_bindings_from_expression, extract_bindings_from_pro
 pub use slot::{extract_bindings_from_formal_parameters, extract_slot_bindings};
 pub use vfor::extract_vfor_bindings;
 
-// Re-export keyword detection for advanced usage
-pub use keywords::is_keyword;
+// Re-export keyword and global detection for advanced usage
+pub use keywords::{is_global, is_keyword};
 
 // Re-export helpers for advanced usage
 pub use helpers::{
     collect_assignment_target_locals, collect_assignment_target_locals_array,
     collect_assignment_target_locals_object, collect_assignment_target_maybe_default_locals,
     collect_chain_element_references, collect_expression_references, collect_pattern_locals,
-    collect_pattern_references, collect_ts_type_references_from_expression,
-    collect_type_references,
+    collect_pattern_references, collect_setup_binding_refs,
+    collect_ts_type_references_from_expression, collect_type_references,
 };
 
 // Re-export span-based helpers (avoiding self-referential struct issues)

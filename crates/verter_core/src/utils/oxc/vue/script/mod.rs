@@ -13,10 +13,6 @@
 //! let result = parse_script(program, ScriptMode::Setup, base_offset, source);
 //! ```
 
-// This module is WIP - allow dead code for now
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 pub mod bindings;
 pub mod macros;
 pub mod options;
@@ -33,9 +29,10 @@ pub use macros::{
     MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
 };
 pub use resolve_type::{
-    build_type_context, format_runtime_types, resolve_type_elements_with_ctx,
-    resolve_type_elements_with_ctx_ref, DiagnosticLocation, ResolutionDiagnostic,
-    ResolutionDiagnosticKind, ResolvedEmit, RuntimeType, TypeResolutionContext,
+    build_type_context, extract_companion_types, format_runtime_types, resolve_type_elements,
+    resolve_type_elements_with_ctx, resolve_type_elements_with_ctx_ref, DiagnosticLocation,
+    ResolutionDiagnostic, ResolutionDiagnosticKind, ResolvedElements, ResolvedEmit,
+    ResolvedEmitSignature, RuntimeType, TypeResolutionContext,
 };
 pub use shared::ScriptParseContext;
 pub use types::*;
@@ -107,6 +104,21 @@ pub fn parse_script<'a>(
     content_offset: u32,
     source: &'a str,
 ) -> ScriptParseResult<'a> {
+    parse_script_with_companion(program, mode, content_offset, source, None)
+}
+
+/// Parse a script program with optional companion type information.
+///
+/// When `companion_types` is `Some`, type references in `defineProps<T>()`
+/// that can't be resolved from the setup script's own declarations will
+/// fall back to these pre-resolved types from the companion `<script>` block.
+pub fn parse_script_with_companion<'a>(
+    program: &Program<'a>,
+    mode: ScriptMode,
+    content_offset: u32,
+    source: &'a str,
+    companion_types: Option<rustc_hash::FxHashMap<String, resolve_type::ResolvedElements>>,
+) -> ScriptParseResult<'a> {
     let ctx = ScriptParseContext::new(content_offset, source.as_bytes());
     let mut items = Vec::new();
     let mut errors = Vec::new();
@@ -125,7 +137,10 @@ pub fn parse_script<'a>(
     // Second pass: mode-specific processing
     match mode {
         ScriptMode::Setup => {
-            let type_ctx = build_type_context(program, source.as_bytes(), content_offset);
+            let mut type_ctx = build_type_context(program, source.as_bytes(), content_offset);
+            if let Some(companion) = companion_types {
+                type_ctx.companion_types = companion;
+            }
             let mut setup_ctx = SetupContext::new();
             process_setup_statements(
                 &program.body,
@@ -153,15 +168,99 @@ pub fn parse_script<'a>(
     // Extract binding metadata (only for script setup)
     let bindings = match mode {
         ScriptMode::Setup => bindings::extract_bindings(program, &ctx),
-        ScriptMode::Options => Vec::new(),
+        ScriptMode::Options => options::extract_options_bindings(program),
     };
+
+    // Collect dynamic import() calls with .vue specifiers for IDE rewriting
+    let vue_dynamic_import_spans = collect_vue_dynamic_imports(program);
 
     ScriptParseResult {
         is_async,
         items,
         errors,
         bindings,
+        vue_dynamic_import_spans,
     }
+}
+
+/// Collect source literal spans of `import('./Foo.vue')` expressions.
+///
+/// Walks the full AST to find `ImportExpression` nodes whose source is a string
+/// literal ending in `.vue`. Returns the span of each source literal (including quotes).
+fn collect_vue_dynamic_imports(program: &Program<'_>) -> Vec<crate::common::Span> {
+    use crate::common::Span;
+    use oxc_ast::ast::{Expression, Statement};
+
+    let mut spans = Vec::new();
+
+    fn scan_expr(expr: &Expression<'_>, spans: &mut Vec<Span>) {
+        if let Expression::ImportExpression(import) = expr {
+            if let Expression::StringLiteral(lit) = &import.source {
+                if lit.value.ends_with(".vue") {
+                    spans.push(Span::from(lit.span));
+                }
+            }
+        }
+        // Recurse into common expression forms
+        match expr {
+            Expression::CallExpression(call) => {
+                scan_expr(&call.callee, spans);
+                for arg in &call.arguments {
+                    if let Some(expr) = arg.as_expression() {
+                        scan_expr(expr, spans);
+                    }
+                }
+            }
+            Expression::ArrowFunctionExpression(arrow) => {
+                for stmt in &arrow.body.statements {
+                    scan_stmt(stmt, spans);
+                }
+            }
+            Expression::ParenthesizedExpression(paren) => {
+                scan_expr(&paren.expression, spans);
+            }
+            Expression::ConditionalExpression(cond) => {
+                scan_expr(&cond.test, spans);
+                scan_expr(&cond.consequent, spans);
+                scan_expr(&cond.alternate, spans);
+            }
+            Expression::LogicalExpression(log) => {
+                scan_expr(&log.left, spans);
+                scan_expr(&log.right, spans);
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_stmt(stmt: &Statement<'_>, spans: &mut Vec<Span>) {
+        match stmt {
+            Statement::ExpressionStatement(es) => scan_expr(&es.expression, spans),
+            Statement::VariableDeclaration(vd) => {
+                for decl in &vd.declarations {
+                    if let Some(init) = &decl.init {
+                        scan_expr(init, spans);
+                    }
+                }
+            }
+            Statement::ReturnStatement(ret) => {
+                if let Some(arg) = &ret.argument {
+                    scan_expr(arg, spans);
+                }
+            }
+            Statement::BlockStatement(block) => {
+                for s in &block.body {
+                    scan_stmt(s, spans);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for stmt in &program.body {
+        scan_stmt(stmt, &mut spans);
+    }
+
+    spans
 }
 
 #[cfg(test)]
@@ -550,6 +649,38 @@ let a = {};"#;
             &source[async_items[0].span.start as usize..async_items[0].span.end as usize];
         println!("Detected async span text: '{}'", await_text);
         assert!(await_text.contains("await"), "Span should contain 'await'");
+    }
+
+    #[test]
+    fn test_parse_setup_with_await_in_ts_non_null_assertion() {
+        // `(await foo())!` — the TS non-null assertion wraps the await in TSNonNullExpression
+        let source = r#"const item = (await getById(id))!"#;
+        let allocator = Allocator::default();
+        let source_type = SourceType::tsx();
+        let ret = Parser::new(&allocator, source, source_type).parse();
+
+        let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+
+        assert!(
+            result.is_async,
+            "is_async should be true for await inside TS non-null assertion"
+        );
+    }
+
+    #[test]
+    fn test_parse_setup_with_await_in_ts_as_expression() {
+        // `(await foo()) as T` — TSAsExpression wraps the await
+        let source = r#"const item = (await getById(id)) as string"#;
+        let allocator = Allocator::default();
+        let source_type = SourceType::tsx();
+        let ret = Parser::new(&allocator, source, source_type).parse();
+
+        let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+
+        assert!(
+            result.is_async,
+            "is_async should be true for await inside TS as expression"
+        );
     }
 
     #[test]

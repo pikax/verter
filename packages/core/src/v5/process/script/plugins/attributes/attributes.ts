@@ -8,10 +8,11 @@ export const AttributesPlugin = definePlugin({
     const isTS = ctx.block.lang.startsWith("ts");
     const generic = ctx.generic;
 
-    const attribute = tag.attributes.attributes;
+    const attribute = tag.attributes.attributes ?? tag.attributes.attrs;
     // handling attributes template attribute
     if (attribute && attribute.value) {
       ctx.handledAttributes?.add("attributes");
+      ctx.handledAttributes?.add("attrs");
 
       const prefix = ctx.prefix("");
       if (isTS) {

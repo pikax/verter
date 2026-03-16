@@ -9,6 +9,7 @@ import "vue/jsx";
 import { assertType, describe, it } from "vitest";
 import { defineComponent, SlotsType } from "vue";
 import { strictRenderSlot, extractArgumentsFromRenderSlot } from "./slots";
+import { instantiateComponent } from "../components/components";
 
 describe("StrictRenderSlot", () => {
   const TabItem = defineComponent({
@@ -151,6 +152,60 @@ describe("StrictRenderSlot", () => {
   });
 });
 
+// Tests for strictRenderSlot using the Verter-generated pattern:
+// function Comp() { return instantiateComponent(Component, {}); }
+// strictRenderSlot({} as NonNullable<ReturnType<typeof Comp>['$slots']['default']>, [...])
+describe("StrictRenderSlot with Verter codegen pattern", () => {
+  const TabItem = defineComponent({
+    props: {
+      id: { type: String, required: true },
+    },
+  });
+
+  const OtherComp = defineComponent({
+    props: {
+      label: { type: String, required: true },
+    },
+  });
+
+  const Tabs = defineComponent({
+    slots: {} as SlotsType<{
+      default: () => (typeof TabItem)[];
+      header: () => HTMLSpanElement[];
+    }>,
+  });
+
+  // This simulates the Verter-generated Comp function pattern
+  function ___VERTER___Comp42() {
+    return instantiateComponent(Tabs, {});
+  }
+
+  // Type aliases to keep @ts-expect-error on single-line calls
+  type DefaultSlot = NonNullable<ReturnType<typeof ___VERTER___Comp42>["$slots"]["default"]>;
+  type HeaderSlot = NonNullable<ReturnType<typeof ___VERTER___Comp42>["$slots"]["header"]>;
+
+  it("accepts correct children via Comp function ReturnType pattern", () => {
+    // This is the exact pattern Verter generates
+    strictRenderSlot({} as DefaultSlot, [TabItem]);
+    strictRenderSlot({} as DefaultSlot, [TabItem, TabItem]);
+    // @ts-expect-error wrong child type via Comp function pattern
+    strictRenderSlot({} as DefaultSlot, [OtherComp]);
+  });
+
+  it("works with HTML element slot types via Comp function pattern", () => {
+    strictRenderSlot({} as HeaderSlot, [{} as HTMLSpanElement]);
+    // @ts-expect-error wrong HTML element type
+    strictRenderSlot({} as HeaderSlot, [{} as HTMLDivElement]);
+  });
+
+  it("works with HTMLElementTagNameMap pattern (what Verter emits for HTML children)", () => {
+    // Verter generates: {} as HTMLElementTagNameMap["span"] for <span/> children
+    strictRenderSlot({} as HeaderSlot, [{} as HTMLElementTagNameMap["span"]]);
+    // @ts-expect-error wrong element tag
+    strictRenderSlot({} as HeaderSlot, [{} as HTMLElementTagNameMap["div"]]);
+  });
+});
+
 // @ai-generated - Tests for extractArgumentsFromRenderSlot helper
 describe("extractArgumentsFromRenderSlot", () => {
   const MyCompSlots = defineComponent({
@@ -242,6 +297,67 @@ describe("extractArgumentsFromRenderSlot", () => {
 
     // @ts-expect-error - invalid slot name
     extractArgumentsFromRenderSlot(Comp1(), "nonexistent");
+  });
+
+  it("preserves slot props for public-api-style constructor components", () => {
+    type PublicApiComponent = {
+      new (props?: {}): {
+        $props: {};
+        $slots: {
+          default(props: {
+            slotItem: { id: number; name: string };
+            slotIndex: number;
+            slotTotal: number;
+          }): any;
+        };
+      };
+    };
+
+    const PublicApiComp = {} as PublicApiComponent;
+    const result = extractArgumentsFromRenderSlot(
+      instantiateComponent(PublicApiComp, {}),
+      "default",
+    );
+
+    result.slotItem.id satisfies number;
+    result.slotItem.name satisfies string;
+    result.slotIndex satisfies number;
+    result.slotTotal satisfies number;
+
+    // @ts-expect-error - slot item should not widen to any
+    result.slotItem.id satisfies string;
+  });
+
+  it("preserves slot props for generated public-api intersections", () => {
+    type OmitNew<T> = { [K in keyof T]: T[K] };
+    const BaseComp = defineComponent({});
+
+    type GeneratedPublicApiComponent = OmitNew<typeof BaseComp> & {
+      new (props?: {}): {
+        $props: {};
+        $slots: {
+          default(props: {
+            slotItem: { id: number; name: string };
+            slotIndex: number;
+            slotTotal: number;
+          }): any;
+        };
+      };
+    };
+
+    const PublicApiComp = {} as GeneratedPublicApiComponent;
+    const result = extractArgumentsFromRenderSlot(
+      instantiateComponent(PublicApiComp, {}),
+      "default",
+    );
+
+    result.slotItem.id satisfies number;
+    result.slotItem.name satisfies string;
+    result.slotIndex satisfies number;
+    result.slotTotal satisfies number;
+
+    // @ts-expect-error - slot item should not widen to any
+    result.slotItem.id satisfies string;
   });
 
   // Test with generic component types

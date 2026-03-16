@@ -18,3 +18,22 @@ export function mergeImportMap(a: ImportMap, b: ImportMap): ImportMap {
     scopes: { ...a.scopes, ...b.scopes },
   };
 }
+
+const vueVersionRe = /cdn\.jsdelivr\.net\/npm\/vue@([^/]+)\//;
+
+export function extractVueVersion(importMap: ImportMap): string | undefined {
+  const vueUrl = importMap.imports?.vue;
+  if (!vueUrl) return undefined;
+  const match = vueUrl.match(vueVersionRe);
+  return match?.[1];
+}
+
+export function isDefaultImport(
+  key: string,
+  value: string,
+  vueVersion?: string,
+): boolean {
+  if (!vueVersion) return false;
+  const defaults = getDefaultImportMap(vueVersion);
+  return defaults.imports[key] === value;
+}

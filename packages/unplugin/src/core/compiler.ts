@@ -1,28 +1,54 @@
 import { createHash } from "crypto";
 import { createRequire } from "module";
-import type { Compiler } from "./types";
+import type {
+  VerterHost,
+  ProcessStyleOptions,
+  ProcessStyleResult,
+} from "@verter/native";
 
 const require = createRequire(import.meta.url);
 
-let compiler: Compiler | null = null;
+type NativeModule = typeof import("@verter/native");
 
-export function loadCompiler(): Compiler {
-  if (compiler) return compiler;
+let native: NativeModule | null = null;
+let host: VerterHost | null = null;
 
-  const native = require("@verter/native") as typeof import("@verter/native");
-  compiler = {
-    compileForVite: (input, opts) => native.compileForVite(input, opts),
-    processStyle: (css, opts) => native.processStyle(css, opts),
-    stripTypes: (source) => native.stripTypes(source),
-  };
-  return compiler;
+function loadNative(): NativeModule {
+  if (native) return native;
+  native = require("@verter/native") as NativeModule;
+  return native;
+}
+
+export function loadHost(config?: { devMode?: boolean }): VerterHost {
+  if (host) return host;
+  const n = loadNative();
+  host = new n.VerterHost({
+    devMode: config?.devMode ?? true,
+  });
+  return host;
+}
+
+export function resetHost(): void {
+  host?.close();
+  host = null;
+}
+
+export function processStyle(css: string, options: ProcessStyleOptions): ProcessStyleResult {
+  return loadNative().processStyle(css, options);
 }
 
 export function getHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").substring(0, 8);
 }
 
-export function generateComponentId(filename: string, source: string, isProd: boolean): string {
+export function generateComponentId(filename: string, source: string, isProd: boolean, root?: string): string {
   const normalized = filename.replace(/\\/g, "/");
-  return isProd ? getHash(normalized) : getHash(normalized + source);
+  const normalizedRoot = root?.replace(/\\/g, "/").replace(/\/$/, "");
+  // Compute relative path (matching @vitejs/plugin-vue):
+  // path.relative(root, filename) with forward slashes
+  const relativePath = normalizedRoot && normalized.startsWith(normalizedRoot + "/")
+    ? normalized.slice(normalizedRoot.length + 1)
+    : normalized;
+  // Vue: dev = hash(path), prod = hash(path + source)
+  return isProd ? getHash(relativePath + source) : getHash(relativePath);
 }

@@ -2,7 +2,7 @@
 
 Verter is a Vue compiler and Language Server Protocol (LSP) implementation. It converts Vue Single File Components (SFCs) to valid TSX (leveraging TypeScript for type checking) and compiles templates to optimized render functions. Unlike Volar, Verter generates actual valid TSX code rather than virtual files.
 
-The project is a hybrid Rust + TypeScript monorepo: Rust crates handle template compilation (exposed via NAPI-RS native bindings and wasm-bindgen WASM), while TypeScript packages handle the SFC-to-TSX transformation, LSP, and IDE integration.
+The project is a hybrid Rust + TypeScript monorepo: Rust crates handle template compilation (exposed via NAPI-RS native bindings and wasm-bindgen WASM) and the LSP server (`verter_lsp` binary, communicates over stdio), while TypeScript packages handle the SFC-to-TSX transformation and IDE integration.
 
 ## Architecture
 
@@ -10,18 +10,28 @@ The project is a hybrid Rust + TypeScript monorepo: Rust crates handle template 
 
 ```
 verter-vscode (VS Code extension)
-├── @verter/language-server (LSP server)
-│   ├── @verter/core (SFC → TSX transformation)
-│   │   └── @verter/types (type utilities)
-│   ├── @verter/language-shared (client/server protocol)
-│   └── @verter/native (Rust template compiler, NAPI-RS)
-├── @verter/typescript-plugin (IDE .vue import resolution)
-│   └── @verter/core
-└── @verter/unplugin (universal bundler plugin)
+├── verter-lsp (Rust LSP binary, stdio)
+│   ├── verter_host (file host + compilation)
+│   ├── verter_diagnostics (lint rules + DiagnosticSet)
+│   ├── verter_actions (quick fixes + refactoring)
+│   └── TypeProvider (optional: TSGO or tsserver, for TS type checking)
+├── @verter/language-shared (custom protocol types)
+├── @verter/typescript-plugin (.vue import resolution, NAPI-backed)
+└── @verter/unplugin (bundler plugin)
     └── @verter/native
+
+verter-mcp (MCP server binary, stdio + HTTP)
+├── verter_host (file host + compilation)
+├── verter_analysis (static analysis snapshots)
+├── verter_diagnostics (lint rules + DiagnosticSet)
+└── verter_actions (quick fixes + refactoring)
 
 @verter/playground (Netlify-hosted)
 └── @verter/wasm (Rust template compiler, wasm-bindgen)
+
+@verter/component-meta (metadata extraction)
+├── @verter/native (NAPI host, Node.js)
+└── @verter/wasm (WASM host, browser, optional)
 ```
 
 ### Repository Structure
@@ -29,7 +39,14 @@ verter-vscode (VS Code extension)
 ```
 crates/
   verter_core/       # Core template compiler (Rust)
+  verter_analysis/   # Static analysis: imports, exports, bindings, type resolution
+  verter_host/       # In-memory file host: caching, dependency tracking, multi-file compilation
+  verter_diagnostics/ # Vue SFC diagnostic engine: ~186 lint rules, rule trait, visitor, DiagnosticSet (depends only on verter_analysis)
+  verter_actions/    # Code actions engine: quick fixes, refactoring (depends on verter_diagnostics + verter_analysis)
+  verter_lsp/        # Rust LSP server binary (stdio, launched by VS Code extension)
+  verter_ffi/        # FFI types: shared serializable structs for NAPI/WASM boundaries
   verter_bench/      # Benchmarks and comparison examples (Rust)
+  verter_mcp/        # MCP server binary: analysis, diagnostics, scoring for AI agents
   verter_napi/       # Native Node.js bindings (NAPI-RS cdylib)
   verter_wasm/       # WASM bindings (wasm-bindgen cdylib)
 packages/
@@ -38,10 +55,10 @@ packages/
   native/            # @verter/native - Native binding loader + platform packages
   wasm/              # @verter/wasm - WASM binding wrapper
   unplugin/          # @verter/unplugin - Universal bundler plugin
-  language-server/   # @verter/language-server - LSP server
   language-shared/   # @verter/language-shared - Shared LSP protocol types
   typescript-plugin/ # @verter/typescript-plugin - TS language service plugin
   oxc-bindings/      # @verter/oxc-bindings - OXC parser binary helper
+  component-meta/    # @verter/component-meta - Component metadata extraction + Type IR + adapters
   playground/        # @verter/playground - Online playground (private, Netlify-hosted)
   vue-vscode/        # verter-vscode - VS Code extension
   example/           # Example project
@@ -49,139 +66,199 @@ scripts/
   check-versions.mjs # Version check + publish order for CI
 ```
 
-### TypeScript Packages
+### Two Template Codegen Paths (CRITICAL)
 
-| Package | Purpose | Entry Point |
-|---------|---------|-------------|
-| **`@verter/core`** | SFC parser & TSX transformer. Converts `.vue` files to valid TSX using `MagicString` for sourcemap preservation | `src/v5/index.ts` |
-| **`@verter/types`** | TypeScript utility types (`PatchHidden`, `ExtractHidden`, `EmitsToProps`, etc.). Has `/string` export with `$V_` prefixed types for LSP injection | `src/index.ts` |
-| **`@verter/language-server`** | LSP server implementation. Manages documents, provides completions, diagnostics, hover, go-to-definition | `src/server.ts` |
-| **`@verter/language-shared`** | Shared protocol types between VS Code client and language server | `src/index.ts` |
-| **`@verter/typescript-plugin`** | TypeScript plugin that resolves `.vue` imports in TS/JS files. Intercepts module resolution to return transformed TSX | `src/index.ts` |
-| **`verter-vscode`** | VS Code extension. Bundles language server and TS plugin, handles extension activation | `src/extension.ts` |
-| **`@verter/oxc-bindings`** | Helper for downloading platform-specific OXC parser binaries | `src/index.ts` |
+The Rust compiler has **two separate template codegen paths**. Modifying one does NOT affect the other:
 
-### Core Transformation Pipeline (`packages/core/src/v5/`)
+| Path | Module | Purpose | Output |
+|------|--------|---------|--------|
+| **VDOM/Vapor** | `template/code_gen/vdom/` | Runtime render functions for bundler output | `_createElementVNode(...)` calls |
+| **IDE** | `ide/template/` | Valid JSX/TSX for LSP/TSGO type checking | `<div prop={expr}>` JSX elements |
 
-```
-Vue SFC → parser/ → process/script/plugins/ → TSX output
-              ↓              ↓
-         ParsedBlock    MagicString (preserves sourcemaps)
-```
+The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. The IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX), while JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
 
-1. **`parser/`** - Parses SFC into typed blocks
-   - `parser.ts` - Main entry, uses `@vue/compiler-sfc`
-   - `types.ts` - `ParsedBlockScript`, `ParsedBlockTemplate`, `ParsedBlockUnknown`
-   - `script/` - Extracts script AST items (`ScriptItem`, `ScriptTypes`)
-   - `template/` - Parses template expressions and bindings
+### Strict Slot Children Type Checking (Experimental)
 
-2. **`process/`** - Plugin-based transformation system
-   - `script/script.ts` - Orchestrates plugin execution
-   - `types.ts` - `ProcessContext`, `ProcessPlugin`, `ProcessItemType`
+When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree. These enforce that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).
 
-### Plugin System (`packages/core/src/v5/process/script/plugins/`)
-
-Plugins transform parsed SFC items into TSX. Each plugin can:
-- Hook into `pre`/`post` phases
-- Transform specific `ScriptTypes` via `transformXxx` methods
-- Add items to `context.items` for downstream plugins
-
-| Plugin | Purpose |
-|--------|---------|
-| `macros/` | Transforms Vue macros (`defineProps`, `defineEmits`, `defineModel`, `defineSlots`, `defineExpose`, `withDefaults`) |
-| `template-binding/` | Generates template binding type for IDE support |
-| `binding/` | Tracks variable declarations for binding context |
-| `imports/` | Handles import statements |
-| `script-block/` | Wraps script setup content |
-| `full-context/` | Generates component context type |
-| `attributes/` | Processes component attributes |
-| `resolvers/` | Resolves component references |
-
-**Plugin execution order**: Controlled by `enforce: "pre" | "post"`. Pre-plugins run first, then main transforms, then post-plugins.
-
-### Language Server Architecture (`packages/language-server/src/v5/`)
-
-```
-server.ts (LSP connection)
-    ↓
-documents/
-├── manager/manager.ts    → DocumentManager (file tracking)
-├── verter/manager/       → VerterManager (TS services per tsconfig)
-└── verter/vue/           → VueDocument (parsed .vue with sub-documents)
-    └── sub/              → VueTypescriptDocument, VueStyleDocument
+**Generated pattern** (inside the block scope, after JSX):
+```tsx
+___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp{offset}>['$slots']['{slot}']>, [TabItem, {} as HTMLElementTagNameMap["input"], "" as string]);
 ```
 
-- **DocumentManager**: Tracks open files, handles file changes, caches snapshots
-- **VerterManager**: Manages TypeScript LanguageService instances per tsconfig.json
-- **VueDocument**: Represents a `.vue` file, lazily parses and creates sub-documents for each block
+**Child type references**: Component → constructor name, HTML element → `HTMLElementTagNameMap["tag"]`, text/interpolation → `"" as string`. Each child is a sourcemapped `InsertedMapped` chunk pointing to its template position.
 
-### Rust Compiler Architecture (`crates/verter_core/src/`)
+**Skipped cases**: self-closing components (no children), `is_jsx` mode, `<component :is>` (deferred), whitespace-only text, comments.
 
-The Rust compiler uses an event-driven plugin pipeline. See [CLAUDE_IMPLEMENTATION_GUIDE.md](CLAUDE_IMPLEMENTATION_GUIDE.md) and [crates/verter_core/src/syntax/README.md](crates/verter_core/src/syntax/README.md) for details.
+**Key files**: `ide/template/mod.rs` (`StrictSlotEntry`, `collect_strict_slot_children`, `emit_strict_slot_checks`), `ide/script.rs` (ambient `strictRenderSlot` type declarations).
 
-```
-Vue SFC Source
-    ↓
-[Tokenizer] → TokenizerEvent stream
-    ↓
-[Syntax/Pipeline] → Vec<Event> (template/style) + Vec<Event> (script)
-    ↓
-[Plugin Pipeline] → Processed events + codegen output
-```
+### CodeTransform Is the Single Source of Truth (CRITICAL)
 
-**Plugin pipeline order:**
-- Script: `element_compiler → oxc_parser → code_gen/script`
-- Template: `element_compiler → css_parser → oxc_parser → code_gen/template`
+**All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.). Never apply string replacements, regex transforms, or manual splicing to the output of `build_string()` or to content that was produced by a `CodeTransform`.
 
-Where `code_gen/template` can target VDOM, Vapor, or TSX output modes.
+Post-hoc string manipulation breaks sourcemap accuracy: the `CodeTransform` generates source maps by tracking chunks (Original, Inserted, Moved, Overwritten). If you modify the string after the transform, byte offsets in the source map no longer match the actual content. This causes position mismatches in the LSP (e.g., hover landing on the wrong token, go-to-definition jumping to wrong locations).
 
-**Module overview:**
+**Correct:** Use `ct.prepend_left(pos, ".ts")` to insert text at a known position — the chunk list and source map stay consistent.
 
-```
-syntax/
-├── types.rs              # All event and type definitions
-├── pipeline.rs           # Tokenizer → Event conversion
-├── plugin.rs             # SyntaxPlugin trait
-├── binding_types.rs      # BindingType, ReactivityLevel
-└── plugins/
-    ├── element_compiler/  # Raw events → Compiled events
-    ├── oxc_parser/        # Compiled → OXC-parsed events (expression parsing)
-    ├── css_parser/        # Scoped CSS, v-bind(), CSS Modules
-    └── code_gen/          # Codegen plugins
-        ├── script/        # Script codegen (macros, bindings, sections)
-        ├── template/      # Template codegen
-        │   ├── vdom/      # VDOM render function output
-        │   ├── vapor/     # Vapor mode output
-        │   └── shared/    # Shared codegen helpers
-        ├── css/           # CSS output generation
-        └── types.rs       # Shared codegen types
-css/
-├── mod.rs                # CSS entry point
-├── prepass.rs            # CSS preprocessing
-├── scoped.rs             # Scoped CSS transformation
-├── modules.rs            # CSS Modules support
-├── walk.rs               # CSS AST walking
-└── types.rs              # CSS types
-```
+**Wrong:** Call `content.replace(".vue'", ".vue.ts'")` on the built string — the source map still reflects the pre-replace byte offsets.
+
+### IDE Script Error Recovery
+
+When OXC encounters parse errors during typing (e.g., `count.` mid-expression), the IDE script codegen (`ide/script.rs`) uses a **truncate-and-reparse** strategy instead of falling back to degraded file-scope output:
+
+1. Find the earliest error offset from OXC diagnostics.
+2. Truncate source at the last newline before that offset — the "clean prefix".
+3. Re-parse only the clean prefix (which succeeds since the broken code is removed).
+4. Use the clean prefix AST for normal codegen (import hoisting, binding extraction, macro processing). The broken tail passes through unchanged in the CodeTransform.
+
+A lightweight token scanner (`ide/script_recover.rs`) recovers macro binding names from the broken tail so template bindings still resolve. This means typing `count.` at the end of a script preserves hover, completions, and go-to-definition for all declarations above the cursor.
+
+**Fallback**: When the clean prefix is empty (error on first line) or the clean prefix itself fails to parse, the system falls back to file-scope error recovery mode (`process_tsx_script_setup_error_mode`).
+
+### TypeProvider Architecture
+
+The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends are supported:
+
+| Backend | Binary | Protocol | Use Case |
+|---------|--------|----------|----------|
+| **TSGO** | `tsgo` (Go binary) | LSP over stdio (Content-Length + JSON-RPC) | Fast, native TS checking (preview) |
+| **tsserver** | `node tsserver.js` | Newline-delimited JSON over stdio | Workspace TS version, plugin support |
+
+**Provider selection** (`--type-provider` CLI arg / `verter.typeProvider` VS Code setting):
+- `auto` (default): if TS 5.x/6.x installed, uses tsserver; otherwise tries TSGO
+- `tsgo`: TSGO only
+- `tsserver`: tsserver only
+- `off`: no type provider (verter-only mode)
+
+Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/traits.rs`) with 14+ methods (hover, completions, diagnostics, definition, references, rename, etc.). Both are wrapped in a `ResilientTypeProvider` that detects crashes, auto-restarts (max 3 with exponential backoff), and replays the file cache.
+
+**tsserver kind mapping**: `parse_tsserver_completion()` in `tsserver/ipc.rs` maps tsserver's `ScriptElementKind` strings to LSP `CompletionItemKind`. This mapping MUST match VS Code's `MyCompletionItem.convertKind()` exactly. Test coverage: `test_parse_tsserver_completion_kinds_match_vscode`. Sync with VS Code source when updating TypeScript dependencies.
+
+**Key modules** (`crates/verter_lsp/src/`):
+- `tsgo/` — TSGO integration (LSP client, resilient wrapper, project sync)
+- `tsserver/mod.rs` — `find_tsserver()`, `find_node()`, `detect_ts_major_version()`
+- `tsserver/ipc.rs` — `TsserverTypeProvider`, newline-delimited JSON transport, position conversion
+- `tsserver/resilient.rs` — `ResilientTsserverProvider` (crash detection + auto-restart)
+- `workspace_scanner.rs` — Async background workspace scanner with priority-based file loading
+
+**Background file sync**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. For TSGO, both `.vue.tsx` (IDE artifact) and `.vue.ts` (public API) are synced; cross-file imports resolve through `.vue.ts` (via `rewrite_vue_imports_for_tsgo`). This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
+
+**Barrel-import eager sync** (TSGO): When a Vue file imports components through a barrel (non-Vue re-export file like `components/index.ts`), the LSP eagerly syncs the barrel and its Vue dependencies to TSGO during `did_open` and `resync_aliased_imports_for_open_files`. The process: (1) discover barrels from `TemplateComponentUsage.import_source` resolving to non-Vue files, (2) scan barrel's `module_references` for `.vue` specifiers, (3) sync Vue dependencies first, (4) sync barrel file. Without this, TSGO only receives barrels from the background scanner, which may not complete before hover/completion requests.
+
+**Freeze prevention** (fast typing): Three layers prevent tokio runtime starvation during rapid typing:
+1. **SyncCoordinator** (`sync_coordinator.rs`): Single long-lived task replaces spawn-per-keystroke debounce. Uses mpsc channel + 300ms deadline map to guarantee exactly one sync per file after typing stops. After syncing, computes and publishes merged (Verter lint + TS type) diagnostics via push. Holds shared `Arc<VerterHost>`, `ProjectSync`, `TypeProvider`, `cached_verter_diags`, and `PositionEncodingKind`.
+2. **Push diagnostics only**: The LSP uses push diagnostics exclusively (no pull/`diagnostic_provider`). During typing, no new diagnostics are published — VS Code automatically adjusts existing push diagnostic positions as the document changes. The SyncCoordinator publishes fresh merged diagnostics after 300ms of silence.
+3. **Hang detection** (`tsgo/ipc.rs`): `LspTransport` tracks `consecutive_failures` (AtomicU32). After 3 consecutive request timeouts, fires `crash_notify` to trigger `ResilientTypeProvider`'s existing restart machinery. Notifications use `try_send()` (non-blocking) to prevent channel backpressure.
+
+**Heartbeat watchdog**: The server sends `$/verter/heartbeat` every 5s from `initialized()`. The VS Code extension monitors heartbeats — if none arrive for 30s, it auto-restarts the server. This is the last-resort safety net for runtime starvation.
+
+**Async workspace scanning**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task instead of scanning synchronously. The scanner walks the filesystem, compiles `.vue` files to TSX, and syncs them to the type provider in priority order:
+
+1. **Tier 0**: Files opened in the editor (signaled by `did_open`)
+2. **Tier 1**: Project source files covered by `tsconfig.json` — siblings of open files first, then expanding outward
+3. **Tier 2**: Remaining `.vue` files not covered by any tsconfig
+
+TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner receives priority signals from `did_open` to dynamically re-order its queue. This makes `initialized()` return in <1s instead of blocking for the full scan duration.
+
+**Key module**: `crates/verter_lsp/src/workspace_scanner.rs` — `WorkspaceScannerHandle`, `spawn_workspace_scanner()`, priority sorting, throttled sync loop.
+
+### Multi-Root Workspace & Per-Project Configuration
+
+In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` that groups per-project configuration.
+
+**Key types** (`crates/verter_lsp/src/config.rs`):
+- `ProjectConfig` — per-project: root path, `TsConfigPathResolver`, `ResolvedLintConfig`, `Linter` instance, optional `vite_config_path` and `vite_config_deps`
+- `ProjectRegistry` — sorted by root length (longest prefix first), provides `find_project()`, `resolve_alias()`, `find_project_root()`, `linter_for()`
+- `RegistryBuildResult` — returned from `from_workspace_roots()`, contains `registry` + `trust_required` list
+
+**Path alias resolution** (tsconfig-first policy): Tsconfig-backed projects use ONLY `tsconfig.json` `compilerOptions.paths` — Vite aliases are never merged. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
+1. **Static analysis** (OXC): Parses `vite.config.{ts,js,mjs,cjs,mts,cts}` without executing code. Handles object/array alias forms, `defineConfig()`, template literals, `path.resolve()`, `new URL()`, `fileURLToPath()`. Returns `Complex` for configs using env vars, dynamic imports, or non-allowlisted packages.
+2. **Trusted execution** (opt-in): For complex configs, spawns Node.js with `loadConfigFromFile` if the file is in `verter.viteConfig.trustedFiles`. Includes env sanitization, 10s timeout, and last-known-good caching.
+
+The server sends `$/verter/viteConfigTrustRequired` notifications for complex configs not yet trusted, and the extension shows a trust prompt. Config file changes (detected via file watcher) trigger a full registry rebuild.
+
+**Type provider integration**: TSGO receives `workspace/didChangeWorkspaceFolders` notifications. tsserver uses per-file `projectRootPath` from the project registry. Both resilient wrappers store workspace folders for restart replay.
+
+**Lock ordering** (prevents deadlocks): `workspace_roots` (async) → `project_registry` (sync read) → release → `fallback_linter` (sync read). Never acquire `fallback_linter` while holding `project_registry`.
+
+### Style Preprocessing in Bundler Mode
+
+Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preprocessing to CSS. The pipeline differs between Vite and non-Vite bundlers:
+
+**Vite mode** (Vite-owned preprocessing, matching `@vitejs/plugin-vue`):
+1. During main `.vue` `transform()`, the plugin parses the SFC with `compiler.parse()` and caches raw style block content in `styleBlockCache`. Style preprocessing is **skipped** in `applyPreprocessorRequests()`.
+2. `load()` returns raw style source (e.g., SCSS with `$variables`) from `styleBlockCache`.
+3. Style URLs preserve the original lang (`lang.scss`, not `lang.css`) since `meta.style_langs` is never overwritten.
+4. Vite's CSS pipeline preprocesses SCSS/SASS/Less/Stylus automatically between `load()` and `transform()`.
+5. `transform()` always runs `compiler.compileStyleAsync()` for Vue-specific post-processing: scoped CSS attribute selectors (`[data-v-...]`) and CSS `v-bind()` rewriting. This runs even for unscoped plain CSS blocks (CSS `v-bind()` still needs rewriting).
+
+**Non-Vite mode** (preprocessor fallback):
+Style preprocessing goes through `preprocessBlock()` → `preprocessStyle()` which calls Vite's `preprocessCSS()` in-process (if Vite config is available). The compiled CSS is sent to the Rust host via `applyBlockOverrides()`, and `apply_style_overrides()` updates `meta.style_langs` to `"css"`. The `transform()` hook uses Rust `processStyle()` for CSS scoping only.
+
+**Compiler resolution**: `vue/compiler-sfc` is resolved once per plugin instance from the project root in `configResolved()` via `createRequire(join(root, "package.json"))("vue/compiler-sfc")`. This is stored in the `compiler` variable and used for both SFC parsing (`compiler.parse()`) and style post-processing (`compiler.compileStyleAsync()`).
+
+**Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_host/src/host_upsert.rs` (`apply_style_overrides` — lang update, non-Vite only), `crates/verter_host/src/id.rs` (`render_ids` — URL generation).
+
+### Cached Directive Fields on ElementNode
+
+The parser extracts structural directives from `el.props` via `prop.take()` and caches them as dedicated fields on `ElementNode` (`ast/types.rs`):
+
+| Field | Directive | In `el.props`? | Notes |
+|-------|-----------|----------------|-------|
+| `v_condition` | `v-if`, `v-else-if`, `v-else` | **No** (taken) | Contains `ElementNodeCondition` with kind + prop |
+| `v_for` | `v-for` | **No** (taken) | Contains the full `NodeProp` |
+| `v_slot` | `v-slot`, `#name` | **No** (taken) | Contains the full `NodeProp` |
+| `v_once` | `v-once` | **No** (taken) | Contains the full `NodeProp` |
+| `v_ref` | `ref`, `:ref` | **No** (taken) | Contains the full `NodeProp` |
+
+**Consequence**: Code iterating `el.props` will **never see** these directives. Both codegen paths must handle them explicitly. The IDE module removes `v-if/v-for/v-slot/v-once` attributes (they become JSX wrappers/removals) and converts `ref` to JSX expression syntax (`ref={"name"}`).
+
+### Position Encoding (CRITICAL rules)
+
+See `/position-encoding` skill for full span type reference, encoding tables, and path normalization details.
+
+**Encoding source of truth**: The position encoding MUST come from the client capabilities negotiated during `initialize()`. The server stores it in `Arc<parking_lot::RwLock<PositionEncodingKind>>` shared with the SyncCoordinator. Default is UTF-16 (per LSP spec) until negotiated. **Rust-internal code uses UTF-8 byte offsets**; **LSP boundary code converts to negotiated encoding**; **JS/VS Code uses UTF-16**.
+
+**Line/Column Base Rules** (off-by-one bugs):
+- **PositionResolver is 1-based** — subtract 1 for source maps and LSP
+- **Source maps, LSP, VS Code are all 0-based**
+- **OXC/verter spans are byte offsets** — no line/column conversion needed
+
+**Serialization rule**: All data crossing serde/MCP/LSP/FFI boundaries MUST use `Span` (SFC-absolute). `RelativeSpan`/`PartialGeneratedSpan`/`GeneratedSpan` do not implement Serialize.
+
+### Path Normalization (CRITICAL rules)
+
+See `/position-encoding` skill for canonical ID format and boundary tables.
+
+1. **Receive → normalize immediately** (`canonicalize_id()` or `uri_to_canonical_id_from_str()`)
+2. **Store only canonical IDs** in all maps and caches
+3. **Denormalize at exit boundaries** (file:// URIs or OS paths)
+4. **Never compare raw paths** — always compare canonical IDs
 
 ## Build
 
 ```bash
 pnpm install                  # Install all dependencies
-pnpm build                    # Build everything: native → wasm → ts packages
+pnpm build                    # Build everything: native → lsp → wasm → ts packages
 pnpm run build:native         # Build native .node bindings only
+pnpm run build:lsp            # Build Rust LSP binary (debug)
+pnpm run build:lsp:release    # Build Rust LSP binary (release, optimized)
+pnpm run build:mcp            # Build MCP server binary (debug)
+pnpm run build:mcp:release    # Build MCP server binary (release, optimized)
 pnpm run build:wasm           # Build WASM + copy to playground
 pnpm run build:ts             # Build all TypeScript packages
 pnpm run build:playground     # Build the playground for deployment
 ```
 
-`pnpm build` runs sequentially: native bindings first (needed by unplugin), then WASM (needed by playground), then all TS packages. This ensures F5 debugging in VS Code and `pnpm --filter @verter/playground dev` both work.
+`pnpm build` runs sequentially: native bindings first (needed by unplugin), then LSP binary (shares compiled Rust deps with native, avoids recompilation), then WASM (needed by playground), then all TS packages.
+
+See `/build-and-profiling` skill for build dependency chains, rebuild sequences, and profiling setup.
 
 ## Development
 
 ```bash
 pnpm watch                    # Watch-build TS packages for extension dev
-pnpm dev-extension            # Watch language-server + vscode extension
+pnpm dev-extension            # Build LSP binary, then watch language-shared + vscode extension + typescript-plugin
 pnpm clean                    # Remove build artifacts
 ```
 
@@ -208,11 +285,37 @@ Run these after making changes:
 ```bash
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
+pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this)
 ```
+
+### Documentation Updates
+
+After adding, changing, or removing features, check and update relevant documentation:
+
+- **`CLAUDE.md`** — Architecture tables, module paths, key file references
+- **`docs/`** — API docs, guide pages, contributing guides (`docs/contributing/rust-setup.md`, etc.)
+- **`.claude/skills/`** — Skill files referencing affected modules or APIs
+- **Inline doc comments** — Public API rustdoc (`///`) and JSDoc (`/** */`) on changed signatures
+
+Skip this for purely internal refactors that don't change any public behavior, module paths, or APIs.
 
 ### Testing Requirements
 
-**IMPORTANT**: When making any code changes, always add corresponding tests whenever possible:
+**MANDATORY RULE — TDD (Test-Driven Development) must be followed for EVERY code change. This is non-negotiable. All agents, subagents, and automated workflows MUST comply. Skipping TDD is never acceptable, regardless of task size or urgency.**
+
+**TDD workflow (strict order — no exceptions):**
+1. **Write failing tests FIRST** — before writing ANY implementation code, write one or more tests that demonstrate the expected behavior. Run the tests and **verify they fail**. Do not proceed to step 2 until you have confirmed test failure.
+2. **Implement the minimum code** to make the failing tests pass. Do not write implementation code before tests exist.
+3. **Run the tests again** and verify they pass.
+4. **Refactor** if needed while keeping tests green.
+
+**Violation examples (DO NOT do these):**
+- Writing implementation code and then adding tests after the fact
+- Writing tests and implementation simultaneously without verifying the tests fail first
+- Skipping tests for "small" or "trivial" changes
+- Delegating implementation to a subagent without requiring TDD compliance
+
+Coverage expectations:
 - New features: Add tests covering the new functionality
 - Bug fixes: Add tests that would have caught the bug
 - Refactoring: Ensure existing tests pass and add tests for edge cases discovered
@@ -220,113 +323,95 @@ cargo fmt --all
 
 Tests serve as documentation of expected behavior and prevent regressions.
 
-### TypeScript Test Patterns
+**IMPORTANT — Always include negative assertions**:
 
-**Test locations**: Unit tests are co-located as `*.spec.ts` next to source files. Type tests in `packages/types/` use `vitest --typecheck`.
+Every test must verify both what SHOULD be present AND what should NOT be present. A test that only checks for expected output can pass even when the output contains invalid/broken content alongside the expected content.
 
-**AI-generated tests**: Add appropriate comments indicating AI assistance:
+```rust
+// GOOD: Both positive and negative assertions
+let result = gen_tsx_template(r#"<template><div v-if="show">hello</div></template>"#);
+assert!(result.contains("if(show)"), "should have IIFE if-block condition");  // positive
+assert!(!result.contains("v-if"), "v-if attribute must be removed from JSX"); // negative
 
-```typescript
-// For new test files, add a JSDoc at the top:
-/**
- * @ai-generated - This test file was generated with AI assistance.
- * Brief description of what the tests cover.
- */
-
-// For individual tests in existing files:
-// @ai-generated - Tests X functionality with Y scenarios
-it("does something", () => { /* ... */ });
+// BAD: Only positive assertion — passes even if v-if="show" leaks into output
+let result = gen_tsx_template(r#"<template><div v-if="show">hello</div></template>"#);
+assert!(result.contains("if(show)"), "should have IIFE if-block condition"); // not enough!
 ```
 
-**Sourcemap testing** (see `macros.map.spec.ts`):
-```typescript
-const { s, source, result } = processMacrosForSourcemap(code);
-const map = s.generateMap({ source: "test.vue" });
+For codegen tests: always verify that removed/transformed Vue syntax does NOT appear in output. For type tests: always include both positive assertions and `@ts-expect-error` negative assertions to guard against `any`/`never`.
+
+**IMPORTANT — Rust test file organization**:
+
+When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a sibling `*_tests.rs` file:
+
+```rust
+// In foo.rs — replace the inline mod tests block with:
+#[cfg(test)]
+#[path = "foo_tests.rs"]
+mod foo_tests;
 ```
 
-**Type testing best practices** (`packages/types/`):
-- Always include **both** a positive assertion and a `@ts-expect-error` negative assertion
-- This prevents `any`/`unknown`/`never` types from silently passing tests
+For `mod.rs` files, use the simpler form (loads `tests.rs` from the same directory):
 
-```typescript
-it("type is correctly inferred", () => {
-  type Result = SomeTypeHelper<Input>;
-
-  // Positive assertion - type matches expected
-  assertType<Result>({} as ExpectedType);
-  assertType<ExpectedType>({} as Result);
-
-  // @ts-expect-error - Result is not any/unknown/never
-  assertType<{ unrelated: true }>({} as Result);
-});
+```rust
+#[cfg(test)]
+mod tests;
 ```
 
-### Rust Test Patterns
+The extracted file contains the module contents directly (no wrapping `mod tests { }`), starting with `use super::*;`.
 
-See [CLAUDE_IMPLEMENTATION_GUIDE.md](CLAUDE_IMPLEMENTATION_GUIDE.md) for detailed Rust testing patterns including:
+See `/testing` skill for full TS/Rust test patterns, sourcemap testing, E2E best practices, and server cleanup.
 
-- **TDD workflow** — write failing tests first, then implement
-- **`gen_and_validate()`** — all codegen tests MUST validate JS syntax via oxc parser
-- **AST comparison** — E2E tests compare against Vue's official compiler output
-- **Event pipeline** — construct event Vecs, run through plugins, assert output
-- **Binding metadata** — `BindingType` and `ReactivityLevel` in `binding_types.rs`
+### VS Code Extension Testing (MANDATORY)
 
-## TypeScript Code Patterns
+Changes to the VS Code extension (`packages/vue-vscode/`) or the LSP server (`crates/verter_lsp/`) MUST be verified with automated tests, NOT manual testing. LSP changes directly affect extension behavior — hover, completions, diagnostics, etc. Two test tiers exist:
 
-**Defining script plugins:**
-```typescript
-import { definePlugin, ScriptContext } from "../../types";
-export const MyPlugin = definePlugin({
-  name: "my-plugin",
-  enforce: "pre", // or "post"
-  pre(s, ctx) { /* runs before transforms */ },
-  transformFunctionCall(item, s, context) { /* transform specific type */ },
-  transformDeclaration(item, s, context) { /* another type */ },
-  post(s, context) { /* runs after all transforms */ }
-});
+**Unit tests** (Vitest, `*.spec.ts` co-located in `src/`):
+- For pure logic: utility functions, response parsing, restart logic, CSS scanning
+- Run: `pnpm vitest --run packages/vue-vscode/src/path/to/file.spec.ts`
+
+**E2E tests** (Mocha + @vscode/test-cli, `e2e/suite/*.test.ts`):
+- For LSP integration: completions, hover, diagnostics, go-to-definition, rename, decorations
+- Single fixture/provider: `E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter verter-vscode test:e2e`
+- Full matrix from the repo root: `pnpm run test:e2e`
+- CI runs the same fixture matrix across both `tsserver` and `tsgo`
+- See `.claude/skills/e2e-vscode-testing.md` for fixture design, helpers API, and adding new tests
+
+**When to use which:**
+- New extension utility/parser logic → unit test
+- New/changed LSP feature (hover, completion, diagnostics, definition, rename, decorations) → E2E test
+- `verter_lsp` changes (new handler, changed response format, sync behavior) → E2E test
+- Both if the change spans utility logic + LSP behavior
+
+**Never acceptable:** "Test manually by opening VS Code" as the sole verification step in a plan.
+
+### Agent Feedback Capture
+
+During work sessions, agents encounter issues, discover improvement opportunities, and gain insights that may be lost when context is compacted. To preserve these observations, agents MUST continuously log feedback to a per-conversation file.
+
+**Setup** (at session start, when making code changes):
+- Create a feedback file at `.claude/feedback/feedback-{YYYY-MM-DD}-{short-id}.md` where `short-id` is a 6-character identifier (e.g., from the plan name or timestamp)
+- The `.claude/feedback/` directory is gitignored — these files are for human review only
+
+**What to log** — append entries whenever encountering something noteworthy:
+- `[issue]` — bugs, unexpected behavior, workarounds applied
+- `[improvement]` — code quality, performance, architecture ideas
+- `[debt]` — things that work but could be better
+- `[docs]` — missing or outdated documentation discovered
+
+**Format**:
+```markdown
+## {date}
+
+- [{category}] `{file_path}:{line}` — Brief description of the observation
+- [{category}] `{file_path}` — Another observation
 ```
 
-**Type helper prefix convention:**
-- Internal helpers use `___VERTER___` prefix (see `packages/core/`)
-- String-exported types use `$V_` prefix for collision avoidance
-
-**Parser types** (`packages/core/src/v5/parser/`):
-- `ParsedBlockScript`, `ParsedBlockTemplate` - Block-specific parsed data
-- `ScriptItem`, `ScriptTypes` - Categorized script AST items
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `packages/core/src/v5/parser/parser.ts` | Main SFC parser entry |
-| `packages/core/src/v5/process/script/script.ts` | Script processing orchestration |
-| `packages/core/src/v5/process/script/types.ts` | `definePlugin`, `ScriptContext`, `ScriptPlugin` |
-| `packages/core/src/v5/process/script/plugins/macros/macros.ts` | Vue macro transformations |
-| `packages/language-server/src/server.ts` | LSP server setup |
-| `packages/language-server/src/v5/documents/verter/manager/manager.ts` | TS service management |
-| `packages/types/src/helpers/helpers.ts` | Core type utilities |
-| `crates/verter_core/src/syntax/types.rs` | All event and type definitions |
-| `crates/verter_core/src/syntax/pipeline.rs` | Tokenizer → Event conversion pipeline |
-| `crates/verter_core/src/syntax/binding_types.rs` | BindingType, ReactivityLevel, binding resolution |
-| `crates/verter_core/src/syntax/plugin.rs` | SyntaxPlugin trait and SyntaxResult |
-| `crates/verter_core/src/syntax/plugins/element_compiler/` | Raw events → Compiled events |
-| `crates/verter_core/src/syntax/plugins/oxc_parser/` | Compiled events → OXC-parsed events |
-| `crates/verter_core/src/syntax/plugins/code_gen/script/mod.rs` | Script codegen (macros, bindings) |
-| `crates/verter_core/src/syntax/plugins/code_gen/template/vdom/` | VDOM render function codegen |
-| `crates/verter_core/src/syntax/plugins/code_gen/template/vapor/` | Vapor mode codegen |
-| `crates/verter_core/src/syntax/plugins/css_parser/` | CSS scoping, modules, v-bind() |
-| `crates/verter_core/src/css/` | CSS preprocessing and style transformation |
-| `crates/verter_core/src/builder/codegen.rs` | Pipeline setup, E2E tests |
-
-## Rust Performance
-
-See [.claude/performance-guide.md](.claude/performance-guide.md) for Rust performance patterns including:
-
-- **Batch over incremental** — collect mutations, apply in single O(n+m) passes
-- **Allocation hierarchy** — `&'static str` > bump `&'alloc str` > `&str` > reusable buffer > `String`
-- **Reusable buffer** — `std::mem::take` pattern to thread a single `String` through processing
-- **Object pooling** — recycle structs with `.clear()` to retain Vec capacities
-- **Reduce work** — skip expensive operations for trivial cases, cache repeated computations
+**Rules**:
+- Append continuously as you work — do not wait for context compaction
+- When delegating to subagents, pass the feedback file path in the prompt and instruct them to append their observations
+- This is best-effort — do not let feedback capture slow down actual work
+- One feedback file per conversation session
 
 ## Dependencies Policy
 
@@ -361,6 +446,7 @@ Scopes:
   lsp      - language-server
   types    - @verter/types
   ts       - @verter/core (TypeScript)
+  meta     - @verter/component-meta
   ci       - CI/CD workflows
   *        - multiple areas
 
@@ -373,10 +459,23 @@ Examples:
 
 ## CI/CD
 
-See [.claude/ci-cd.md](.claude/ci-cd.md) for detailed CI/CD documentation including:
+See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for detailed CI/CD documentation including:
 
 - Workflow specifications (CI, nightly, release)
 - Pre-release versioning flow (alpha → beta → rc → stable)
 - Publishing process (npm + crates.io)
 - Nightly WASM builds and playground deployment
 - Required GitHub secrets configuration
+
+## Skills Reference
+
+Detailed reference material is available as on-demand skills (loaded automatically when relevant):
+
+| Skill | Use When |
+|-------|----------|
+| `/architecture` | Working on any specific module, need key files, type tables, LSP features, plugin system, analysis types |
+| `/position-encoding` | Working with spans, positions, coordinate conversions, path normalization details |
+| `/build-and-profiling` | Debugging build order, rebuild sequences, profiling, MCP server setup |
+| `/testing` | Writing tests, test patterns, sourcemap testing, E2E workflow, server cleanup |
+| `/wsl-e2e-testing` | Running E2E tests in WSL to reproduce Linux/CI failures, fixture matrix, acceptance criteria |
+| `/rust-performance` | Optimizing Rust code, allocation patterns, batch operations, CodeTransform API |

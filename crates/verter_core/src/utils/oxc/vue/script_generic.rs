@@ -15,7 +15,7 @@ use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use smallvec::SmallVec;
 
-use crate::common::Span;
+use crate::common::{RelativeSpan, Span};
 
 /// The prefix used when wrapping the generic string for parsing.
 /// Creates an arrow function: `<{generic}>()=>{}`
@@ -27,15 +27,15 @@ pub const GENERIC_WRAPPER_SUFFIX: &[u8] = b">()=>{}";
 #[derive(Debug, Clone, Copy)]
 pub struct GenericParam {
     /// Span of the parameter name within the generic string (relative to generic start).
-    pub name_span: Span,
+    pub name_span: RelativeSpan,
     /// Span of the full parameter content within the generic string.
-    pub span: Span,
+    pub span: RelativeSpan,
     /// Span of the constraint within the generic string (if any).
     /// For `T extends Foo`, this would be the span of `Foo`.
-    pub constraint_span: Option<Span>,
+    pub constraint_span: Option<RelativeSpan>,
     /// Span of the default type within the generic string (if any).
     /// For `T = DefaultType`, this would be the span of `DefaultType`.
-    pub default_span: Option<Span>,
+    pub default_span: Option<RelativeSpan>,
 }
 
 impl GenericParam {
@@ -180,6 +180,10 @@ pub fn parse_generic<'a>(
     wrapped_code.extend_from_slice(GENERIC_WRAPPER_SUFFIX);
 
     // SAFETY: We're constructing valid UTF-8 from known ASCII prefix/suffix and user's generic string
+    debug_assert!(
+        std::str::from_utf8(&wrapped_code).is_ok(),
+        "wrapped generic code is not valid UTF-8"
+    );
     let wrapped_str = unsafe { std::str::from_utf8_unchecked(&wrapped_code) };
 
     // Allocate in the allocator for lifetime safety
@@ -237,18 +241,18 @@ pub fn parse_generic<'a>(
         let constraint_span = param.constraint.as_ref().map(|c| {
             let start = c.span().start.saturating_sub(ast_offset);
             let end = c.span().end.saturating_sub(ast_offset);
-            Span::new(start, end)
+            RelativeSpan::new(start, end)
         });
 
         let default_span = param.default.as_ref().map(|d| {
             let start = d.span().start.saturating_sub(ast_offset);
             let end = d.span().end.saturating_sub(ast_offset);
-            Span::new(start, end)
+            RelativeSpan::new(start, end)
         });
 
         params.push(GenericParam {
-            name_span: Span::new(name_start, name_end),
-            span: Span::new(param_start, param_end),
+            name_span: RelativeSpan::new(name_start, name_end),
+            span: RelativeSpan::new(param_start, param_end),
             constraint_span,
             default_span,
         });
@@ -266,6 +270,7 @@ pub fn parse_generic<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::RelativeSpan;
 
     fn parse(source: &str) -> GenericParseResult<'static> {
         let allocator = Box::leak(Box::new(Allocator::default()));
@@ -412,6 +417,23 @@ mod tests {
 
         assert_eq!(result.position.start, 100);
         assert_eq!(result.position.end, 100 + source.len() as u32);
+    }
+
+    #[test]
+    fn test_param_spans_use_relative_span() {
+        fn expect_relative(_: RelativeSpan) {}
+
+        let result = parse("T extends Foo");
+        assert!(result.is_ok(), "should parse: {:?}", result.errors);
+
+        let param = &result.params[0];
+        expect_relative(param.name_span);
+        expect_relative(param.span);
+        assert!(
+            param.constraint_span.is_some(),
+            "constraint span should exist for `extends`"
+        );
+        expect_relative(param.constraint_span.expect("constraint span"));
     }
 
     #[test]

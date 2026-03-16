@@ -952,15 +952,11 @@ function findVueFiles(dir: string): string[] {
 // Main
 // ============================================================================
 
-const folders = [
-  "D:\\dev\\accioresearch\\WLS\\avava\\src",
-  "D:\\dev\\accioresearch\\WLS\\sport\\src",
-  "D:\\dev\\accioresearch\\WLS\\nexus\\nexus-ui",
-  "D:\\dev\\csc-web\\csc-web\\src",
-  "D:\\dev\\hypermob\\judis-app\\packages",
-  "D:\\dev\\mpreis\\storefront\\src",
-  "D:\\dev\\spotqa\\frontend\\src",
-];
+const folders = process.argv.slice(2);
+if (folders.length === 0) {
+  console.error("Usage: npx tsx scripts/tokenize_folders.ts <folder1> [folder2] ...");
+  process.exit(1);
+}
 
 interface FileResult {
   path: string;

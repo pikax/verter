@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "verter": {
+      "url": "http://localhost:6772/mcp"
+    }
+  }
+}

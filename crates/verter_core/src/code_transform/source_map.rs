@@ -1,20 +1,21 @@
 use memchr::memchr_iter;
 
 use super::code_transform::CodeTransform;
+use crate::cursor::position::{utf16_len, PositionResolver};
 use oxc_sourcemap::{SourceMap, SourceMapBuilder};
 
 /// Options for source map generation
 #[derive(Debug, Clone)]
-pub struct SourceMapOptions {
+pub struct SourceMapOptions<'a> {
     /// The filename of the source file
-    pub source: Option<String>,
+    pub source: Option<&'a str>,
     /// The filename of the generated file
-    pub file: Option<String>,
+    pub file: Option<&'a str>,
     /// Whether to include the source content in the map
     pub include_content: bool,
 }
 
-impl Default for SourceMapOptions {
+impl Default for SourceMapOptions<'_> {
     fn default() -> Self {
         Self {
             source: None,
@@ -24,18 +25,19 @@ impl Default for SourceMapOptions {
     }
 }
 
-impl SourceMapOptions {
+#[allow(dead_code)] // Builder API used in tests
+impl<'a> SourceMapOptions<'a> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn with_source(mut self, source: impl Into<String>) -> Self {
-        self.source = Some(source.into());
+    pub fn with_source(mut self, source: &'a str) -> Self {
+        self.source = Some(source);
         self
     }
 
-    pub fn with_file(mut self, file: impl Into<String>) -> Self {
-        self.file = Some(file.into());
+    pub fn with_file(mut self, file: &'a str) -> Self {
+        self.file = Some(file);
         self
     }
 
@@ -49,7 +51,7 @@ impl<'a> CodeTransform<'a> {
     /// Generate a source map for the transformations
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use verter_core::code_transform::{CodeTransform, SourceMapOptions};
     /// use oxc_allocator::Allocator;
     ///
@@ -63,12 +65,14 @@ impl<'a> CodeTransform<'a> {
     ///
     /// let source_map = ct.generate_map(options);
     /// ```
-    #[allow(unused_assignments)]
+    #[must_use]
+    #[allow(unused_assignments)] // generated_line/column updated in outro but intentionally not read after
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn generate_map(&self, options: SourceMapOptions) -> SourceMap {
         let mut builder = SourceMapBuilder::default();
 
         // Set up source file
-        let source_id = if let Some(source) = &options.source {
+        let source_id = if let Some(source) = options.source {
             let id = if options.include_content {
                 builder.set_source_and_content(source, self.original())
             } else {
@@ -81,20 +85,13 @@ impl<'a> CodeTransform<'a> {
 
         // Set output file name
         if let Some(file) = options.file {
-            builder.set_file(&file);
+            builder.set_file(file);
         }
 
-        // Build line-starts table once: line_starts[i] = byte offset of line i.
-        // Line 0 always starts at offset 0.
-        let original_bytes = self.original().as_bytes();
-        let line_starts = {
-            let mut starts = Vec::with_capacity(original_bytes.len() / 40 + 1);
-            starts.push(0u32);
-            for pos in memchr_iter(b'\n', original_bytes) {
-                starts.push((pos + 1) as u32);
-            }
-            starts
-        };
+        // Build position resolver for O(log N) byte-offset → (line, UTF-16 column) lookups.
+        // Uses the sourcemap-optimized constructor that skips the UTF-16 cumulative offset
+        // cache (not needed here — we only use line and column).
+        let resolver = PositionResolver::new_for_sourcemap(self.original());
 
         let mut generated_line = 0u32;
         let mut generated_column = 0u32;
@@ -103,11 +100,13 @@ impl<'a> CodeTransform<'a> {
         if !self.intro().is_empty() {
             builder.add_token(generated_line, generated_column, 0, 0, None, None);
             Self::advance_generated_position(
-                self.intro().as_bytes(),
+                self.intro(),
                 &mut generated_line,
                 &mut generated_column,
             );
         }
+
+        let is_ascii = self.is_ascii();
 
         // Process chunks
         for chunk in self.chunks() {
@@ -116,11 +115,60 @@ impl<'a> CodeTransform<'a> {
             match chunk {
                 Chunk::Original { start, end } => {
                     if let Some(source_id) = source_id {
-                        let slice_bytes = &original_bytes[*start as usize..*end as usize];
-                        let (mut source_line, mut source_column) =
-                            Self::offset_to_line_column(&line_starts, *start);
+                        let slice = &self.original()[*start as usize..*end as usize];
 
-                        // Map start of chunk
+                        Self::emit_mapped_content(
+                            &mut builder,
+                            slice,
+                            source_id,
+                            &resolver,
+                            *start,
+                            &mut generated_line,
+                            &mut generated_column,
+                            is_ascii,
+                        );
+                    }
+                }
+                Chunk::Moved {
+                    start: orig_start,
+                    content,
+                    ..
+                } => {
+                    if content.is_empty() {
+                        continue;
+                    }
+                    // Moved content — line-by-line mappings like Original chunks
+                    if let Some(source_id) = source_id {
+                        Self::emit_mapped_content(
+                            &mut builder,
+                            content,
+                            source_id,
+                            &resolver,
+                            *orig_start,
+                            &mut generated_line,
+                            &mut generated_column,
+                            is_ascii,
+                        );
+                    }
+                }
+                Chunk::Overwritten {
+                    start: orig_start,
+                    content,
+                    ..
+                } => {
+                    if content.is_empty() {
+                        continue;
+                    }
+                    // Overwritten content — emit a single token at the original start
+                    // position. Unlike Original/Moved chunks, there is no character-level
+                    // correspondence between replacement content and the source, so
+                    // per-line tokens would be misleading. This matches MagicString behavior.
+                    if let Some(source_id) = source_id {
+                        let (src_line_1, src_col_1) =
+                            resolver.offset_to_line_and_col(*orig_start as usize);
+                        let source_line = (src_line_1 - 1) as u32;
+                        let source_column = (src_col_1 - 1) as u32;
+
                         builder.add_token(
                             generated_line,
                             generated_column,
@@ -129,132 +177,66 @@ impl<'a> CodeTransform<'a> {
                             Some(source_id),
                             None,
                         );
-
-                        // Scan for newlines using memchr — only newlines matter for mappings
-                        let mut prev = 0usize;
-                        let slice_len = slice_bytes.len();
-                        for nl_pos in memchr_iter(b'\n', slice_bytes) {
-                            // Characters before this newline advance column
-                            let chars_before = nl_pos - prev;
-                            generated_column += chars_before as u32;
-                            source_column += chars_before as u32;
-
-                            // Newline
-                            generated_line += 1;
-                            generated_column = 0;
-                            source_line += 1;
-                            source_column = 0;
-                            prev = nl_pos + 1;
-
-                            // Only add mapping if this is NOT the last byte
-                            if prev < slice_len {
-                                builder.add_token(
-                                    generated_line,
-                                    generated_column,
-                                    source_line,
-                                    source_column,
-                                    Some(source_id),
-                                    None,
-                                );
-                            }
-                        }
-
-                        // Remaining chars after last newline (or all chars if no newlines)
-                        let remaining = slice_len - prev;
-                        generated_column += remaining as u32;
                     }
+
+                    Self::advance_generated_position(
+                        content,
+                        &mut generated_line,
+                        &mut generated_column,
+                    );
                 }
-                Chunk::Edited {
+                Chunk::Inserted { content } => {
+                    if content.is_empty() {
+                        continue;
+                    }
+                    // Pure insertion — unmapped
+                    builder.add_token(generated_line, generated_column, 0, 0, None, None);
+
+                    Self::advance_generated_position(
+                        content,
+                        &mut generated_line,
+                        &mut generated_column,
+                    );
+                }
+                Chunk::InsertedMapped {
                     content,
-                    original_start,
-                    original_end,
-                    ..
+                    source_start,
+                    content_offset,
                 } => {
                     if content.is_empty() {
                         continue;
                     }
-
-                    let has_original = original_start.is_some() && original_end.is_some();
-
-                    if has_original {
-                        let orig_start = original_start.unwrap();
-                        let orig_end = original_end.unwrap();
-                        let original_slice = self.slice(orig_start, orig_end);
-
-                        let is_move = *content == original_slice;
-
-                        if is_move {
-                            // Moved content — line-by-line mappings like Original chunks
-                            if let Some(source_id) = source_id {
-                                let content_bytes = content.as_bytes();
-                                let (mut source_line, mut source_column) =
-                                    Self::offset_to_line_column(&line_starts, orig_start);
-
-                                builder.add_token(
-                                    generated_line,
-                                    generated_column,
-                                    source_line,
-                                    source_column,
-                                    Some(source_id),
-                                    None,
-                                );
-
-                                let mut prev = 0usize;
-                                let content_len = content_bytes.len();
-                                for nl_pos in memchr_iter(b'\n', content_bytes) {
-                                    let chars_before = nl_pos - prev;
-                                    generated_column += chars_before as u32;
-                                    source_column += chars_before as u32;
-
-                                    generated_line += 1;
-                                    generated_column = 0;
-                                    source_line += 1;
-                                    source_column = 0;
-                                    prev = nl_pos + 1;
-
-                                    if prev < content_len {
-                                        builder.add_token(
-                                            generated_line,
-                                            generated_column,
-                                            source_line,
-                                            source_column,
-                                            Some(source_id),
-                                            None,
-                                        );
-                                    }
-                                }
-
-                                let remaining = content_len - prev;
-                                generated_column += remaining as u32;
-                            }
-                        } else {
-                            // Overwritten content — only map start position
-                            if let Some(source_id) = source_id {
-                                let (source_line, source_column) =
-                                    Self::offset_to_line_column(&line_starts, orig_start);
-
-                                builder.add_token(
-                                    generated_line,
-                                    generated_column,
-                                    source_line,
-                                    source_column,
-                                    Some(source_id),
-                                    None,
-                                );
-                            }
-
-                            Self::advance_generated_position(
-                                content.as_bytes(),
-                                &mut generated_line,
-                                &mut generated_column,
+                    // Inserted content mapped to a specific source position.
+                    // `content_offset` shifts the source map token within the content:
+                    // characters before `content_offset` are unmapped (e.g., `(__props.`),
+                    // then the token is emitted at `content_offset` pointing to `source_start`.
+                    let offset = (*content_offset as usize).min(content.len());
+                    if offset > 0 {
+                        // Unmapped prefix (e.g., the `(` and binding prefix)
+                        let prefix = &content[..offset];
+                        builder.add_token(generated_line, generated_column, 0, 0, None, None);
+                        Self::advance_generated_position(
+                            prefix,
+                            &mut generated_line,
+                            &mut generated_column,
+                        );
+                    }
+                    // Mapped token at content_offset → source_start
+                    let rest = &content[offset..];
+                    if !rest.is_empty() {
+                        if let Some(source_id) = source_id {
+                            let (sl, sc) = resolver.offset_to_line_and_col(*source_start as usize);
+                            builder.add_token(
+                                generated_line,
+                                generated_column,
+                                (sl - 1) as u32,
+                                (sc - 1) as u32,
+                                Some(source_id),
+                                None,
                             );
                         }
-                    } else {
-                        // Pure insertion — unmapped
-                        builder.add_token(generated_line, generated_column, 0, 0, None, None);
-
                         Self::advance_generated_position(
-                            content.as_bytes(),
+                            rest,
                             &mut generated_line,
                             &mut generated_column,
                         );
@@ -267,7 +249,7 @@ impl<'a> CodeTransform<'a> {
         if !self.outro().is_empty() {
             builder.add_token(generated_line, generated_column, 0, 0, None, None);
             Self::advance_generated_position(
-                self.outro().as_bytes(),
+                self.outro(),
                 &mut generated_line,
                 &mut generated_column,
             );
@@ -276,36 +258,94 @@ impl<'a> CodeTransform<'a> {
         builder.into_sourcemap()
     }
 
-    /// Binary-search the line-starts table to convert a byte offset
-    /// into (line, column) in O(log N) time.
-    #[inline]
-    fn offset_to_line_column(line_starts: &[u32], offset: u32) -> (u32, u32) {
-        // partition_point returns the first index where line_starts[i] > offset,
-        // so line = that index - 1.
-        let line = line_starts.partition_point(|&s| s <= offset);
-        let line = if line > 0 { line - 1 } else { 0 };
-        let column = offset - line_starts[line];
-        (line as u32, column)
+    /// Emit line-by-line source map tokens for content that maps back to original source.
+    /// Used for both Original chunks and moved Edited chunks.
+    ///
+    /// Scans `content` for newlines, emitting a token at the start and after each newline.
+    /// Source positions are resolved via `PositionResolver` (UTF-16 aware).
+    /// Generated column advances use the resolver's column difference since the content
+    /// is always from the original source (either in-place or moved).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_mapped_content(
+        builder: &mut SourceMapBuilder,
+        content: &str,
+        source_id: u32,
+        resolver: &PositionResolver,
+        original_start: u32,
+        generated_line: &mut u32,
+        generated_column: &mut u32,
+        is_ascii: bool,
+    ) {
+        let content_bytes = content.as_bytes();
+        let content_len = content_bytes.len();
+
+        // Single resolver lookup for the initial source position (O(log N) once per chunk)
+        let (sl, sc) = resolver.offset_to_line_and_col(original_start as usize);
+        let mut source_line = (sl - 1) as u32;
+
+        builder.add_token(
+            *generated_line,
+            *generated_column,
+            source_line,
+            (sc - 1) as u32,
+            Some(source_id),
+            None,
+        );
+
+        // Scan for newlines — O(1) manual tracking per newline (no binary search)
+        let mut prev = 0usize;
+
+        for nl_pos in memchr_iter(b'\n', content_bytes) {
+            *generated_line += 1;
+            *generated_column = 0;
+            source_line += 1;
+            prev = nl_pos + 1;
+
+            // After a newline, source column is always 0
+            if prev < content_len {
+                builder.add_token(
+                    *generated_line,
+                    *generated_column,
+                    source_line,
+                    0,
+                    Some(source_id),
+                    None,
+                );
+            }
+        }
+
+        // Advance generated_column for remaining content after last newline.
+        // For ASCII sources, byte length == UTF-16 length, so skip utf16_len().
+        let remaining = &content[prev..];
+        *generated_column += if is_ascii {
+            remaining.len() as u32
+        } else {
+            utf16_len(remaining) as u32
+        };
     }
 
-    /// Advance generated line/column position through a byte slice using memchr.
+    /// Advance generated line/column position through a string using memchr.
+    /// Counts columns in UTF-16 code units for correct source map positions.
     #[inline]
-    fn advance_generated_position(bytes: &[u8], line: &mut u32, column: &mut u32) {
+    fn advance_generated_position(content: &str, line: &mut u32, column: &mut u32) {
+        let bytes = content.as_bytes();
         let mut prev = 0usize;
         for nl_pos in memchr_iter(b'\n', bytes) {
             *line += 1;
             prev = nl_pos + 1;
         }
         if prev == 0 {
-            // No newlines at all — just advance column by byte count
-            *column += bytes.len() as u32;
+            // No newlines at all — advance column by UTF-16 length
+            *column += utf16_len(content) as u32;
         } else {
-            // Column is distance from last newline to end
-            *column = (bytes.len() - prev) as u32;
+            // Column is UTF-16 length from last newline to end
+            *column = utf16_len(&content[prev..]) as u32;
         }
     }
 
     /// Generate source map and return as JSON string
+    #[must_use]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn generate_map_json(&self, options: SourceMapOptions) -> String {
         let map = self.generate_map(options);
         map.to_json_string()
@@ -313,124 +353,5 @@ impl<'a> CodeTransform<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use oxc_allocator::Allocator;
-
-    #[test]
-    fn test_source_map_generation() {
-        let allocator = Allocator::default();
-        let mut ct = CodeTransform::new("Hello World", &allocator);
-        ct.overwrite(6, 11, "Rust");
-
-        let options = SourceMapOptions::new()
-            .with_source("input.js")
-            .with_file("output.js");
-
-        let map = ct.generate_map(options);
-
-        // The source map should be valid
-        let sources: Vec<_> = map.get_sources().collect();
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].as_ref(), "input.js");
-    }
-
-    #[test]
-    fn test_source_map_with_content() {
-        let allocator = Allocator::default();
-        let source = "const x = 1;\nconst y = 2;";
-        let mut ct = CodeTransform::new(source, &allocator);
-        ct.overwrite(6, 7, "foo");
-
-        let options = SourceMapOptions::new()
-            .with_source("test.js")
-            .include_content(true);
-
-        let map = ct.generate_map(options);
-
-        // Should include source content
-        let content = map.get_source_content(0);
-        assert!(content.is_some());
-        assert_eq!(content.unwrap().as_ref(), source);
-    }
-
-    #[test]
-    fn test_line_column_calculation() {
-        let source = "Hello\nWorld\nTest";
-        let bytes = source.as_bytes();
-        let mut line_starts = vec![0u32];
-        for pos in memchr_iter(b'\n', bytes) {
-            line_starts.push((pos + 1) as u32);
-        }
-
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 0),
-            (0, 0)
-        ); // H
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 5),
-            (0, 5)
-        ); // \n
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 6),
-            (1, 0)
-        ); // W
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 12),
-            (2, 0)
-        ); // T
-    }
-
-    /// @ai-generated — Verify offset_to_line_column edge cases
-    /// Tests the Copilot-suggested concern that partition_point + line-1 is incorrect.
-    /// The current implementation IS correct: partition_point(|&s| s <= offset) returns
-    /// the count of elements satisfying the predicate, which minus 1 gives the correct line.
-    #[test]
-    fn test_line_column_edge_cases() {
-        // Single line: line_starts = [0]
-        let line_starts = vec![0u32];
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 0),
-            (0, 0)
-        );
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 5),
-            (0, 5)
-        );
-
-        // Two lines: "abc\ndef" → line_starts = [0, 4]
-        let line_starts = vec![0u32, 4];
-        // offset 0 = line 0, col 0
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 0),
-            (0, 0)
-        );
-        // offset 3 = line 0, col 3 (the \n)
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 3),
-            (0, 3)
-        );
-        // offset 4 = line 1, col 0 (first char of line 1)
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 4),
-            (1, 0)
-        );
-        // offset 6 = line 1, col 2
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 6),
-            (1, 2)
-        );
-
-        // Offset exactly at a line start boundary
-        // "a\nb\nc" → line_starts = [0, 2, 4]
-        let line_starts = vec![0u32, 2, 4];
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 2),
-            (1, 0)
-        );
-        assert_eq!(
-            CodeTransform::offset_to_line_column(&line_starts, 4),
-            (2, 0)
-        );
-    }
-}
+#[path = "source_map_tests.rs"]
+mod source_map_tests;

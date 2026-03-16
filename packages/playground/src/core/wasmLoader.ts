@@ -17,10 +17,39 @@ const GITHUB_RELEASE_BASE = `https://github.com/${GITHUB_REPO}/releases/download
 const JSDELIVR_BASE = "https://cdn.jsdelivr.net/npm/@verter/wasm";
 
 export interface WasmModule {
-  compile: (input: string, options?: unknown) => unknown;
-  compileBytes?: (input: Uint8Array, options?: unknown) => unknown;
-  stripTypes?: (source: string) => unknown;
+  VerterHost?: new (config?: unknown) => {
+    resolve: (rawId: string) => unknown;
+    upsert: (request: unknown) => unknown;
+    getVirtualFile: (query: unknown) => unknown;
+    listVirtualFiles: (canonicalId: string) => unknown;
+    remove: (canonicalOrAlias: string) => unknown;
+    collectResolvableModuleReferenceSpecifiers?: (moduleReferences: unknown) => unknown;
+    resolveKnownModuleReferenceDependencies?: (
+      ownerCanonicalId: string,
+      moduleReferences: unknown,
+      knownIds: string[],
+      extensions?: string[],
+    ) => unknown;
+  };
   default: (input?: unknown) => Promise<unknown>;
+}
+
+function isNodeRuntime(): boolean {
+  const maybeProcess = (globalThis as { process?: { versions?: { node?: string } } }).process;
+  return typeof maybeProcess?.versions?.node === "string";
+}
+
+async function resolveLocalWasmModuleOrPath(): Promise<string | Uint8Array> {
+  if (!isNodeRuntime()) {
+    return "/verter_wasm_bg.wasm";
+  }
+
+  const wasmUrl = new URL("../../../wasm/wasm/verter_wasm_bg.wasm", import.meta.url);
+  const nodeFs = (await import(/* @vite-ignore */ "node:fs/promises")) as unknown as {
+    readFile(path: URL): Promise<Uint8Array>;
+  };
+
+  return nodeFs.readFile(wasmUrl);
 }
 
 /**
@@ -30,7 +59,7 @@ export interface WasmModule {
 export async function loadLocalWasm(): Promise<WasmModule> {
   // @ts-ignore - Dynamic import of wasm glue code
   const mod = await import("verter-wasm-glue");
-  await mod.default({ module_or_path: "/verter_wasm_bg.wasm" });
+  await mod.default({ module_or_path: await resolveLocalWasmModuleOrPath() });
   return mod;
 }
 

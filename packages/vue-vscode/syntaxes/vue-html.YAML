@@ -232,7 +232,7 @@ repository:
         endCaptures:
           '0': { name: punctuation.definition.string.end.html }
         patterns:
-          - include: source.js#expression
+          - include: '#ts-expression-safe'
       - name: source.directive.vue
         begin: '"'
         beginCaptures:
@@ -241,7 +241,7 @@ repository:
         endCaptures:
           '0': { name: punctuation.definition.string.end.html }
         patterns:
-          - include: source.js#expression
+          - include: '#ts-expression-safe'
       - name: source.directive.vue
         begin: "'"
         beginCaptures:
@@ -250,4 +250,16 @@ repository:
         endCaptures:
           '0': { name: punctuation.definition.string.end.html }
         patterns:
-          - include: source.js#expression
+          - include: '#ts-expression-safe'
+  ts-expression-safe:
+    patterns:
+      # Intercept 'as const' before TS grammar's begin/end type-assertion scope can open
+      - match: (?<![_$[:alnum:]])(?:(?<=\.\.\.)|(?<!\.))(as)\s+(const)\b
+        captures:
+          '1': { name: keyword.control.as.ts }
+          '2': { name: storage.modifier.ts }
+      # Intercept 'as'/'satisfies' before TS grammar's begin/end type-assertion scope can open
+      - match: (?<![_$[:alnum:]])(?:(?<=\.\.\.)|(?<!\.))(as|satisfies)(?=\s)
+        captures:
+          '1': { name: keyword.control.as.ts }
+      - include: source.ts#expression

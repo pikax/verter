@@ -1,0 +1,986 @@
+//! TypeScript type provider via the VS Code extension's in-process
+//! `ts.createLanguageService()`.
+//!
+//! Instead of spawning a child process, this provider sends `$/verter/tsQuery`
+//! requests back to the extension host over the existing LSP stdio pipe.
+//! The extension handles each query synchronously in-process, avoiding TCP,
+//! stdio, and process spawn overhead.
+//!
+//! Uses tsserver command format so all existing response parsers work unchanged.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use tokio::sync::{Mutex, OnceCell};
+
+use crate::server::{TsQuery, TsQueryParams};
+use crate::tsgo::protocol::*;
+use crate::tsgo::traits::{ProviderFuture, TypeProvider};
+use crate::tsserver::ipc::{
+    byte_offset_to_tsserver_pos, concat_display_parts, format_quickinfo_hover,
+    parse_tsserver_code_action, parse_tsserver_completion, parse_tsserver_diagnostic,
+    parse_tsserver_location, parse_tsserver_rename_span,
+};
+
+/// A `TypeProvider` that delegates to the VS Code extension's in-process
+/// TypeScript language service via `$/verter/tsQuery` server→client requests.
+pub struct ExtensionTypeProvider {
+    /// Deferred LSP client — populated during `LspService::build()`.
+    client: Arc<OnceCell<tower_lsp_server::Client>>,
+    /// Cached file contents for position conversion (byte offset ↔ line/col).
+    contents: Arc<Mutex<HashMap<String, String>>>,
+    /// Files that have been sent to the extension via `open` command.
+    opened_files: Arc<Mutex<HashSet<String>>>,
+    /// Workspace root path (forward slashes).
+    workspace_root: String,
+    /// Per-project roots for per-file `projectRootPath` matching.
+    project_roots: Arc<parking_lot::RwLock<Vec<String>>>,
+}
+
+impl ExtensionTypeProvider {
+    pub fn new(client: Arc<OnceCell<tower_lsp_server::Client>>, workspace_root: &str) -> Self {
+        Self {
+            client,
+            contents: Arc::new(Mutex::new(HashMap::new())),
+            opened_files: Arc::new(Mutex::new(HashSet::new())),
+            workspace_root: workspace_root.replace('\\', "/"),
+            project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Send a tsserver-format command to the extension and return the response body.
+    async fn query(
+        &self,
+        command: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, TypeProviderError> {
+        let client = self
+            .client
+            .get()
+            .ok_or_else(|| TypeProviderError::new("LSP client not yet initialized"))?;
+        client
+            .send_request::<TsQuery>(TsQueryParams {
+                command: command.into(),
+                arguments,
+            })
+            .await
+            .map_err(|e| TypeProviderError::new(format!("tsQuery failed: {e}")))
+    }
+
+    fn normalize_path(path: &str) -> String {
+        path.replace('\\', "/")
+    }
+
+    fn project_root_for(&self, file: &str) -> String {
+        let roots = self.project_roots.read();
+        for root in roots.iter() {
+            if file.starts_with(root.as_str()) {
+                return root.clone();
+            }
+        }
+        self.workspace_root.clone()
+    }
+}
+
+impl TypeProvider for ExtensionTypeProvider {
+    fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let file = Self::normalize_path(path);
+        let content = content.to_string();
+        let contents_cache = Arc::clone(&self.contents);
+        let opened_files = Arc::clone(&self.opened_files);
+        let project_root = self.project_root_for(&file);
+        Box::pin(async move {
+            contents_cache
+                .lock()
+                .await
+                .insert(file.clone(), content.clone());
+            opened_files.lock().await.insert(file.clone());
+            self.query(
+                "open",
+                serde_json::json!({
+                    "file": file,
+                    "fileContent": content,
+                    "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                        else if file.ends_with(".jsx") { "JSX" }
+                        else if file.ends_with(".js") { "JS" }
+                        else { "TS" },
+                    "projectRootPath": project_root,
+                }),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let file = Self::normalize_path(path);
+        let content = content.to_string();
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            contents_cache.lock().await.insert(file, content);
+            Ok(())
+        })
+    }
+
+    fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let file = Self::normalize_path(path);
+        let content = content.to_string();
+        let contents_cache = Arc::clone(&self.contents);
+        let opened_files = Arc::clone(&self.opened_files);
+        let project_root = self.project_root_for(&file);
+        Box::pin(async move {
+            let old_line_count = {
+                let cache = contents_cache.lock().await;
+                cache.get(&file).map(|c| c.lines().count() as u32 + 1)
+            };
+
+            contents_cache
+                .lock()
+                .await
+                .insert(file.clone(), content.clone());
+
+            let mut opened = opened_files.lock().await;
+            if opened.contains(&file) {
+                drop(opened);
+                if let Some(end_line) = old_line_count {
+                    self.query(
+                        "updateOpen",
+                        serde_json::json!({
+                            "changedFiles": [{
+                                "fileName": file,
+                                "textChanges": [{
+                                    "start": { "line": 1, "offset": 1 },
+                                    "end": { "line": end_line, "offset": 1 },
+                                    "newText": content,
+                                }]
+                            }]
+                        }),
+                    )
+                    .await?;
+                } else {
+                    self.query(
+                        "updateOpen",
+                        serde_json::json!({
+                            "closedFiles": [&file],
+                            "openFiles": [{
+                                "file": file,
+                                "fileContent": content,
+                                "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                                    else if file.ends_with(".jsx") { "JSX" }
+                                    else if file.ends_with(".js") { "JS" }
+                                    else { "TS" },
+                                "projectRootPath": project_root,
+                            }]
+                        }),
+                    )
+                    .await?;
+                }
+            } else {
+                opened.insert(file.clone());
+                drop(opened);
+                self.query(
+                    "open",
+                    serde_json::json!({
+                        "file": file,
+                        "fileContent": content,
+                        "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                            else if file.ends_with(".jsx") { "JSX" }
+                            else if file.ends_with(".js") { "JS" }
+                            else { "TS" },
+                        "projectRootPath": project_root,
+                    }),
+                )
+                .await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        let opened_files = Arc::clone(&self.opened_files);
+        Box::pin(async move {
+            contents_cache.lock().await.remove(&file);
+            opened_files.lock().await.remove(&file);
+            self.query("close", serde_json::json!({ "file": file }))
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn get_completions(
+        &self,
+        path: &str,
+        offset: u32,
+        trigger_character: Option<&str>,
+    ) -> ProviderFuture<'_, CompletionResult> {
+        let file = Self::normalize_path(path);
+        let trigger = trigger_character.map(|s| s.to_string());
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let mut args = serde_json::json!({
+                "file": file,
+                "line": line,
+                "offset": col,
+                "includeExternalModuleExports": true,
+                "includeInsertTextCompletions": true,
+            });
+
+            if let Some(ref t) = trigger {
+                args["triggerCharacter"] = serde_json::Value::String(t.clone());
+            }
+
+            let result = self.query("completionInfo", args).await?;
+
+            let is_incomplete = result
+                .get("isMemberCompletion")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let items = result
+                .get("entries")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(parse_tsserver_completion).collect())
+                .unwrap_or_default();
+
+            Ok(CompletionResult {
+                items,
+                is_incomplete,
+            })
+        })
+    }
+
+    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let result = self
+                .query(
+                    "quickinfo",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                    }),
+                )
+                .await;
+
+            match result {
+                Ok(body) => {
+                    let display = body
+                        .get("displayString")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let docs = body
+                        .get("documentation")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let kind = body
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+
+                    if display.is_empty() {
+                        return Ok(None);
+                    }
+
+                    let contents = format_quickinfo_hover(kind, display, docs);
+
+                    Ok(Some(HoverInfo {
+                        contents,
+                        range_start: None,
+                        range_end: None,
+                    }))
+                }
+                Err(e) => {
+                    tracing::warn!("extension quickinfo error for {file}: {e}");
+                    Ok(None)
+                }
+            }
+        })
+    }
+
+    fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let content = {
+                let cache = contents_cache.lock().await;
+                cache.get(&file).cloned()
+            };
+
+            let result = self
+                .query(
+                    "semanticDiagnosticsSync",
+                    serde_json::json!({ "file": file }),
+                )
+                .await;
+
+            match result {
+                Ok(body) => {
+                    let diags = if let Some(arr) = body.as_array() {
+                        arr.iter()
+                            .filter_map(|d| parse_tsserver_diagnostic(d, content.as_deref()))
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+                    Ok(diags)
+                }
+                Err(_) => Ok(vec![]),
+            }
+        })
+    }
+
+    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let result = self
+                .query(
+                    "definition",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                    }),
+                )
+                .await?;
+
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+
+            Ok(locs)
+        })
+    }
+
+    fn get_type_definition(
+        &self,
+        path: &str,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let result = self
+                .query(
+                    "typeDefinition",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                    }),
+                )
+                .await?;
+
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+
+            Ok(locs)
+        })
+    }
+
+    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let result = self
+                .query(
+                    "references",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                    }),
+                )
+                .await?;
+
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .get("refs")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+
+            Ok(locs)
+        })
+    }
+
+    fn get_rename_locations(
+        &self,
+        path: &str,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let result = self
+                .query(
+                    "rename",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                        "findInComments": false,
+                        "findInStrings": false,
+                    }),
+                )
+                .await?;
+
+            let locs = {
+                let cache = contents_cache.lock().await;
+                result
+                    .get("locs")
+                    .and_then(|v| v.as_array())
+                    .map(|groups| {
+                        groups
+                            .iter()
+                            .flat_map(|group| {
+                                let file_path = group
+                                    .get("file")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .replace('\\', "/");
+                                let content = cache.get(&file_path).map(|s| s.as_str());
+                                group
+                                    .get("locs")
+                                    .and_then(|v| v.as_array())
+                                    .into_iter()
+                                    .flat_map(move |spans| {
+                                        let fp = file_path.clone();
+                                        let c = content;
+                                        spans.iter().filter_map(move |span| {
+                                            parse_tsserver_rename_span(span, &fp, c)
+                                        })
+                                    })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+
+            Ok(locs)
+        })
+    }
+
+    fn get_signature_help(
+        &self,
+        path: &str,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let result = self
+                .query(
+                    "signatureHelp",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                    }),
+                )
+                .await;
+
+            match result {
+                Ok(body) => {
+                    let items = body.get("items").and_then(|v| v.as_array());
+                    let Some(items) = items else {
+                        return Ok(None);
+                    };
+
+                    let signatures: Vec<SignatureInfo> = items
+                        .iter()
+                        .map(|item| {
+                            let prefix = item
+                                .get("prefixDisplayParts")
+                                .and_then(|v| v.as_array())
+                                .map(|parts| concat_display_parts(parts))
+                                .unwrap_or_default();
+                            let suffix = item
+                                .get("suffixDisplayParts")
+                                .and_then(|v| v.as_array())
+                                .map(|parts| concat_display_parts(parts))
+                                .unwrap_or_default();
+                            let separator = item
+                                .get("separatorDisplayParts")
+                                .and_then(|v| v.as_array())
+                                .map(|parts| concat_display_parts(parts))
+                                .unwrap_or_else(|| ", ".to_string());
+
+                            let params: Vec<ParameterInfo> = item
+                                .get("parameters")
+                                .and_then(|v| v.as_array())
+                                .map(|ps| {
+                                    ps.iter()
+                                        .map(|p| {
+                                            let label = p
+                                                .get("displayParts")
+                                                .and_then(|v| v.as_array())
+                                                .map(|parts| concat_display_parts(parts))
+                                                .unwrap_or_default();
+                                            let doc = p
+                                                .get("documentation")
+                                                .and_then(|v| v.as_array())
+                                                .map(|parts| concat_display_parts(parts));
+                                            ParameterInfo {
+                                                label,
+                                                documentation: doc,
+                                            }
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+
+                            let param_labels: Vec<String> =
+                                params.iter().map(|p| p.label.clone()).collect();
+                            let label =
+                                format!("{prefix}{}{suffix}", param_labels.join(&separator));
+                            let doc = item
+                                .get("documentation")
+                                .and_then(|v| v.as_array())
+                                .map(|parts| concat_display_parts(parts));
+
+                            SignatureInfo {
+                                label,
+                                documentation: doc,
+                                parameters: params,
+                            }
+                        })
+                        .collect();
+
+                    if signatures.is_empty() {
+                        return Ok(None);
+                    }
+
+                    let active_sig = body
+                        .get("selectedItemIndex")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as u32);
+                    let active_param = body
+                        .get("argumentIndex")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as u32);
+
+                    Ok(Some(SignatureHelp {
+                        signatures,
+                        active_signature: active_sig,
+                        active_parameter: active_param,
+                    }))
+                }
+                Err(_) => Ok(None),
+            }
+        })
+    }
+
+    fn get_code_actions(
+        &self,
+        path: &str,
+        start_offset: u32,
+        end_offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (sl, sc, el, ec) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => {
+                        let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
+                        let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
+                        (sl, sc, el, ec)
+                    }
+                    None => (1, start_offset + 1, 1, end_offset + 1),
+                }
+            };
+
+            let result = self
+                .query(
+                    "getCodeFixes",
+                    serde_json::json!({
+                        "file": file,
+                        "startLine": sl,
+                        "startOffset": sc,
+                        "endLine": el,
+                        "endOffset": ec,
+                        "errorCodes": [],
+                    }),
+                )
+                .await;
+
+            match result {
+                Ok(body) => {
+                    let cache = contents_cache.lock().await;
+                    let actions = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|a| parse_tsserver_code_action(a, &cache))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Ok(actions)
+                }
+                Err(_) => Ok(vec![]),
+            }
+        })
+    }
+
+    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let content = {
+                let cache = contents_cache.lock().await;
+                cache.get(&file).cloned()
+            };
+            let Some(content) = content else {
+                return Ok(vec![]);
+            };
+            let end_line = content.lines().count() as u32 + 1;
+
+            let result = self
+                .query(
+                    "encodedSemanticClassifications-full",
+                    serde_json::json!({
+                        "file": file,
+                        "start": { "line": 1, "offset": 1 },
+                        "end": { "line": end_line, "offset": 1 },
+                        "format": "2020",
+                    }),
+                )
+                .await;
+
+            match result {
+                Ok(body) => {
+                    let spans = body
+                        .get("spans")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let mut tokens = Vec::new();
+                    let mut i = 0;
+                    while i + 2 < spans.len() {
+                        let start = spans[i].as_u64().unwrap_or(0) as u32;
+                        let length = spans[i + 1].as_u64().unwrap_or(0) as u32;
+                        let classification = spans[i + 2].as_u64().unwrap_or(0) as u32;
+                        let token_type = classification & 0xFF;
+                        let token_modifiers = (classification >> 8) & 0xFF;
+                        tokens.push(SemanticToken {
+                            start,
+                            length,
+                            token_type,
+                            token_modifiers,
+                        });
+                        i += 3;
+                    }
+
+                    Ok(tokens)
+                }
+                Err(_) => Ok(vec![]),
+            }
+        })
+    }
+
+    fn get_document_highlights(
+        &self,
+        path: &str,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (line, col) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                    None => (1, offset + 1),
+                }
+            };
+
+            let result = self
+                .query(
+                    "documentHighlights",
+                    serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "offset": col,
+                        "filesToSearch": [file],
+                    }),
+                )
+                .await;
+
+            match result {
+                Ok(body) => {
+                    let highlights = body
+                        .as_array()
+                        .into_iter()
+                        .flat_map(|groups| {
+                            groups.iter().flat_map(|group| {
+                                group
+                                    .get("highlightSpans")
+                                    .and_then(|v| v.as_array())
+                                    .into_iter()
+                                    .flat_map(|spans| {
+                                        spans.iter().filter_map(|span| {
+                                            let start = span.get("start")?;
+                                            let end = span.get("end")?;
+                                            let sl = start.get("line")?.as_u64()? as u32;
+                                            let so = start.get("offset")?.as_u64()? as u32;
+                                            let el = end.get("line")?.as_u64()? as u32;
+                                            let eo = end.get("offset")?.as_u64()? as u32;
+                                            let kind = span
+                                                .get("kind")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("none");
+                                            let hl_kind = match kind {
+                                                "writtenReference" => {
+                                                    TypeDocumentHighlightKind::Write
+                                                }
+                                                _ => TypeDocumentHighlightKind::Read,
+                                            };
+                                            let s = ((sl.saturating_sub(1)) << 16)
+                                                | ((so.saturating_sub(1)) & 0xFFFF);
+                                            let e = ((el.saturating_sub(1)) << 16)
+                                                | ((eo.saturating_sub(1)) & 0xFFFF);
+                                            Some(TypeDocumentHighlight {
+                                                start: s,
+                                                end: e,
+                                                kind: hl_kind,
+                                            })
+                                        })
+                                    })
+                            })
+                        })
+                        .collect();
+
+                    Ok(highlights)
+                }
+                Err(_) => Ok(vec![]),
+            }
+        })
+    }
+
+    fn get_inlay_hints(
+        &self,
+        path: &str,
+        start_offset: u32,
+        end_offset: u32,
+    ) -> ProviderFuture<'_, Vec<InlayHint>> {
+        let file = Self::normalize_path(path);
+        let contents_cache = Arc::clone(&self.contents);
+        Box::pin(async move {
+            let (sl, _sc, el, _ec) = {
+                let cache = contents_cache.lock().await;
+                match cache.get(&file) {
+                    Some(c) => {
+                        let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
+                        let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
+                        (sl, sc, el, ec)
+                    }
+                    None => (1, start_offset + 1, 1, end_offset + 1),
+                }
+            };
+
+            let result = self
+                .query(
+                    "provideInlayHints",
+                    serde_json::json!({
+                        "file": file,
+                        "start": sl,
+                        "length": (el.saturating_sub(sl) + 1) * 200,
+                    }),
+                )
+                .await;
+
+            match result {
+                Ok(body) => {
+                    let hints = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|hint| {
+                                    let text = hint.get("text")?.as_str()?.to_string();
+                                    let pos = hint.get("position")?;
+                                    let hl = pos.get("line")?.as_u64()? as u32;
+                                    let ho = pos.get("offset")?.as_u64()? as u32;
+
+                                    let kind_str =
+                                        hint.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    let kind = match kind_str {
+                                        "Type" => Some(InlayHintKind::Type),
+                                        "Parameter" => Some(InlayHintKind::Parameter),
+                                        _ => None,
+                                    };
+
+                                    let position = ((hl.saturating_sub(1)) << 16)
+                                        | ((ho.saturating_sub(1)) & 0xFFFF);
+
+                                    Some(InlayHint {
+                                        position,
+                                        label: text,
+                                        kind,
+                                        padding_left: hint
+                                            .get("whitespaceBefore")
+                                            .and_then(|v| v.as_bool()),
+                                        padding_right: hint
+                                            .get("whitespaceAfter")
+                                            .and_then(|v| v.as_bool()),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    Ok(hints)
+                }
+                Err(_) => Ok(vec![]),
+            }
+        })
+    }
+
+    fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
+        let base_url = base_url.to_string();
+        Box::pin(async move {
+            let mut options = serde_json::json!({
+                "module": "esnext",
+                "target": "esnext",
+                "moduleResolution": "bundler",
+                "jsx": "preserve",
+                "jsxImportSource": "vue",
+                "allowImportingTsExtensions": true,
+                "allowJs": true,
+                "checkJs": true,
+                "strict": true,
+                "allowArbitraryExtensions": true,
+                "baseUrl": base_url,
+                "paths": paths,
+            });
+            if options.get("paths").is_some_and(|v| v.is_null()) {
+                if let Some(obj) = options.as_object_mut() {
+                    obj.remove("paths");
+                }
+            }
+            let _ = self
+                .query(
+                    "compilerOptionsForInferredProjects",
+                    serde_json::json!({ "options": options }),
+                )
+                .await;
+            Ok(())
+        })
+    }
+
+    fn update_workspace_folders(
+        &self,
+        added: Vec<serde_json::Value>,
+        removed: Vec<serde_json::Value>,
+    ) -> ProviderFuture<'_, ()> {
+        let project_roots = Arc::clone(&self.project_roots);
+        Box::pin(async move {
+            let mut roots = project_roots.write();
+
+            for folder in &removed {
+                if let Some(uri) = folder.get("uri").and_then(|v| v.as_str()) {
+                    let canonical = crate::documents::uri_to_canonical_id_from_str(uri);
+                    roots.retain(|r| r != &canonical);
+                }
+            }
+
+            for folder in &added {
+                if let Some(uri) = folder.get("uri").and_then(|v| v.as_str()) {
+                    let canonical = crate::documents::uri_to_canonical_id_from_str(uri);
+                    if !roots.contains(&canonical) {
+                        roots.push(canonical);
+                    }
+                }
+            }
+
+            roots.sort_by_key(|r| std::cmp::Reverse(r.len()));
+
+            Ok(())
+        })
+    }
+}

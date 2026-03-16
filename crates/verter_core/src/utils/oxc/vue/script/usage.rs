@@ -127,6 +127,49 @@ impl VueApiKind {
     pub const fn requires_sync_context(&self) -> bool {
         matches!(self, Self::GetCurrentInstance)
     }
+
+    /// Get the Vue API function name as it appears in source code.
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::Provide => "provide",
+            Self::Inject => "inject",
+            Self::Ref => "ref",
+            Self::Reactive => "reactive",
+            Self::Computed => "computed",
+            Self::ShallowRef => "shallowRef",
+            Self::ShallowReactive => "shallowReactive",
+            Self::Watch => "watch",
+            Self::WatchEffect => "watchEffect",
+            Self::WatchPostEffect => "watchPostEffect",
+            Self::WatchSyncEffect => "watchSyncEffect",
+            Self::OnMounted => "onMounted",
+            Self::OnUnmounted => "onUnmounted",
+            Self::OnBeforeMount => "onBeforeMount",
+            Self::OnBeforeUnmount => "onBeforeUnmount",
+            Self::OnUpdated => "onUpdated",
+            Self::OnBeforeUpdate => "onBeforeUpdate",
+            Self::OnErrorCaptured => "onErrorCaptured",
+            Self::OnActivated => "onActivated",
+            Self::OnDeactivated => "onDeactivated",
+            Self::OnRenderTracked => "onRenderTracked",
+            Self::OnRenderTriggered => "onRenderTriggered",
+            Self::OnServerPrefetch => "onServerPrefetch",
+            Self::UseSlots => "useSlots",
+            Self::UseAttrs => "useAttrs",
+            Self::UseTemplateRef => "useTemplateRef",
+            Self::GetCurrentInstance => "getCurrentInstance",
+        }
+    }
+
+    /// Check if this API is a lifecycle hook.
+    pub const fn is_lifecycle(&self) -> bool {
+        matches!(self.category(), VueApiCategory::Lifecycle)
+    }
+
+    /// Check if this API is a watcher.
+    pub const fn is_watcher(&self) -> bool {
+        matches!(self.category(), VueApiCategory::Watchers)
+    }
 }
 
 /// Categories of Vue Composition API functions
@@ -389,6 +432,24 @@ impl LifecycleHook {
             _ => None,
         }
     }
+
+    /// Get the lifecycle hook name as it appears in source code.
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::OnMounted => "onMounted",
+            Self::OnUnmounted => "onUnmounted",
+            Self::OnBeforeMount => "onBeforeMount",
+            Self::OnBeforeUnmount => "onBeforeUnmount",
+            Self::OnUpdated => "onUpdated",
+            Self::OnBeforeUpdate => "onBeforeUpdate",
+            Self::OnErrorCaptured => "onErrorCaptured",
+            Self::OnActivated => "onActivated",
+            Self::OnDeactivated => "onDeactivated",
+            Self::OnRenderTracked => "onRenderTracked",
+            Self::OnRenderTriggered => "onRenderTriggered",
+            Self::OnServerPrefetch => "onServerPrefetch",
+        }
+    }
 }
 
 /// A lifecycle hook usage
@@ -480,6 +541,8 @@ pub struct TemplateUtilUsage {
     pub binding_span: Option<Span>,
     /// For useTemplateRef: the ref name argument span
     pub ref_name_span: Option<Span>,
+    /// For useAttrs<T>(): the type parameter span (points to `T` inside `<T>`)
+    pub type_arg_span: Option<Span>,
 }
 
 // =============================================================================

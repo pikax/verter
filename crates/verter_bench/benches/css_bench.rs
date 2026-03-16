@@ -1,7 +1,8 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 use verter_core::css::{
-    modules::apply_css_modules, prepass::prepass, scoped::apply_scoped, ProcessStyleOptions,
+    modules::apply_css_modules, prepass::prepass, scoped::apply_scoped, scoped::apply_scoped_raw,
+    ProcessStyleOptions,
 };
 
 // =============================================================================
@@ -134,7 +135,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -155,7 +156,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -176,7 +177,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: false,
                 is_module: true,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -198,7 +199,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: true,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -219,7 +220,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -240,7 +241,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: false,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -447,11 +448,218 @@ fn bench_modules(c: &mut Criterion) {
     group.finish();
 }
 
+// =============================================================================
+// Benchmark: lightningcss (process_style) vs fast (process_style_fast)
+// =============================================================================
+
+/// Generate CSS with @media blocks (exercises the walker fix).
+fn generate_media_rules(n: usize) -> String {
+    let mut css = String::new();
+    for i in 0..n {
+        css.push_str(&format!(
+            ".class-{} {{ color: red; }}\n\
+             @media (max-width: {}px) {{ .inner-{} {{ display: flex; }} }}\n",
+            i,
+            600 + i * 10,
+            i
+        ));
+    }
+    css
+}
+
+fn bench_fast_vs_normal(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fast_vs_normal");
+
+    // --- Simple classes ---
+    for n in [5, 20, 50] {
+        let css = generate_class_rules(n);
+        group.throughput(Throughput::Bytes(css.len() as u64));
+
+        group.bench_with_input(BenchmarkId::new("normal/classes", n), &css, |b, css| {
+            let options = ProcessStyleOptions {
+                scope_id: "a4f2eed6",
+                scoped: true,
+                is_module: false,
+                module_name: None,
+                filename: None,
+                sourcemap: false,
+            };
+            b.iter(|| {
+                let result =
+                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                black_box(&result.code);
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("fast/classes", n), &css, |b, css| {
+            let options = ProcessStyleOptions {
+                scope_id: "a4f2eed6",
+                scoped: true,
+                is_module: false,
+                module_name: None,
+                filename: None,
+                sourcemap: false,
+            };
+            b.iter(|| {
+                let result =
+                    verter_core::css::process_style_fast(black_box(css), black_box(&options))
+                        .unwrap();
+                black_box(&result.code);
+            });
+        });
+    }
+
+    // --- @media blocks (the critical fix path) ---
+    for n in [5, 20] {
+        let css = generate_media_rules(n);
+        group.throughput(Throughput::Bytes(css.len() as u64));
+
+        group.bench_with_input(BenchmarkId::new("normal/media", n), &css, |b, css| {
+            let options = ProcessStyleOptions {
+                scope_id: "a4f2eed6",
+                scoped: true,
+                is_module: false,
+                module_name: None,
+                filename: None,
+                sourcemap: false,
+            };
+            b.iter(|| {
+                let result =
+                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                black_box(&result.code);
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("fast/media", n), &css, |b, css| {
+            let options = ProcessStyleOptions {
+                scope_id: "a4f2eed6",
+                scoped: true,
+                is_module: false,
+                module_name: None,
+                filename: None,
+                sourcemap: false,
+            };
+            b.iter(|| {
+                let result =
+                    verter_core::css::process_style_fast(black_box(css), black_box(&options))
+                        .unwrap();
+                black_box(&result.code);
+            });
+        });
+    }
+
+    // --- Real-world: template-heavy.vue CSS ---
+    {
+        let sfc_source =
+            include_str!("../../../packages/benchmark/src/fixtures/template-heavy.vue");
+        let style_start = sfc_source
+            .find("<style scoped>")
+            .expect("must have <style scoped>");
+        let css_start = style_start + "<style scoped>".len();
+        let css_end = sfc_source[css_start..]
+            .find("</style>")
+            .expect("must have </style>");
+        let css = &sfc_source[css_start..css_start + css_end];
+
+        group.throughput(Throughput::Bytes(css.len() as u64));
+
+        group.bench_function("normal/template-heavy", |b| {
+            let options = ProcessStyleOptions {
+                scope_id: "0d04bfeb",
+                scoped: true,
+                is_module: false,
+                module_name: None,
+                filename: None,
+                sourcemap: false,
+            };
+            b.iter(|| {
+                let result =
+                    verter_core::css::process_style(black_box(css), black_box(&options)).unwrap();
+                black_box(&result.code);
+            });
+        });
+
+        group.bench_function("fast/template-heavy", |b| {
+            let options = ProcessStyleOptions {
+                scope_id: "0d04bfeb",
+                scoped: true,
+                is_module: false,
+                module_name: None,
+                filename: None,
+                sourcemap: false,
+            };
+            b.iter(|| {
+                let result =
+                    verter_core::css::process_style_fast(black_box(css), black_box(&options))
+                        .unwrap();
+                black_box(&result.code);
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// Benchmark: scoped isolation — apply_scoped (lightningcss) vs apply_scoped_raw
+// =============================================================================
+
+fn bench_scoped_fast_vs_normal(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scoped_fast_vs_normal");
+
+    for n in [5, 20, 50] {
+        let css = generate_class_rules(n);
+        group.throughput(Throughput::Bytes(css.len() as u64));
+
+        group.bench_with_input(BenchmarkId::new("apply_scoped", n), &css, |b, css| {
+            b.iter(|| {
+                let result = apply_scoped(black_box(css), black_box("a4f2eed6")).unwrap();
+                black_box(result);
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("apply_scoped_raw", n), &css, |b, css| {
+            b.iter(|| {
+                let result = apply_scoped_raw(black_box(css), black_box("a4f2eed6"));
+                black_box(result);
+            });
+        });
+    }
+
+    // Media rules
+    for n in [5, 20] {
+        let css = generate_media_rules(n);
+        group.throughput(Throughput::Bytes(css.len() as u64));
+
+        group.bench_with_input(BenchmarkId::new("apply_scoped/media", n), &css, |b, css| {
+            b.iter(|| {
+                let result = apply_scoped(black_box(css), black_box("a4f2eed6")).unwrap();
+                black_box(result);
+            });
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("apply_scoped_raw/media", n),
+            &css,
+            |b, css| {
+                b.iter(|| {
+                    let result = apply_scoped_raw(black_box(css), black_box("a4f2eed6"));
+                    black_box(result);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_process_style,
     bench_prepass,
     bench_scoped,
     bench_modules,
+    bench_fast_vs_normal,
+    bench_scoped_fast_vs_normal,
 );
 criterion_main!(benches);

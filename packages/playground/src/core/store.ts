@@ -5,11 +5,15 @@ import {
   type StoreState,
   type CompilerOptions,
   type CompileTiming,
+  type TypeCheckerMode,
+  type TypeCheckerStatus,
+  type TsDiagnosticEntry,
 } from "./types";
-import { compileFile, initCompilers, switchWasmVersion } from "./compiler";
-import { getDefaultImportMap, type ImportMap } from "./importMap";
-import { serializeToHash, deserializeFromHash } from "./urlState";
+import { compileFile, relintFile, initCompilers, switchWasmVersion } from "./compiler";
+import { getDefaultImportMap, extractVueVersion, type ImportMap } from "./importMap";
+import { serializeToHash, deserializeFromHash, type SerializedState } from "./urlState";
 import type { VersionEntry } from "./versions";
+import * as projectStorage from "./projectStorage";
 
 const defaultAppCode = `<script setup lang="ts">
 import { ref } from 'vue'
@@ -50,6 +54,7 @@ export interface Store extends StoreState {
   importMap: ImportMap;
   verterVersion: string;
   versionLoading: boolean;
+  tsDiagnostics: TsDiagnosticEntry[];
   init(): Promise<void>;
   setActiveFile(filename: string): void;
   addFile(filename: string): void;
@@ -61,10 +66,27 @@ export interface Store extends StoreState {
   toggleAutoSave(): void;
   toggleProduction(): void;
   toggleSSR(): void;
-  toggleShowTS(): void;
-  toggleShowTSX(): void;
+  toggleStrictSlots(): void;
+  setTypeChecker(mode: TypeCheckerMode): void;
+  setTypeCheckerStatus(status: TypeCheckerStatus): void;
+  disabledRules: Set<string>;
+  toggleLintRule(name: string): void;
+  relint(): void;
   recompile(): Promise<void>;
   switchVerterVersion(entry: VersionEntry): Promise<void>;
+  setVueVersion(version: string): void;
+  vueVersion: string;
+  // Project management
+  saveProject(name?: string): void;
+  loadProject(name: string, state: SerializedState): Promise<void>;
+  deleteProject(name: string): void;
+  // Editable output
+  toggleEditableOutput(): void;
+  updateTsxOverride(code: string): void;
+  clearTsxOverride(): void;
+  // Click-to-highlight from output panels
+  revealSpan: { start: number; end: number } | null;
+  requestRevealSpan(start: number, end: number): void;
 }
 
 export function useStore(): Store {
@@ -78,25 +100,37 @@ export function useStore(): Store {
     typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches,
   );
   const autoSave = ref(true);
-  const showTS = ref(false);
-  const showTSX = ref(false);
   const compilerOptions = reactive<CompilerOptions>({
     isProduction: false,
     ssr: false,
+    strictSlots: false,
   });
   const compileTiming = reactive<CompileTiming>({
-    verter: null,
-    verterNative: null,
-    stripTypes: null,
-    tsx: null,
-    kai: null,
-    kaiJs: null,
+    verterNewJs: null,
+    parseDurationMs: null,
+    scriptMs: null,
+    templateMs: null,
+    styleMs: null,
+    tsxMs: null,
+    tscMs: null,
+    lintMs: null,
   });
+  const typeChecker = ref<TypeCheckerMode>("tsc");
+  const typeCheckerStatus = ref<TypeCheckerStatus>("active");
 
   const verterVersion = ref("local");
   const versionLoading = ref(false);
+  const tsDiagnostics: Ref<TsDiagnosticEntry[]> = ref([]);
+
+  const disabledRules = reactive(new Set<string>());
+
+  const currentProjectName = ref<string | null>(null);
+  const editableOutput = ref(false);
+  const tsxUserEdited = ref(false);
+  const tsxOverrideCode = ref<string | null>(null);
 
   const importMap = reactive(getDefaultImportMap());
+  const vueVersion = computed(() => extractVueVersion(importMap) ?? "3.5.26");
 
   const activeFile = computed(() => {
     if (activeFilename.value === IMPORT_MAP_FILENAME) {
@@ -122,13 +156,40 @@ export function useStore(): Store {
         activeFilename.value = savedState.activeFile;
       }
       if (savedState.outputMode) {
-        outputMode.value = savedState.outputMode;
+        // Redirect removed tabs from old URLs
+        if (
+          savedState.outputMode === "js" ||
+          savedState.outputMode === "css" ||
+          savedState.outputMode === "tsc" ||
+          savedState.outputMode === "types"
+        ) {
+          outputMode.value = "files";
+        } else {
+          outputMode.value = savedState.outputMode;
+        }
       }
       if (savedState.compilerOptions) {
         Object.assign(compilerOptions, savedState.compilerOptions);
       }
-      if (savedState.importMap) {
-        Object.assign(importMap, savedState.importMap);
+      // Re-initialize import map with correct vue version, then merge custom imports
+      if (savedState.vueVersion) {
+        const defaults = getDefaultImportMap(savedState.vueVersion);
+        Object.assign(importMap, defaults);
+      }
+      if (savedState.importMap?.imports) {
+        Object.assign(importMap.imports, savedState.importMap.imports);
+      }
+      if (savedState.importMap?.scopes) {
+        importMap.scopes = savedState.importMap.scopes;
+      }
+
+      // Switch verter version if specified and different from current
+      if (savedState.verterVersion && savedState.verterVersion !== verterVersion.value) {
+        verterVersion.value = savedState.verterVersion;
+        // Version switch will happen after init compilers are ready
+      }
+      if (savedState.typeChecker) {
+        typeChecker.value = savedState.typeChecker;
       }
     }
 
@@ -138,15 +199,17 @@ export function useStore(): Store {
 
     // Compile all files on init and capture timing from the last one compiled
     let lastTiming: CompileTiming = {
-      verter: null,
-      verterNative: null,
-      stripTypes: null,
-      tsx: null,
-      kai: null,
-      kaiJs: null,
+      verterNewJs: null,
+      parseDurationMs: null,
+      scriptMs: null,
+      templateMs: null,
+      styleMs: null,
+      tsxMs: null,
+      tscMs: null,
+      lintMs: null,
     };
     for (const file of Object.values(files.value)) {
-      lastTiming = await compileFile(file, compilerOptions, showTS.value, showTSX.value);
+      lastTiming = await compileFile(file, compilerOptions, disabledRules, files.value);
     }
     Object.assign(compileTiming, lastTiming);
     loading.value = false;
@@ -157,22 +220,15 @@ export function useStore(): Store {
       async () => {
         if (activeFilename.value === IMPORT_MAP_FILENAME) return;
         if (autoSave.value && activeFile.value) {
-          // Auto-switch away from TS tab if showTS is disabled or file is not TS
-          if (outputMode.value === "ts" && (!showTS.value || !activeFile.value.isTS)) {
-            outputMode.value = "js";
-          }
-          // Auto-switch away from TSX tab if showTSX is disabled
-          if (outputMode.value === "tsx" && !showTSX.value) {
-            outputMode.value = "js";
-          }
           const timing = await compileFile(
             activeFile.value,
             compilerOptions,
-            showTS.value,
-            showTSX.value,
+            undefined,
+            files.value,
           );
           Object.assign(compileTiming, timing);
           errors.value = activeFile.value.compiled.errors;
+          clearTsxOverride();
         }
       },
     );
@@ -184,17 +240,10 @@ export function useStore(): Store {
         if (activeFilename.value === IMPORT_MAP_FILENAME) return;
         const file = activeFile.value;
         if (file) {
-          // Auto-switch away from TS tab if showTS is disabled or file is not TS
-          if (outputMode.value === "ts" && (!showTS.value || !file.isTS)) {
-            outputMode.value = "js";
-          }
-          // Auto-switch away from TSX tab if showTSX is disabled
-          if (outputMode.value === "tsx" && !showTSX.value) {
-            outputMode.value = "js";
-          }
-          const timing = await compileFile(file, compilerOptions, showTS.value, showTSX.value);
+          const timing = await compileFile(file, compilerOptions, disabledRules, files.value);
           Object.assign(compileTiming, timing);
           errors.value = file.compiled.errors;
+          clearTsxOverride();
         }
       },
     );
@@ -211,10 +260,18 @@ export function useStore(): Store {
           imports: { ...importMap.imports },
           scopes: importMap.scopes ? { ...importMap.scopes } : undefined,
         },
+        vueVersion: extractVueVersion(importMap),
+        verterVersion: verterVersion.value,
+        typeChecker: typeChecker.value,
       }),
       (state) => {
         if (saveTimeout) clearTimeout(saveTimeout);
-        saveTimeout = setTimeout(() => serializeToHash(state), 500);
+        saveTimeout = setTimeout(() => {
+          serializeToHash(state);
+          if (currentProjectName.value) {
+            projectStorage.saveProject(currentProjectName.value, state);
+          }
+        }, 500);
       },
       { deep: true },
     );
@@ -269,17 +326,12 @@ export function useStore(): Store {
   }
 
   function setOutputMode(mode: OutputMode) {
-    // Auto-fallback: if switching to TS tab but showTS is off or file is not TS, go to JS
-    if (mode === "ts" && (!showTS.value || !activeFile.value?.isTS)) {
-      outputMode.value = "js";
-      return;
+    // Redirect removed tabs to files
+    if (mode === "js" || mode === "css" || mode === "tsc" || mode === "types") {
+      outputMode.value = "files";
+    } else {
+      outputMode.value = mode;
     }
-    // Auto-fallback: if switching to TSX tab but showTSX is off, go to JS
-    if (mode === "tsx" && !showTSX.value) {
-      outputMode.value = "js";
-      return;
-    }
-    outputMode.value = mode;
   }
 
   function toggleDarkMode() {
@@ -301,32 +353,152 @@ export function useStore(): Store {
     recompile();
   }
 
-  function toggleShowTS() {
-    showTS.value = !showTS.value;
-    // If disabling showTS and currently on TS tab, switch to JS
-    if (!showTS.value && outputMode.value === "ts") {
-      outputMode.value = "js";
-    }
+  function toggleStrictSlots() {
+    compilerOptions.strictSlots = !compilerOptions.strictSlots;
     recompile();
   }
 
-  function toggleShowTSX() {
-    showTSX.value = !showTSX.value;
-    // If disabling showTSX and currently on TSX tab, switch to JS
-    if (!showTSX.value && outputMode.value === "tsx") {
-      outputMode.value = "js";
-    }
-    recompile();
+  function setTypeChecker(mode: TypeCheckerMode) {
+    typeChecker.value = mode;
+  }
+
+  function setTypeCheckerStatus(status: TypeCheckerStatus) {
+    typeCheckerStatus.value = status;
+  }
+
+  function setVueVersion(version: string) {
+    const defaults = getDefaultImportMap(version);
+    Object.assign(importMap, defaults);
   }
 
   async function recompile() {
     if (activeFilename.value === IMPORT_MAP_FILENAME) return;
     const file = activeFile.value;
     if (file) {
-      const timing = await compileFile(file, compilerOptions, showTS.value, showTSX.value);
+      const timing = await compileFile(file, compilerOptions, disabledRules, files.value);
       Object.assign(compileTiming, timing);
       errors.value = file.compiled.errors;
     }
+  }
+
+  function getCurrentState(): SerializedState {
+    return {
+      files: Object.fromEntries(Object.entries(files.value).map(([k, f]) => [k, f.code])),
+      activeFile: activeFilename.value,
+      outputMode: outputMode.value,
+      compilerOptions: { ...compilerOptions },
+      importMap: {
+        imports: { ...importMap.imports },
+        scopes: importMap.scopes ? { ...importMap.scopes } : undefined,
+      },
+      vueVersion: extractVueVersion(importMap) ?? undefined,
+      verterVersion: verterVersion.value,
+      typeChecker: typeChecker.value,
+    };
+  }
+
+  function saveCurrentProject(name?: string) {
+    const projectName = name ?? currentProjectName.value;
+    if (!projectName) return;
+    currentProjectName.value = projectName;
+    projectStorage.saveProject(projectName, getCurrentState());
+  }
+
+  async function loadProject(name: string, state: SerializedState) {
+    // Reset files
+    files.value = {};
+    for (const [filename, code] of Object.entries(state.files)) {
+      files.value[filename] = new File(filename, code);
+    }
+    if (!files.value[mainFile.value]) {
+      files.value[mainFile.value] = new File(mainFile.value, defaultAppCode);
+    }
+
+    // Restore state
+    if (
+      state.activeFile &&
+      (files.value[state.activeFile] || state.activeFile === IMPORT_MAP_FILENAME)
+    ) {
+      activeFilename.value = state.activeFile;
+    } else {
+      activeFilename.value = mainFile.value;
+    }
+    if (state.outputMode) outputMode.value = state.outputMode;
+    if (state.compilerOptions) Object.assign(compilerOptions, state.compilerOptions);
+    if (state.vueVersion) {
+      const defaults = getDefaultImportMap(state.vueVersion);
+      Object.assign(importMap, defaults);
+    }
+    if (state.importMap?.imports) Object.assign(importMap.imports, state.importMap.imports);
+    if (state.importMap?.scopes) importMap.scopes = state.importMap.scopes;
+    if (state.typeChecker) typeChecker.value = state.typeChecker;
+
+    currentProjectName.value = name;
+    clearTsxOverride();
+
+    // Recompile all files
+    let lastTiming: CompileTiming = {
+      verterNewJs: null,
+      parseDurationMs: null,
+      scriptMs: null,
+      templateMs: null,
+      styleMs: null,
+      tsxMs: null,
+      tscMs: null,
+      lintMs: null,
+    };
+    for (const file of Object.values(files.value)) {
+      lastTiming = await compileFile(file, compilerOptions, disabledRules, files.value);
+    }
+    Object.assign(compileTiming, lastTiming);
+  }
+
+  function deleteCurrentProject(name: string) {
+    projectStorage.deleteProject(name);
+    if (currentProjectName.value === name) {
+      currentProjectName.value = null;
+    }
+  }
+
+  function toggleLintRule(name: string) {
+    if (disabledRules.has(name)) {
+      disabledRules.delete(name);
+    } else {
+      disabledRules.add(name);
+    }
+  }
+
+  function relint() {
+    if (activeFilename.value === IMPORT_MAP_FILENAME) return;
+    const file = activeFile.value;
+    if (!file) return;
+    const lintMs = relintFile(file, disabledRules);
+    if (lintMs != null) {
+      compileTiming.lintMs = lintMs;
+    }
+  }
+
+  function toggleEditableOutput() {
+    editableOutput.value = !editableOutput.value;
+    if (!editableOutput.value) {
+      clearTsxOverride();
+    }
+  }
+
+  function updateTsxOverride(code: string) {
+    tsxOverrideCode.value = code;
+    tsxUserEdited.value = true;
+  }
+
+  function clearTsxOverride() {
+    tsxOverrideCode.value = null;
+    tsxUserEdited.value = false;
+  }
+
+  // Click-to-highlight from output panels
+  const revealSpan: Ref<{ start: number; end: number } | null> = ref(null);
+  function requestRevealSpan(start: number, end: number) {
+    revealSpan.value = { start, end };
   }
 
   async function switchVersion(entry: VersionEntry) {
@@ -351,8 +523,6 @@ export function useStore(): Store {
     loading,
     darkMode,
     autoSave,
-    showTS,
-    showTSX,
     compilerOptions,
     compileTiming,
     activeFile,
@@ -370,9 +540,32 @@ export function useStore(): Store {
     toggleAutoSave,
     toggleProduction,
     toggleSSR,
-    toggleShowTS,
-    toggleShowTSX,
+    toggleStrictSlots,
+    typeChecker,
+    typeCheckerStatus,
+    setTypeChecker,
+    setTypeCheckerStatus,
+    disabledRules,
+    toggleLintRule,
+    relint,
     recompile,
+    tsDiagnostics,
     switchVerterVersion: switchVersion,
+    setVueVersion,
+    vueVersion,
+    // Project management
+    currentProjectName,
+    saveProject: saveCurrentProject,
+    loadProject,
+    deleteProject: deleteCurrentProject,
+    // Editable output
+    editableOutput,
+    tsxUserEdited,
+    tsxOverrideCode,
+    toggleEditableOutput,
+    updateTsxOverride,
+    clearTsxOverride,
+    revealSpan,
+    requestRevealSpan,
   }) as Store;
 }

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "verter": {
+      "command": "verter-mcp",
+      "args": ["--project-root", "."]
+    }
+  }
+}

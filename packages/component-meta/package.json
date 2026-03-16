@@ -1,0 +1,87 @@
+{
+  "name": "@verter/component-meta",
+  "version": "0.0.1-beta.1",
+  "description": "Extract Vue component metadata (props, events, slots, models, expose) with a generic Type IR",
+  "keywords": ["vue", "component", "metadata", "props", "storybook", "histoire", "zod", "json-schema"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "author": "pikax",
+  "homepage": "https://verterjs.dev/",
+  "files": [
+    "dist",
+    "readme.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js",
+      "default": "./dist/browser.js"
+    },
+    "./storybook": {
+      "types": "./dist/adapters/storybook.d.ts",
+      "import": "./dist/adapters/storybook.js",
+      "default": "./dist/adapters/storybook.js"
+    },
+    "./histoire": {
+      "types": "./dist/adapters/histoire.d.ts",
+      "import": "./dist/adapters/histoire.js",
+      "default": "./dist/adapters/histoire.js"
+    },
+    "./zod": {
+      "types": "./dist/adapters/zod.d.ts",
+      "import": "./dist/adapters/zod.js",
+      "default": "./dist/adapters/zod.js"
+    },
+    "./json-schema": {
+      "types": "./dist/adapters/json-schema.d.ts",
+      "import": "./dist/adapters/json-schema.js",
+      "default": "./dist/adapters/json-schema.js"
+    },
+    "./compat": {
+      "types": "./dist/compat/index.d.ts",
+      "import": "./dist/compat/index.js",
+      "default": "./dist/compat/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b --force",
+    "dev": "tsc -b --watch",
+    "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "test": "vitest --run"
+  },
+  "dependencies": {
+    "@verter/native": "workspace:*"
+  },
+  "peerDependencies": {
+    "@verter/wasm": "workspace:*",
+    "zod": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@verter/wasm": {
+      "optional": true
+    },
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0",
+    "zod": "^3.24.4"
+  }
+}

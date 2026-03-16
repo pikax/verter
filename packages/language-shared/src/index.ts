@@ -4,6 +4,8 @@ import type { OmitRequest, RequestTyped } from "./request";
 export * from "./notifications";
 export * from "./request";
 export * from "./statistics";
+export * from "./analysis";
+export * from "./routes";
 
 export type PatchClient<T> = OmitNotification<OmitRequest<T>> & NotificationTyped & RequestTyped;
 

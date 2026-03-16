@@ -1,5 +1,3 @@
-import type { ViteCodegenResult } from "@verter/native";
-
 export interface VueQuery {
   vue: boolean;
   type?: "script" | "template" | "style" | (string & {});
@@ -22,31 +20,24 @@ export function parseVueRequest(id: string): ParsedVueRequest {
 
   const params = new URLSearchParams(queryString);
 
+  // Parse lang from both `lang=less` and `lang.less` (Vite dot-notation) formats
+  let lang = params.get("lang") || undefined;
+  if (!lang) {
+    for (const key of params.keys()) {
+      if (key.startsWith("lang.")) {
+        lang = key.slice(5);
+        break;
+      }
+    }
+  }
+
   const query: VueQuery = {
     vue: params.has("vue"),
     type: params.get("type") as VueQuery["type"],
     index: params.has("index") ? parseInt(params.get("index")!, 10) : undefined,
     scoped: params.has("scoped"),
-    lang: params.get("lang") || undefined,
+    lang,
   };
 
   return { filename, query };
-}
-
-const cache = new Map<string, ViteCodegenResult>();
-
-export function getDescriptor(filename: string): ViteCodegenResult | undefined {
-  return cache.get(filename);
-}
-
-export function setDescriptor(filename: string, result: ViteCodegenResult): void {
-  cache.set(filename, result);
-}
-
-export function deleteDescriptor(filename: string): void {
-  cache.delete(filename);
-}
-
-export function clearCache(): void {
-  cache.clear();
 }

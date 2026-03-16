@@ -1,0 +1,21 @@
+[package]
+name = "verter_actions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Code actions engine for Verter Vue compiler — quick fixes and refactoring"
+
+[dependencies]
+verter_span = { path = "../verter_span" }
+verter_diagnostics = { path = "../verter_diagnostics" }
+verter_analysis = { path = "../verter_analysis" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }

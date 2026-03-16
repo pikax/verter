@@ -103,9 +103,35 @@ Documentation‑as‑Code, transparency, single source of truth, continuous impr
 
 - **Create Draft Pull Requests**: When documentation needs updates, create focused draft pull requests with clear descriptions
 
+### Verter Documentation Structure
+
+The project documentation uses **VitePress** in `docs/` and is deployed to `https://verterjs.dev` via Netlify.
+
+**Directory layout:**
+- `docs/guide/` — User guides (features, bundler integration, architecture, linting)
+- `docs/api/` — API reference for each npm package
+- `docs/editor/` — VS Code extension and LSP documentation
+- `docs/contributing/` — Contributor guides (setup, testing, CI/CD)
+
+**Source-to-docs mapping** (when these source files change, update the corresponding doc):
+| Source File | Documentation Page |
+|---|---|
+| `packages/unplugin/src/core/types.ts` | `docs/api/unplugin.md` |
+| `packages/native/index.js`, `packages/native/index.d.ts` | `docs/api/native.md` |
+| `packages/wasm/src/index.ts` | `docs/api/wasm.md` |
+| `packages/core/src/v5/` | `docs/api/core.md` |
+| `packages/types/src/` | `docs/api/types.md` |
+| `crates/verter_lsp/src/capabilities.rs` | `docs/editor/lsp-features.md` |
+| `packages/vue-vscode/package.json` (contributes) | `docs/editor/settings.md` |
+| `crates/verter_diagnostics/src/rules/` | `docs/guide/linting.md` |
+| `benchmark-results.json` | `docs/guide/performance.md` |
+
+**Internal developer docs** (AI agent context, not user-facing) live in `.claude/`:
+- `.claude/analysis.md`, `.claude/architecture-internal.md`, `.claude/performance-guide.md`, `.claude/ci-cd.md`
+
 ### Technical Implementation
 
-- **Hosting**: Prepare documentation for GitHub Pages deployment with branch-based workflows
+- **Hosting**: VitePress site deployed to Netlify at `verterjs.dev`. Build command: `pnpm --filter docs build`
 - **Automation**: Implement linting and style checking for documentation consistency
 
 ### Error Handling

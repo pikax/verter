@@ -1,8 +1,9 @@
 {
   "name": "verter-vscode",
   "displayName": "Verter VSCode",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-beta.1",
   "description": "Verter VSCode Extension",
+  "icon": "logo.svg",
   "categories": [
     "Programming Languages"
   ],
@@ -13,6 +14,7 @@
   ],
   "license": "MIT",
   "author": "Carlos Rodrigues <pikax>",
+  "homepage": "https://verterjs.dev/",
   "repository": {
     "type": "git",
     "url": "https://github.com/pikax/verter"
@@ -21,32 +23,66 @@
   "type": "commonjs",
   "main": "dist/extension.js",
   "scripts": {
-    "build": "tsc -b",
-    "watch": "pnpm build --watch",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "package": "vsce package"
+    "build": "node esbuild.mjs --production",
+    "build:dev": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "vscode:prepublish": "node esbuild.mjs --production",
+    "prepare:e2e": "cargo build -p verter_lsp --manifest-path ../../Cargo.toml && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm run build:dev && tsc -p tsconfig.test.json",
+    "pretest:e2e": "pnpm run prepare:e2e",
+    "test:e2e": "pnpm run test:e2e:run",
+    "test:e2e:run": "node out-test/e2e/runTests.js",
+    "test:e2e:matrix": "pnpm run prepare:e2e && node out-test/e2e/runTests.js",
+    "benchmark:startup": "node e2e/startupBenchmark.mjs",
+    "benchmark:completion": "node e2e/completionBenchmark.mjs",
+    "package": "node package.mjs",
+    "package:win32-x64": "node package.mjs --target win32-x64",
+    "package:linux-x64": "node package.mjs --target linux-x64",
+    "package:linux-arm64": "node package.mjs --target linux-arm64",
+    "package:darwin-x64": "node package.mjs --target darwin-x64",
+    "package:darwin-arm64": "node package.mjs --target darwin-arm64"
   },
   "dependencies": {
-    "@types/lodash": "^4.17.23",
-    "@types/vscode": "^1.109.0",
-    "@verter/language-server": "workspace:^",
-    "@verter/language-shared": "workspace:^",
-    "@verter/oxc-bindings": "workspace:^",
     "@verter/typescript-plugin": "workspace:^",
-    "brace-expansion": "^4.0.1",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@types/lodash": "^4.17.24",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.4.0",
+    "@types/vscode": "^1.110.0",
+    "@verter/language-shared": "workspace:^",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.7.1",
+    "brace-expansion": "^5.0.4",
+    "chai": "^6.2.2",
+    "esbuild": "^0.27.3",
     "lodash": "^4.17.23",
-    "minimatch": "^10.1.2",
+    "minimatch": "^10.2.4",
+    "mocha": "^11.7.5",
+    "source-map": "^0.7.6",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.0",
+    "vscode-css-languageservice": "^6.3.10",
     "vscode-jsonrpc": "^8.2.1",
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver-protocol": "^3.17.5",
+    "vscode-languageserver-textdocument": "^1.0.12",
     "vscode-languageserver-types": "^3.17.5"
   },
-  "devDependencies": {
-    "@vscode/vsce": "^3.7.1",
-    "typescript": "^5.9.3",
-    "vite": "^7.3.1"
+  "configurationDefaults": {
+    "emmet.includeLanguages": {
+      "vue": "html"
+    }
   },
   "contributes": {
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "verter",
+        "label": "Verter Vue Analysis"
+      }
+    ],
     "configuration": {
       "type": "object",
       "title": "Verter",
@@ -55,6 +91,11 @@
           "type": "boolean",
           "default": true,
           "description": "Enable/Disable Verter"
+        },
+        "verter.lspBinaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the verter-lsp binary. Leave empty to auto-detect (bundled binary or PATH)."
         },
         "verter.statistics.enabled": {
           "type": "boolean",
@@ -80,8 +121,312 @@
           "type": "number",
           "default": 2000,
           "description": "Maximum number of events persisted to disk."
+        },
+        "verter.analysis.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the Verter Analysis sidebar (virtual files, component tree, analysis, source map sync)."
+        },
+        "verter.decorations.vueApiCalls": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline annotations for Vue API calls (lifecycle hooks, watchers, reactivity, provide/inject)."
+        },
+        "verter.decorations.bindingColors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show faint color decorations on bindings based on their reactivity type (ref, computed, reactive, prop, etc.)."
+        },
+        "verter.decorations.bindingColorsScope": {
+          "type": "string",
+          "enum": [
+            "template",
+            "all"
+          ],
+          "default": "template",
+          "enumDescriptions": [
+            "Color bindings only in <template> (where they are consumed far from declarations)",
+            "Color bindings in both <template> and <script>"
+          ],
+          "description": "Where to apply binding color decorations."
+        },
+        "verter.decorations.bindingColorsStyle": {
+          "type": "string",
+          "enum": [
+            "background",
+            "underline"
+          ],
+          "default": "background",
+          "enumDescriptions": [
+            "Faint background tint behind binding text",
+            "Subtle colored dotted underline beneath binding text"
+          ],
+          "description": "Visual style for binding color decorations."
+        },
+        "verter.decorations.propConstness": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show faint background decorations on component props based on their constness (const = optimizable, dynamic = needs tracking)."
+        },
+        "verter.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the Verter language server."
+        },
+        "verter.server.logLevel": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "default": "info",
+          "description": "Log level for the Verter language server process. Changing this setting restarts the server."
+        },
+        "verter.lint.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable full lint diagnostics (all severities). When disabled, only error-severity lint diagnostics are shown. Enable this or create a .verterrc.json to see warnings and hints."
+        },
+        "verter.lint.preset": {
+          "type": "string",
+          "enum": [
+            "essential",
+            "recommended",
+            "all",
+            "performance",
+            "a11y",
+            "strict"
+          ],
+          "default": "recommended",
+          "enumDescriptions": [
+            "Vue Essential rules only (prevents runtime errors)",
+            "Essential + Strongly Recommended rules (default)",
+            "All available rules",
+            "Performance-focused rules",
+            "Accessibility rules",
+            "Strictest ruleset"
+          ],
+          "description": "Lint rule preset. Only applies when verter.lint.enabled is true."
+        },
+        "verter.inlayHints.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable type inlay hints from the type provider (TSGO/tsserver). Shows resolved types for variable declarations, function return types, and parameter names in both script and template."
+        },
+        "verter.viteConfig.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Discover resolve.alias from vite.config.{ts,js,mjs} for fallback projects without tsconfig.json. Simple configs are analyzed statically; complex configs require explicit trust via trustedFiles."
+        },
+        "verter.viteConfig.trustedFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Vite config file paths trusted for Node.js execution. Required when static analysis cannot extract aliases from complex configs (e.g. configs using environment variables or dynamic imports)."
+        },
+        "verter.mcp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start an HTTP MCP endpoint alongside the LSP, providing Vue analysis tools to AI agents."
+        },
+        "verter.mcp.port": {
+          "type": "number",
+          "default": 6772,
+          "description": "Port for the MCP HTTP endpoint. Set to 0 for auto-assign."
+        },
+        "verter.mcp.lintPreset": {
+          "type": "string",
+          "enum": [
+            "essential",
+            "recommended",
+            "all",
+            "performance",
+            "a11y",
+            "strict"
+          ],
+          "default": "recommended",
+          "description": "Lint preset for the MCP server's diagnostic tools."
+        },
+        "verter.mcp.claudeCodeNotification": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a notification when Claude Code is detected with MCP setup instructions."
+        },
+        "verter.typeProvider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "tsgo",
+            "tsserver",
+            "extension",
+            "off"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Use workspace TypeScript if available, fall back to TSGO (recommended)",
+            "Use TSGO only (faster, but re-exported .vue components may lose typing)",
+            "Use workspace TypeScript version (tsserver)",
+            "Host TypeScript language service in the extension process (experimental)",
+            "Disable TypeScript type checking"
+          ],
+          "description": "TypeScript type provider for Vue files. Changing this setting restarts the server."
+        },
+        "verter.typescript.tsdk": {
+          "type": "string",
+          "default": "",
+          "description": "Path to TypeScript SDK directory (e.g., node_modules/typescript/lib). Leave empty to auto-detect."
+        },
+        "verter.experimental.conditionalRootNarrowing": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Experimental**: Enable generic narrowing for conditional root elements. When a root `v-if` references a prop, the component's type signature narrows based on the prop value passed by the parent."
+        },
+        "verter.experimental.exposeBindingsTesting": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Experimental**: In test files, resolve `.vue` imports to Verter's VTU-style debug public API. This exposes `<script setup>` bindings on the instance and ignores `defineExpose()` narrowing to match `wrapper.vm` access in Vue Test Utils."
+        },
+        "verter.experimental.strictSlots": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Experimental**: Enforce strict type checking for slot children. When a component defines typed slots via `defineSlots()`, only matching children types are accepted. See [RFC #733](https://github.com/vuejs/rfcs/discussions/733)."
         }
       }
+    },
+    "colors": [
+      {
+        "id": "verter.binding.ref",
+        "description": "Background highlight for ref() bindings (needs .value)",
+        "defaults": {
+          "dark": "#4285f415",
+          "light": "#1a73e812",
+          "highContrast": "#4285f430",
+          "highContrastLight": "#1a73e820"
+        }
+      },
+      {
+        "id": "verter.binding.computed",
+        "description": "Background highlight for computed() bindings",
+        "defaults": {
+          "dark": "#a142f415",
+          "light": "#7b1fa212",
+          "highContrast": "#a142f430",
+          "highContrastLight": "#7b1fa220"
+        }
+      },
+      {
+        "id": "verter.binding.reactive",
+        "description": "Background highlight for reactive() bindings",
+        "defaults": {
+          "dark": "#00bcd415",
+          "light": "#00897b12",
+          "highContrast": "#00bcd430",
+          "highContrastLight": "#00897b20"
+        }
+      },
+      {
+        "id": "verter.binding.prop",
+        "description": "Background highlight for defineProps bindings",
+        "defaults": {
+          "dark": "#ff980015",
+          "light": "#e6510012",
+          "highContrast": "#ff980030",
+          "highContrastLight": "#e6510020"
+        }
+      },
+      {
+        "id": "verter.binding.composable",
+        "description": "Background highlight for composable return values (MaybeRef)",
+        "defaults": {
+          "dark": "#e91e6315",
+          "light": "#c2185b12",
+          "highContrast": "#e91e6330",
+          "highContrastLight": "#c2185b20"
+        }
+      },
+      {
+        "id": "verter.binding.mutable",
+        "description": "Background highlight for mutable (let) bindings",
+        "defaults": {
+          "dark": "#ffc10715",
+          "light": "#f5960012",
+          "highContrast": "#ffc10730",
+          "highContrastLight": "#f5960020"
+        }
+      },
+      {
+        "id": "verter.binding.function",
+        "description": "Background highlight for function bindings",
+        "defaults": {
+          "dark": "#4caf5015",
+          "light": "#2e7d3212",
+          "highContrast": "#4caf5030",
+          "highContrastLight": "#2e7d3220"
+        }
+      },
+      {
+        "id": "verter.propConstness.const",
+        "description": "Background highlight for const (optimizable) component props",
+        "defaults": {
+          "dark": "#66bb6a18",
+          "light": "#43a04715",
+          "highContrast": "#66bb6a30",
+          "highContrastLight": "#43a04725"
+        }
+      },
+      {
+        "id": "verter.propConstness.dynamic",
+        "description": "Background highlight for dynamic (reactive) component props",
+        "defaults": {
+          "dark": "#42a5f518",
+          "light": "#1976d215",
+          "highContrast": "#42a5f530",
+          "highContrastLight": "#1976d225"
+        }
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "verter-analysis",
+          "title": "Verter Analysis",
+          "icon": "$(beaker)"
+        }
+      ]
+    },
+    "views": {
+      "verter-analysis": [
+        {
+          "id": "verterVirtualFiles",
+          "name": "Virtual Files & Source Map",
+          "when": "verter.analysisEnabled && verter.hasActiveVueFile"
+        },
+        {
+          "id": "verterComponentTree",
+          "name": "Component Tree",
+          "when": "verter.analysisEnabled && verter.hasActiveVueFile"
+        },
+        {
+          "id": "verterAnalysis",
+          "name": "Analysis",
+          "when": "verter.analysisEnabled"
+        },
+        {
+          "id": "verterRoutes",
+          "name": "Routes",
+          "when": "verter.analysisEnabled"
+        }
+      ]
     },
     "typescriptServerPlugins": [
       {
@@ -172,7 +517,8 @@
         "scopeName": "text.html.vue-html",
         "path": "./syntaxes/vue-html.tmLanguage.json",
         "embeddedLanguages": {
-          "source.js": "javascript"
+          "source.js": "javascript",
+          "source.ts": "typescript"
         }
       },
       {
@@ -202,6 +548,10 @@
     ],
     "commands": [
       {
+        "command": "verter.showOutputChannel",
+        "title": "Verter: Show Output Channel"
+      },
+      {
         "command": "verter.restartLanguageServer",
         "title": "Verter: Restart Language Server"
       },
@@ -216,12 +566,90 @@
       {
         "command": "verter.showStatistics",
         "title": "Verter: Show Processing Statistics"
+      },
+      {
+        "command": "verter.openVirtualFile",
+        "title": "Verter: Open in Editor",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "verter.showSourceMapForFile",
+        "title": "Verter: Show Source Map",
+        "icon": "$(map)"
+      },
+      {
+        "command": "verter.refreshVirtualFiles",
+        "title": "Verter: Refresh Virtual Files",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "verter.refreshAnalysis",
+        "title": "Verter: Refresh Analysis",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "verter.refreshRoutes",
+        "title": "Verter: Refresh Routes",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "verter.showSourceMapVisualization",
+        "title": "Verter: Show Source Map Visualization",
+        "icon": "$(split-horizontal)"
+      },
+      {
+        "command": "verter.goToComponent",
+        "title": "Verter: Go to Component Definition",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "verter.goToParentFile",
+        "title": "Verter: Go to Parent File",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "verter.setupMcpForClaudeCode",
+        "title": "Verter: Setup MCP for Claude Code"
       }
-    ]
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "verter.openVirtualFile",
+          "when": "view == verterVirtualFiles && viewItem == virtual-file",
+          "group": "inline"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "verter.showSourceMapVisualization",
+          "when": "view == verterVirtualFiles",
+          "group": "navigation"
+        },
+        {
+          "command": "verter.refreshVirtualFiles",
+          "when": "view == verterVirtualFiles",
+          "group": "navigation"
+        },
+        {
+          "command": "verter.refreshAnalysis",
+          "when": "view == verterAnalysis",
+          "group": "navigation"
+        },
+        {
+          "command": "verter.refreshRoutes",
+          "when": "view == verterRoutes",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "activationEvents": [
     "onCommand:verter.restartLanguageServer",
     "onCommand:verter.showStatistics",
+    "onCommand:verter.setupMcpForClaudeCode",
+    "onView:verterVirtualFiles",
+    "onView:verterAnalysis",
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
     "onLanguage:typescript",
@@ -229,10 +657,10 @@
     "onLanguage:vue"
   ],
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.109.0"
   },
   "vsce": {
-    "dependencies": true,
+    "dependencies": false,
     "yarn": false
   }
 }

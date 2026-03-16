@@ -1,0 +1,18 @@
+[build]
+  command = "cd .. && pnpm install --frozen-lockfile && pnpm --filter docs build"
+  publish = ".vitepress/dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+  PNPM_VERSION = "10.22.0"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+
+[[redirects]]
+  from = "/*"
+  to = "/404.html"
+  status = 404

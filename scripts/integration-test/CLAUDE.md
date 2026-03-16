@@ -18,6 +18,7 @@ When adding, removing, or modifying a project in **either** file, you **MUST** u
 | `e2eCmd` | `e2e-cmd` |
 | `packageManager` | `package-manager` |
 | `bundler` | `bundler` |
+| `shallow` | `shallow` |
 
 ## Running Integration Tests
 
@@ -35,7 +36,24 @@ pnpm integration-test coreui balancer-frontend-v2 slidev
 
 # All projects
 pnpm integration-test
+
+# Inventory local repos under D:\dev and stop
+pnpm integration-test:discover
+
+# Discover local repos and execute non-manual Tier 2 entries in sandboxes
+pnpm integration-test:local
 ```
+
+### Local inventory rules
+
+- Discovery is repo-root based. Nested packages are treated as surfaces inside the git root unless they force `manual_review`.
+- Only deterministic root commands are auto-executed:
+  - build: `scripts.build`
+  - test: `scripts.test` or `scripts["test:unit"]`
+  - typecheck: `tsconfig.json`, then `tsconfig.web.json`, `tsconfig.app.json`, `tsconfig.src.json`
+- Local runs copy the repo to `D:\dev\temp\verter-toolchain-runs\<run-id>\sandboxes\<repo>\` before modifying anything.
+- Reports live beside the sandboxes under `reports/<repo>/` and include `project.json`, `replacement.json`, `summary.md`, and `typecheck/review-queue.json`.
+- Repos classified as `manual_review` must not be auto-executed unless the runner logic is intentionally extended.
 
 ### CI
 
@@ -50,7 +68,12 @@ Triggered by:
 
 1. Check `.integration-tests/logs/<project>/verter-build.log`
 2. Compare with `baseline-build.log` — if baseline also fails, the issue is project setup, not Verter
-3. Common causes:
+3. Search the build log for these error patterns:
+   - `Unexpected token` → raw HTML or TS syntax leaked into JS output
+   - `<!--` or `-->` in generated code → interstitial comment not removed (see P1 fix pattern)
+   - `: string`, `<T>`, `as const` in JS output → TS not stripped (`forceJs` issue, see P2)
+   - Garbled identifiers in `props:` section → cross-file type span extraction bug (see P0)
+4. Common infrastructure causes:
    - Plugin replacement didn't work (check verification step output)
    - Verter doesn't support a template feature the project uses
    - Dependency version conflict with `@verter/native`
@@ -69,6 +92,33 @@ If "No files contain @verter/unplugin after replacement":
 1. The project may use a non-standard import style
 2. Check how the project imports its Vue plugin (grep for `@vitejs/plugin-vue` or `rollup-plugin-vue`)
 3. The replacement patterns may need to be extended in both `run.mjs` (Node.js `String.replace`) and `integration-test.yml` (bash `sed`)
+
+### Stale native binary (`.node` file)
+
+**Symptom**: `host?.close is not a function` or missing methods on `VerterHost` at runtime.
+
+**Cause**: pnpm's content-addressable store retains old `.node` binaries via hardlinks. `copyRecursive()` may fail silently on locked/hardlinked files (the `catch {}` swallows the error), leaving a stale binary in `.pnpm/` even after the overwrite step reports success.
+
+**Diagnosis**: Run from the project's `node_modules/`:
+```bash
+node -e "const r = require('@verter/native'); const h = new r.VerterHost({}); console.log(Object.getOwnPropertyNames(Object.getPrototypeOf(h)))"
+```
+Check that the listed methods include the one reported missing (e.g., `close`).
+
+**Fix**:
+1. Rebuild native bindings: `pnpm run build:native`
+2. Delete the project's checkout: `rm -rf .integration-tests/repos/<project>/`
+3. Re-run: `pnpm integration-test --skip-build --no-clone <project>`
+
+**Prevention**: The overwrite step now verifies native binary file size after copy and retries with direct `fs.copyFileSync` if the initial copy failed.
+
+### Type-check review queue
+
+`vue-tsc` is the baseline. Extra `verter-tsc` diagnostics are persisted, not auto-dismissed:
+- `diagnostics.normalized.json` stores parsed raw output for cold/warm runs
+- `diagnostics.diff.json` groups shared, Vue-only, and Verter-only diagnostics
+- `review-queue.json` stores Verter-only items with statuses like `pending`, `likely_legit`, `verter_bug`, and `env_issue`
+- `tool_crash` entries are failures, not cosmetic diffs
 
 ## Adding a New Project
 
@@ -110,6 +160,20 @@ Some pnpm monorepos don't properly hoist `@verter/native` into the repo's `node_
 Projects can define an optional `e2eCmd` field. E2E tests run only on the Verter build (not baseline) after the unit tests complete. E2E logs are saved as `verter-e2e.log`. E2E frameworks used:
 - **Playwright** (VitePress, vue-vben-admin): Auto-starts dev server via playwright config
 - **Cypress** (slidev): Must start fixture dev server manually before running Cypress
+
+## Common Compiler Bugs by Symptom
+
+When a project's build fails or tests regress, these are the most common root cause patterns:
+
+| Symptom | Root Cause | Example Fix |
+|---------|-----------|-------------|
+| Garbled prop names in component definition | Span extraction using wrong source for cross-file types | P0: use `key_name` in `macros.rs` |
+| Raw HTML in JS output (`<!-- -->`, `&amp;`, etc.) | Template node not overwritten during codegen | P1: emit removal overwrite in `visit_comment` |
+| TS syntax in JS output (`: string`, `<T>`) | `forceJs` not set for the bundler framework | P2: check `meta.framework` in unplugin |
+| `_ctx.` prefix on globals (`_ctx.String`) | Missing entry in `is_global()` allowlist | Add to globals list in binding resolver |
+| Props missing from runtime declaration | Type resolution failed for external types | Check `resolve_external_type` and `key_name` population |
+| Build hangs indefinitely | CSS preprocessor deadlock in transform hook | Move preprocessing to style sub-request |
+| Template expressions at wrong positions | HTML entity decode shifts byte offsets | Pass original source to binding resolver |
 
 ## Common Patterns and Gotchas
 

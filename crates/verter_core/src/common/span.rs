@@ -1,49 +1,6 @@
-/// A simple byte offset span into the source text.
-/// More lightweight than SourceLocation - no line/column info, no source string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct Span {
-    pub start: u32,
-    pub end: u32,
-}
-
-impl Span {
-    #[inline]
-    pub const fn new(start: u32, end: u32) -> Self {
-        Self { start, end }
-    }
-
-    #[inline]
-    pub fn len(&self) -> u32 {
-        self.end.saturating_sub(self.start)
-    }
-
-    /// Alias for `len()` - compatible with oxc_span::Span
-    #[inline]
-    pub fn size(&self) -> u32 {
-        self.len()
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.start >= self.end
-    }
-
-    /// Extract the slice from the source string
-    #[inline]
-    pub fn slice<'a>(&self, source: &'a str) -> &'a str {
-        &source[self.start as usize..self.end as usize]
-    }
-}
-
-impl From<oxc_span::Span> for Span {
-    #[inline]
-    fn from(span: oxc_span::Span) -> Self {
-        Self {
-            start: span.start,
-            end: span.end,
-        }
-    }
-}
+// Re-export span types from verter_span.
+// Span = SFC-absolute, RelativeSpan = relative to base, GeneratedSpan = resolved mapping.
+pub use verter_span::{GeneratedSpan, PartialGeneratedSpan, RelativeSpan, Span};
 
 /// Positions are byte-based and copy-only for fast propagation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]

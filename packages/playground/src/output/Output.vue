@@ -4,6 +4,17 @@ import type { Store } from "../core/store";
 import type { OutputMode } from "../core/types";
 import Preview from "./Preview.vue";
 import CodeOutput from "./CodeOutput.vue";
+import AnalysisPanel from "./AnalysisPanel.vue";
+import ComponentMetaPanel from "./ComponentMetaPanel.vue";
+import LintPanel from "./LintPanel.vue";
+import OutlinePanel from "./OutlinePanel.vue";
+import VirtualFilesPanel from "./VirtualFilesPanel.vue";
+import CssMatchPanel from "./CssMatchPanel.vue";
+import SourceMapPanel from "./SourceMapPanel.vue";
+import DiagnosticsPanel from "./DiagnosticsPanel.vue";
+import TemplateAstPanel from "./TemplateAstPanel.vue";
+import CssVarFlowPanel from "./CssVarFlowPanel.vue";
+import DependencyGraphPanel from "./DependencyGraphPanel.vue";
 
 const props = defineProps<{
   store: Store;
@@ -11,38 +22,44 @@ const props = defineProps<{
 
 const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "preview", label: "Preview" },
-  { mode: "kai", label: "Kai" },
-  { mode: "tsx", label: "TSX" },
-  { mode: "ts", label: "TS" },
-  { mode: "js", label: "JS" },
-  { mode: "css", label: "CSS" },
+  { mode: "files", label: "Files" },
+  { mode: "analysis", label: "Analysis" },
+  { mode: "componentMeta", label: "Meta" },
+  { mode: "lint", label: "Lint" },
+  { mode: "outline", label: "Outline" },
+  { mode: "cssMatch", label: "CSS Match" },
+  { mode: "map", label: "Map" },
+  { mode: "diagnostics", label: "Diagnostics" },
+  { mode: "templateAst", label: "Template AST" },
+  { mode: "cssVarFlow", label: "CSS Vars" },
+  { mode: "depGraph", label: "Dep Graph" },
 ];
 
-/** Show TS/TSX tabs conditionally based on toggle state */
 const tabs = computed(() => {
-  const file = props.store.activeFile;
-  const showTSTab = props.store.showTS && (file?.isTS ?? false);
-  const showTSXTab = props.store.showTSX;
-  const isVue = file?.filename.endsWith(".vue") ?? false;
-  return allTabs.filter((tab) => {
-    if (tab.mode === "ts") return showTSTab;
-    if (tab.mode === "tsx") return showTSXTab;
-    if (tab.mode === "kai") return isVue;
-    return true;
-  });
+  if (props.store.compilerOptions.ssr) {
+    const list = [...allTabs];
+    const filesIdx = list.findIndex((t) => t.mode === "files");
+    list.splice(filesIdx + 1, 0, { mode: "ssr", label: "SSR" });
+    return list;
+  }
+  return allTabs;
 });
 
 function openSourceMapVisualization() {
   const file = props.store.activeFile;
-  if (!file?.compiled.sourceMap) return;
-  const code = file.compiled.ts || file.compiled.js;
-  const map = file.compiled.sourceMap;
+  if (!file) return;
+
+  // The combined source map covers the full assembled JS (file.compiled.js),
+  // matching exactly what's displayed in the Files tab (script node).
+  const code = file.compiled.js;
+  const map = file.compiled.verterSourceMap;
+  if (!map) return;
+
   // evanw's source-map-visualization uses length-prefixed format:
   // btoa(`${utf8CodeLen}\0${utf8Code}${utf8MapLen}\0${utf8Map}`)
   const enc = new TextEncoder();
   const codeBytes = enc.encode(code);
   const mapBytes = enc.encode(map);
-  // Build binary string from UTF-8 bytes (latin1 decoding preserves raw bytes)
   let binary = "";
   const codeLenStr = String(codeBytes.length);
   binary += codeLenStr + "\0";
@@ -54,28 +71,55 @@ function openSourceMapVisualization() {
   window.open(`https://evanw.github.io/source-map-visualization/#${encoded}`, "_blank");
 }
 
+/** Whether the source map button should be visible */
+const showSourceMapButton = computed(() => {
+  const file = props.store.activeFile;
+  if (!file) return false;
+  return props.store.outputMode === "files" && !!file.compiled.verterSourceMap;
+});
+
+const lintCount = computed(() => {
+  return props.store.activeFile?.compiled.lintDiagnostics?.length ?? 0;
+});
+
+const diagnosticCount = computed(() => {
+  const file = props.store.activeFile;
+  if (!file) return 0;
+  return (
+    file.compiled.compilerDiagnostics.length +
+    file.compiled.lintDiagnostics.length +
+    props.store.tsDiagnostics.length
+  );
+});
+
 function getTabTiming(mode: OutputMode): string | null {
-  const { verter, stripTypes, tsx, kai } = props.store.compileTiming;
+  const { verterNewJs } = props.store.compileTiming;
   switch (mode) {
-    case "preview": {
-      const total = (verter ?? 0) + (stripTypes ?? 0);
-      return total > 0 ? `${total.toFixed(1)}ms` : null;
-    }
-    case "kai":
-      return kai !== null ? `${kai.toFixed(1)}ms` : null;
-    case "tsx":
-      return tsx !== null ? `${tsx.toFixed(1)}ms` : null;
-    case "ts":
-      return verter !== null ? `${verter.toFixed(1)}ms` : null;
-    case "js":
-      // When showTS is on and file is TS, JS tab shows stripTypes timing
-      if (props.store.showTS && (props.store.activeFile?.isTS ?? false)) {
-        return stripTypes !== null ? `${stripTypes.toFixed(1)}ms` : null;
-      }
-      return verter !== null ? `${verter.toFixed(1)}ms` : null;
-    case "css":
+    case "files":
+      return verterNewJs !== null ? `${verterNewJs.toFixed(1)}ms` : null;
+    case "analysis":
+      return verterNewJs !== null ? `${verterNewJs.toFixed(1)}ms` : null;
+    default:
       return null;
   }
+}
+
+function getTabBadge(mode: OutputMode): string | null {
+  if (mode === "lint" && lintCount.value > 0) {
+    return String(lintCount.value);
+  }
+  if (mode === "diagnostics" && diagnosticCount.value > 0) {
+    return String(diagnosticCount.value);
+  }
+  return null;
+}
+
+function isEditableMode(_mode: OutputMode): boolean {
+  return false;
+}
+
+function isEditedMode(_mode: OutputMode): boolean {
+  return false;
 }
 </script>
 
@@ -93,9 +137,13 @@ function getTabTiming(mode: OutputMode): string | null {
         <span v-if="getTabTiming(tab.mode)" class="timing-pill">
           {{ getTabTiming(tab.mode) }}
         </span>
+        <span v-if="getTabBadge(tab.mode)" class="lint-badge">
+          {{ getTabBadge(tab.mode) }}
+        </span>
+        <span v-if="isEditedMode(tab.mode)" class="edited-badge">edited</span>
       </button>
       <button
-        v-if="store.activeFile?.compiled.sourceMap"
+        v-if="showSourceMapButton"
         class="sourcemap-btn"
         @click="openSourceMapVisualization"
         title="Visualize Source Map"
@@ -105,7 +153,18 @@ function getTabTiming(mode: OutputMode): string | null {
     </div>
     <div class="output-content">
       <Preview v-if="store.outputMode === 'preview'" :store="store" />
-      <CodeOutput v-else :store="store" :mode="store.outputMode" />
+      <AnalysisPanel v-else-if="store.outputMode === 'analysis'" :store="store" />
+      <ComponentMetaPanel v-else-if="store.outputMode === 'componentMeta'" :store="store" />
+      <LintPanel v-else-if="store.outputMode === 'lint'" :store="store" />
+      <OutlinePanel v-else-if="store.outputMode === 'outline'" :store="store" />
+      <VirtualFilesPanel v-else-if="store.outputMode === 'files'" :store="store" />
+      <CssMatchPanel v-else-if="store.outputMode === 'cssMatch'" :store="store" />
+      <SourceMapPanel v-else-if="store.outputMode === 'map'" :store="store" />
+      <DiagnosticsPanel v-else-if="store.outputMode === 'diagnostics'" :store="store" />
+      <TemplateAstPanel v-else-if="store.outputMode === 'templateAst'" :store="store" />
+      <CssVarFlowPanel v-else-if="store.outputMode === 'cssVarFlow'" :store="store" />
+      <DependencyGraphPanel v-else-if="store.outputMode === 'depGraph'" :store="store" />
+      <CodeOutput v-else :store="store" :mode="store.outputMode" :editable="isEditableMode(store.outputMode)" />
     </div>
   </div>
 </template>
@@ -158,6 +217,28 @@ function getTabTiming(mode: OutputMode): string | null {
 .output-tab.active .timing-pill {
   background: var(--accent-color-light, rgba(66, 153, 225, 0.2));
   color: var(--accent-color);
+}
+
+.lint-badge {
+  margin-left: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border-radius: 10px;
+  min-width: 16px;
+  text-align: center;
+}
+
+.edited-badge {
+  margin-left: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border-radius: 10px;
 }
 
 .sourcemap-btn {

@@ -1,0 +1,17 @@
+[package]
+name = "verter_span"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Typed span primitives for Verter — compile-time safety for position encoding"
+publish = false
+
+[dependencies]
+oxc_span = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -19,7 +19,7 @@ export interface CompiledStyleBlock {
   /** Whether this is a CSS module block */
   isModule: boolean;
   /** CSS module class mappings (each entry is [original, hashed]) */
-  moduleClasses: string[][];
+  moduleClasses: [string, string][];
   /** CSS processing errors */
   errors: string[];
 }
@@ -61,25 +61,133 @@ export interface CodegenResult {
   tsxDurationMs: number;
 }
 
-export interface StripTypesResult {
-  /** The JavaScript output with TypeScript syntax removed */
-  code: string;
-  /** Any parse errors encountered */
-  errors: string[];
-}
+// =============================================================================
+// VerterHost types — shared with @verter/native
+// =============================================================================
+
+export type {
+  HostConfig,
+  HostCompileProfile,
+  HostIdeResponse,
+  HostVirtualNodeKind,
+  HostSliceChanges,
+  HostDiagnostic,
+  HostDiagnosticsSnapshot,
+  HostExternalSourceRequest,
+  HostScriptImportInfo,
+  HostModuleReference,
+  HostPreprocessorRequest,
+  HostBlockOverrideEntry,
+  HostBlockOverrideRequest,
+  HostUpdateResult,
+  HostResolvedId,
+  HostVirtualMeta,
+  HostVirtualFileResponse,
+  HostUpsertRequest,
+  HostStyleOverrideEntry,
+  HostStyleOverrideRequest,
+  HostVirtualQuery,
+  HostRemoveResult,
+  HostTextEdit,
+  HostCodeAction,
+  HostLintRuleMetadata,
+  HostLintDiagnostic,
+  HostDocumentSymbol,
+  HostElementMatch,
+  HostSelectorMatchResult,
+} from "@verter/native/host-types";
+
+import type {
+  HostConfig,
+  HostCompileProfile,
+  HostIdeResponse,
+  HostModuleReference,
+  HostResolvedId,
+  HostUpsertRequest,
+  HostBlockOverrideRequest,
+  HostUpdateResult,
+  HostVirtualQuery,
+  HostVirtualFileResponse,
+  HostVirtualNodeKind,
+  HostRemoveResult,
+  HostCodeAction,
+  HostLintRuleMetadata,
+  HostLintDiagnostic,
+  HostDocumentSymbol,
+  HostSelectorMatchResult,
+  HostDependencyResolution,
+} from "@verter/native/host-types";
+
+// =============================================================================
+// WASM compile types
+// =============================================================================
 
 export type WasmInput = string | Uint8Array;
 
-type WasmCompileFn = (input: string, options?: unknown) => CodegenResult;
-type WasmCompileBytesFn = (input: Uint8Array, options?: unknown) => CodegenResult;
-type WasmStripTypesFn = (source: string) => StripTypesResult;
+type WasmCompileFn = (input: string, options?: CodegenOptions) => CodegenResult;
+type WasmCompileBytesFn = (input: Uint8Array, options?: CodegenOptions) => CodegenResult;
 type WasmInitFn = () => Promise<unknown>;
+type WasmHostResolveFn = (rawId: string) => HostResolvedId | null;
+type WasmHostUpsertFn = (request: HostUpsertRequest) => HostUpdateResult;
+type WasmHostApplyBlockOverridesFn = (request: HostBlockOverrideRequest) => HostUpdateResult;
+type WasmHostGetVirtualFileFn = (query: HostVirtualQuery) => HostVirtualFileResponse;
+type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[];
+type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
+type WasmHostGetIdeFn = (
+  canonicalId: string,
+  profile?: HostCompileProfile,
+) => HostIdeResponse | null;
+type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
+type WasmHostSetImportDependenciesFn = (
+  canonicalOrAlias: string,
+  resolutions: HostDependencyResolution[],
+) => void;
+type WasmHostCollectResolvableModuleReferenceSpecifiersFn = (
+  moduleReferences: HostModuleReference[],
+) => string[];
+type WasmHostResolveKnownModuleReferenceDependenciesFn = (
+  ownerCanonicalId: string,
+  moduleReferences: HostModuleReference[],
+  knownIds: string[],
+  extensions?: string[],
+) => string[];
+type WasmHostLintFn = (canonicalOrAlias: string, config?: unknown) => HostLintDiagnostic[];
+type WasmHostGetCodeActionsFn = (canonicalOrAlias: string, offset: number) => HostCodeAction[];
+type WasmHostGetLintRuleMetadataFn = () => HostLintRuleMetadata[];
+type WasmHostGetDocumentSymbolsFn = (canonicalOrAlias: string) => HostDocumentSymbol[];
+type WasmHostMatchCssSelectorsFn = (canonicalOrAlias: string) => HostSelectorMatchResult[];
+interface WasmHostBinding {
+  resolve: WasmHostResolveFn;
+  upsert: WasmHostUpsertFn;
+  applyBlockOverrides: WasmHostApplyBlockOverridesFn;
+  getIde: WasmHostGetIdeFn;
+  getVirtualFile: WasmHostGetVirtualFileFn;
+  listVirtualFiles: WasmHostListVirtualFilesFn;
+  remove: WasmHostRemoveFn;
+  getAnalysis: WasmHostGetAnalysisFn;
+  setImportDependencies: WasmHostSetImportDependenciesFn;
+  collectResolvableModuleReferenceSpecifiers: WasmHostCollectResolvableModuleReferenceSpecifiersFn;
+  resolveKnownModuleReferenceDependencies: WasmHostResolveKnownModuleReferenceDependenciesFn;
+  lint: WasmHostLintFn;
+  getCodeActions: WasmHostGetCodeActionsFn;
+  getLintRuleMetadata: WasmHostGetLintRuleMetadataFn;
+  getDocumentSymbols: WasmHostGetDocumentSymbolsFn;
+  matchCssSelectors: WasmHostMatchCssSelectorsFn;
+}
+type WasmHostCtor = new (config?: HostConfig) => WasmHostBinding;
 
 let wasmCompile: WasmCompileFn | null = null;
 let wasmCompileBytes: WasmCompileBytesFn | null = null;
-let wasmStripTypes: WasmStripTypesFn | null = null;
+let wasmHostCtor: WasmHostCtor | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
+
+function getOptionalExport<T>(mod: object, key: string): T | null {
+  if (Object.prototype.hasOwnProperty.call(mod, key)) {
+    return (mod as Record<string, unknown>)[key] as T;
+  }
+  return null;
+}
 
 function decodeUtf8(input: Uint8Array): string {
   if (typeof TextDecoder === "undefined") {
@@ -102,8 +210,8 @@ export async function initialize(): Promise<void> {
     const wasm = await import("../wasm/verter_wasm.js");
     await (wasm.default as WasmInitFn)();
     wasmCompile = wasm.compile as WasmCompileFn;
-    wasmCompileBytes = (wasm.compileBytes as WasmCompileBytesFn) ?? null;
-    wasmStripTypes = (wasm.stripTypes as WasmStripTypesFn) ?? null;
+    wasmCompileBytes = getOptionalExport<WasmCompileBytesFn>(wasm, "compileBytes");
+    wasmHostCtor = getOptionalExport<WasmHostCtor>(wasm, "VerterHost");
     initialized = true;
   })();
 
@@ -117,17 +225,7 @@ export function isInitialized(): boolean {
   return initialized;
 }
 
-/**
- * Compile a Vue SFC to JavaScript.
- *
- * @param input - The Vue SFC source code (string or Uint8Array)
- * @param options - Optional compilation options
- * @returns The compiled result with code, source map, and code with inline source map
- * @throws If the WASM module has not been initialized
- */
-export async function compile(input: WasmInput, options?: CodegenOptions): Promise<CodegenResult> {
-  await initialize();
-
+function dispatchCompile(input: WasmInput, options?: CodegenOptions): CodegenResult {
   if (!wasmCompile) {
     throw new Error("WASM module not initialized");
   }
@@ -144,6 +242,19 @@ export async function compile(input: WasmInput, options?: CodegenOptions): Promi
 }
 
 /**
+ * Compile a Vue SFC to JavaScript.
+ *
+ * @param input - The Vue SFC source code (string or Uint8Array)
+ * @param options - Optional compilation options
+ * @returns The compiled result with code, source map, and code with inline source map
+ * @throws If the WASM module has not been initialized
+ */
+export async function compile(input: WasmInput, options?: CodegenOptions): Promise<CodegenResult> {
+  await initialize();
+  return dispatchCompile(input, options);
+}
+
+/**
  * Synchronous compile - requires initialize() to have been called first.
  *
  * @param input - The Vue SFC source code (string or Uint8Array)
@@ -152,49 +263,118 @@ export async function compile(input: WasmInput, options?: CodegenOptions): Promi
  * @throws If the WASM module has not been initialized
  */
 export function compileSync(input: WasmInput, options?: CodegenOptions): CodegenResult {
-  if (!initialized || !wasmCompile) {
+  if (!initialized) {
     throw new Error("WASM module not initialized. Call initialize() first.");
   }
-
-  if (typeof input === "string") {
-    return wasmCompile(input, options);
-  }
-
-  if (wasmCompileBytes) {
-    return wasmCompileBytes(input, options);
-  }
-
-  return wasmCompile(decodeUtf8(input), options);
+  return dispatchCompile(input, options);
 }
 
 /**
- * Strip TypeScript syntax from a standalone .ts/.tsx file.
- *
- * @param source - The TypeScript source code
- * @returns The stripped JavaScript code and any parse errors
- * @throws If the WASM module has not been initialized
+ * In-memory host facade exposed by the WASM runtime.
+ * Requires initialize() (or createHost()) before construction.
  */
-export async function stripTypes(source: string): Promise<StripTypesResult> {
+export class Host {
+  private readonly inner: WasmHostBinding;
+
+  constructor(config?: HostConfig) {
+    if (!initialized || !wasmHostCtor) {
+      throw new Error("WASM host not initialized. Call initialize() first.");
+    }
+    this.inner = new wasmHostCtor(config);
+  }
+
+  resolve(rawId: string): HostResolvedId | null {
+    return this.inner.resolve(rawId);
+  }
+
+  upsert(request: HostUpsertRequest): HostUpdateResult {
+    return this.inner.upsert(request);
+  }
+
+  applyBlockOverrides(request: HostBlockOverrideRequest): HostUpdateResult {
+    return this.inner.applyBlockOverrides(request);
+  }
+
+  getIde(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null {
+    return this.inner.getIde(canonicalId, profile);
+  }
+
+  getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse {
+    return this.inner.getVirtualFile(query);
+  }
+
+  listVirtualFiles(canonicalId: string): HostVirtualNodeKind[] {
+    return this.inner.listVirtualFiles(canonicalId);
+  }
+
+  remove(canonicalOrAlias: string): HostRemoveResult | null {
+    return this.inner.remove(canonicalOrAlias);
+  }
+
+  /**
+   * Returns the analysis snapshot for a file as a native JS object, or null
+   * if the file doesn't exist. When `analysisLevel` is not "full", computes
+   * analysis on demand.
+   */
+  getAnalysis(canonicalOrAlias: string): unknown | null {
+    return this.inner.getAnalysis(canonicalOrAlias);
+  }
+
+  /**
+   * Sets the resolved import dependencies for a file, enabling Tier 2/3
+   * smart invalidation (cross-file change tracking).
+   */
+  setImportDependencies(canonicalOrAlias: string, resolutions: HostDependencyResolution[]): void {
+    this.inner.setImportDependencies(canonicalOrAlias, resolutions);
+  }
+
+  collectResolvableModuleReferenceSpecifiers(moduleReferences: HostModuleReference[]): string[] {
+    return this.inner.collectResolvableModuleReferenceSpecifiers(moduleReferences);
+  }
+
+  resolveKnownModuleReferenceDependencies(
+    ownerCanonicalId: string,
+    moduleReferences: HostModuleReference[],
+    knownIds: string[],
+    extensions?: string[],
+  ): string[] {
+    return this.inner.resolveKnownModuleReferenceDependencies(
+      ownerCanonicalId,
+      moduleReferences,
+      knownIds,
+      extensions,
+    );
+  }
+
+  /** Runs lint rules against a file and returns diagnostics with UTF-16 spans. */
+  lint(canonicalOrAlias: string, config?: unknown): HostLintDiagnostic[] {
+    return this.inner.lint(canonicalOrAlias, config);
+  }
+
+  /** Returns code actions (quick fixes) at a given UTF-16 offset. */
+  getCodeActions(canonicalOrAlias: string, offset: number): HostCodeAction[] {
+    return this.inner.getCodeActions(canonicalOrAlias, offset);
+  }
+
+  /** Returns metadata for all registered lint rules. */
+  getLintRuleMetadata(): HostLintRuleMetadata[] {
+    return this.inner.getLintRuleMetadata();
+  }
+
+  /** Returns document symbols for a file (SFC blocks → children). */
+  getDocumentSymbols(canonicalOrAlias: string): HostDocumentSymbol[] {
+    return this.inner.getDocumentSymbols(canonicalOrAlias);
+  }
+
+  /** Matches CSS selectors against template elements (three-valued matrix). */
+  matchCssSelectors(canonicalOrAlias: string): HostSelectorMatchResult[] {
+    return this.inner.matchCssSelectors(canonicalOrAlias);
+  }
+}
+
+export async function createHost(config?: HostConfig): Promise<Host> {
   await initialize();
-
-  if (!wasmStripTypes) {
-    throw new Error("WASM module not initialized or stripTypes not available");
-  }
-
-  return wasmStripTypes(source);
+  return new Host(config);
 }
 
-/**
- * Synchronous stripTypes - requires initialize() to have been called first.
- *
- * @param source - The TypeScript source code
- * @returns The stripped JavaScript code and any parse errors
- * @throws If the WASM module has not been initialized
- */
-export function stripTypesSync(source: string): StripTypesResult {
-  if (!initialized || !wasmStripTypes) {
-    throw new Error("WASM module not initialized. Call initialize() first.");
-  }
-
-  return wasmStripTypes(source);
-}
+export { Host as VerterHost };
